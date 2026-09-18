@@ -248,6 +248,7 @@ BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_language(CompilerDrive
     case COMPILER_DRIVER_LANGUAGE_METAL_AIR: return GPU_SOURCE_LANGUAGE_METAL_AIR;
     case COMPILER_DRIVER_LANGUAGE_C:
     case COMPILER_DRIVER_LANGUAGE_ASSEMBLY:
+    case COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT:
     case COMPILER_DRIVER_LANGUAGE_COUNT: break;
     }
     return GPU_SOURCE_LANGUAGE_COUNT;
@@ -264,6 +265,7 @@ bool compiler_driver_language_is_native(CompilerDriverLanguage language)
     case COMPILER_DRIVER_LANGUAGE_AUTOMATIC:
     case COMPILER_DRIVER_LANGUAGE_C:
     case COMPILER_DRIVER_LANGUAGE_ASSEMBLY:
+    case COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT:
         result = true;
         break;
     case COMPILER_DRIVER_LANGUAGE_OPENCL:
@@ -440,10 +442,10 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     {
         compiler_driver_argument_error(arena, invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation->source_metrics_path);
     }
-    else if (invocation->language == COMPILER_DRIVER_LANGUAGE_C)
+    else if (invocation->language == COMPILER_DRIVER_LANGUAGE_C || invocation->language == COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT)
     {
         compiler_driver_argument_error(arena, invocation, S8("native source language is incompatible with GPU target: {S8}"),
-                                       S8("c"));
+                                       invocation->language == COMPILER_DRIVER_LANGUAGE_C ? S8("c") : S8("cpp-output"));
     }
     else if (invocation->library_path_count || invocation->library_count || invocation->framework_path_count || invocation->framework_count ||
         invocation->linker_argument_count)
@@ -989,9 +991,13 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             }
             else if (string_equal(argument, S8("-x")))
             {
-                if (string_equal(value, S8("c")) || string_equal(value, S8("cpp-output")))
+                if (string_equal(value, S8("c")))
                 {
                     invocation.language = COMPILER_DRIVER_LANGUAGE_C;
+                }
+                else if (string_equal(value, S8("cpp-output")))
+                {
+                    invocation.language = COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT;
                 }
                 else if (string_equal(value, S8("cl")) || string_equal(value, S8("opencl")))
                 {
@@ -1625,25 +1631,48 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
 
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverInvocation invocation, String8 path)
+typedef enum CompilerDriverCInputPhase
 {
-    bool result;
+    COMPILER_DRIVER_C_INPUT_RAW,
+    COMPILER_DRIVER_C_INPUT_PREPROCESSED,
+    COMPILER_DRIVER_C_INPUT_INVALID,
+} CompilerDriverCInputPhase;
+
+// One authority classifies both the C language and its starting phase.
+// `-x cpp-output` applies to every suffix; explicit `-x c` is the raw-source
+// escape hatch even for `.i`, while automatic mode derives the phase from the
+// suffix. A future positional -x input record can carry the same language
+// value into this classifier without creating a parallel phase table.
+BUSTER_GLOBAL_LOCAL CompilerDriverCInputPhase compiler_driver_c_input_phase(CompilerDriverInvocation invocation, String8 path)
+{
+    CompilerDriverCInputPhase result = COMPILER_DRIVER_C_INPUT_INVALID;
     if (invocation.language == COMPILER_DRIVER_LANGUAGE_C)
     {
-        result = true;
+        result = COMPILER_DRIVER_C_INPUT_RAW;
     }
-    else if (invocation.language != COMPILER_DRIVER_LANGUAGE_AUTOMATIC || path.length < 2)
+    else if (invocation.language == COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT)
     {
-        result = false;
+        result = COMPILER_DRIVER_C_INPUT_PREPROCESSED;
     }
-    else
+    else if (invocation.language == COMPILER_DRIVER_LANGUAGE_AUTOMATIC && path.length >= 2 && path.pointer[path.length - 2] == '.')
     {
-        result = path.pointer[path.length - 2] == '.' && (path.pointer[path.length - 1] == 'c' || path.pointer[path.length - 1] == 'i');
+        if (path.pointer[path.length - 1] == 'c')
+        {
+            result = COMPILER_DRIVER_C_INPUT_RAW;
+        }
+        else if (path.pointer[path.length - 1] == 'i')
+        {
+            result = COMPILER_DRIVER_C_INPUT_PREPROCESSED;
+        }
     }
 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverInvocation invocation, String8 path)
+{
+    return compiler_driver_c_input_phase(invocation, path) != COMPILER_DRIVER_C_INPUT_INVALID;
+}
 
 // A `.s` input, or any input under `-x assembler`.
 BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_input(CompilerDriverInvocation invocation, String8 path)
@@ -3428,6 +3457,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .undefinition_count = invocation.undefinition_count,
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
+                                                    .already_preprocessed = compiler_driver_c_input_phase(invocation, invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of

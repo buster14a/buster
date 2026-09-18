@@ -494,7 +494,13 @@ struct CPreprocessOptions
     // line whose word is no known directive as a comment instead of an
     // error; conditionals, defines and includes keep their meaning.
     bool assembly_comment_lines;
-    u8 reserved[2];
+    // The source has already completed preprocessing. Lexing, symbol
+    // interning, source maps, line markers, pragmas and parser-facing token
+    // normalization remain active; command macros, ordinary directives and
+    // text macro expansion are not replayed. This consumes a reserved byte so
+    // the public options record keeps its existing size.
+    bool already_preprocessed;
+    u8 reserved[1];
 };
 
 typedef struct CSymbolTable CSymbolTable;
