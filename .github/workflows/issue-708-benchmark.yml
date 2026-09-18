@@ -1,12 +1,20 @@
-name: Issue 708 Windows benchmark
+name: Windows paired matrix benchmark
 
-# Temporary acceptance workflow for #708. It runs the ordinary complete
-# Windows x86-64 matrix without fixture/process instrumentation.
+# Each trial runs both revisions on one VM. Ordinary PRs do not run benchmarks.
 on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline full commit SHA
+        required: true
+        type: string
+      candidate:
+        description: Candidate full commit SHA
+        required: true
+        type: string
   pull_request:
     paths:
       - '.github/workflows/issue-708-benchmark.yml'
-      - 'src/buster/tests/compiler/driver/driver_test.c'
 
 permissions:
   contents: read
@@ -19,112 +27,184 @@ jobs:
   benchmark:
     if: >-
       ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
-          github.head_ref == 'bench/708-baseline' }}
+          (github.event_name == 'workflow_dispatch' || github.head_ref == 'bench/708-baseline') }}
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 3
       matrix:
-        arm: [baseline, candidate]
         trial: [1, 2, 3]
-        include:
-          - arm: baseline
-            revision: f7c4e868d6c90d6b4331a8be84fbfb2d8ae02a47
-          - arm: candidate
-            revision: 72dca9502cdc880c74cf3df0abc93476980b32a6
-    name: Windows benchmark ${{ matrix.arm }} trial ${{ matrix.trial }}
+    name: Windows paired benchmark trial ${{ matrix.trial }}
     runs-on: windows-2025
     timeout-minutes: 300
+    env:
+      BASELINE_SHA: ${{ inputs.baseline || 'f7c4e868d6c90d6b4331a8be84fbfb2d8ae02a47' }}
+      CANDIDATE_SHA: ${{ inputs.candidate || 'b03bdf762f5271076fdf5ff485c4870a2e88bfea' }}
     steps:
-      - name: Checkout
-        id: checkout
+      - name: Validate immutable revisions
+        shell: powershell
+        run: |
+          if ($env:BASELINE_SHA -cnotmatch '^[0-9a-f]{40}$' -or $env:CANDIDATE_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'Both revisions must be full lowercase commit SHAs'
+          }
+
+      - name: Checkout baseline
+        id: baseline
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-          ref: ${{ matrix.revision }}
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+
+      - name: Checkout candidate
+        id: candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
 
       - name: Install verified Zig
         id: zig
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/buster-ci"
-          python tools/ci_zig.py --target x86_64-windows --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
+          mkdir -p "$RUNNER_TEMP/issue-708"
+          cmp baseline/tools/ci_zig.py candidate/tools/ci_zig.py
+          python baseline/tools/ci_zig.py --target x86_64-windows --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/issue-708/zig.log"
 
-      - name: Full uninstrumented combination matrix
-        id: combinations_windows
+      - name: Paired full uninstrumented combination matrices
         shell: powershell
         env:
           VS_COMPONENT: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
-          BUSTER_BENCHMARK_ARM: ${{ matrix.arm }}
-          BUSTER_BENCHMARK_TRIAL: ${{ matrix.trial }}
+          BENCHMARK_TRIAL: ${{ matrix.trial }}
+          BENCHMARK_STEPS: ${{ toJSON(steps) }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
-          New-Item -ItemType Directory -Force -Path $Logs | Out-Null
-          git rev-parse HEAD | Tee-Object -FilePath (Join-Path $Logs 'source-sha.txt')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "schema=ISSUE_708_BENCHMARK_V1 instrumented=false ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion RUNNER_ARCH=$env:RUNNER_ARCH" | Set-Content (Join-Path $Logs 'benchmark-environment.txt')
+          $OriginalTemp = $env:RUNNER_TEMP
+          $OriginalWorkspace = $env:GITHUB_WORKSPACE
+          $WorkflowSha = $env:GITHUB_SHA
+          $PairRoot = Join-Path $OriginalTemp 'issue-708'
+          $Trial = [int]$env:BENCHMARK_TRIAL
+          $Arms = if ($Trial % 2) { @('baseline', 'candidate') } else { @('candidate', 'baseline') }
+          Get-CimInstance Win32_Processor | Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors |
+            ConvertTo-Json | Set-Content (Join-Path $PairRoot 'cpu.json')
+          "schema=ISSUE_708_PAIRED_V1 instrumented=false ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion RUNNER_ARCH=$env:RUNNER_ARCH order=$($Arms -join ',')" |
+            Set-Content (Join-Path $PairRoot 'environment.txt')
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
+          if (-not (Test-Path -LiteralPath $VsWhere)) { throw 'vswhere was not found' }
           $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
           if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
           $VsPath = $VsPaths[0].Trim()
           if (-not $VsPath) { throw 'Visual Studio path is empty' }
           & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
-          $PathDelimiter = 'BUSTER_708_WINDOWS_COMPILER_PATH'
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PATH<<$PathDelimiter"
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value $env:PATH
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value $PathDelimiter
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VSCMD_ARG_TGT_ARCH=$env:VSCMD_ARG_TGT_ARCH"
           foreach ($Compiler in @('cl', 'clang', 'gcc', 'zig')) {
             where.exe $Compiler
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           $ClangVersion = (& clang --version) -join "`n"
-          Write-Output $ClangVersion
-          if ($ClangVersion -notmatch 'Target:\s*x86_64-') { throw 'clang does not default to x86-64' }
-          New-Item -ItemType Directory -Force -Path 'build' | Out-Null
-          $Driver = Join-Path (Get-Location) 'build\build.exe'
-          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /c "`"$Driver`" test_differential --self-test 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'differential-self-test.log')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $Started = [DateTime]::UtcNow
-          cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
-          $MatrixExit = $LASTEXITCODE
-          $Finished = [DateTime]::UtcNow
-          [ordered]@{
-            schema = 'ISSUE_708_BENCHMARK_RESULT_V1'
-            source_sha = (git rev-parse HEAD).Trim()
-            arm = $env:BUSTER_BENCHMARK_ARM
-            trial = [int]$env:BUSTER_BENCHMARK_TRIAL
-            started_utc = $Started.ToString('o')
-            finished_utc = $Finished.ToString('o')
-            duration_seconds = [Math]::Round(($Finished - $Started).TotalSeconds, 3)
-            exit_code = $MatrixExit
-          } | ConvertTo-Json | Set-Content (Join-Path $Logs 'benchmark-result.json')
-          if ($MatrixExit -ne 0) { exit $MatrixExit }
+          if ($LASTEXITCODE -ne 0 -or $ClangVersion -notmatch 'Target:\s*x86_64-') { throw 'clang does not default to x86-64' }
+          $ClangVersion | Set-Content (Join-Path $PairRoot 'clang.txt')
+          Remove-Item Env:BUSTER_TEST_FIXTURE_TIMING -ErrorAction SilentlyContinue
+          $PairFailed = $false
+          foreach ($Arm in $Arms) {
+            $env:RUNNER_TEMP = Join-Path $PairRoot $Arm
+            $env:GITHUB_WORKSPACE = Join-Path $OriginalWorkspace $Arm
+            $ExpectedSha = if ($Arm -eq 'baseline') { $env:BASELINE_SHA } else { $env:CANDIDATE_SHA }
+            $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
+            New-Item -ItemType Directory -Force -Path $Logs | Out-Null
+            $env:BUSTER_CI_COVERAGE_OUTPUT = Join-Path $Logs 'coverage.json'
+            Push-Location $env:GITHUB_WORKSPACE
+            $SourceSha = $null
+            $MatrixExit = -1
+            $SummaryExit = -1
+            $Started = $null
+            $Finished = $null
+            $Elapsed = $null
+            $Stopwatch = $null
+            try {
+              $SourceSha = (git rev-parse HEAD).Trim()
+              if ($LASTEXITCODE -ne 0 -or $SourceSha -ne $ExpectedSha) { throw 'Checkout does not match the requested revision' }
+              $env:GITHUB_SHA = $SourceSha
+              $SourceSha | Set-Content (Join-Path $Logs 'source-sha.txt')
+              New-Item -ItemType Directory -Force -Path 'build' | Out-Null
+              $Driver = Join-Path (Get-Location) 'build\build.exe'
+              cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+              if ($LASTEXITCODE -ne 0) { throw 'Build-driver bootstrap failed' }
+              cmd /c "`"$Driver`" test_differential --self-test 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'differential-self-test.log')
+              if ($LASTEXITCODE -ne 0) { throw 'Differential self-test failed' }
+              $Started = [DateTime]::UtcNow
+              $Stopwatch = [Diagnostics.Stopwatch]::StartNew()
+              cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
+              $MatrixExit = $LASTEXITCODE
+            } catch {
+              $_ | Out-String | Tee-Object -FilePath (Join-Path $Logs 'failure.txt')
+              $PairFailed = $true
+            } finally {
+              if ($null -ne $Stopwatch) {
+                $Stopwatch.Stop()
+                $Finished = [DateTime]::UtcNow
+                $Elapsed = [Math]::Round($Stopwatch.Elapsed.TotalSeconds, 3)
+              }
+              try {
+                $Steps = $env:BENCHMARK_STEPS | ConvertFrom-Json
+                $Outcome = if ($MatrixExit -eq 0) { 'success' } else { 'failure' }
+                $Steps | Add-Member -NotePropertyName combinations_windows -NotePropertyValue @{ outcome=$Outcome; conclusion=$Outcome }
+                $env:BUSTER_CI_STEPS = $Steps | ConvertTo-Json -Depth 10 -Compress
+                $env:BUSTER_CI_RUNNER = 'windows-2025'
+                $env:BUSTER_CI_REQUIRED = 'zig combinations_windows'
+                $env:BUSTER_CI_REPRO = 'Full paired Windows matrix: build/build.exe test_all_combinations_ci --verbose=1'
+                $env:BUSTER_CI_COVERAGE_OUTPUT = Join-Path $Logs 'coverage.json'
+                $env:BUSTER_CI_COVERAGE_REQUIRED = '1'
+                $env:BUSTER_CI_COVERAGE_PLATFORM = 'windows'
+                $env:BUSTER_CI_COVERAGE_ARCH = 'x86_64'
+                python tools/ci_summary.py
+                $SummaryExit = $LASTEXITCODE
+              } catch {
+                $_ | Out-String | Set-Content (Join-Path $Logs 'summary-failure.txt')
+                $PairFailed = $true
+              }
+              [ordered]@{
+                schema = 'ISSUE_708_PAIRED_RESULT_V1'
+                source_sha = $SourceSha
+                expected_sha = $ExpectedSha
+                workflow_sha = $WorkflowSha
+                arm = $Arm
+                trial = $Trial
+                order = $Arms
+                started_utc = if ($null -ne $Started) { $Started.ToString('o') } else { $null }
+                finished_utc = if ($null -ne $Finished) { $Finished.ToString('o') } else { $null }
+                duration_seconds = $Elapsed
+                exit_code = $MatrixExit
+                summary_exit_code = $SummaryExit
+                cpu_seconds = $null
+                peak_simultaneous_rss_bytes = $null
+              } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $Logs 'benchmark-result.json')
+              Pop-Location
+              $env:RUNNER_TEMP = $OriginalTemp
+              $env:GITHUB_WORKSPACE = $OriginalWorkspace
+              $env:GITHUB_SHA = $WorkflowSha
+            }
+            if ($MatrixExit -ne 0 -or $SummaryExit -ne 0) { $PairFailed = $true }
+          }
+          if ($PairFailed) { throw 'At least one benchmark arm or independent coverage validation failed' }
+          $Inventories = @{}
+          foreach ($Arm in @('baseline', 'candidate')) {
+            $Log = Join-Path $PairRoot "$Arm\buster-ci\combinations.log"
+            $Rows = @(Get-Content $Log | Where-Object { $_ -match '^TEST_MODULE_TIMING .* module=compiler_driver_tests ' } |
+              ForEach-Object { $_ -replace ' duration_ns=\d+', '' } | Sort-Object)
+            if ($Rows.Count -ne 3) { throw "Expected three driver-module records for $Arm" }
+            $Inventories[$Arm] = $Rows -join "`n"
+          }
+          if ($Inventories['baseline'] -cne $Inventories['candidate']) { throw 'Driver assertion inventory differs between arms' }
+          'Both arms succeeded with matching driver assertion inventories. Timing requires separate analysis.' |
+            Tee-Object -FilePath (Join-Path $PairRoot 'pair-validation.txt')
 
-      - name: Matrix coverage and result
-        if: ${{ always() && steps.checkout.outcome == 'success' }}
-        shell: bash
-        env:
-          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
-          BUSTER_CI_RUNNER: windows-2025
-          BUSTER_CI_REQUIRED: zig combinations_windows
-          BUSTER_CI_REPRO: Issue 708 uninstrumented full Windows matrix benchmark.
-          BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
-          BUSTER_CI_COVERAGE_REQUIRED: '1'
-          BUSTER_CI_COVERAGE_PLATFORM: windows
-          BUSTER_CI_COVERAGE_ARCH: x86_64
-        run: python tools/ci_summary.py
-
-      - name: Retain benchmark logs
+      - name: Retain paired benchmark evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: issue-708-${{ matrix.arm }}-${{ matrix.trial }}-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/buster-ci/
+          name: issue-708-pair-${{ matrix.trial }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue-708/
           if-no-files-found: warn
           retention-days: 14
