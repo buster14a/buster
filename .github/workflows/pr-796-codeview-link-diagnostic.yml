@@ -1,0 +1,176 @@
+name: PR 796 Windows CodeView link diagnostic
+
+on:
+  push:
+    branches:
+      - fix/786-native-retirement-closure
+    paths:
+      - .github/workflows/pr-796-codeview-link-diagnostic.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-796-codeview-link-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    name: ${{ matrix.variant }}
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - baseline
+          - omit-frame-subfield
+          - omit-defranges
+          - omit-blocks
+    steps:
+      - name: Check out diagnostic revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Apply diagnostic isolation
+        if: matrix.variant != 'baseline'
+        shell: powershell
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import os
+          from pathlib import Path
+
+          path = Path('src/buster/lib/compiler/codeview/codeview.c')
+          text = path.read_text()
+          variant = os.environ['VARIANT']
+
+          if variant == 'omit-frame-subfield':
+              marker = '            else if (piece->kind == DEBUG_LOCATION_FRAME)\n'
+              start = text.find(marker)
+              if start < 0:
+                  raise SystemExit('frame-piece branch not found')
+              finish = text.find('\n            }\n', start)
+              if finish < 0:
+                  raise SystemExit('frame-piece branch end not found')
+              finish += len('\n            }\n')
+              text = text[:start] + text[finish:]
+          elif variant == 'omit-defranges':
+              marker = '''BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, DebugLocationRange* range, u32 function_offset, u16 machine,
+                                                         u32 function_index, CodeviewRelocation* relocations, u32* relocation_count,
+                                                         u64 relocation_capacity)
+          {
+          '''
+              replacement = marker + '''    (void)symbols;
+              (void)range;
+              (void)function_offset;
+              (void)machine;
+              (void)function_index;
+              (void)relocations;
+              (void)relocation_count;
+              (void)relocation_capacity;
+              return;
+          '''
+              if text.count(marker) != 1:
+                  raise SystemExit(f'location-range marker count={text.count(marker)}')
+              text = text.replace(marker, replacement, 1)
+          elif variant == 'omit-blocks':
+              marker = '''BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugModel* model, DebugScopeId root, u32 function_offset,
+                                                    u16 machine, CodeviewScopeWalk* walk, u32 function_index,
+                                                    CodeviewRelocation* relocations, u32* relocation_count,
+                                                    u64 relocation_capacity)
+          {
+          '''
+              replacement = marker + '''    (void)symbols;
+              (void)model;
+              (void)root;
+              (void)function_offset;
+              (void)machine;
+              (void)walk;
+              (void)function_index;
+              (void)relocations;
+              (void)relocation_count;
+              (void)relocation_capacity;
+              return;
+          '''
+              if text.count(marker) != 1:
+                  raise SystemExit(f'scope-tree marker count={text.count(marker)}')
+              text = text.replace(marker, replacement, 1)
+          else:
+              raise SystemExit(f'unknown variant: {variant}')
+
+          path.write_text(text)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff -- src/buster/lib/compiler/codeview/codeview.c
+
+      - name: Reproduce strict p2 link
+        shell: powershell
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86/x64 tools were not found' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+
+          $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $RuntimeDlls = @(Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse | Sort-Object FullName)
+          if ($RuntimeDlls.Count -ne 1) { throw "Expected one ASan runtime under ${ResourceDir}; found $($RuntimeDlls.Count)" }
+          $RuntimeDir = Split-Path -Parent $RuntimeDlls[0].FullName
+          $env:PATH = "$RuntimeDir;$env:PATH"
+
+          $Driver = Join-Path $env:RUNNER_TEMP "strict-build-$env:VARIANT.exe"
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Ide = (Resolve-Path 'build\Release\ide.exe').Path
+          $Include = (Resolve-Path 'tests\differential').Path
+          $Caller = Join-Path $env:RUNNER_TEMP "abi-caller-$env:VARIANT.o"
+          $Subject = Join-Path $env:RUNNER_TEMP "abi-p2-$env:VARIANT.o"
+          $Program = Join-Path $env:RUNNER_TEMP "abi-p2-$env:VARIANT.exe"
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
+
+          $Sanitize = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
+          $CallerArgs = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char') + $Sanitize + @("-I$Include")
+          foreach ($LibraryPath in $LibraryPaths) { $CallerArgs += "-L$LibraryPath" }
+          $CallerArgs += @('tests\differential\abi_host.c', '-c', '-o', $Caller)
+          & clang.exe @CallerArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Common = @(
+            'cc', '-fregister-allocator=fast', '-fno-machine-fallback',
+            '-fno-canonical-local-promotion', '-fno-frontend-ssa', '-fverify-codegen',
+            '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', "-I$Include",
+            '-ftarget-local-promotion', 'tests\differential\abi.c', '-c', '-o', $Subject
+          )
+          foreach ($LibraryPath in $LibraryPaths) { $Common += "-L$LibraryPath" }
+          & $Ide @Common
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Write-Output "=== $env:VARIANT CodeView and relocations ==="
+          & llvm-readobj.exe --sections --symbols --relocations --codeview $Subject
+          $ReadObjExit = $LASTEXITCODE
+          Write-Output "llvm_readobj_exit=$ReadObjExit"
+
+          $LinkArgs = @() + $Sanitize
+          foreach ($LibraryPath in $LibraryPaths) { $LinkArgs += "-L$LibraryPath" }
+          $LinkArgs += @($Caller, $Subject, '-o', $Program)
+          & clang.exe -v @LinkArgs
+          $LinkExit = $LASTEXITCODE
+          Write-Output "variant=$env:VARIANT p2_link_exit=$LinkExit"
+          if ($LinkExit -ne 0) { exit $LinkExit }
+          & $Program
+          exit $LASTEXITCODE
