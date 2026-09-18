@@ -1895,9 +1895,205 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_codeview_limit(UnitTestA
 
 // The curated MIR corpus is part of test_all/CI. Keep exclusions in separate
 // negative tests so an unsupported target cannot make a strict gate vacuous.
+// New padded-vector coverage stays in the registered driver suite. The
+// retirement corpus retains its approved pre-existing ABI inputs (#507/#73).
+BUSTER_GLOBAL_LOCAL bool compiler_driver_write_non_power_vector_source(Arena* arena, String8 path)
+{
+    // Each literal remains below the C99 minimum supported string length.
+    String8 parts[] = {
+        S8(
+            "// GNU vector_size keeps the requested logical lane count but rounds the\n"
+            "// object image to the next power of two. This fixture crosses every x86-64\n"
+            "// call shape affected by that distinction: scalarized Win64 lanes, native\n"
+            "// AVX/AVX-512 registers, System V memory arguments, three-part integer and\n"
+            "// floating results, and over-aligned hidden-pointer results. The driver also\n"
+            "// builds provider and consumer with different compilers in both directions.\n"
+            "\n"
+            "typedef unsigned char U8x3 __attribute__((vector_size(3)));\n"
+            "typedef unsigned short U16x3 __attribute__((vector_size(6)));\n"
+            "typedef unsigned int U32x3 __attribute__((vector_size(12)));\n"
+            "typedef unsigned long long U64x3 __attribute__((vector_size(24)));\n"
+            "typedef float F32x3 __attribute__((vector_size(12)));\n"
+            "typedef double F64x3 __attribute__((vector_size(24)));\n"
+            "typedef double F64x6 __attribute__((vector_size(48)));\n"
+            "typedef double F64x12 __attribute__((vector_size(96)));\n"
+            "\n"
+            "#if defined(__aarch64__) || defined(_M_ARM64)\n"
+            "#define NON_POWER_VECTOR_ALIGNMENT(size) ((size) > 16 ? 16 : (size))\n"
+            "#elif defined(__APPLE__) && defined(__AVX512F__)\n"
+            "#define NON_POWER_VECTOR_ALIGNMENT(size) ((size) > 64 ? 64 : (size))\n"
+            "#elif defined(__APPLE__) && defined(__AVX__)\n"
+            "#define NON_POWER_VECTOR_ALIGNMENT(size) ((size) > 32 ? 32 : (size))\n"
+            "#elif defined(__APPLE__)\n"
+            "#define NON_POWER_VECTOR_ALIGNMENT(size) ((size) > 16 ? 16 : (size))\n"
+            "#else\n"
+            "#define NON_POWER_VECTOR_ALIGNMENT(size) (size)\n"
+            "#endif\n"
+            "\n"
+            "_Static_assert(sizeof(U8x3) == 4 && _Alignof(U8x3) == NON_POWER_VECTOR_ALIGNMENT(4), \"U8x3 layout\");\n"
+            "_Static_assert(sizeof(U16x3) == 8 && _Alignof(U16x3) == NON_POWER_VECTOR_ALIGNMENT(8), \"U16x3 layout\");\n"
+            "_Static_assert(sizeof(U32x3) == 16 && _Alignof(U32x3) == NON_POWER_VECTOR_ALIGNMENT(16), \"U32x3 layout\");\n"
+            "_Static_assert(sizeof(U64x3) == 32 && _Alignof(U64x3) == NON_POWER_VECTOR_ALIGNMENT(32), \"U64x3 layout\");\n"
+            "_Static_assert(sizeof(F32x3) == 16 && _Alignof(F32x3) == NON_POWER_VECTOR_ALIGNMENT(16), \"F32x3 layout\");\n"
+            "_Static_assert(sizeof(F64x3) == 32 && _Alignof(F64x3) == NON_POWER_VECTOR_ALIGNMENT(32), \"F64x3 layout\");\n"
+            "_Static_assert(sizeof(F64x6) == 64 && _Alignof(F64x6) == NON_POWER_VECTOR_ALIGNMENT(64), \"F64x6 layout\");\n"
+            "_Static_assert(sizeof(F64x12) == 128 && _Alignof(F64x12) == NON_POWER_VECTOR_ALIGNMENT(128), \"F64x12 layout\");\n"
+            "\n"
+            "U8x3 non_power_u8(U8x3 value);\n"
+            "U16x3 non_power_u16(U16x3 value);\n"
+            "U32x3 non_power_u32(U32x3 value);\n"
+            "U64x3 non_power_u64(U64x3 value);\n"
+            "F32x3 non_power_f32(F32x3 value);\n"
+            "F64x3 non_power_f64(F64x3 value);\n"
+            "F64x6 non_power_f64x6(F64x6 value);\n"
+            "F64x12 non_power_f64x12(F64x12 value);\n"
+            "F64x3 non_power_add(F64x3 left, F64x3 right);\n"
+            "double non_power_positioned(int before, F64x3 value, int after);\n"
+            "unsigned long long non_power_positioned_u64(unsigned before, U64x3 value, unsigned after);\n"
+            "\n"
+            "#if !defined(NON_POWER_VECTOR_CONSUMER_ONLY)\n"
+            "U8x3 non_power_u8(U8x3 value)\n"
+            "{\n"
+            "    return (U8x3){(unsigned char)(value[0] + 1), (unsigned char)(value[1] + 2), (unsigned char)(value[2] + 3)};\n"
+            "}\n"
+            "\n"
+            "U16x3 non_power_u16(U16x3 value)\n"
+            "{\n"
+            "    return (U16x3){(unsigned short)(value[0] + 1), (unsigned short)(value[1] + 2), (unsigned short)(value[2] + 3)};\n"
+            "}\n"
+            "\n"
+            "U32x3 non_power_u32(U32x3 value)\n"
+            "{\n"
+            "    return (U32x3){value[0] + 1, value[1] + 2, value[2] + 3};\n"
+            "}\n"
+            "\n"
+            "U64x3 non_power_u64(U64x3 value)\n"
+            "{\n"
+            "    return (U64x3){value[0] + 1, value[1] + 2, value[2] + 3};\n"
+            "}\n"
+            "\n"
+            "F32x3 non_power_f32(F32x3 value)\n"
+            "{\n"
+            "    return (F32x3){value[0] + 1.0f, value[1] + 2.0f, value[2] + 3.0f};\n"
+            "}\n"
+            "\n"
+            "F64x3 non_power_f64(F64x3 value)\n"
+            "{\n"
+        ),
+        S8(
+            "    return (F64x3){value[0] + 1.0, value[1] + 2.0, value[2] + 3.0};\n"
+            "}\n"
+            "\n"
+            "F64x6 non_power_f64x6(F64x6 value)\n"
+            "{\n"
+            "    for (int lane = 0; lane < 6; lane += 1)\n"
+            "    {\n"
+            "        value[lane] += (double)(lane + 1);\n"
+            "    }\n"
+            "    return value;\n"
+            "}\n"
+            "\n"
+            "F64x12 non_power_f64x12(F64x12 value)\n"
+            "{\n"
+            "    for (int lane = 0; lane < 12; lane += 1)\n"
+            "    {\n"
+            "        value[lane] += (double)(lane + 1);\n"
+            "    }\n"
+            "    return value;\n"
+            "}\n"
+            "\n"
+            "F64x3 non_power_add(F64x3 left, F64x3 right)\n"
+            "{\n"
+            "    return left + right;\n"
+            "}\n"
+            "\n"
+            "double non_power_positioned(int before, F64x3 value, int after)\n"
+            "{\n"
+            "    return (double)before + value[0] + value[1] + value[2] + (double)after;\n"
+            "}\n"
+            "\n"
+            "unsigned long long non_power_positioned_u64(unsigned before, U64x3 value, unsigned after)\n"
+            "{\n"
+            "    return before + value[0] + value[1] + value[2] + after;\n"
+            "}\n"
+            "#endif\n"
+            "\n"
+            "#if !defined(NON_POWER_VECTOR_PROVIDER_ONLY)\n"
+            "int main(void)\n"
+            "{\n"
+            "    U8x3 (*volatile call_u8)(U8x3) = non_power_u8;\n"
+            "    U16x3 (*volatile call_u16)(U16x3) = non_power_u16;\n"
+            "    U32x3 (*volatile call_u32)(U32x3) = non_power_u32;\n"
+            "    U64x3 (*volatile call_u64)(U64x3) = non_power_u64;\n"
+            "    F32x3 (*volatile call_f32)(F32x3) = non_power_f32;\n"
+            "    F64x3 (*volatile call_f64)(F64x3) = non_power_f64;\n"
+            "    F64x6 (*volatile call_f64x6)(F64x6) = non_power_f64x6;\n"
+            "    F64x12 (*volatile call_f64x12)(F64x12) = non_power_f64x12;\n"
+            "    F64x3 (*volatile call_add)(F64x3, F64x3) = non_power_add;\n"
+            "\n"
+            "    U8x3 u8 = call_u8((U8x3){1, 2, 3});\n"
+            "    if (u8[0] != 2 || u8[1] != 4 || u8[2] != 6)\n"
+            "        return 1;\n"
+            "    U16x3 u16 = call_u16((U16x3){10, 20, 30});\n"
+            "    if (u16[0] != 11 || u16[1] != 22 || u16[2] != 33)\n"
+            "        return 2;\n"
+            "    U32x3 u32 = call_u32((U32x3){100, 200, 300});\n"
+            "    if (u32[0] != 101 || u32[1] != 202 || u32[2] != 303)\n"
+            "        return 3;\n"
+            "    U64x3 u64 = call_u64((U64x3){1000, 2000, 3000});\n"
+            "    if (u64[0] != 1001 || u64[1] != 2002 || u64[2] != 3003)\n"
+            "        return 4;\n"
+            "    F32x3 f32 = call_f32((F32x3){1.0f, 2.0f, 3.0f});\n"
+            "    if (f32[0] != 2.0f || f32[1] != 4.0f || f32[2] != 6.0f)\n"
+            "        return 5;\n"
+            "    F64x3 f64 = call_f64((F64x3){10.0, 20.0, 30.0});\n"
+            "    if (f64[0] != 11.0 || f64[1] != 22.0 || f64[2] != 33.0)\n"
+            "        return 6;\n"
+            "    F64x3 sum = call_add((F64x3){1.0, 2.0, 3.0}, (F64x3){10.0, 20.0, 30.0});\n"
+            "    if (sum[0] != 11.0 || sum[1] != 22.0 || sum[2] != 33.0)\n"
+            "        return 7;\n"
+            "    if (non_power_positioned(7, (F64x3){1.0, 2.0, 3.0}, 11) != 24.0)\n"
+            "        return 8;\n"
+            "    if (non_power_positioned_u64(7, (U64x3){1, 2, 3}, 11) != 24)\n"
+            "        return 9;\n"
+            "\n"
+            "    F64x6 f64x6 = call_f64x6((F64x6){1, 2, 3, 4, 5, 6});\n"
+            "    if (f64x6[0] != 2.0 || f64x6[2] != 6.0 || f64x6[5] != 12.0)\n"
+            "        return 10;\n"
+            "\n"
+            "    struct GuardedResult\n"
+            "    {\n"
+            "        unsigned long long before[2];\n"
+            "        F64x12 value;\n"
+            "        unsigned long long after[2];\n"
+            "    } guarded = {\n"
+            "        .before = {0x51c0ffee51c0ffeeull, 0x0ddf00d50ddf00d5ull},\n"
+            "        .after = {0xdecaf00ddecaf00dull, 0x123456789abcdef0ull},\n"
+            "    };\n"
+            "    guarded.value = call_f64x12((F64x12){1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});\n"
+            "    if (guarded.value[0] != 2.0 || guarded.value[5] != 12.0 || guarded.value[11] != 24.0)\n"
+            "        return 11;\n"
+            "    if (guarded.before[0] != 0x51c0ffee51c0ffeeull || guarded.before[1] != 0x0ddf00d50ddf00d5ull ||\n"
+            "        guarded.after[0] != 0xdecaf00ddecaf00dull || guarded.after[1] != 0x123456789abcdef0ull)\n"
+            "        return 12;\n"
+            "\n"
+            "    // The callee still writes through a correctly aligned hidden pointer when\n"
+            "    // the source expression discards the over-aligned result.\n"
+            "    (void)call_f64x12((F64x12){0});\n"
+            "    return 0;\n"
+            "}\n"
+            "#endif\n"
+        ),
+    };
+    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 padded_input = buster_test_temporary_path(arguments->arena, S8("buster-padded-vector-source"), S8(".c"));
+    BUSTER_TEST(arguments, compiler_driver_write_non_power_vector_source(arguments->arena, padded_input));
     String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-android"), S8("x86_64-ios"),
                         S8("x86_64-windows"), S8("x86_64-uefi")};
     String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
@@ -2005,6 +2201,65 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
             }
         }
     }
+    // GNU vector_size preserves its logical lane count while rounding the
+    // object image to the next power of two. Keep that distinction live
+    // through every x86-64 convention, CPU width, frontend and allocator.
+    // MIR deliberately falls back until it models padding separately from
+    // lanes; NONE exercises the canonical path directly.
+    {
+        String8 padded_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                  S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 cpu = 0; cpu < BUSTER_ARRAY_LENGTH(cpus); cpu += 1)
+            {
+                for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(padded_modes); mode += 1)
+                {
+                    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                    {
+                        for (u32 pic = 0; pic < 2; pic += 1)
+                        {
+                            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                            String8 object = buster_test_temporary_path(temporary.arena, S8("buster-padded-vector"), S8(".o"));
+                            String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], cpus[cpu], padded_modes[mode],
+                                frontends[frontend], pic ? S8("-fPIC") : S8("-fno-pic"), S8("-fverify-codegen"),
+                                padded_input, S8("-o"), object};
+                            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                            String8 description = string_format(temporary.arena,
+                                S8("padded vector {S8} {S8} {S8} {S8} PIC={u32}: {S8}"), targets[target], cpus[cpu],
+                                padded_modes[mode], frontends[frontend], pic, compiled.diagnostic);
+                            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                            BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 12u &&
+                                compiled.codegen_statistics.fallback_function_count == (mode ? 12u : 0u), description);
+#if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+                            bool native = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS);
+                            bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
+                                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                            if (native && runnable && frontend == 1 && pic == 1 && clang.length &&
+                                compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-padded-vector-run"), S8(".exe"));
+                                String8 link[] = {clang,
+#if BUSTER_LINUX
+                                    S8("-no-pie"),
+#endif
+                                    object, S8("-o"), executable};
+                                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                bool linked = spawn.handle &&
+                                    os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                                BUSTER_TEST(arguments, linked);
+                                if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                            }
+#endif
+                            scratch_end(temporary);
+                        }
+                    }
+                }
+            }
+        }
+    }
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     // Clang agrees at baseline and AVX width. GCC's baseline result-pointer
     // convention differs, so its positive exchange uses the AVX contract.
@@ -2080,7 +2335,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
             }
         }
     }
+    // Exchange every padded-vector call shape with Clang in both directions.
+    // Baseline observes SysV memory arguments and three-part results, Haswell
+    // observes the 32-byte native register, and Zen 5 additionally observes
+    // the 64-byte native register. Wider values stay memory/sret in every row.
+    {
+        String8 padded_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                  S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 host_cpus[] = {S8("-march=x86-64"), S8("-march=haswell"), S8("-march=znver5")};
+        String8 half_defines[] = {S8("-DNON_POWER_VECTOR_PROVIDER_ONLY=1"), S8("-DNON_POWER_VECTOR_CONSUMER_ONLY=1")};
+        for (u32 cpu = 0; cpu < BUSTER_ARRAY_LENGTH(cpus); cpu += 1)
+        {
+            bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
+                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+            for (u32 host_provider = 0; runnable && host_provider < 2; host_provider += 1)
+            {
+                TemporalArena host_temporary = scratch_begin(&arguments->arena, 1);
+                String8 host_object = buster_test_temporary_path(host_temporary.arena, S8("buster-padded-vector-clang"), S8(".o"));
+                String8 host_command[] = {clang, S8("-O0"), S8("-fno-inline"), S8("-fPIC"), host_cpus[cpu], S8("-c"),
+                    half_defines[host_provider ? 0u : 1u], padded_input, S8("-o"), host_object};
+                ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command),
+                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                bool host_ok = host_spawn.handle &&
+                    os_process_wait_deadline(host_temporary.arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST(arguments, host_ok);
+                for (u32 mode = 0; host_ok && mode < BUSTER_ARRAY_LENGTH(padded_modes); mode += 1)
+                {
+                    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                    {
+                        TemporalArena temporary = scratch_begin(&host_temporary.arena, 1);
+                        String8 object = buster_test_temporary_path(temporary.arena, S8("buster-padded-vector-mixed"), S8(".o"));
+                        String8 command[] = {S8("-c"), S8("-g0"), cpus[cpu], padded_modes[mode], frontends[frontend], S8("-fPIC"),
+                            S8("-fverify-codegen"), half_defines[host_provider ? 1u : 0u],
+                            padded_input, S8("-o"), object};
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                        u32 function_count = host_provider ? 1u : 11u;
+                        String8 description = string_format(temporary.arena,
+                            S8("padded vector mixed cpu={S8} allocator={S8} frontend={S8} provider={u32}: {S8}"), cpus[cpu],
+                            padded_modes[mode], frontends[frontend], host_provider, compiled.diagnostic);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == function_count &&
+                            compiled.codegen_statistics.fallback_function_count == (mode ? function_count : 0u), description);
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-padded-vector-mixed"), S8(".exe"));
+                            String8 link[] = {clang,
+#if BUSTER_LINUX
+                                S8("-no-pie"),
 #endif
+                                object, host_object, S8("-o"), executable};
+                            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            bool linked = spawn.handle &&
+                                os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                            BUSTER_TEST(arguments, linked);
+                            if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                        }
+                        scratch_end(temporary);
+                    }
+                }
+                scratch_end(host_temporary);
+            }
+        }
+    }
+#endif
+    BUSTER_TEST(arguments, os_file_delete(padded_input));
     return result;
 }
 
@@ -11525,6 +11845,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult wine_probe =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_probe_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
         bool wine_available = wine_probe.handle && os_process_wait_sync(arguments->arena, wine_probe).result == PROCESS_RESULT_SUCCESS;
+        String8 padded_input = buster_test_temporary_path(arguments->arena, S8("buster-padded-vector-wine-source"), S8(".c"));
+        if (wine_available)
+        {
+            BUSTER_TEST(arguments, compiler_driver_write_non_power_vector_source(arguments->arena, padded_input));
+        }
         String8 wine_fixtures[] = {
             S8("tests/basic_c_vector.c"),
             S8("tests/basic_c_simd.c"),
@@ -11818,6 +12143,61 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                         scratch_end(wide_temporary);
                     }
                 }
+                // Baseline Win64 scalarizes padded vectors into ordinary
+                // positional lanes. Exchange all integer, float and hidden-
+                // result forms with Clang in both directions under wine.
+                String8 padded_defines[] = {S8("-DNON_POWER_VECTOR_PROVIDER_ONLY=1"),
+                                            S8("-DNON_POWER_VECTOR_CONSUMER_ONLY=1")};
+                String8 padded_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+                String8 padded_clang_objects[2] = {0};
+                bool padded_clang_ready = true;
+                for (u32 half = 0; half < BUSTER_ARRAY_LENGTH(padded_defines); half += 1)
+                {
+                    padded_clang_objects[half] = buster_test_temporary_path(
+                        wine_mixed_arena, S8("buster-win64-padded-clang"), string_format(wine_mixed_arena, S8("-{u32}.obj"), half));
+                    String8 clang_command[] = {S8(BUSTER_HOST_C_COMPILER), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-march=x86-64"),
+                                              S8("-O0"), S8("-ffreestanding"), S8("-fno-builtin"), S8("-mno-stack-arg-probe"), S8("-c"),
+                                              padded_defines[half], padded_input, S8("-o"), padded_clang_objects[half]};
+                    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_command), (SliceString8){0},
+                                                                 (SliceString8){0}, wine_options);
+                    padded_clang_ready &= spawn.handle && os_process_wait_sync(wine_mixed_arena, spawn).result == PROCESS_RESULT_SUCCESS;
+                }
+                BUSTER_TEST(arguments, padded_clang_ready);
+                for (u32 mode = 0; padded_clang_ready && mode < BUSTER_ARRAY_LENGTH(padded_modes); mode += 1)
+                {
+                    for (u32 direction = 0; direction < 2; direction += 1)
+                    {
+                        TemporalArena padded_temporary = scratch_begin(&wine_mixed_arena, 1);
+                        String8 buster_object = buster_test_temporary_path(padded_temporary.arena, S8("buster-win64-padded-mir"), S8(".obj"));
+                        String8 executable = buster_test_temporary_path(padded_temporary.arena, S8("buster-win64-padded-mixed"), S8(".exe"));
+                        String8 compile_command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-pc-windows-msvc"),
+                            S8("-march=baseline"), padded_modes[mode], S8("-fverify-codegen"), padded_defines[1u - direction],
+                            padded_input, S8("-o"), buster_object};
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(padded_temporary.arena,
+                            compiler_driver_parse_arguments(padded_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_command)));
+                        u32 function_count = direction ? 11u : 1u;
+                        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
+                            compiled.codegen_statistics.function_count == function_count &&
+                            compiled.codegen_statistics.fallback_function_count == (mode ? function_count : 0u));
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            String8 link_command[] = {S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-march=baseline"), S8("-o"), executable,
+                                                     buster_object, padded_clang_objects[direction]};
+                            CompilerDriverResult linked = compiler_driver_execute_invocation(padded_temporary.arena,
+                                compiler_driver_parse_arguments(padded_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+                            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                String8 run_command[] = {S8("wine"), executable};
+                                ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
+                                                                          (SliceString8){0}, wine_options);
+                                BUSTER_TEST(arguments, run.handle && os_process_wait_sync(padded_temporary.arena, run).result == PROCESS_RESULT_SUCCESS);
+                            }
+                        }
+                        scratch_end(padded_temporary);
+                    }
+                }
             }
             scratch_end(wine_mixed_temporary);
         }
@@ -11830,40 +12210,45 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         // provides -- the -march=native rows above already assume at least
         // as much.
         String8 wine_wide_models[] = {S8("-march=nehalem"), S8("-march=haswell")};
+        String8 wine_model_sources[] = {S8("tests/basic_c_vector_argument_wide.c"), padded_input};
         for (u32 model_index = 0; wine_available && model_index < BUSTER_ARRAY_LENGTH(wine_wide_models); model_index += 1)
         {
-            TemporalArena wine_wide_temporary = scratch_begin(&arguments->arena, 1);
-            String8 wine_wide_path = buster_test_temporary_path(wine_wide_temporary.arena, S8("buster-c-windows-wide"),
-                                                                string_format(wine_wide_temporary.arena, S8("-{u32}.exe"), model_index));
-            String8 wine_wide_command_line[] = {
-                S8("-g"),
-                S8("-target"),
-                S8("x86_64-pc-windows-msvc"),
-                wine_wide_models[model_index],
-                S8("-o"),
-                wine_wide_path,
-                S8("tests/basic_c_vector_argument_wide.c"),
-            };
-            CompilerDriverResult wine_wide_build = compiler_driver_execute_invocation(
-                wine_wide_temporary.arena,
-                compiler_driver_parse_arguments(wine_wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_command_line)));
-            BUSTER_TEST(arguments, wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE);
-            if (wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE)
+            for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(wine_model_sources); fixture += 1)
             {
-                String8 wine_wide_run_arguments[] = {
-                    S8("wine"),
+                TemporalArena wine_wide_temporary = scratch_begin(&arguments->arena, 1);
+                String8 wine_wide_path = buster_test_temporary_path(wine_wide_temporary.arena, S8("buster-c-windows-wide"),
+                    string_format(wine_wide_temporary.arena, S8("-{u32}-{u32}.exe"), model_index, fixture));
+                String8 wine_wide_command_line[] = {
+                    S8("-g"),
+                    S8("-target"),
+                    S8("x86_64-pc-windows-msvc"),
+                    wine_wide_models[model_index],
+                    S8("-o"),
                     wine_wide_path,
+                    wine_model_sources[fixture],
                 };
-                ProcessSpawnResult wine_wide_run =
-                    os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_run_arguments), (SliceString8){0}, (SliceString8){0}, wine_options);
-                BUSTER_TEST(arguments, wine_wide_run.handle != 0);
-                if (wine_wide_run.handle)
+                CompilerDriverResult wine_wide_build = compiler_driver_execute_invocation(
+                    wine_wide_temporary.arena,
+                    compiler_driver_parse_arguments(wine_wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_command_line)));
+                BUSTER_TEST(arguments, wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE);
+                if (wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    BUSTER_TEST(arguments, os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run).result == PROCESS_RESULT_SUCCESS);
+                    String8 wine_wide_run_arguments[] = {
+                        S8("wine"),
+                        wine_wide_path,
+                    };
+                    ProcessSpawnResult wine_wide_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_run_arguments),
+                        (SliceString8){0}, (SliceString8){0}, wine_options);
+                    BUSTER_TEST(arguments, wine_wide_run.handle != 0);
+                    if (wine_wide_run.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run).result == PROCESS_RESULT_SUCCESS);
+                    }
                 }
+                scratch_end(wine_wide_temporary);
             }
-            scratch_end(wine_wide_temporary);
         }
+        if (wine_available) { BUSTER_TEST(arguments, os_file_delete(padded_input)); }
     }
 #endif
 

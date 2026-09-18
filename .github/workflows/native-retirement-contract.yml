@@ -156,6 +156,7 @@ jobs:
           python3 tools/native_retirement_external.py self-test
           python3 tools/native_retirement_external_test.py -v
           python3 tools/native_retirement_sdks_test.py -v
+          mkdir -p evidence
           "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out evidence/contract
       - name: Validate streamed result input under strict resource warnings
         run: python3 -W error::ResourceWarning tools/native_retirement_result_input_test.py -v
