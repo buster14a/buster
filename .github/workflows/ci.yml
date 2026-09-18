@@ -189,6 +189,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
           "$BUSTER_CI_PYTHON" tools/matrix_shard_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-shard.log"
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
+          "$BUSTER_CI_PYTHON" tools/native_producer_profile_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-producer-profile.log"
           "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the
@@ -478,7 +479,7 @@ jobs:
           # generate recreates build/, so the driver and logs must live outside it.
           driver="$RUNNER_TEMP/buster-build"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-          "$driver" generate --cc clang --config Release --linker DEFAULT
+          "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
           "$driver" test_mode_matrix --config Release
 
       - name: Native configuration differential matrix
@@ -497,7 +498,7 @@ jobs:
           # The preceding mode step normally configured this tree. Recover a
           # missing graph too, so an earlier failure cannot skip this gate.
           if [[ ! -f build/CMakeCache.txt ]]; then
-            "$driver" generate --cc clang --config Release --linker DEFAULT
+            "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
           fi
           "$driver" build --config Release -t ide
           "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle --jobs 4
