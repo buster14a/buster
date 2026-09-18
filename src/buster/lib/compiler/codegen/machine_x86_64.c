@@ -15593,10 +15593,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         {
                             String8 operation = atomic_operation == IR_ATOMIC_ADD           ? S8("ADD")
                                 : atomic_operation == IR_ATOMIC_SUBTRACT    ? S8("SUB")
-                                : atomic_operation == IR_ATOMIC_BITWISE_AND ? S8("AND")
+                                : atomic_operation == IR_ATOMIC_BITWISE_AND || atomic_operation == IR_ATOMIC_BITWISE_NAND ? S8("AND")
                                 : atomic_operation == IR_ATOMIC_BITWISE_OR  ? S8("OR")
                                 : S8("XOR");
                             (void)machine_x64_emit_metadata_registers(&encoder, operation, MACHINE_X64_R8, MACHINE_X64_RDX, (u16)(size * 8u), 0);
+                            if (atomic_operation == IR_ATOMIC_BITWISE_NAND)
+                            {
+                                (void)machine_x64_emit_metadata_register(&encoder, S8("NOT"), MACHINE_X64_R8, (u16)(size * 8u), 0);
+                            }
                         }
                         (void)machine_x64_emit_metadata_atomic_memory_register(&encoder, S8("CMPXCHG"), MACHINE_X64_RCX, MACHINE_X64_R8,
                                 (u16)(size * 8u), 0);
@@ -15704,7 +15708,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 atomic_operation = instruction->payload >> 8;
                         String8 low_operation = atomic_operation == IR_ATOMIC_ADD           ? S8("ADD")
                             : atomic_operation == IR_ATOMIC_SUBTRACT    ? S8("SUB")
-                            : atomic_operation == IR_ATOMIC_BITWISE_AND ? S8("AND")
+                            : atomic_operation == IR_ATOMIC_BITWISE_AND || atomic_operation == IR_ATOMIC_BITWISE_NAND ? S8("AND")
                             : atomic_operation == IR_ATOMIC_BITWISE_OR  ? S8("OR")
                             : atomic_operation == IR_ATOMIC_BITWISE_XOR ? S8("XOR")
                             : atomic_operation == IR_ATOMIC_EXCHANGE    ? S8("MOV")
@@ -15724,6 +15728,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RCX, MACHINE_X64_RDX, 64, 0);
                         (void)machine_x64_emit_metadata_registers(&encoder, low_operation, MACHINE_X64_RBX, MACHINE_X64_R8, 64, 0);
                         (void)machine_x64_emit_metadata_registers(&encoder, high_operation, MACHINE_X64_RCX, MACHINE_X64_R9, 64, 0);
+                        if (atomic_operation == IR_ATOMIC_BITWISE_NAND)
+                        {
+                            (void)machine_x64_emit_metadata_register(&encoder, S8("NOT"), MACHINE_X64_RBX, 64, 0);
+                            (void)machine_x64_emit_metadata_register(&encoder, S8("NOT"), MACHINE_X64_RCX, 64, 0);
+                        }
                         (void)machine_x64_emit_metadata_atomic_memory(&encoder, S8("CMPXCHG16B"), address, 128, 0);
                         u32 retry_branch = encoder.count;
                         (void)machine_x64_emit_metadata_relative(&encoder, S8("JNE"), 0, 32, 0);

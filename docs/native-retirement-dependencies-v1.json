@@ -499,8 +499,8 @@
       "source": "src/buster/lib/compiler/ir/ir.h",
       "provenance": "repo:src/buster/lib/compiler/ir/ir.h",
       "destination": "dependencies/project-include/buster/lib/compiler/ir/ir.h",
-      "bytes": 46721,
-      "sha256": "788529876cb23af30c58e077d862059c0bbe3e029501288f688e29762d519c1f"
+      "bytes": 46749,
+      "sha256": "3b64d4badfc1ba4971ddec4db2add02bbf51fae747ed593898c5f6319b897b5a"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_cfg.c",

@@ -8800,9 +8800,9 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             capacity64 += 32 + 2u * (large_save_offset ? 16u : 4u);
             break;
         case MACHINE_A64_ATOMIC_RMW_PAIR:
-            // Two input loads, a pair loop with at most two arithmetic
+            // Two input loads, a pair loop with up to four NAND arithmetic
             // words, and two result stores. Every frame access may expand.
-            capacity64 += 20 + 4u * (large_save_offset ? 16u : 4u);
+            capacity64 += 28 + 4u * (large_save_offset ? 16u : 4u);
             break;
         case MACHINE_A64_ATOMIC_CAS_PAIR:
             // Expected/desired loads, compare and conditional replacement,
@@ -8810,8 +8810,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             capacity64 += 28 + 6u * (large_save_offset ? 16u : 4u);
             break;
         case MACHINE_A64_ATOMIC_RMW:
-            // ld(a)xr, operation, st(l)xr, cbnz.
-            capacity64 += 16;
+            // ld(a)xr, operation, optional NAND inversion, st(l)xr, cbnz.
+            capacity64 += 20;
             break;
         case MACHINE_A64_CLEAR_INSTRUCTION_CACHE:
             // Two cache-maintenance loops, alignment, and barriers.
@@ -9521,8 +9521,14 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                             machine_a64_emit(&encoder, UINT32_C(0xda0c01cc)); // sbc x12, x14, x12
                             break;
                         case IR_ATOMIC_BITWISE_AND:
+                        case IR_ATOMIC_BITWISE_NAND:
                             machine_a64_emit(&encoder, UINT32_C(0x8a0b012b));
                             machine_a64_emit(&encoder, UINT32_C(0x8a0c01cc));
+                            if ((instruction->payload >> MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT) == IR_ATOMIC_BITWISE_NAND)
+                            {
+                                machine_a64_emit(&encoder, UINT32_C(0xaa2b03eb)); // mvn x11, x11
+                                machine_a64_emit(&encoder, UINT32_C(0xaa2c03ec)); // mvn x12, x12
+                            }
                             break;
                         case IR_ATOMIC_BITWISE_OR:
                             machine_a64_emit(&encoder, UINT32_C(0xaa0b012b));
@@ -9581,18 +9587,24 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 u32 rmw_size_bits = rmw_size == 2 ? 0x40000000u : rmw_size == 4 ? 0x80000000u : rmw_size == 8 ? 0xc0000000u : 0;
                 bool rmw_wide = rmw_size == 8;
                 u32 rmw_operation = (instruction->payload >> 8) & 0xffu;
+                u32 rmw_retry_offset = encoder.count;
                 machine_a64_emit(&encoder, ((instruction->payload & 0x10u) ? 0x085ffc00u : 0x085f7c00u) | rmw_size_bits | (MACHINE_A64_X10 << 5) |
                                                MACHINE_A64_X9);
                 u32 rmw_word = rmw_operation == IR_ATOMIC_ADD           ? (rmw_wide ? 0x8b0b012cu : 0x0b0b012cu)
                                : rmw_operation == IR_ATOMIC_SUBTRACT    ? (rmw_wide ? 0xcb0b012cu : 0x4b0b012cu)
-                               : rmw_operation == IR_ATOMIC_BITWISE_AND ? (rmw_wide ? 0x8a0b012cu : 0x0a0b012cu)
+                               : rmw_operation == IR_ATOMIC_BITWISE_AND || rmw_operation == IR_ATOMIC_BITWISE_NAND ? (rmw_wide ? 0x8a0b012cu : 0x0a0b012cu)
                                : rmw_operation == IR_ATOMIC_BITWISE_OR  ? (rmw_wide ? 0xaa0b012cu : 0x2a0b012cu)
                                : rmw_operation == IR_ATOMIC_BITWISE_XOR ? (rmw_wide ? 0xca0b012cu : 0x4a0b012cu)
                                                                         : (rmw_wide ? 0xaa0b03ecu : 0x2a0b03ecu);
                 machine_a64_emit(&encoder, rmw_word);
+                if (rmw_operation == IR_ATOMIC_BITWISE_NAND)
+                {
+                    machine_a64_emit(&encoder, rmw_wide ? UINT32_C(0xaa2c03ec) : UINT32_C(0x2a2c03ec)); // mvn x12/w12, x12/w12
+                }
                 machine_a64_emit(&encoder, ((instruction->payload & 0x20u) ? 0x0800fc00u : 0x08007c00u) | rmw_size_bits | (MACHINE_A64_X13 << 16) |
                                                (MACHINE_A64_X10 << 5) | MACHINE_A64_X12);
-                machine_a64_emit(&encoder, 0x35000000u | (0x7fffdu << 5) | MACHINE_A64_X13);
+                u32 rmw_retry_words = (rmw_retry_offset - encoder.count) / 4u;
+                machine_a64_emit(&encoder, 0x35000000u | ((rmw_retry_words & 0x7ffffu) << 5) | MACHINE_A64_X13);
             }
             break;
             case MACHINE_A64_ATOMIC_CAS:

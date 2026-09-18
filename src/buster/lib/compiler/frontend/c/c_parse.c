@@ -12928,9 +12928,10 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
         // userland reaches for it in preference to the C11 one.
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__atomic_"));
-        // GCC's legacy full barrier is the one __sync builtin the compiler
-        // implements; SQLite reaches for it in sqlite3MemoryBarrier.
-        predefined_function_name |= string_equal(spelling, S8("__sync_synchronize"));
+        // Admit only the implemented legacy full barrier and NAND spellings.
+        predefined_function_name |= string_equal(spelling, S8("__sync_synchronize")) ||
+                                    string_equal(spelling, S8("__sync_fetch_and_nand")) ||
+                                    string_equal(spelling, S8("__sync_nand_and_fetch"));
         // GNU's complex part operators are spelled as identifiers but name no
         // entity; the expression walker consumes them as prefix operators.
         predefined_function_name |= string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__real")) ||

@@ -14857,6 +14857,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 high_mnemonic = S8("SBB");
                                 break;
                             case IR_ATOMIC_BITWISE_AND:
+                            case IR_ATOMIC_BITWISE_NAND:
                                 low_mnemonic = S8("AND");
                                 high_mnemonic = S8("AND");
                                 break;
@@ -14889,6 +14890,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                                                   BUSTER_ARRAY_LENGTH(low_operands)) ||
                                 !codegen_canonical_x64_metadata_emit(&buffer, high_mnemonic, high_operands,
                                                                       BUSTER_ARRAY_LENGTH(high_operands)) ||
+                                (instruction->atomic_operation == IR_ATOMIC_BITWISE_NAND &&
+                                 (!codegen_canonical_x64_metadata_emit(&buffer, S8("NOT"), low_operands, 1) ||
+                                  !codegen_canonical_x64_metadata_emit(&buffer, S8("NOT"), high_operands, 1))) ||
                                 !codegen_canonical_x64_metadata_emit_attributes(
                                     &buffer, S8("CMPXCHG16B"), &cx16_memory, 1,
                                     (BusterX86MetadataFeatureInput){.names = cx16_features_names, .count = BUSTER_ARRAY_LENGTH(cx16_features_names)},
@@ -14983,6 +14987,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 operation_mnemonic = S8("SUB");
                                 break;
                             case IR_ATOMIC_BITWISE_AND:
+                            case IR_ATOMIC_BITWISE_NAND:
                                 operation_mnemonic = S8("AND");
                                 break;
                             case IR_ATOMIC_BITWISE_OR:
@@ -15003,6 +15008,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (!operation_mnemonic.length ||
                             !codegen_canonical_x64_metadata_emit(&buffer, operation_mnemonic, operation_operands,
                                                                   BUSTER_ARRAY_LENGTH(operation_operands)) ||
+                            (instruction->atomic_operation == IR_ATOMIC_BITWISE_NAND &&
+                             !codegen_canonical_x64_metadata_emit(&buffer, S8("NOT"), operation_operands, 1)) ||
                             !codegen_canonical_x64_metadata_atomic_register_memory(&buffer, S8("CMPXCHG"), X64_REGISTER_RDX,
                                                                                       X64_REGISTER_R8, atomic_width))
                         {
@@ -20363,8 +20370,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 codegen_emit_u32(&buffer, UINT32_C(0xda0c01cc));
                                 break;
                             case IR_ATOMIC_BITWISE_AND:
+                            case IR_ATOMIC_BITWISE_NAND:
                                 codegen_emit_u32(&buffer, UINT32_C(0x8a0b012b));
                                 codegen_emit_u32(&buffer, UINT32_C(0x8a0c01cc));
+                                if (instruction->atomic_operation == IR_ATOMIC_BITWISE_NAND)
+                                {
+                                    codegen_emit_u32(&buffer, UINT32_C(0xaa2b03eb)); // mvn x11, x11
+                                    codegen_emit_u32(&buffer, UINT32_C(0xaa2c03ec)); // mvn x12, x12
+                                }
                                 break;
                             case IR_ATOMIC_BITWISE_OR:
                                 codegen_emit_u32(&buffer, UINT32_C(0xaa0b012b));
@@ -20423,6 +20436,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             operation = wide ? UINT32_C(0xcb0b012c) : UINT32_C(0x4b0b012c);
                             break;
                         case IR_ATOMIC_BITWISE_AND:
+                        case IR_ATOMIC_BITWISE_NAND:
                             operation = wide ? UINT32_C(0x8a0b012c) : UINT32_C(0x0a0b012c);
                             break;
                         case IR_ATOMIC_BITWISE_OR:
@@ -20438,6 +20452,10 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             break;
                         }
                         codegen_emit_u32(&buffer, operation);
+                        if (instruction->atomic_operation == IR_ATOMIC_BITWISE_NAND)
+                        {
+                            codegen_emit_u32(&buffer, wide ? UINT32_C(0xaa2c03ec) : UINT32_C(0x2a2c03ec)); // mvn x12/w12, x12/w12
+                        }
                         a64_emit_atomic_exclusive_store(&buffer, 13, 12, 10, (u32)value_type->layout.size, release);
                         s64 retry_displacement = (s64)retry_offset - (s64)buffer.count;
                         if (retry_displacement % 4 || retry_displacement / 4 < -INT64_C(0x40000) || retry_displacement / 4 > INT64_C(0x3ffff))

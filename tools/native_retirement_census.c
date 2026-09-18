@@ -35,10 +35,10 @@ BUSTER_GLOBAL_LOCAL u64 const nrc_full_input_count = 558;
 BUSTER_GLOBAL_LOCAL u64 const nrc_full_subject_count = 410;
 BUSTER_GLOBAL_LOCAL u64 const nrc_full_group_count = 19680;
 BUSTER_GLOBAL_LOCAL u64 const nrc_full_row_count = 78720;
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("d4ffce559c12a3201420c75347e4ff3ce48832a0e4987c95b5539346033433ab");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("250416ef64fc90d9697ee6e6bc2d55c8ce95d0fa68805b714c9c2c8347313bd7");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("51532fcbff545f42308672151b2046a99fce49a460cecda6f65d1859c5e8013b");
-BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("0c0f0ec8768957d93573a04f8712e37df2fadbc9647113bf6578b7dfdc300bcd");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_descriptor_sha256 = S8_INITIALIZER("eb304ef83ce0ce82e46a8a72ccff2e9d6d7afb6f034b91844e9a08451bef369f");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_receipt_sha256 = S8_INITIALIZER("38cc61341370bf2a9d0ba82114559b5d30111da95307367aeb0db91315c92e55");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_project_sha256 = S8_INITIALIZER("32746de4877ba782d3cdeebdc1a82e0b09d53b4d7d5e52953d8b53e69755c27e");
+BUSTER_GLOBAL_LOCAL String8 const nrc_dependency_ledger_sha256 = S8_INITIALIZER("9b897ed31ed2f09cde934341b48cbe95421b8d3c85374bc2d849f6b8d013710d");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_input_sha256 = S8_INITIALIZER("bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_fixture_map_sha256 = S8_INITIALIZER("8d79504f67d48fd27698c6897b00fc9347dd60a538a6198e53e42970c799bc4f");
 BUSTER_GLOBAL_LOCAL String8 const nrc_archived_row_sha256 = S8_INITIALIZER("9604102b75a14631aeb1d6a3652d36506a05928a0046c52cc50a00b942826ce6");
@@ -1639,6 +1639,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
         String8 flags = settings.project_include.length
                             ? S8("-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem RESOURCE_SNAPSHOT -isystem TARGET_MUSL_INCLUDE -isystem MUSL_INCLUDE")
                             : S8("-c -g0 -v -fwrapv -fno-strict-aliasing -funsigned-char -fverify-codegen -nostdinc -isystem RESOURCE_SNAPSHOT");
+        // TCC 0.9.28rc leaks the const qualifier of a `String8 const` passed
+        // through `...` onto `settings` and then rejects `settings.rows = ...`
+        // as a read-only assignment, which breaks the build.sh bootstrap.
+        // Passing non-const copies keeps the driver compiling with TCC.
+        String8 archived_input_sha256 = nrc_archived_input_sha256;
+        String8 archived_fixture_map_sha256 = nrc_archived_fixture_map_sha256;
+        String8 archived_row_sha256 = nrc_archived_row_sha256;
         String8 metadata = string_format(arena, S8("version=2\nkind=object-coverage\nidentity_hash=sha256\nrow_artifact_hash=buster_hash_64-noncryptographic\n"
             "support_contract=docs/native-retirement-support-v1.tsv\nsupport_contract_sha256={S8}\n"
             "supported_gap_ledger=docs/native-retirement-supported-gaps-v1.tsv\nsupported_gap_ledger_sha256={S8}\n"
@@ -1663,8 +1670,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             settings.compiler_revision, settings.baseline_revision, compiler_hash, compiler_bytes, compiler_sha256,
             baseline_hash, baseline_bytes, baseline_sha256, settings.cpu, settings.resource_sha256, project_include_sha256,
             settings.dependency_manifest_sha256, dependency_receipt_name, settings.dependency_receipt_sha256,
-            settings.dependency_project_sha256, settings.dependency_ledger_sha256, nrc_archived_input_sha256,
-            nrc_archived_fixture_map_sha256, nrc_archived_row_sha256, sysroot, system_include, input_count, subject_count,
+            settings.dependency_project_sha256, settings.dependency_ledger_sha256, archived_input_sha256,
+            archived_fixture_map_sha256, archived_row_sha256, sysroot, system_include, input_count, subject_count,
             groups * BUSTER_ARRAY_LENGTH(nrc_allocators), profile, 192,
             S8("9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"),
             settings.fixture_filter, settings.target_filter,
