@@ -33,22 +33,16 @@ jobs:
             git diff --check
           } 2>&1 | tee -a issue84-build.log
 
-      - name: Install bootstrap dependency
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            sudo apt-get update
-            sudo apt-get install --no-install-recommends -y tcc ninja-build cmake
-          } 2>&1 | tee -a issue84-build.log
-
       - name: Build and run registered tests
         shell: bash
         run: |
           set -euo pipefail
           {
-            ./build.sh generate --cc clang --ci --linker DEFAULT
-            BUSTER_TEST_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=2 ./build.sh build --config Debug -t ide
+            mkdir -p build
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+            build/build generate --cc clang --ci --linker DEFAULT
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+            BUSTER_TEST_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=2 build/build build --config Debug -t ide
             BUSTER_TEST_JOBS=1 build/Debug/ide test --ci=1
           } 2>&1 | tee -a issue84-build.log
 
