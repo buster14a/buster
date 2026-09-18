@@ -1,4 +1,4 @@
-name: Issue 103 source snapshot
+name: Issue 103 acceptance
 
 on:
   push:
@@ -6,27 +6,143 @@ on:
       - codex/103-line-mark-acceptance-20260918
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  snapshot:
+  acceptance:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: true
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 464774d8e88cb3c97c182685474fbab3fcfcfc00
+          path: baseline
           persist-credentials: false
-      - name: Archive exact checkout
+      - name: Apply reviewed source patch
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/issue-103-source"
-          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/issue-103-source/identity.txt"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/issue-103-source/source.tar.gz" HEAD
+          mkdir -p evidence
+          cp candidate/.issue103-source.patch evidence/source.patch
+          sha256sum evidence/source.patch > evidence/source.patch.sha256
+          git -C candidate apply --check .issue103-source.patch
+          git -C candidate apply .issue103-source.patch
+          rm candidate/.issue103-source.patch
+          rm candidate/.github/workflows/issue-103-source-snapshot.yml
+          git -C candidate diff --check
+      - name: Build historical and current probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          compile_probe() {
+            local root="$1"
+            local output="$2"
+            clang -O2 -g -ffunction-sections -fdata-sections -Wall -Werror \
+              -Wno-unused-function -Wno-unused-variable \
+              -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SINGLE_THREADED=1 \
+              -I"$root/src" -fwrapv -fno-strict-aliasing -funsigned-char \
+              "$root/tools/machine_line_mark_scaling.c" \
+              "$root/src/buster/lib/compiler/codegen/machine.c" \
+              "$root/src/buster/lib/arena.c" "$root/src/buster/lib/os.c" \
+              "$root/src/buster/lib/integer.c" "$root/src/buster/lib/string.c" \
+              "$root/src/buster/lib/float.c" "$root/src/buster/lib/time.c" \
+              -Wl,--gc-sections -lpthread -ldl -lm -o "$output"
+          }
+          cp candidate/tools/machine_line_mark_scaling.c baseline/tools/machine_line_mark_scaling.c
+          compile_probe baseline evidence/baseline-probe
+          compile_probe candidate evidence/candidate-probe
+          {
+            printf 'workflow_head='; git -C candidate rev-parse HEAD
+            printf 'workflow_tree='; git -C candidate rev-parse 'HEAD^{tree}'
+            printf 'baseline_commit='; git -C baseline rev-parse HEAD
+            printf 'baseline_tree='; git -C baseline rev-parse 'HEAD^{tree}'
+            printf 'benchmark_source_sha256='; sha256sum candidate/tools/machine_line_mark_scaling.c | cut -d' ' -f1
+            printf 'cpu_allowed_list='; awk '/Cpus_allowed_list/ {print $2}' /proc/self/status
+            printf 'kernel='; uname -srmo
+            clang --version | head -1
+            lscpu
+            git -C candidate diff --stat
+          } > evidence/provenance.txt
+          sha256sum evidence/baseline-probe evidence/candidate-probe > evidence/binaries.sha256
+      - name: Run alternating scaling comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed="$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status)"
+          cpu="${allowed%%,*}"
+          cpu="${cpu%%-*}"
+          : > evidence/raw.log
+          for size in 32 256 1024 4096 16384 65536; do
+            case "$size" in
+              32) samples=21 ;;
+              256) samples=15 ;;
+              1024) samples=11 ;;
+              4096) samples=7 ;;
+              16384) samples=5 ;;
+              65536) samples=3 ;;
+            esac
+            for sample in $(seq 1 "$samples"); do
+              if (( sample % 2 )); then order='baseline candidate'; else order='candidate baseline'; fi
+              for variant in $order; do
+                line="$(timeout 180s taskset -c "$cpu" "evidence/$variant-probe" "$size" 1)"
+                printf 'variant=%s sample=%s %s\n' "$variant" "$sample" "$line" | tee -a evidence/raw.log
+              done
+            done
+          done
+          /usr/bin/time -v -o evidence/baseline-largest.time taskset -c "$cpu" evidence/baseline-probe 65536 1 > evidence/baseline-largest.log
+          /usr/bin/time -v -o evidence/candidate-largest.time taskset -c "$cpu" evidence/candidate-probe 65536 1 > evidence/candidate-largest.log
+          python3 - <<'PY'
+          from collections import defaultdict
+          from pathlib import Path
+          rows = defaultdict(list)
+          for line in Path('evidence/raw.log').read_text().splitlines():
+              fields = dict(part.split('=', 1) for part in line.split())
+              rows[(fields['variant'], int(fields['leaves']))].append(fields)
+          for size in sorted({size for _, size in rows}):
+              before = rows[('baseline', size)]
+              after = rows[('candidate', size)]
+              assert len(before) == len(after) and before
+              for key in ('rows', 'retained_bytes', 'permuted', 'displacement', 'hash'):
+                  assert {row[key] for row in before + after} == {before[0][key]}, (size, key)
+          PY
+      - name: Run candidate sanitizer probe
+        shell: bash
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -ffunction-sections -fdata-sections -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SINGLE_THREADED=1 \
+            -Icandidate/src -fwrapv -fno-strict-aliasing -funsigned-char \
+            candidate/tools/machine_line_mark_scaling.c \
+            candidate/src/buster/lib/compiler/codegen/machine.c candidate/src/buster/lib/arena.c candidate/src/buster/lib/os.c \
+            candidate/src/buster/lib/integer.c candidate/src/buster/lib/string.c candidate/src/buster/lib/float.c candidate/src/buster/lib/time.c \
+            -Wl,--gc-sections -lpthread -ldl -lm -o evidence/candidate-sanitized
+          evidence/candidate-sanitized 65536 1 | tee evidence/sanitizer.log
+      - name: Publish acceptance source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd candidate
+          git config user.name David
+          git config user.email davidgmbb@gmail.com
+          git add src/buster/tests/compiler/codegen/machine_test.c tools/machine_line_mark_scaling.c
+          git rm .issue103-source.patch .github/workflows/issue-103-source-snapshot.yml
+          git commit -m 'scheduler: complete line-mark repair acceptance (#103)'
+          git push origin HEAD:codex/103-line-mark-acceptance-20260918
+          git rev-parse HEAD 'HEAD^{tree}' > ../evidence/published-identity.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: issue-103-source-${{ github.sha }}
-          path: ${{ runner.temp }}/issue-103-source
-          retention-days: 1
-          if-no-files-found: error
+          name: issue-103-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: warn
