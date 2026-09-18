@@ -10,3 +10,7 @@ self-hosted-runner:
     - macos-26
     - macos-26-intel
     - windows-11-arm
+    # Custom labels of the dedicated self-hosted Ryzen 9700X runner used by
+    # .github/workflows/zen5-audit.yml.
+    - buster-zen5
+    - ryzen-9700x
