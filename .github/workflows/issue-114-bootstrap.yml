@@ -1,0 +1,43 @@
+name: Issue 114 bootstrap
+
+on:
+  push:
+    branches:
+      - codex/issue-114
+
+permissions:
+  contents: write
+
+jobs:
+  implement-and-test:
+    if: ${{ !contains(github.event.head_commit.message, '[issue-114 generated]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/issue-114
+          fetch-depth: 0
+      - name: Apply focused implementation
+        run: python3 .github/issue-114-patch.py
+      - name: Validate patch shape
+        run: git diff --check
+      - name: Publish implementation commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/buster/lib/compiler/object/object.h \
+                  src/buster/lib/compiler/object/object.c \
+                  src/buster/lib/compiler/link/link.h \
+                  src/buster/lib/compiler/link/link.c \
+                  src/buster/lib/compiler/driver/driver_diagnostic.c \
+                  src/buster/tests/compiler/object/object_test.c \
+                  src/buster/tests/compiler/link/link_test.c \
+                  docs/agents/frontend/linkage.md
+          git commit -m "link: enforce COFF COMDAT selection contracts [issue-114 generated]"
+          git push origin HEAD:codex/issue-114
+      - name: Configure
+        run: ./build.sh generate
+      - name: Release test suite
+        run: ./build.sh build --config Release -t test_all
