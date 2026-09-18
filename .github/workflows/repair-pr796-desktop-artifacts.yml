@@ -1,0 +1,121 @@
+name: Repair PR 796 desktop artifacts
+
+on:
+  push:
+    branches:
+      - fix/786-native-retirement-closure
+
+concurrency:
+  group: repair-pr796-desktop-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.head_commit.message == 'ci: stage PR 796 artifact repair'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "${GITHUB_REF_NAME}"
+          git checkout -B "${GITHUB_REF_NAME}" FETCH_HEAD
+
+      - name: Add safe desktop artifact staging
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/ci.yml')
+          text = path.read_text()
+          marker = '      - name: Retain desktop logs\n'
+          assert text.count(marker) == 1
+          condition = '$' + '{{ !cancelled() }}'
+          step = '''      # Logs may contain symlinks into build/.buster-cache. upload-artifact
+          # follows those links and can fail on intentionally unreadable cache entries.
+          # Rebuild the upload root from readable regular files only, without
+          # preserving links or source permissions.
+          - name: Sanitize desktop logs
+            if: CONDITION
+            timeout-minutes: 2
+            shell: bash
+            run: |
+              set -euo pipefail
+              "$BUSTER_CI_PYTHON" - <<'PYTHON'
+              import os
+              import shutil
+              import stat
+              from pathlib import Path
+
+              root = Path(os.environ["RUNNER_TEMP"]) / "buster-ci"
+              source = root.with_name("buster-ci-unsanitized")
+              if source.is_symlink() or source.is_file():
+                  source.unlink()
+              elif source.is_dir():
+                  shutil.rmtree(source, ignore_errors=True)
+              if root.is_symlink() or root.is_file():
+                  root.unlink()
+              elif root.is_dir():
+                  root.rename(source)
+              root.mkdir(parents=True, exist_ok=True)
+
+              skipped = []
+              if source.is_dir():
+                  for directory, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
+                      current = Path(directory)
+                      relative = current.relative_to(source)
+                      retained_directories = []
+                      for name in dirnames:
+                          entry = current / name
+                          try:
+                              mode = entry.lstat().st_mode
+                          except OSError as error:
+                              skipped.append(f"{relative / name}: {error}")
+                              continue
+                          if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
+                              retained_directories.append(name)
+                              (root / relative / name).mkdir(parents=True, exist_ok=True)
+                          else:
+                              skipped.append(f"{relative / name}: non-directory or symbolic link")
+                      dirnames[:] = retained_directories
+                      for name in filenames:
+                          entry = current / name
+                          destination = root / relative / name
+                          try:
+                              mode = entry.lstat().st_mode
+                              if not stat.S_ISREG(mode):
+                                  skipped.append(f"{relative / name}: non-regular file")
+                                  continue
+                              destination.parent.mkdir(parents=True, exist_ok=True)
+                              with entry.open("rb") as input_file, destination.open("wb") as output_file:
+                                  shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
+                          except OSError as error:
+                              destination.unlink(missing_ok=True)
+                              skipped.append(f"{relative / name}: {error}")
+
+              report = root / "artifact-sanitization.txt"
+              report.write_text("\n".join(skipped) + ("\n" if skipped else ""), encoding="utf-8")
+              shutil.rmtree(source, ignore_errors=True)
+              PYTHON
+
+'''.replace('CONDITION', condition)
+          path.write_text(text.replace(marker, step + marker, 1))
+          PY
+
+      - name: Commit the repair
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/ci.yml
+          git rm .github/workflows/repair-pr796-desktop-artifacts.yml
+          git commit -m 'fix(ci): sanitize desktop artifacts'
+          git push origin HEAD:"${GITHUB_REF_NAME}"
