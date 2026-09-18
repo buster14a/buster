@@ -3864,13 +3864,9 @@ BUSTER_C_INTERNAL bool c_parse_generic_selection_range(CTypeParseMachine* machin
     return valid;
 }
 
-// Flatten only selected _Generic associations into a compact token stream for
-// the parse-side integer evaluators.  The explicit range stack preserves
-// nested selections without source-dependent recursion, and no unselected
-// association is copied or evaluated.
-BUSTER_C_INTERNAL bool c_parse_generic_constant_tokens(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
-                                                         CParseResult* result, CScopeId scope, u32 start, u32 end,
-                                                         CToken** tokens_out, u32* token_count_out)
+BUSTER_GLOBAL_LOCAL bool c_parse_generic_constant_tokens_flatten(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                                   CParseResult* result, CScopeId scope, u32 start, u32 end,
+                                                                   CToken** tokens_out, u32* token_count_out)
 {
     u32 capacity = end - start + 1;
     CToken* tokens = arena_allocate(arena, CToken, preprocess.token_count);
@@ -3930,6 +3926,53 @@ BUSTER_C_INTERNAL bool c_parse_generic_constant_tokens(CTypeParseMachine* machin
     }
     return valid;
 }
+
+BUSTER_GLOBAL_LOCAL bool c_parse_generic_constant_tokens_alias_range(CPreprocessResult preprocess, u32 start, u32 end,
+                                                                       CToken** tokens_out, u32* token_count_out)
+{
+    bool aliased = start < end;
+    for (u32 index = start; aliased && index + 1 < end; index += 1)
+    {
+        CToken token = preprocess.tokens[index];
+        bool generic = token.kind == C_TOKEN_IDENTIFIER &&
+                       string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic")) &&
+                       c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        aliased = !generic;
+    }
+    if (aliased)
+    {
+        *tokens_out = preprocess.tokens;
+        *token_count_out = end - start;
+    }
+    return aliased;
+}
+
+// Flatten only selected _Generic associations into a compact token stream for
+// the parse-side integer evaluators.  The explicit range stack preserves
+// nested selections without source-dependent recursion.  Ordinary expressions
+// keep the original token view; only a range containing _Generic needs storage,
+// and no unselected association is copied or evaluated.
+BUSTER_C_INTERNAL bool c_parse_generic_constant_tokens(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+                                                         CParseResult* result, CScopeId scope, u32 start, u32 end,
+                                                         CToken** tokens_out, u32* token_count_out)
+{
+    bool valid = start < end;
+    if (valid && !c_parse_generic_constant_tokens_alias_range(preprocess, start, end, tokens_out, token_count_out))
+    {
+        valid = c_parse_generic_constant_tokens_flatten(machine, arena, preprocess, result, scope, start, end, tokens_out, token_count_out);
+    }
+    return valid;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_parse_generic_constant_tokens_alias(CPreprocessResult preprocess, u32 start, u32 end)
+{
+    CToken* tokens = 0;
+    u32 token_count = 0;
+    bool aliased = c_parse_generic_constant_tokens_alias_range(preprocess, start, end, &tokens, &token_count);
+    return aliased && tokens == preprocess.tokens && token_count == end - start;
+}
+#endif
 
 BUSTER_C_INTERNAL bool c_parse_range_is_null_pointer_constant(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
                                                                 CTypeId type_id, u32 start, u32 end);

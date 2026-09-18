@@ -9,6 +9,28 @@
 #include <sys/stat.h>
 #endif
 
+BUSTER_GLOBAL_LOCAL char const bq_validate_buster_profile[] =
+    "schema=1\n"
+    "recipe=validate-buster-v1\n"
+    "repository=buster14a/buster\n"
+    "source-manifest=BQ-SOURCE-V1\n"
+    "layout=separate-source-build-v1\n";
+
+BUSTER_GLOBAL_LOCAL char const bq_native_retirement_blocked_profile[] =
+    "schema=1\n"
+    "recipe=native-retirement-performance-v1\n"
+    "repository=buster14a/buster\n"
+    "status=blocked\n"
+    "contract=docs/native-retirement-performance-contract.md\n"
+    "contract-sha256=53096e73ee875db48c69b793ef16603124e499959ac0380ae12928177c72ebbd\n"
+    "support-declaration=docs/native-retirement-support-v1.tsv\n"
+    "support-declaration-sha256=1986484b53f92221b684463f25fd0a9c1145f8d344ae907cc3134f5a26fa118e\n"
+    "binding-validator=tools/native_retirement_performance_binding.py\n"
+    "binding-validator-sha256=aef5cf3ac345a7ec2bae2cb34cc78a29640c4232c71cae717305d3a6bbe87973\n"
+    "statistics=tools/throughput/retirement_stats.h\n"
+    "statistics-sha256=72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8\n"
+    "requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay\n";
+
 u32 bq_u32(u8 const* bytes)
 {
     u32 value = 0;
@@ -94,16 +116,102 @@ BUSTER_GLOBAL_LOCAL bool bq_source_identity(String8 value)
     return ok;
 }
 
+BqRecipe bq_recipe_from_name(String8 name)
+{
+    BqRecipe result = string_equal(name, S8("fake-success-v1")) ? BQ_RECIPE_FAKE_SUCCESS :
+                      string_equal(name, S8("fake-failure-v1")) ? BQ_RECIPE_FAKE_FAILURE :
+                      string_equal(name, S8("validate-buster-v1")) ? BQ_RECIPE_VALIDATE_BUSTER :
+                      string_equal(name, S8("native-retirement-performance-v1")) ?
+                      BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED : BQ_RECIPE_UNKNOWN;
+    return result;
+}
+
+BqRecipe bq_request_recipe(BqRequest const* request)
+{
+    BqRecipe result = request ? bq_recipe_from_name(bq_field(request, 2)) : BQ_RECIPE_UNKNOWN;
+    return result;
+}
+
+String8 bq_recipe_name(BqRecipe recipe)
+{
+    String8 result = {0};
+    if (recipe == BQ_RECIPE_FAKE_SUCCESS) result = S8("fake-success-v1");
+    else if (recipe == BQ_RECIPE_FAKE_FAILURE) result = S8("fake-failure-v1");
+    else if (recipe == BQ_RECIPE_VALIDATE_BUSTER) result = S8("validate-buster-v1");
+    else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
+        result = S8("native-retirement-performance-v1");
+    return result;
+}
+
+String8 bq_recipe_profile(BqRecipe recipe)
+{
+    String8 result = {0};
+    if (recipe == BQ_RECIPE_VALIDATE_BUSTER)
+        result = (String8){(char8*)bq_validate_buster_profile, sizeof(bq_validate_buster_profile) - 1};
+    else if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED)
+        result = (String8){(char8*)bq_native_retirement_blocked_profile,
+                           sizeof(bq_native_retirement_blocked_profile) - 1};
+    return result;
+}
+
+bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
+{
+    String8 name = bq_recipe_name(recipe);
+    char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
+    char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" : "";
+    bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+                               recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+    if (files) *files = (BqRecipeFiles){0};
+    int name_length = described && name.length <= BQ_RECIPE_NAME_CAP ?
+                      snprintf(files->name, sizeof(files->name), "%.*s", (int)name.length, name.pointer) : -1;
+    int profile_length = name_length > 0 ? snprintf(files->profile, sizeof(files->profile), "%s%s",
+                                                     files->name, profile_suffix) : -1;
+    int manifest_length = name_length > 0 ? snprintf(files->manifest, sizeof(files->manifest), "%s.manifest",
+                                                       files->name) : -1;
+    int bundle_length = name_length > 0 ? snprintf(files->bundle, sizeof(files->bundle), "%s.bundle",
+                                                     files->name) : -1;
+    int outcome_length = name_length > 0 ? snprintf(files->outcome, sizeof(files->outcome), "%s.outcome",
+                                                      files->name) : -1;
+    int command_length = described ? snprintf(files->command, sizeof(files->command), "%s", command) : -1;
+    bool result = name_length > 0 && (u32)name_length <= BQ_RECIPE_NAME_CAP && profile_length > 0 &&
+                  (u32)profile_length <= BQ_RECIPE_FILE_CAP && manifest_length > 0 &&
+                  (u32)manifest_length <= BQ_RECIPE_FILE_CAP && bundle_length > 0 &&
+                  (u32)bundle_length <= BQ_RECIPE_FILE_CAP && outcome_length > 0 &&
+                  (u32)outcome_length <= BQ_RECIPE_FILE_CAP && command_length >= 0 &&
+                  (u32)command_length <= BQ_RECIPE_COMMAND_CAP;
+    if (!result && files) *files = (BqRecipeFiles){0};
+    return result;
+}
+
+bool bq_recipe_admitted(BqRecipe recipe)
+{
+    bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE ||
+                  recipe == BQ_RECIPE_VALIDATE_BUSTER;
+    return result;
+}
+
+bool bq_recipe_service(BqRecipe recipe)
+{
+    bool result = recipe == BQ_RECIPE_VALIDATE_BUSTER;
+    return result;
+}
+
+bool bq_recipe_blocked(BqRecipe recipe)
+{
+    bool result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+    return result;
+}
+
 bool bq_recipe_fake(BqRequest const* request)
 {
-    String8 recipe = bq_field(request, 2);
-    bool result = string_equal(recipe, S8("fake-success-v1")) || string_equal(recipe, S8("fake-failure-v1"));
+    BqRecipe recipe = bq_request_recipe(request);
+    bool result = recipe == BQ_RECIPE_FAKE_SUCCESS || recipe == BQ_RECIPE_FAKE_FAILURE;
     return result;
 }
 
 bool bq_recipe_real(BqRequest const* request)
 {
-    bool result = string_equal(bq_field(request, 2), S8("validate-buster-v1"));
+    bool result = bq_recipe_service(bq_request_recipe(request));
     return result;
 }
 
@@ -114,9 +222,7 @@ bool bq_request_valid(BqRequest const* request)
     String8 recipe = bq_field(request, 2);
     String8 base = bq_field(request, 3);
     String8 candidate = bq_field(request, 4);
-    bool ok = bq_name(principal, 32) && bq_name(key, 64) &&
-              (string_equal(recipe, S8("fake-success-v1")) || string_equal(recipe, S8("fake-failure-v1")) ||
-               string_equal(recipe, S8("validate-buster-v1"))) &&
+    bool ok = bq_name(principal, 32) && bq_name(key, 64) && bq_recipe_admitted(bq_recipe_from_name(recipe)) &&
               bq_source_identity(base) && bq_source_identity(candidate) && base.length == candidate.length &&
               principal.length + key.length + recipe.length + base.length + candidate.length + 20 == request->size;
     return ok;

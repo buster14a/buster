@@ -194,9 +194,9 @@ The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
 `d4ffce559c12a3201420c75347e4ff3ce48832a0e4987c95b5539346033433ab`, materializer
 receipt SHA-256
-`50b096cef098fe3d2f8a2b28805f471db91a102150ebbba212519fea84977bad`, project
+`250416ef64fc90d9697ee6e6bc2d55c8ce95d0fa68805b714c9c2c8347313bd7`, project
 closure SHA-256
-`9cc5fa417928aff06c145da8c0892a2c6dd6a362f0eb01a22057d074e0bc4d03`, and
+`51532fcbff545f42308672151b2046a99fce49a460cecda6f65d1859c5e8013b`, and
 materializer ledger SHA-256
 `0c0f0ec8768957d93573a04f8712e37df2fadbc9647113bf6578b7dfdc300bcd`.
 The archived fixture-input map is

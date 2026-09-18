@@ -4,8 +4,10 @@ This is a local, one-shot control tool with a deterministic fake worker and a
 real installed-input materialization boundary and a Linux containment
 supervisor. Linux also provides a long-lived local service endpoint: it owns
 the single queue writer, authenticates Unix peer credentials, and dispatches
-bounded public control frames. The fixed installed helper returns only typed
-build-driver failures until its operator-installed dependencies are available.
+bounded public control frames. Installed execution is selected through a
+compiled recipe registry; request bytes never select a program or command.
+The current executable recipe returns only typed build-driver failures until
+its operator-installed dependencies are available.
 This does not change server configuration, measure performance or qualify a
 9700X.
 Do not close #437 or accept compiler performance changes because these tests
@@ -14,13 +16,16 @@ pass.
 ## Linux installed worker boundary
 
 `worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU` is the Linux
-single-job supervisor. A request may name `validate-buster-v1`; it cannot
-supply a program, argument, unit name, resource property, cgroup path or
-timeout. The service constructs one fixed `/usr/bin/systemd-run --wait --service-type=exec`
+single-job supervisor. A request may name only an admitted service recipe;
+`validate-buster-v1` is currently the sole admitted entry. It cannot supply a
+program, argument, unit name, resource property, cgroup path or timeout. The
+service constructs one fixed `/usr/bin/systemd-run --wait --service-type=exec`
 invocation of `/usr/local/libexec/buster-bench-service worker-unit`, explicitly
 as `--uid=buster-bench --gid=buster-bench`.
 `worker-unit` authenticates the private result-root handoff and adopts the exact
-stable lease open-file description before executing the fixed
+stable lease open-file description before mapping the passed recipe identity
+through the same compiled registry. Unknown, blocked or commandless entries
+fail before execution. The active validation entry maps to the fixed
 `/usr/local/libexec/buster-bench-build bench_service_recipe` entrypoint. The
 build driver accepts exactly
 `JOB_ID ATTEMPT_TOKEN WORKSPACE_ROOT BASE_REVISION CANDIDATE_REVISION RESULT_ROOT`;
@@ -350,6 +355,16 @@ repository `buster`, workload `fake-steps-v1`, profile `unmeasured`, toolchain
 bytes are checked against `profiles/validate-buster-v1.recipe`; it does not
 admit arbitrary build policy. The recipe's own `schema=1` field is independent of the
 journal and control schema numbers.
+
+`native-retirement-performance-v1` is a recognized but deliberately blocked
+registry entry. `profiles/native-retirement-performance-v1.blocked` pins the
+landed performance contract, support declaration, binding validator and
+statistics implementation by SHA-256 and records the remaining execution
+requirements. It has no executable command, is not an installed `.recipe`, and
+is rejected by request validation and `worker-unit`. This prevents the one-pair
+smoke recipe from being relabelled as a retirement result while preserving a
+machine-visible identity for the future admitted implementation.
+
 The request digest is SHA-256 of `BQ-request-v1` followed by the canonical
 request bytes, not an in-memory C structure with padding.
 
@@ -480,9 +495,11 @@ daemon's effective UID and GID through `SO_PEERCRED`. The service refuses the
 materialize, workspace-reconcile and worker-run operations over this endpoint;
 the worker configuration is service-owned.
 
-The service retries a queued `validate-buster-v1` request on each bounded idle
-tick and runs the existing supervisor with that fixed configuration. A queued
-real request therefore follows the same lease-before-materialization and
+The service retries a queued admitted service request on each bounded idle
+tick and runs the existing supervisor with that fixed configuration. At
+present, the only such request is `validate-buster-v1`; the blocked retirement
+identity cannot enter the queue. A queued real request therefore follows the
+same lease-before-materialization and
 cleanup/recovery path as the local worker command, including progress after a
 temporary `BQ_BUSY` lease result without another client frame. The synchronous
 worker path remains listener-free: it does not accept,
@@ -547,8 +564,9 @@ stdin, and writes one response frame through the queue opened by that process.
 It remains a local pipe codec without caller authentication and retains the
 fake recipes for deterministic regression work. `bench_service rpc SOCKET`
 forwards schema-2 frames to the authenticated Linux service; that endpoint
-advertises `service-recipes=validate-buster-v1`, rejects fake and supervisor
-internals, and performs the only service queue mutation.
+advertises `service-recipes=validate-buster-v1` and
+`blocked-recipes=native-retirement-performance-v1`, rejects fake, blocked and
+supervisor-internal submissions, and performs the only service queue mutation.
 
 The 24-byte header is `BQP1` (four bytes), schema (u32), operation (u32), payload
 length (u32 <=512), correlation (u64). Control schema 2 adds operations 9..11 and the
@@ -597,7 +615,7 @@ status/result response at the top-level error field.
 | Durable service identity/recovery | intent plus immutable invocation/cgroup-inode binding; same-boot exact termination, same-name reuse quarantine, and a real fork/exec fixed-recipe SIGKILL followed by journal reopen and reboot-interruption recovery without contradicting a durable outcome |
 | Resource and process-tree containment | Fixed systemd argv; manager plus cgroup-v2 leaf/ancestor validation; live detached descendant TERM/KILL/recursive-empty fixture |
 | Distinct terminal causes | Durable worker failure, OOM and timeout evidence; cancellation outcome retained separately |
-| Installed recipe/source validation | Exact recipe bytes; requested revision, safe sorted paths and source SHA-256; durable failure reasons |
+| Installed recipe/source validation | Compiled fail-closed registry; exact executable-recipe bytes; blocked retirement-contract digest pins; requested revision, safe sorted paths and source SHA-256; durable failure reasons |
 | Per-attempt workspace isolation | Exclusive job/token identity; separate base/candidate source and build trees; read-only verified sources |
 | Cleanup/recovery | Seal-required removal, restart reconciliation, collision/tamper/cleanup failures retain active admission |
 
@@ -610,8 +628,9 @@ Still outside this slice: live operator-installed build/validate/compare
 qualification and real measurement; live-systemd/polkit/deployment
 qualification; transport credentials beyond the local peer UID/GID boundary;
 retention migration; qualification, A/A and physical 9700X acceptance. The
-repository contains the fixed recipe contract, durable whole-result bundle and
-failure/cancellation evidence with injected replay tests; these are not claims
-about a deployed host or a measured result.
+repository contains the fixed validation recipe, the non-executable retirement
+contract descriptor, durable whole-result bundle and failure/cancellation
+evidence with injected replay tests; these are not claims about a deployed host
+or a measured result.
 No credentials, server settings, benchmark thresholds, production runner
 ownership or parent-issue closure are authorized by this implementation.

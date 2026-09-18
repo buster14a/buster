@@ -25,6 +25,10 @@
 #define BQ_RECORD_CAP (BQ_HEADER_SIZE + BQ_JOURNAL_BODY_CAP)
 #define BQ_FIELD_COUNT 5u
 #define BQ_PATH_CAP 192u
+#define BQ_RECIPE_NAME_CAP 48u
+#define BQ_RECIPE_FILE_CAP 80u
+#define BQ_RECIPE_COMMAND_CAP 48u
+#define BQ_RECIPE_PROFILE_CAP 1024u
 
 typedef enum BqError
 {
@@ -57,6 +61,25 @@ typedef enum BqRecordKind
 {
     BQ_SUBMIT = 1, BQ_RESERVE, BQ_ADVANCE, BQ_CANCEL, BQ_RECONCILE, BQ_RESULT_BIND
 } BqRecordKind;
+
+typedef enum BqRecipe
+{
+    BQ_RECIPE_UNKNOWN,
+    BQ_RECIPE_FAKE_SUCCESS,
+    BQ_RECIPE_FAKE_FAILURE,
+    BQ_RECIPE_VALIDATE_BUSTER,
+    BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED
+} BqRecipe;
+
+typedef struct BqRecipeFiles
+{
+    char name[BQ_RECIPE_NAME_CAP + 1];
+    char profile[BQ_RECIPE_FILE_CAP + 1];
+    char manifest[BQ_RECIPE_FILE_CAP + 1];
+    char bundle[BQ_RECIPE_FILE_CAP + 1];
+    char outcome[BQ_RECIPE_FILE_CAP + 1];
+    char command[BQ_RECIPE_COMMAND_CAP + 1];
+} BqRecipeFiles;
 
 typedef struct BqRequest
 {
@@ -146,6 +169,14 @@ BUSTER_F_DECL BqError bq_cancel(BqQueue* queue, u64 id);
 BUSTER_F_DECL BqError bq_fake_step(BqQueue* queue, u64 id, u64 token);
 BUSTER_F_DECL BqError bq_fake_run(BqQueue* queue, u64* id);
 BUSTER_F_DECL BqError bq_fake_reconcile(BqQueue* queue, u64 id, u64 token);
+BUSTER_F_DECL BqRecipe bq_recipe_from_name(String8 name);
+BUSTER_F_DECL BqRecipe bq_request_recipe(BqRequest const* request);
+BUSTER_F_DECL String8 bq_recipe_name(BqRecipe recipe);
+BUSTER_F_DECL String8 bq_recipe_profile(BqRecipe recipe);
+BUSTER_F_DECL bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files);
+BUSTER_F_DECL bool bq_recipe_admitted(BqRecipe recipe);
+BUSTER_F_DECL bool bq_recipe_service(BqRecipe recipe);
+BUSTER_F_DECL bool bq_recipe_blocked(BqRecipe recipe);
 BUSTER_F_DECL bool bq_recipe_fake(BqRequest const* request);
 BUSTER_F_DECL bool bq_recipe_real(BqRequest const* request);
 BUSTER_F_DECL BqError bq_materialize(BqQueue* queue, String8 installed_root, String8 workspace_root, u64* id, u64* token);
