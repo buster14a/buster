@@ -95,6 +95,6 @@ write(path, text)
 # Test-only deterministic setup fault injection.
 path = "src/buster/lib/os_internal.h"
 text = read(path)
-marker = "// Calling-thread census used by BUSTER_CHECK_SERIAL_INITIALIZATION.\n"
+marker = "typedef enum OsResourceTestOperation\n"
 insert = r'''#if BUSTER_INCLUDE_TESTS
 typedef enum OsProcessSpawnTestOperation
