@@ -6237,6 +6237,396 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_attribute_queries(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {
+        S8("x86_64-unknown-linux-gnu"),
+        S8("x86_64-pc-windows-msvc"),
+        S8("aarch64-unknown-linux-gnu"),
+        S8("aarch64-pc-windows-msvc"),
+    };
+    String8 modes[] = {
+        S8("-fregister-allocator=none"),
+        S8("-fregister-allocator=mir-stack"),
+        S8("-fregister-allocator=fast"),
+        S8("-fregister-allocator=quality"),
+    };
+    String8 float16_shared_source = S8(
+        "typedef _Float16 Float16Vector8 __attribute__((vector_size(16)));\n"
+        "typedef short Float16Mask8 __attribute__((vector_size(16)));\n"
+        "\n"
+        "typedef union Float16Bits\n"
+        "{\n"
+        "    _Float16 value;\n"
+        "    unsigned short bits;\n"
+        "} Float16Bits;\n"
+        "\n"
+        "typedef union Float16VectorBits\n"
+        "{\n"
+        "    Float16Vector8 value;\n"
+        "    unsigned short bits[8];\n"
+        "} Float16VectorBits;\n"
+        "\n"
+        "typedef union Float16MaskBits\n"
+        "{\n"
+        "    Float16Mask8 value;\n"
+        "    unsigned short bits[8];\n"
+        "} Float16MaskBits;\n"
+        "\n"
+        "_Float16 float16_echo(_Float16 value);\n"
+        "_Float16 float16_mixed(int first, _Float16 second, double third, _Float16 fourth, long fifth);\n"
+        "_Float16 float16_ninth(_Float16 a0, _Float16 a1, _Float16 a2, _Float16 a3, _Float16 a4, _Float16 a5, _Float16 a6, _Float16 a7,\n"
+        "                       _Float16 a8);\n"
+        "_Float16 float16_add(_Float16 left, _Float16 right);\n"
+        "_Float16 float16_subtract(_Float16 left, _Float16 right);\n"
+        "_Float16 float16_multiply(_Float16 left, _Float16 right);\n"
+        "_Float16 float16_divide(_Float16 left, _Float16 right);\n"
+        "_Float16 float16_negate(_Float16 value);\n"
+        "_Float16 float16_round_each(_Float16 first, _Float16 second, _Float16 third);\n"
+        "int float16_less(_Float16 left, _Float16 right);\n"
+        "int float16_truth(_Float16 value);\n"
+        "float float16_to_float(_Float16 value);\n"
+        "double float16_to_double(_Float16 value);\n"
+        "_Float16 float16_from_float(float value);\n"
+        "_Float16 float16_from_double(double value);\n"
+        "_Float16 float16_from_int(int value);\n"
+        "int float16_to_int(_Float16 value);\n"
+        "Float16Vector8 float16_vector_add(Float16Vector8 left, Float16Vector8 right);\n"
+        "Float16Vector8 float16_vector_subtract(Float16Vector8 left, Float16Vector8 right);\n"
+        "Float16Vector8 float16_vector_multiply(Float16Vector8 left, Float16Vector8 right);\n"
+        "Float16Vector8 float16_vector_divide(Float16Vector8 left, Float16Vector8 right);\n"
+        "Float16Vector8 float16_vector_negate(Float16Vector8 value);\n"
+        "Float16Mask8 float16_vector_less(Float16Vector8 left, Float16Vector8 right);\n"
+        "\n");
+    String8 float16_callee_body = S8(
+        "\n"
+        "_Float16 float16_echo(_Float16 value)\n"
+        "{\n"
+        "    return value;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_mixed(int first, _Float16 second, double third, _Float16 fourth, long fifth)\n"
+        "{\n"
+        "    _Float16 result = first == 7 && third == 9.0 && fifth == 11 ? fourth : second;\n"
+        "    return result;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_ninth(_Float16 a0, _Float16 a1, _Float16 a2, _Float16 a3, _Float16 a4, _Float16 a5, _Float16 a6, _Float16 a7,\n"
+        "                       _Float16 a8)\n"
+        "{\n"
+        "    (void)a0;\n"
+        "    (void)a1;\n"
+        "    (void)a2;\n"
+        "    (void)a3;\n"
+        "    (void)a4;\n"
+        "    (void)a5;\n"
+        "    (void)a6;\n"
+        "    (void)a7;\n"
+        "    return a8;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_add(_Float16 left, _Float16 right)\n"
+        "{\n"
+        "    return left + right;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_subtract(_Float16 left, _Float16 right)\n"
+        "{\n"
+        "    return left - right;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_multiply(_Float16 left, _Float16 right)\n"
+        "{\n"
+        "    return left * right;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_divide(_Float16 left, _Float16 right)\n"
+        "{\n"
+        "    return left / right;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_negate(_Float16 value)\n"
+        "{\n"
+        "    return -value;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_round_each(_Float16 first, _Float16 second, _Float16 third)\n"
+        "{\n"
+        "    return (first + second) + third;\n"
+        "}\n"
+        "\n"
+        "int float16_less(_Float16 left, _Float16 right)\n"
+        "{\n"
+        "    return left < right;\n"
+        "}\n"
+        "\n"
+        "int float16_truth(_Float16 value)\n"
+        "{\n"
+        "    return !!value;\n"
+        "}\n"
+        "\n"
+        "float float16_to_float(_Float16 value)\n"
+        "{\n"
+        "    return (float)value;\n"
+        "}\n"
+        "\n"
+        "double float16_to_double(_Float16 value)\n"
+        "{\n"
+        "    return (double)value;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_from_float(float value)\n"
+        "{\n"
+        "    return (_Float16)value;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_from_double(double value)\n"
+        "{\n"
+        "    return (_Float16)value;\n"
+        "}\n"
+        "\n"
+        "_Float16 float16_from_int(int value)\n"
+        "{\n"
+        "    return (_Float16)value;\n"
+        "}\n"
+        "\n"
+        "int float16_to_int(_Float16 value)\n"
+        "{\n"
+        "    return (int)value;\n"
+        "}\n"
+        "\n"
+        "Float16Vector8 float16_vector_add(Float16Vector8 left, Float16Vector8 right)\n"
+        "{\n"
+        "    return left + right;\n"
+        "}\n"
+        "\n"
+        "Float16Vector8 float16_vector_subtract(Float16Vector8 left, Float16Vector8 right)\n"
+        "{\n"
+        "    return left - right;\n"
+        "}\n"
+        "\n"
+        "Float16Vector8 float16_vector_multiply(Float16Vector8 left, Float16Vector8 right)\n"
+        "{\n"
+        "    return left * right;\n"
+        "}\n"
+        "\n"
+        "Float16Vector8 float16_vector_divide(Float16Vector8 left, Float16Vector8 right)\n"
+        "{\n"
+        "    return left / right;\n"
+        "}\n"
+        "\n"
+        "Float16Vector8 float16_vector_negate(Float16Vector8 value)\n"
+        "{\n"
+        "    return -value;\n"
+        "}\n"
+        "\n"
+        "Float16Mask8 float16_vector_less(Float16Vector8 left, Float16Vector8 right)\n"
+        "{\n"
+        "    return left < right;\n"
+        "}\n");
+    String8 float16_caller_body = S8(
+        "\n"
+        "static int float16_same_bits(_Float16 value, unsigned short bits)\n"
+        "{\n"
+        "    Float16Bits converted = {.value = value};\n"
+        "    return converted.bits == bits;\n"
+        "}\n"
+        "\n"
+        "static int float16_vector_same(Float16Vector8 left, Float16Vector8 right)\n"
+        "{\n"
+        "    Float16VectorBits left_bits = {.value = left};\n"
+        "    Float16VectorBits right_bits = {.value = right};\n"
+        "    int same = 1;\n"
+        "    for (int index = 0; index < 8; index += 1)\n"
+        "    {\n"
+        "        same &= left_bits.bits[index] == right_bits.bits[index];\n"
+        "    }\n"
+        "    return same;\n"
+        "}\n"
+        "\n"
+        "static int float16_mask_same(Float16Mask8 left, Float16Mask8 right)\n"
+        "{\n"
+        "    Float16MaskBits left_bits = {.value = left};\n"
+        "    Float16MaskBits right_bits = {.value = right};\n"
+        "    int same = 1;\n"
+        "    for (int index = 0; index < 8; index += 1)\n"
+        "    {\n"
+        "        same &= left_bits.bits[index] == right_bits.bits[index];\n"
+        "    }\n"
+        "    return same;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int status = 0;\n"
+        "    Float16Bits subnormal = {.bits = 1};\n"
+        "    Float16Bits negative_zero = {.bits = 0x8000};\n"
+        "    Float16Bits quiet_nan = {.bits = 0x7e55};\n"
+        "    if (!float16_same_bits(float16_echo(subnormal.value), 1)) status = 1;\n"
+        "    if (!status && !float16_same_bits(float16_echo(negative_zero.value), 0x8000)) status = 2;\n"
+        "    if (!status && !float16_same_bits(float16_mixed(7, 1.0f16, 9.0, subnormal.value, 11), 1)) status = 3;\n"
+        "    if (!status && !float16_same_bits(float16_ninth(1, 2, 3, 4, 5, 6, 7, 8, subnormal.value), 1)) status = 4;\n"
+        "    if (!status && !float16_same_bits(float16_add(1.5f16, 2.25f16), 0x4380)) status = 5;\n"
+        "    if (!status && !float16_same_bits(float16_subtract(2.25f16, 1.5f16), 0x3a00)) status = 6;\n"
+        "    if (!status && !float16_same_bits(float16_multiply(1.5f16, 2.25f16), 0x42c0)) status = 7;\n"
+        "    if (!status && !float16_same_bits(float16_divide(2.25f16, 1.5f16), 0x3e00)) status = 8;\n"
+        "    if (!status && !float16_same_bits(float16_negate(quiet_nan.value), 0xfe55)) status = 9;\n"
+        "#ifndef __BUSTER__\n"
+        "    // 1 + 2^-11 is exactly halfway and rounds back to even 1.0 in binary16.\n"
+        "    // The second addition must observe that rounded result, not an f32 excess-\n"
+        "    // precision value that would turn the pair into 1 + 2^-10. This direction\n"
+        "    // deliberately uses the host-built observer and the Buster-built callee;\n"
+        "    // Clang's own `_Float16` expression keeps excess precision here at -O0.\n"
+        "    if (!status && !float16_same_bits(float16_round_each(1.0f16, 0x1p-11f16, 0x1p-11f16), 0x3c00)) status = 10;\n"
+        "#endif\n"
+        "    if (!status && !float16_less(1.5f16, 2.25f16)) status = 11;\n"
+        "    if (!status && (float16_less(2.25f16, 1.5f16) || float16_less(quiet_nan.value, 1.0f16))) status = 12;\n"
+        "    if (!status && (!float16_truth(subnormal.value) || float16_truth(0.0f16) || float16_truth(negative_zero.value))) status = 13;\n"
+        "    if (!status && (float16_to_float(1.5f16) != 1.5f || float16_to_double(1.5f16) != 1.5)) status = 14;\n"
+        "    if (!status && !float16_same_bits(float16_from_float(0.1f), 0x2e66)) status = 15;\n"
+        "    if (!status && !float16_same_bits(float16_from_double(0.1), 0x2e66)) status = 16;\n"
+        "    if (!status && !float16_same_bits(float16_from_int(65519), 0x7bff)) status = 17;\n"
+        "    if (!status && float16_to_int(42.75f16) != 42) status = 18;\n"
+        "\n"
+        "    Float16Vector8 left = {0.1f16, 1.5f16, -2.0f16, 0x1p-24f16, 65504.0f16, -0.0f16, 3.25f16, -4.5f16};\n"
+        "    Float16Vector8 right = {0.2f16, 2.25f16, 0.5f16, 2.0f16, 0.5f16, 1.0f16, -1.25f16, 2.0f16};\n"
+        "    if (!status && !float16_vector_same(float16_vector_add(left, right), left + right)) status = 19;\n"
+        "    if (!status && !float16_vector_same(float16_vector_subtract(left, right), left - right)) status = 20;\n"
+        "    if (!status && !float16_vector_same(float16_vector_multiply(left, right), left * right)) status = 21;\n"
+        "    if (!status && !float16_vector_same(float16_vector_divide(left, right), left / right)) status = 22;\n"
+        "    if (!status && !float16_vector_same(float16_vector_negate(left), -left)) status = 23;\n"
+        "    if (!status && !float16_mask_same(float16_vector_less(left, right), left < right)) status = 24;\n"
+        "    return status;\n"
+        "}\n");
+    String8 source_bodies[] = {
+        string_format(arguments->arena, S8("{S8}{S8}"), float16_shared_source, float16_callee_body),
+        string_format(arguments->arena, S8("{S8}{S8}"), float16_shared_source, float16_caller_body),
+    };
+    String8 sources[BUSTER_ARRAY_LENGTH(source_bodies)];
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(source_bodies); source_index += 1)
+    {
+        sources[source_index] = buster_test_temporary_path(
+            arguments->arena, S8("buster-float16-codegen-source"), string_format(arguments->arena, S8("-{u32}.c"), source_index));
+        BUSTER_TEST(arguments, file_write(sources[source_index], BUSTER_SLICE_TO_BYTE_SLICE(source_bodies[source_index])));
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
+        {
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 object = buster_test_temporary_path(
+                    temporary.arena, S8("buster-float16-codegen"),
+                    string_format(temporary.arena, S8("-{u32}-{u32}-{u32}.o"), target_index, mode_index, source_index));
+                String8 command[] = {
+                    S8("-target"), targets[target_index], modes[mode_index], S8("-fverify-codegen"), S8("-g0"), S8("-c"), sources[source_index],
+                    S8("-o"), object,
+                };
+                CompilerDriverInvocation invocation =
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = mode_index != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                String8 description = string_format(temporary.arena, S8("binary16 {S8} {S8} {S8}: {S8}"), sources[source_index],
+                                                    targets[target_index], modes[mode_index], compiled.diagnostic);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE && mode_index != 0)
+                {
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+
+#if defined(BUSTER_HOST_C_COMPILER) && !BUSTER_HOST_C_COMPILER_MSVC && BUSTER_LINK_LIBC && \
+    (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_WINDOWS && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena mixed_temporary = scratch_begin(&arguments->arena, 1);
+    Arena* mixed_arena = mixed_temporary.arena;
+    bool configured_clang = string_first_sequence(S8(BUSTER_HOST_C_COMPILER_ID), S8("Clang")) < S8(BUSTER_HOST_C_COMPILER_ID).length;
+    String8 host_compiler = configured_clang ? S8(BUSTER_HOST_C_COMPILER) : executable_resolve_in_path(mixed_arena, S8("clang"));
+    BUSTER_TEST(arguments, host_compiler.length != 0);
+    String8 host_objects[BUSTER_ARRAY_LENGTH(sources)];
+    bool host_compiled = host_compiler.length != 0;
+    for (u32 source_index = 0; host_compiled && source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+    {
+        host_objects[source_index] = buster_test_temporary_path(
+            mixed_arena, S8("buster-float16-host"), string_format(mixed_arena, S8("-{u32}.o"), source_index));
+        String8 host_command[12];
+        u32 host_count = 0;
+        host_command[host_count++] = host_compiler;
+        if (configured_clang && S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+        {
+            host_command[host_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+        }
+        host_command[host_count++] = S8("-std=gnu2x");
+        host_command[host_count++] = S8("-O0");
+        host_command[host_count++] = S8("-fno-inline");
+        host_command[host_count++] = S8("-c");
+        host_command[host_count++] = sources[source_index];
+        host_command[host_count++] = S8("-o");
+        host_command[host_count++] = host_objects[source_index];
+        ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count}, (SliceString8){0},
+                                                       (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        host_compiled = spawned.handle && os_process_wait_deadline(mixed_arena, spawned, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, host_compiled);
+    }
+    for (u32 mode_index = 0; host_compiled && mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
+    {
+        String8 buster_objects[BUSTER_ARRAY_LENGTH(sources)];
+        bool buster_compiled = true;
+        for (u32 source_index = 0; buster_compiled && source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+        {
+            buster_objects[source_index] = buster_test_temporary_path(
+                mixed_arena, S8("buster-float16-native"), string_format(mixed_arena, S8("-{u32}-{u32}.o"), mode_index, source_index));
+            String8 command[] = {
+                modes[mode_index], S8("-fverify-codegen"), S8("-g0"), S8("-c"), sources[source_index], S8("-o"), buster_objects[source_index],
+            };
+            CompilerDriverInvocation invocation =
+                compiler_driver_parse_arguments(mixed_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.reject_machine_fallback = mode_index != 0;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(mixed_arena, invocation);
+            buster_compiled = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
+                              (mode_index == 0 || compiled.codegen_statistics.fallback_function_count == 0);
+            BUSTER_TEST_RAW(arguments, buster_compiled, compiled.diagnostic);
+        }
+        for (u32 direction = 0; buster_compiled && direction < 2; direction += 1)
+        {
+            String8 executable = buster_test_temporary_path(
+                mixed_arena, S8("buster-float16-mixed"), string_format(mixed_arena, S8("-{u32}-{u32}.exe"), mode_index, direction));
+            String8 caller = direction ? buster_objects[1] : host_objects[1];
+            String8 callee = direction ? host_objects[0] : buster_objects[0];
+            String8 link_command[12];
+            u32 link_count = 0;
+            link_command[link_count++] = host_compiler;
+            if (configured_clang && S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+            {
+                link_command[link_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+            }
+#if BUSTER_LINUX
+            link_command[link_count++] = S8("-no-pie");
+#endif
+            link_command[link_count++] = caller;
+            link_command[link_count++] = callee;
+            link_command[link_count++] = S8("-o");
+            link_command[link_count++] = executable;
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count}, (SliceString8){0},
+                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+            bool linked = spawned.handle && os_process_wait_deadline(mixed_arena, spawned, 30000000).result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, linked);
+            if (linked)
+            {
+                BUSTER_TEST(arguments, compiler_driver_test_process_success(mixed_arena, executable));
+            }
+        }
+    }
+    scratch_end(mixed_temporary);
+#endif
+
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6278,6 +6668,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_dynamic_calls);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_variadic);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_float16_codegen);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_va_list);
@@ -11511,19 +11902,17 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // still produce objects for every cross target.
     buster_test_arena_end(arguments, driver_fixture, true);
     driver_fixture = buster_test_arena_begin(arguments, arguments->arena, S8("c_vector_half_element_path"), false);
-    // A binary16 vector lane has no packed arithmetic on either backend --
-    // it needs AVX512-FP16's ADDPH, which is not selected here -- so the
-    // canonical emitters must refuse it rather than fall through to the
-    // binary32/binary64 encoding and add the vector as if its lanes were
-    // twice as wide. The `float` row beside it is the control: the widths
-    // that do have instructions still emit.
+    // A binary16 vector lane scalarizes through the exact f16<->f32 runtime
+    // conversion pair and rounds each lane after the operation. Bfloat16 has
+    // no corresponding runtime implementation and remains the failed control;
+    // the wider float and integer rows retain their native paths.
     {
         struct
         {
             String8 element;
             bool supported;
         } half_element_rows[] = {
-            {S8("_Float16"), false},
+            {S8("_Float16"), true},
             {S8("__bf16"), false},
             {S8("float"), true},
             {S8("double"), true},

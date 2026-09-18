@@ -6547,9 +6547,17 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerI
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 magnitude, bool is_negative, CToken token, IrTypeId type);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* builder, String8 link_name, IrTypeId return_type, IrValueId argument,
+                                                            IrTypeId parameter_type, IrSourceRange source);
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_binary_value(CIntegerIrBuilder* builder, IrValueId left, IrValueId right, IrTypeId type, IrBinaryOperation operation,
-                                                     IrSourceRange source)
+BUSTER_C_INTERNAL bool c_ir_type_is_ieee_binary16(CIntegerIrBuilder* builder, IrTypeId type_id)
+{
+    IrType* type = ir_type_from_id(&builder->program->types, type_id);
+    return type && type->kind == IR_TYPE_FLOAT && type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_binary_value_raw(CIntegerIrBuilder* builder, IrValueId left, IrValueId right, IrTypeId type,
+                                                         IrBinaryOperation operation, IrSourceRange source)
 {
     IrValueId result = c_ir_add_result(builder, type);
     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
@@ -6563,6 +6571,41 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_binary_value(CIntegerIrBuilder* builder, I
     instruction.result = result;
     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
     builder->function->values[result.value].definition = id;
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_emit_binary_value(CIntegerIrBuilder* builder, IrValueId left, IrValueId right, IrTypeId type, IrBinaryOperation operation,
+                                                     IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId left_type = left.value < builder->function->value_count ? builder->function->values[left.value].canonical_type : IR_TYPE_ID_INVALID;
+    IrTypeId right_type = right.value < builder->function->value_count ? builder->function->values[right.value].canonical_type : IR_TYPE_ID_INVALID;
+    bool binary16_operands = c_ir_type_is_ieee_binary16(builder, left_type) && c_ir_type_is_ieee_binary16(builder, right_type);
+    bool arithmetic = operation == IR_BINARY_FLOAT_ADD || operation == IR_BINARY_FLOAT_SUBTRACT || operation == IR_BINARY_FLOAT_MULTIPLY ||
+                      operation == IR_BINARY_FLOAT_DIVIDE;
+    bool comparison = operation == IR_BINARY_FLOAT_EQUAL || operation == IR_BINARY_FLOAT_NOT_EQUAL || operation == IR_BINARY_FLOAT_LESS ||
+                      operation == IR_BINARY_FLOAT_LESS_EQUAL || operation == IR_BINARY_FLOAT_GREATER || operation == IR_BINARY_FLOAT_GREATER_EQUAL;
+    if (binary16_operands && (arithmetic || comparison))
+    {
+        IrValueId left_wide = c_ir_emit_float16_runtime_call(builder, S8("__extendhfsf2"), builder->f32_type, left, left_type, source);
+        IrValueId right_wide = c_ir_emit_float16_runtime_call(builder, S8("__extendhfsf2"), builder->f32_type, right, right_type, source);
+        if (left_wide.value != IR_ID_UNDERLYING_INVALID && right_wide.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId wide_result = c_ir_emit_binary_value_raw(builder, left_wide, right_wide, comparison ? type : builder->f32_type, operation, source);
+            if (comparison)
+            {
+                result = wide_result;
+            }
+            else if (wide_result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                result = c_ir_emit_float16_runtime_call(builder, S8("__truncsfhf2"), type, wide_result, builder->f32_type, source);
+            }
+        }
+    }
+    else
+    {
+        result = c_ir_emit_binary_value_raw(builder, left, right, type, operation, source);
+    }
     return result;
 }
 
@@ -7230,10 +7273,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_atomic_aggregate_conversion(CIntegerIrBuil
     return c_ir_emit_load_place_raw(builder, slot, atomic_type, source);
 }
 
-// Compatible vector typedefs can have distinct canonical IDs. Reinterpret
-// their identical lane representation through typed views of a private slot;
-// every load/store remains type-correct without inventing an identity cast.
-BUSTER_C_INTERNAL IrValueId c_ir_emit_vector_alias_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
+// Reinterpret equal-sized representations through typed views of a private
+// slot; every load/store remains type-correct without inventing an IR bitcast.
+// Compatible vector typedefs use this for their identical lane representation,
+// and Darwin x86 compiler-rt calls use it for the integer carrier of binary16.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_representation_alias_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type,
+                                                                        IrSourceRange source)
 {
     IrTypeId source_type = builder->function->values[value.value].canonical_type;
     IrValueId result = IR_VALUE_ID_INVALID;
@@ -7400,7 +7445,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
             source_element->bit_width == target_element->bit_width && source_element->is_signed == target_element->is_signed &&
             (source_element->kind != IR_TYPE_FLOAT || source_element->float_format == target_element->float_format))
         {
-            return c_ir_emit_vector_alias_conversion(builder, value, target_type, source);
+            return c_ir_emit_representation_alias_conversion(builder, value, target_type, source);
         }
     }
     // Two types that differ only in a `volatile` qualifier are one type as far
@@ -7520,6 +7565,50 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId
     if (source_value->is_complex || target_value->is_complex)
     {
         return c_ir_emit_complex_conversion(builder, value, target_type, source);
+    }
+    bool source_binary16 = c_ir_type_is_ieee_binary16(builder, source_type);
+    bool target_binary16 = c_ir_type_is_ieee_binary16(builder, target_type);
+    if (source_binary16 && target_value->kind == IR_TYPE_BOOLEAN)
+    {
+        return c_ir_truth_value(builder, value, source);
+    }
+    if (source_binary16 && !target_binary16)
+    {
+        IrValueId widened = c_ir_emit_float16_runtime_call(builder, S8("__extendhfsf2"), builder->f32_type, value, source_type, source);
+        if (widened.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return IR_VALUE_ID_INVALID;
+        }
+        return target_type.value == builder->f32_type.value ? widened : c_ir_emit_cast(builder, widened, target_type, source);
+    }
+    if (target_binary16 && !source_binary16)
+    {
+        IrValueId narrowed_source = value;
+        String8 runtime = S8("__truncsfhf2");
+        IrTypeId runtime_parameter = builder->f32_type;
+        if (source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 64)
+        {
+            runtime = S8("__truncdfhf2");
+            runtime_parameter = builder->f64_type;
+        }
+        else if (source_type.value != builder->f32_type.value)
+        {
+            bool source_bfloat16 = source_value->kind == IR_TYPE_FLOAT && source_value->bit_width == 16 &&
+                                   source_value->float_format == IR_FLOAT_FORMAT_BFLOAT16;
+            if (source_value->kind != IR_TYPE_INTEGER && source_value->kind != IR_TYPE_BOOLEAN && !source_bfloat16)
+            {
+                // Wider source formats need their own direct compiler-runtime
+                // conversion. Routing f80 or binary128 through f32 would
+                // double-round; bfloat16 remains a semantic IR conversion that
+                // native code generation deliberately refuses.
+                builder->failure_message = S8("C IR lowering does not support this runtime conversion to binary16");
+                return IR_VALUE_ID_INVALID;
+            }
+            narrowed_source = c_ir_emit_cast(builder, value, builder->f32_type, source);
+        }
+        return narrowed_source.value == IR_ID_UNDERLYING_INVALID
+                   ? IR_VALUE_ID_INVALID
+                   : c_ir_emit_float16_runtime_call(builder, runtime, target_type, narrowed_source, runtime_parameter, source);
     }
     bool source_wide_float = source_value->kind == IR_TYPE_FLOAT && source_value->bit_width > 64;
     bool target_wide_float = target_value->kind == IR_TYPE_FLOAT && target_value->bit_width > 64;
@@ -14988,6 +15077,135 @@ BUSTER_C_INTERNAL bool c_ir_emit_clear_cache_runtime_call(CIntegerIrBuilder* bui
     return emitted;
 }
 
+// Baseline targets do not promise native binary16 conversion instructions.
+// Use the same compiler-runtime entry points Clang selects there, keeping the
+// half value in its real ABI position while all arithmetic runs through the
+// already-supported binary32 vocabulary.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* builder, String8 link_name, IrTypeId return_type, IrValueId argument,
+                                                            IrTypeId parameter_type, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
+    IrTypeId function_type = IR_TYPE_ID_INVALID;
+    bool darwin_x64_integer_half_abi = builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+                                       (builder->target.os == OPERATING_SYSTEM_MACOS || builder->target.os == OPERATING_SYSTEM_IOS);
+    IrTypeId runtime_return_type = return_type;
+    IrTypeId runtime_parameter_type = parameter_type;
+    IrValueId runtime_argument = argument;
+    bool parameter_is_half = c_ir_type_is_ieee_binary16(builder, parameter_type);
+    bool return_is_half = c_ir_type_is_ieee_binary16(builder, return_type);
+    if (darwin_x64_integer_half_abi && (parameter_is_half || return_is_half))
+    {
+        // Darwin's x86 compiler-rt binary16 entry points predate the scalar
+        // `_Float16` ABI: half operands/results use an unsigned 16-bit integer
+        // carrier (EDI/AX), while the wider float side remains in XMM. Keep
+        // ordinary source-level `_Float16` calls in their SSE class and bridge
+        // only these compiler-runtime symbols through a bit-preserving view.
+        IrTypeId bits_type = c_ir_unsigned_type_of_size(builder, 2);
+        if (bits_type.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return result;
+        }
+        if (parameter_is_half)
+        {
+            runtime_parameter_type = bits_type;
+            runtime_argument = c_ir_emit_representation_alias_conversion(builder, argument, bits_type, source);
+        }
+        if (return_is_half)
+        {
+            runtime_return_type = bits_type;
+        }
+    }
+    if (builder->target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        // Baseline AArch64 converts half precision directly. Its runtime
+        // libraries need not provide the x86 soft-conversion entry points.
+        result = c_ir_emit_cast_instruction(builder, argument, return_type,
+                    parameter_is_half ? IR_CONVERSION_FLOAT_EXTEND : IR_CONVERSION_FLOAT_TRUNCATE, source);
+    }
+    else if (runtime_argument.value < builder->function->value_count &&
+        builder->function->values[runtime_argument.value].canonical_type.value == runtime_parameter_type.value)
+    {
+        for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count && symbol.value == IR_ID_UNDERLYING_INVALID; symbol_index += 1)
+        {
+            IrSymbol* candidate = builder->program->symbols.symbols + symbol_index;
+            if (candidate->kind == IR_SYMBOL_FUNCTION && string_equal(candidate->link_name, link_name))
+            {
+                IrType* candidate_type = ir_type_from_id(&builder->program->types, candidate->type);
+                bool compatible = candidate_type && candidate_type->kind == IR_TYPE_FUNCTION && !candidate_type->is_variadic &&
+                                  candidate_type->calling_convention == IR_CALLING_CONVENTION_C && candidate_type->parameter_count == 1 &&
+                                  candidate_type->return_type.value == runtime_return_type.value && candidate_type->parameter_types &&
+                                  candidate_type->parameter_types[0].value == runtime_parameter_type.value;
+                if (compatible)
+                {
+                    symbol = candidate->id;
+                    function_type = candidate->type;
+                }
+                else
+                {
+                    builder->failure_message = string_format(builder->arena, S8("compiler runtime symbol {S8} has an incompatible declaration"), link_name);
+                }
+            }
+        }
+        if (symbol.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
+        {
+            IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, 1);
+            parameter_types[0] = runtime_parameter_type;
+            function_type = ir_program_add_type(builder->program, (IrType){
+                                                                      .name = S8("binary16 compiler runtime function"),
+                                                                      .parameter_types = parameter_types,
+                                                                      .element_type = IR_TYPE_ID_INVALID,
+                                                                      .return_type = runtime_return_type,
+                                                                      .layout =
+                                                                          {
+                                                                              .size = builder->program->data_layout.pointer.size,
+                                                                              .alignment = builder->program->data_layout.pointer.alignment,
+                                                                              .resolved = true,
+                                                                          },
+                                                                      .kind = IR_TYPE_FUNCTION,
+                                                                      .calling_convention = IR_CALLING_CONVENTION_C,
+                                                                      .parameter_count = 1,
+                                                                  });
+            if (function_type.value != IR_ID_UNDERLYING_INVALID)
+            {
+                symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+                                                                     .name = link_name,
+                                                                     .link_name = link_name,
+                                                                     .source = source,
+                                                                     .type = function_type,
+                                                                     .kind = IR_SYMBOL_FUNCTION,
+                                                                     .linkage = IR_LINKAGE_IMPORT,
+                                                                 });
+            }
+        }
+        if (symbol.value != IR_ID_UNDERLYING_INVALID && function_type.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId reference_result = c_ir_add_result(builder, function_type);
+            IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, function_type);
+            reference.symbol = symbol;
+            reference.result = reference_result;
+            IrInstructionId reference_id = c_ir_append_instruction(builder, reference, source);
+            builder->function->values[reference_result.value].definition = reference_id;
+
+            IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
+            operands[0] = reference_result;
+            operands[1] = runtime_argument;
+            IrValueId call_result = c_ir_add_result(builder, runtime_return_type);
+            IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, runtime_return_type);
+            call.operands = operands;
+            call.operand_count = 2;
+            call.symbol = symbol;
+            call.result = call_result;
+            IrInstructionId call_id = c_ir_append_instruction(builder, call, source);
+            builder->function->values[call_result.value].definition = call_id;
+            result = darwin_x64_integer_half_abi && return_is_half
+                         ? c_ir_emit_representation_alias_conversion(builder, call_result, return_type, source)
+                         : call_result;
+        }
+    }
+    return result;
+}
+
 /* Lowers one `__builtin_mem*` call to the library function it names. Clang
    makes these available with no declaration in scope, which is exactly why
    freestanding sources reach for them, so the prototype cannot be assumed to
@@ -15424,22 +15642,56 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_math_call(CIntegerIrBuilder* builder, CTok
 // that order after a call, and every other position -- the argument, the
 // loads, the stores, the copies -- is the two-field aggregate unchanged.
 
+BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_negate(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type_id, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrTypeId bits_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_SHORT);
+    IrValueId slot = c_ir_emit_temporary(builder, type_id, source);
+    if (c_ir_type_is_ieee_binary16(builder, type_id) && bits_type.value != IR_ID_UNDERLYING_INVALID &&
+        slot.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, slot, type_id, value, source))
+    {
+        IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+        IrValueId address = c_ir_emit_address_of_place(builder, slot, type_id, source);
+        IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+                                     ? c_ir_emit_cast(builder, address, bits_pointer_type, source)
+                                     : IR_VALUE_ID_INVALID;
+        IrValueId bits_place = bits_address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, bits_address, source)
+                                                                              : IR_VALUE_ID_INVALID;
+        IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source)
+                                                                      : IR_VALUE_ID_INVALID;
+        IrValueId sign_mask = c_ir_emit_integer_value_typed(builder, UINT64_C(0x8000), false, (CToken){0}, bits_type);
+        IrValueId flipped = bits.value != IR_ID_UNDERLYING_INVALID && sign_mask.value != IR_ID_UNDERLYING_INVALID
+                                ? c_ir_emit_binary_value(builder, bits, sign_mask, bits_type, IR_BINARY_INTEGER_BITWISE_XOR, source)
+                                : IR_VALUE_ID_INVALID;
+        if (flipped.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, bits_place, bits_type, flipped, source))
+        {
+            result = c_ir_emit_load_place(builder, slot, type_id, source);
+        }
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_unary_value(CIntegerIrBuilder* builder, IrValueId operand, IrTypeId type, IrUnaryOperation operation,
                                                     IrSourceRange source)
 {
-    if (operand.value == IR_ID_UNDERLYING_INVALID || type.value == IR_ID_UNDERLYING_INVALID)
+    IrValueId result = IR_VALUE_ID_INVALID;
+    if (operand.value != IR_ID_UNDERLYING_INVALID && type.value != IR_ID_UNDERLYING_INVALID &&
+        operation == IR_UNARY_FLOAT_NEGATE && c_ir_type_is_ieee_binary16(builder, type))
     {
-        return IR_VALUE_ID_INVALID;
+        result = c_ir_emit_float16_negate(builder, operand, type, source);
     }
-    IrValueId result = c_ir_add_result(builder, type);
-    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, type);
-    instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
-    instruction.operands[0] = operand;
-    instruction.operand_count = 1;
-    instruction.unary_operation = (u8)operation;
-    instruction.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
-    builder->function->values[result.value].definition = id;
+    else if (operand.value != IR_ID_UNDERLYING_INVALID && type.value != IR_ID_UNDERLYING_INVALID)
+    {
+        result = c_ir_add_result(builder, type);
+        IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, type);
+        instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+        instruction.operands[0] = operand;
+        instruction.operand_count = 1;
+        instruction.unary_operation = (u8)operation;
+        instruction.result = result;
+        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+        builder->function->values[result.value].definition = id;
+    }
     return result;
 }
 
@@ -20870,6 +21122,97 @@ BUSTER_C_INTERNAL IrValueId c_ir_vector_splat(CIntegerIrBuilder* builder, IrValu
     return result;
 }
 
+BUSTER_C_INTERNAL IrValueId c_ir_scalarize_binary16_vector_operation(CIntegerIrBuilder* builder, IrUnaryOperation unary, IrBinaryOperation binary,
+                                                                      IrValueId* operands, u32 operand_count, IrTypeId vector_type,
+                                                                      IrTypeId result_type, bool comparison, IrSourceRange source)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrType* vector = ir_type_from_id(&builder->program->types, vector_type);
+    IrType* result_vector = ir_type_from_id(&builder->program->types, result_type);
+    bool valid = vector && result_vector && vector->kind == IR_TYPE_VECTOR && result_vector->kind == IR_TYPE_VECTOR &&
+                 vector->element_count == result_vector->element_count && vector->element_count && vector->element_count <= UINT32_MAX &&
+                 operand_count && operand_count <= 2;
+    IrBinaryOperation scalar_binary = IR_BINARY_COUNT;
+    if (valid && binary != IR_BINARY_COUNT)
+    {
+        scalar_binary = binary == IR_BINARY_VECTOR_FLOAT_ADD             ? IR_BINARY_FLOAT_ADD
+                        : binary == IR_BINARY_VECTOR_FLOAT_SUBTRACT       ? IR_BINARY_FLOAT_SUBTRACT
+                        : binary == IR_BINARY_VECTOR_FLOAT_MULTIPLY       ? IR_BINARY_FLOAT_MULTIPLY
+                        : binary == IR_BINARY_VECTOR_FLOAT_DIVIDE         ? IR_BINARY_FLOAT_DIVIDE
+                        : binary == IR_BINARY_VECTOR_FLOAT_EQUAL          ? IR_BINARY_FLOAT_EQUAL
+                        : binary == IR_BINARY_VECTOR_FLOAT_NOT_EQUAL      ? IR_BINARY_FLOAT_NOT_EQUAL
+                        : binary == IR_BINARY_VECTOR_FLOAT_LESS           ? IR_BINARY_FLOAT_LESS
+                        : binary == IR_BINARY_VECTOR_FLOAT_LESS_EQUAL     ? IR_BINARY_FLOAT_LESS_EQUAL
+                        : binary == IR_BINARY_VECTOR_FLOAT_GREATER        ? IR_BINARY_FLOAT_GREATER
+                        : binary == IR_BINARY_VECTOR_FLOAT_GREATER_EQUAL  ? IR_BINARY_FLOAT_GREATER_EQUAL
+                                                                           : IR_BINARY_COUNT;
+        valid = scalar_binary != IR_BINARY_COUNT;
+    }
+    if (valid && unary != IR_UNARY_COUNT)
+    {
+        valid = unary == IR_UNARY_VECTOR_FLOAT_NEGATE;
+    }
+    IrValueId* slots = valid ? arena_allocate(builder->arena, IrValueId, operand_count) : 0;
+    for (u32 operand_index = 0; valid && operand_index < operand_count; operand_index += 1)
+    {
+        slots[operand_index] = c_ir_emit_temporary(builder, vector_type, source);
+        valid = slots[operand_index].value != IR_ID_UNDERLYING_INVALID &&
+                c_ir_emit_store_place(builder, slots[operand_index], vector_type, operands[operand_index], source);
+    }
+    u32 lane_count = valid ? (u32)vector->element_count : 0;
+    IrValueId* lanes = valid ? arena_allocate(builder->arena, IrValueId, lane_count) : 0;
+    for (u32 lane_index = 0; valid && lane_index < lane_count; lane_index += 1)
+    {
+        IrValueId lane_number = c_ir_emit_integer_value_typed(builder, lane_index, false, (CToken){0}, builder->s32_type);
+        IrValueId lane_values[2] = {IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID};
+        valid = lane_number.value != IR_ID_UNDERLYING_INVALID;
+        for (u32 operand_index = 0; valid && operand_index < operand_count; operand_index += 1)
+        {
+            IrValueId lane_place = c_ir_emit_index_place(builder, slots[operand_index], lane_number, source);
+            lane_values[operand_index] = lane_place.value != IR_ID_UNDERLYING_INVALID
+                                             ? c_ir_emit_load_place(builder, lane_place, vector->element_type, source)
+                                             : IR_VALUE_ID_INVALID;
+            valid = lane_values[operand_index].value != IR_ID_UNDERLYING_INVALID;
+        }
+        IrValueId lane_result = IR_VALUE_ID_INVALID;
+        if (valid && unary != IR_UNARY_COUNT)
+        {
+            lane_result = c_ir_emit_unary_value(builder, lane_values[0], vector->element_type, IR_UNARY_FLOAT_NEGATE, source);
+        }
+        else if (valid)
+        {
+            lane_result = c_ir_emit_binary_value(builder, lane_values[0], lane_values[1],
+                                                 comparison ? builder->bool_type : vector->element_type, scalar_binary, source);
+        }
+        if (valid && comparison && lane_result.value != IR_ID_UNDERLYING_INVALID)
+        {
+            IrValueId as_integer = c_ir_emit_cast(builder, lane_result, builder->s32_type, source);
+            IrValueId all_bits = as_integer.value != IR_ID_UNDERLYING_INVALID
+                                     ? c_ir_emit_unary_value(builder, as_integer, builder->s32_type, IR_UNARY_INTEGER_NEGATE, source)
+                                     : IR_VALUE_ID_INVALID;
+            lane_result = all_bits.value != IR_ID_UNDERLYING_INVALID
+                              ? c_ir_emit_cast(builder, all_bits, result_vector->element_type, source)
+                              : IR_VALUE_ID_INVALID;
+        }
+        valid = lane_result.value != IR_ID_UNDERLYING_INVALID;
+        if (valid)
+        {
+            lanes[lane_index] = lane_result;
+        }
+    }
+    if (valid)
+    {
+        result = c_ir_add_result(builder, result_type);
+        IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ARRAY, result_type);
+        instruction.operands = lanes;
+        instruction.operand_count = lane_count;
+        instruction.result = result;
+        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+        builder->function->values[result.value].definition = id;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL bool c_ir_apply_vector_operation(CIntegerIrBuilder* builder, IrUnaryOperation unary, IrBinaryOperation binary, IrValueId* values,
                                                      u32* value_count, u32 first, u32 operand_count, IrTypeId vector_type, IrSourceRange source)
 {
@@ -21014,6 +21357,18 @@ BUSTER_C_INTERNAL bool c_ir_apply_vector_operation(CIntegerIrBuilder* builder, I
     if (result_type.value == IR_ID_UNDERLYING_INVALID)
     {
         return false;
+    }
+    if (c_ir_type_is_ieee_binary16(builder, vector->element_type))
+    {
+        IrValueId scalarized = c_ir_scalarize_binary16_vector_operation(builder, unary, binary, operands, operand_count, vector_type, result_type,
+                                                                         comparison, source);
+        if (scalarized.value == IR_ID_UNDERLYING_INVALID)
+        {
+            return false;
+        }
+        *value_count = first;
+        values[(*value_count)++] = scalarized;
+        return true;
     }
     IrValueId result = c_ir_add_result(builder, result_type);
     IrSourceRange instruction_source = source;
@@ -22207,16 +22562,12 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
     bool comparison = binary == IR_BINARY_INTEGER_EQUAL || binary == IR_BINARY_INTEGER_NOT_EQUAL || binary == IR_BINARY_FLOAT_EQUAL ||
                       binary == IR_BINARY_FLOAT_NOT_EQUAL || (binary >= IR_BINARY_SIGNED_LESS && binary <= IR_BINARY_FLOAT_GREATER_EQUAL);
     IrTypeId result_type = comparison ? builder->bool_type : operation_type;
-    IrValueId result = c_ir_add_result(builder, result_type);
-    IrSourceRange instruction_source = source;
-    IrInstruction instruction = c_ir_instruction_initialize(unary != IR_UNARY_COUNT ? IR_OPCODE_UNARY : IR_OPCODE_BINARY, result_type);
-    instruction.operands = operands;
-    instruction.operand_count = operand_count;
-    instruction.unary_operation = (u8)unary;
-    instruction.binary_operation = (u8)binary;
-    instruction.result = result;
-    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
-    builder->function->values[result.value].definition = id;
+    IrValueId result = unary != IR_UNARY_COUNT ? c_ir_emit_unary_value(builder, operands[0], result_type, unary, source)
+                                                : c_ir_emit_binary_value(builder, operands[0], operands[1], result_type, binary, source);
+    if (result.value == IR_ID_UNDERLYING_INVALID)
+    {
+        return false;
+    }
     if (comparison)
     {
         IrValueId converted = c_ir_add_result(builder, builder->s32_type);
@@ -27954,6 +28305,11 @@ BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValue
         {
             return IR_VALUE_ID_INVALID;
         }
+    }
+    if (c_ir_type_is_ieee_binary16(builder, type_id))
+    {
+        IrValueId widened = c_ir_emit_float16_runtime_call(builder, S8("__extendhfsf2"), builder->f32_type, value, type_id, source);
+        return widened.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_truth_value(builder, widened, source);
     }
     // Truth conversion is a comparison against a zero of the same type, so it
     // needs the x87 comparison the canonical backend provides only for f80.
