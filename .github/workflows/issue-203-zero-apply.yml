@@ -21,6 +21,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          printf '\n' >> .github/issue-203-zero-codeview.patch
+          printf '\n' >> .github/issue-203-zero-test.patch
           git apply --check .github/issue-203-zero-codeview.patch
           git apply --check .github/issue-203-zero-test.patch
           git apply .github/issue-203-zero-codeview.patch
