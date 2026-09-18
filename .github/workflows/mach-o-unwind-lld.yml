@@ -12,6 +12,10 @@ on:
       - .github/workflows/mach-o-unwind-lld.yml
   workflow_dispatch:
 
+concurrency:
+  group: mach-o-unwind-lld-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
