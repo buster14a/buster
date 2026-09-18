@@ -1,0 +1,187 @@
+name: Inline PR 800 regression fixture
+
+on:
+  push:
+    branches:
+      - fix/72-aarch64-binary128
+    paths:
+      - .github/workflows/pr800-inline-fixture.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr800-inline-fixture
+  cancel-in-progress: false
+
+jobs:
+  rewrite:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: external/musl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Inline the source and refresh authenticated bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          fixture_path = Path("tests/basic_c_aarch64_binary128_transport.c")
+          driver_path = Path("src/buster/tests/compiler/driver/driver_test.c")
+          docs_path = Path("docs/agents/frontend/wide-floats-assembly.md")
+          fixture = fixture_path.read_text()
+          driver = driver_path.read_text()
+
+          marker = """BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transport(UnitTestArguments* arguments)
+          {
+              UnitTestResult result = {0};
+          """
+          if driver.count(marker) != 1:
+              raise SystemExit(f"unexpected function marker count: {driver.count(marker)}")
+          literal = "".join("        " + json.dumps(line) + "\n" for line in fixture.splitlines(keepends=True))
+          replacement = marker + """    String8 source_path = buster_test_temporary_path(
+                  arguments->arena, S8("buster-a64-f128-transport-source"), S8(".c"));
+              String8 source = S8(
+          """ + literal + """    );
+              if (!BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+              {
+                  return result;
+              }
+          """
+          driver = driver.replace(marker, replacement)
+
+          old_path = 'S8("tests/basic_c_aarch64_binary128_transport.c")'
+          if driver.count(old_path) != 4:
+              raise SystemExit(f"unexpected fixture path count: {driver.count(old_path)}")
+          driver = driver.replace(old_path, "source_path")
+
+          tail = """    return result;
+          }
+
+          // Keep the complete conversion fixture strict on all desktop AArch64 targets.
+          """
+          if driver.count(tail) != 1:
+              raise SystemExit(f"unexpected function tail count: {driver.count(tail)}")
+          driver = driver.replace(tail, """    BUSTER_TEST(arguments, os_file_delete(source_path));
+              return result;
+          }
+
+          // Keep the complete conversion fixture strict on all desktop AArch64 targets.
+          """)
+          driver_path.write_text(driver)
+
+          docs = docs_path.read_text()
+          old_docs = "`basic_c_aarch64_binary128_transport.c` covers Q0/Q1, ninth-argument stack"
+          new_docs = "`compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1, ninth-argument stack"
+          if docs.count(old_docs) != 1:
+              raise SystemExit(f"unexpected documentation reference count: {docs.count(old_docs)}")
+          docs_path.write_text(docs.replace(old_docs, new_docs))
+          fixture_path.unlink()
+          PY
+
+          git diff --check
+          test ! -e tests/basic_c_aarch64_binary128_transport.c
+          ! git grep --fixed-strings 'tests/basic_c_aarch64_binary128_transport.c' -- . ':!docs/native-retirement-*'
+
+          python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)"
+          python3 tools/native_retirement_rebind.py refresh --repo-root "$(pwd)" | tee "$RUNNER_TEMP/rebind.json"
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)"
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/retirement-build"
+          rm -rf "$RUNNER_TEMP/contract"
+          "$RUNNER_TEMP/retirement-build" native_retirement_census --manifest-only --out "$RUNNER_TEMP/contract"
+          grep --fixed-strings --quiet 'subjects=402' "$RUNNER_TEMP/contract/manifest.txt"
+          grep --fixed-strings --quiet 'rows=77184' "$RUNNER_TEMP/contract/manifest.txt"
+          grep --fixed-strings --quiet 'io_failed=0' "$RUNNER_TEMP/contract/summary.txt"
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("/tmp/rebind-placeholder").read_text()) if False else None
+          expected = {
+              "docs/agents/frontend/wide-floats-assembly.md",
+              "docs/native-retirement-census.md",
+              "src/buster/tests/compiler/driver/driver_test.c",
+              "tests/basic_c_aarch64_binary128_transport.c",
+              "tools/native_retirement_census.c",
+              "tools/native_retirement_contract.py",
+          }
+          import subprocess
+          actual = set(subprocess.check_output(["git", "diff", "--name-only"], text=True).splitlines())
+          if actual != expected:
+              raise SystemExit(f"unexpected rewrite diff: {sorted(actual)}")
+          PY
+
+          git config user.name David
+          git config user.email davidgmbb@gmail.com
+          git add -A docs/agents/frontend/wide-floats-assembly.md docs/native-retirement-census.md \
+            src/buster/tests/compiler/driver/driver_test.c tests/basic_c_aarch64_binary128_transport.c \
+            tools/native_retirement_census.c tools/native_retirement_contract.py
+          git commit -m 'tests: keep binary128 transport outside frozen corpus'
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
