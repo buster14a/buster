@@ -144,6 +144,16 @@ close failure, returns no bytes and rolls back the read's arena allocation;
 successful empty files retain a nonnull pointer. `file_read` preserves this
 success/failure distinction through its slice pointer.
 
+Successful descriptor-backed `file_read_checked` and `file_map_read` results
+also carry `FileIdentity` captured before that same descriptor is closed. POSIX
+uses `st_dev`/`st_ino`; Windows uses the volume serial number and 64-bit file
+index. Consequently lexical spellings, hard links, followed symbolic links and
+case aliases on case-insensitive filesystems compare as one physical file.
+Android APK assets have no descriptor identity and retain their normalized asset
+path namespace. Identity is cleared with bytes on failure, and mappings retain
+the existing stable-input requirement rather than promising isolation from
+concurrent replacement.
+
 Mappings still require stable input files for their full consumer lifetime;
 they do not promise an atomic snapshot under concurrent mutation. When mapping
 is unavailable, compiler source/object/include/library loading uses the checked
