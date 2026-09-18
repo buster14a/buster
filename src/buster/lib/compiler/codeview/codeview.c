@@ -343,7 +343,8 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
             {
                 u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
                 byte_writer_emit_u32_le(symbols, 0);
-                byte_writer_emit_u32_le(symbols, piece->value_offset);
+                symbols->overflow |= piece->value_offset > UINT16_MAX;
+                byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);
                 codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
                 byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
                 codeview_record_end(symbols, record);
