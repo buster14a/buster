@@ -6530,7 +6530,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 302);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 306);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_X64_F80_BINARY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_F80_NEGATE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -6672,6 +6672,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_FCMP_SET] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_F32_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_F64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F16_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F16_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F32_TO_F16] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F64_TO_F16] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_I64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_I64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_F32_TO_I64] = MACHINE_SCHEDULE_UNIT_VECTOR,

@@ -1249,15 +1249,21 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
         if (instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND || instruction->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE)
         {
             bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
-            bool shaped = source_type && source_type->kind == IR_TYPE_FLOAT &&
-                          source_type->bit_width == (extend ? 32u : 64u) && cast_target_type && cast_target_type->kind == IR_TYPE_FLOAT &&
-                          cast_target_type->bit_width == (extend ? 64u : 32u);
+            bool shaped = source_type && source_type->kind == IR_TYPE_FLOAT && cast_target_type && cast_target_type->kind == IR_TYPE_FLOAT &&
+                          source_type->float_format == IR_FLOAT_FORMAT_IEEE && cast_target_type->float_format == IR_FLOAT_FORMAT_IEEE &&
+                          (source_type->bit_width == 16 || source_type->bit_width == 32 || source_type->bit_width == 64) &&
+                          (cast_target_type->bit_width == 16 || cast_target_type->bit_width == 32 || cast_target_type->bit_width == 64) &&
+                          (extend ? source_type->bit_width < cast_target_type->bit_width : source_type->bit_width > cast_target_type->bit_width);
             if (shaped)
             {
                 u32 row = machine_a64_select_row(selector, (MachineInstruction){
                                                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                               .opcode = (u16)(extend ? MACHINE_A64_CVT_F32_TO_F64 : MACHINE_A64_CVT_F64_TO_F32),
+                                                               .opcode = (u16)(source_type->bit_width == 16
+                                                                   ? (cast_target_type->bit_width == 32 ? MACHINE_A64_CVT_F16_TO_F32 : MACHINE_A64_CVT_F16_TO_F64)
+                                                                   : cast_target_type->bit_width == 16
+                                                                   ? (source_type->bit_width == 32 ? MACHINE_A64_CVT_F32_TO_F16 : MACHINE_A64_CVT_F64_TO_F16)
+                                                                   : extend ? MACHINE_A64_CVT_F32_TO_F64 : MACHINE_A64_CVT_F64_TO_F32),
                                                            });
                 machine_a64_define(selector, result_register, row);
                 selected = true;
@@ -9315,8 +9321,16 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 break;
             case MACHINE_A64_CVT_F32_TO_F64:
             case MACHINE_A64_CVT_F64_TO_F32:
+            case MACHINE_A64_CVT_F16_TO_F32:
+            case MACHINE_A64_CVT_F16_TO_F64:
+            case MACHINE_A64_CVT_F32_TO_F16:
+            case MACHINE_A64_CVT_F64_TO_F16:
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
-                machine_a64_emit(&encoder, instruction->opcode == MACHINE_A64_CVT_F32_TO_F64 ? 0x1e22c000u : 0x1e624000u);
+                machine_a64_emit(&encoder, instruction->opcode == MACHINE_A64_CVT_F16_TO_F32 ? 0x1ee24000u :
+                                          instruction->opcode == MACHINE_A64_CVT_F16_TO_F64 ? 0x1ee2c000u :
+                                          instruction->opcode == MACHINE_A64_CVT_F32_TO_F16 ? 0x1e23c000u :
+                                          instruction->opcode == MACHINE_A64_CVT_F64_TO_F16 ? 0x1e63c000u :
+                                          instruction->opcode == MACHINE_A64_CVT_F32_TO_F64 ? 0x1e22c000u : 0x1e624000u);
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_FROM_VEC, operand_registers[0], 0, 0, 0);
                 break;
             case MACHINE_A64_CVT_I64_TO_F32:

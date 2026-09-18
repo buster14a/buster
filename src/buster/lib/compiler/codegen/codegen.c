@@ -19610,7 +19610,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else
                             {
-                                u32 argument_stack_offset = prior_stack_parts * 8u;
+                                u32 argument_stack_offset;
                                 if (darwin_stack)
                                 {
                                     u32 argument_alignment = (u32)BUSTER_MIN(argument_type->layout.alignment, 16u);
@@ -19670,7 +19670,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                                 continue;
                             }
-                            u32 argument_stack_offset = prior_stack_parts * 8u;
+                            u32 argument_stack_offset;
                             if (darwin_stack)
                             {
                                 u32 argument_alignment = (u32)BUSTER_MIN(argument_type->layout.alignment, 16u);
@@ -20278,14 +20278,18 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
                             if (source_type->float_format != IR_FLOAT_FORMAT_IEEE || target_type->float_format != IR_FLOAT_FORMAT_IEEE ||
-                                source_type->bit_width != (extend ? 32 : 64) || target_type->bit_width != (extend ? 64 : 32))
+                                (source_type->bit_width != 16 && source_type->bit_width != 32 && source_type->bit_width != 64) ||
+                                (target_type->bit_width != 16 && target_type->bit_width != 32 && target_type->bit_width != 64) ||
+                                (extend ? source_type->bit_width >= target_type->bit_width : source_type->bit_width <= target_type->bit_width))
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
                                 return result;
                             }
                             codegen_canonical_a64_frame_float_memory_operation(&buffer, 0, value_offsets[instruction->operands[0].value],
                                                                                (u32)source_type->layout.size, false);
-                            codegen_emit_u32(&buffer, extend ? 0x1e22c000 : 0x1e624000);
+                            u32 source_format = source_type->bit_width == 16 ? 3u : source_type->bit_width == 64 ? 1u : 0u;
+                            u32 target_format = target_type->bit_width == 16 ? 3u : target_type->bit_width == 64 ? 1u : 0u;
+                            codegen_emit_u32(&buffer, 0x1e224000u | (source_format << 22) | (target_format << 15));
                             codegen_canonical_a64_frame_float_memory_operation(&buffer, 0, result_offset, (u32)target_type->layout.size, true);
                             instruction_id.value = instruction_id.value == emitted_block->last_instruction.value ? IR_ID_UNDERLYING_INVALID : instruction_id.value + 1;
                             continue;
@@ -21181,6 +21185,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 {
                                     u32 argument_alignment = indirect ? 8u : (u32)BUSTER_MIN(type->layout.alignment, 16u);
                                     u32 argument_size = indirect ? 8u : (u32)type->layout.size;
+                                    if (unnamed_variadic)
+                                    {
+                                        argument_alignment = BUSTER_MAX(argument_alignment, 8u);
+                                        argument_size = (argument_size + 7u) & ~7u;
+                                    }
                                     packed_stack_bytes = (packed_stack_bytes + argument_alignment - 1u) & ~(argument_alignment - 1u);
                                     argument_stack_offset[argument_array_index] = packed_stack_bytes;
                                     packed_stack_bytes += argument_size;

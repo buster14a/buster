@@ -15073,7 +15073,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* bu
             runtime_return_type = bits_type;
         }
     }
-    if (runtime_argument.value < builder->function->value_count &&
+    if (builder->target.cpu_arch == CPU_ARCH_AARCH64)
+    {
+        // Baseline AArch64 converts half precision directly. Its runtime
+        // libraries need not provide the x86 soft-conversion entry points.
+        result = c_ir_emit_cast_instruction(builder, argument, return_type,
+                    parameter_is_half ? IR_CONVERSION_FLOAT_EXTEND : IR_CONVERSION_FLOAT_TRUNCATE, source);
+    }
+    else if (runtime_argument.value < builder->function->value_count &&
         builder->function->values[runtime_argument.value].canonical_type.value == runtime_parameter_type.value)
     {
         for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count && symbol.value == IR_ID_UNDERLYING_INVALID; symbol_index += 1)

@@ -299,6 +299,31 @@
   escape for method testing. `--skip-build` reuses the existing Release binary
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
+- **`.github/workflows/zen5-audit.yml` runs the stage-1 measurement on the
+  dedicated Ryzen 9700X GitHub runner** (`runs-on: [buster-zen5,
+  ryzen-9700x]`, the host `benchpress`), which is where CPU-heavy measurement
+  belongs rather than a developer laptop or a shared hosted VM. It bootstraps
+  the driver with the runner's TCC through `./build.sh`, builds the Release
+  `ide` without `--ci` so the binary stays profilable, runs `test_self_host`
+  for the `STEP_INSTRUCTIONS`/throughput rows and the fixed point, then times
+  the stage-1 command pinned to one CPU (`-g`, `-g0`, `-c`, `-E`; wall, user,
+  peak RSS, `perf stat` core and memory groups), records a frame-pointer
+  cycle profile with flat/inclusive/line/annotate reports, and runs
+  `tools/cache_miss_survey.py --dwarf` and `tools/branch_miss_survey.py
+  --cross-check`. Everything lands in one `zen5-audit-<run>-<attempt>`
+  artifact, with `perf.data` and the zstd-compressed binary beside it so the
+  capture can be queried offline. It is `workflow_dispatch` only (plus a push
+  of the file itself on an `audit/**` branch) and gates nothing:
+
+  ```sh
+  gh workflow run zen5-audit.yml --ref <branch>
+  gh run download <run-id> -D <directory>
+  ```
+
+  `perf_event_paranoid` is 2 on that host, so every counter is `:u`; the
+  runner serializes jobs but takes no dedicated-host lease, so a paired A/B
+  still belongs to the throughput harness. `2026-09-17T191324Z` is the first
+  audit recorded from it and carries the reference numbers.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
   the CI critical path, so it is the configuration most worth profiling. Record
   it exactly like any other build; there is no sanitizer-specific obstacle:

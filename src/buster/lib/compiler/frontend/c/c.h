@@ -383,6 +383,11 @@ struct CPreprocessDetail
     CSourceMetrics source_unique;
     CSourceFileMetrics* lexed_files;
     CPreprocessedMetrics preprocessed;
+#if BUSTER_INCLUDE_TESTS
+    // Actual include-identity table slot examinations for end-to-end scaling
+    // fixtures. Tests-disabled builds neither store nor increment this value.
+    u64 include_file_probe_count;
+#endif
     u32 lexed_file_count;
 };
 

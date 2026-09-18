@@ -21,6 +21,23 @@ Changes to places or calls also need the foundations guide. Native selection and
 allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
 
+## Preprocessor include identity
+
+The once-file index shared by `#import`, `#pragma once` and proven whole-file
+include guards keys descriptor-backed files by `FileIdentity`, not by their
+resolved path spelling. POSIX identity is device/inode and Windows identity is
+volume serial/file index, captured from the same descriptor that supplied the
+bytes. Lexical aliases, hard links, followed symbolic links and case aliases on
+case-insensitive filesystems therefore share one suppression record. Builtin
+headers and Android APK assets remain in their normalized path namespaces.
+
+The first resolved spelling remains the diagnostic/source-map spelling and the
+per-path metrics key; canonical identity never rewrites user-facing paths. The
+open-addressed table stays at most half full, diagnoses invalid identity or
+arena exhaustion, and records probe counts only in tests. `c_once_tests` covers
+real aliases for all three suppression mechanisms plus an end-to-end fan-out
+and depth workload whose actual slot examinations must scale near-linearly.
+
 ## Builtin capability queries
 
 `c_conditional_builtin_supported` answers `__has_builtin` for implemented
