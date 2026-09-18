@@ -1797,6 +1797,28 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     BQ_CHECK(bq_transport_public_request(packet.bytes, packet.size) == BQ_UNSUPPORTED);
     bq_packet(&packet, BQ_OP_SUBMIT, 8, real.bytes, real.size);
     BQ_CHECK(bq_transport_public_request(packet.bytes, packet.size) == BQ_OK);
+    BqPacket request, response;
+    u8 response_body[4] = {0};
+    bq_packet(&request, BQ_OP_CAPABILITIES, 123, NULL, 0);
+    bq_packet(&response, BQ_OP_CAPABILITIES | 0x80000000u, 123, response_body, sizeof(response_body));
+    BQ_CHECK(bq_transport_response_matches(&request, &response));
+    bq_put32(response.bytes + 4, BQ_CONTROL_SCHEMA - 1);
+    BQ_CHECK(!bq_transport_response_matches(&request, &response));
+    bq_put32(response.bytes + 4, BQ_CONTROL_SCHEMA);
+    bq_put32(response.bytes + 8, BQ_OP_CAPABILITIES);
+    BQ_CHECK(!bq_transport_response_matches(&request, &response));
+    bq_put32(response.bytes + 8, BQ_OP_CAPABILITIES | 0x80000000u);
+    bq_put64(response.bytes + 16, 124);
+    BQ_CHECK(!bq_transport_response_matches(&request, &response));
+    bq_put64(response.bytes + 16, 123);
+    response.size = BQ_CONTROL_HEADER;
+    BQ_CHECK(!bq_transport_response_matches(&request, &response));
+    char missing_socket[BQ_PATH_CAP + 1];
+    snprintf(missing_socket, sizeof(missing_socket), "/tmp/buster-transport-missing-%ld.sock", (long)getpid());
+    unlink(missing_socket);
+    response = (BqPacket){0};
+    BQ_CHECK(bq_transport_request(missing_socket, &request, &response) == BQ_IO && !response.size);
+    BQ_CHECK(bq_transport_request(missing_socket, &request, NULL) == BQ_BAD_REQUEST);
     BqQueue incompatible = {0};
     incompatible.state.job_count = 1;
     incompatible.state.jobs[0].phase = BQ_QUEUED;
@@ -1880,6 +1902,71 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     else
     {
         BQ_CHECK(errno == EPERM || errno == EAFNOSUPPORT || errno == ENOSYS);
+    }
+
+    BqFixture service_fixture;
+    if (bq_test_begin(&service_fixture))
+    {
+        char socket_path[BQ_PATH_CAP + 1];
+        snprintf(socket_path, sizeof(socket_path), "%s/control.sock", service_fixture.path);
+        bq_close(&service_fixture.queue);
+        pid_t child = fork();
+        BQ_CHECK(child >= 0);
+        if (child == 0)
+        {
+            BqWorkerConfig config = {0};
+            _exit(bq_transport_serve(service_fixture.path, socket_path, &config) == BQ_OK ? 0 : 1);
+        }
+        if (child > 0)
+        {
+            struct stat socket_info = {0};
+            bool ready = false;
+            for (u32 attempt = 0; attempt < 200 && !ready; attempt += 1)
+            {
+                ready = lstat(socket_path, &socket_info) == 0 && S_ISSOCK(socket_info.st_mode);
+                if (!ready) usleep(10000);
+            }
+            BQ_CHECK(ready);
+            FILE* input = tmpfile();
+            FILE* output = tmpfile();
+            FILE* diagnostics = tmpfile();
+            BQ_CHECK(input && output && diagnostics);
+            if (input && output && diagnostics)
+            {
+                char* capabilities[] = {"bench_service", "client", socket_path, "capabilities"};
+                BQ_CHECK(bq_cli(4, capabilities, input, output, diagnostics) == 0);
+                rewind(output);
+                char text[2048] = {0};
+                size_t count = fread(text, 1, sizeof(text) - 1, output);
+                BQ_CHECK(count && strstr(text, "service-recipes=validate-buster-v1") != NULL);
+                fclose(output);
+                fclose(diagnostics);
+                output = tmpfile();
+                diagnostics = tmpfile();
+                BQ_CHECK(output && diagnostics);
+                if (output && diagnostics)
+                {
+                    char* status[] = {"bench_service", "client", socket_path, "status", "1"};
+                    BQ_CHECK(bq_cli(5, status, input, output, diagnostics) != 0);
+                    rewind(diagnostics);
+                    memset(text, 0, sizeof(text));
+                    count = fread(text, 1, sizeof(text) - 1, diagnostics);
+                    BQ_CHECK(count && strstr(text, "not-found") != NULL);
+                    char* fake_submit[] = {"bench_service", "client", socket_path, "submit", "test-principal",
+                                           "request-typed", "fake-success-v1",
+                                           "1111111111111111111111111111111111111111",
+                                           "2222222222222222222222222222222222222222"};
+                    BQ_CHECK(bq_cli(9, fake_submit, input, output, diagnostics) != 0);
+                }
+            }
+            if (input) fclose(input);
+            if (output) fclose(output);
+            if (diagnostics) fclose(diagnostics);
+            BQ_CHECK(kill(child, SIGTERM) == 0);
+            int status = 0;
+            BQ_CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        }
+        bq_test_end(&service_fixture);
     }
 #endif
 }
