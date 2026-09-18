@@ -1,0 +1,303 @@
+name: Issue 103 isolated acceptance
+
+on:
+  push:
+    branches:
+      - codex/103-line-mark-acceptance-20260918
+
+permissions:
+  contents: write
+
+jobs:
+  acceptance:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout current PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: current
+          persist-credentials: true
+      - name: Checkout exact quadratic baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 464774d8e88cb3c97c182685474fbab3fcfcfc00
+          path: baseline
+          persist-credentials: false
+      - name: Checkout exact bounded-repair candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f4d7562fb20d7cdc587b68970435e28ec6c9c9da
+          path: candidate
+          persist-credentials: false
+      - name: Build exact probes and production objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/bin evidence/disassembly
+          cp current/tools/machine_line_mark_scaling.c baseline/tools/machine_line_mark_scaling.c
+          cp current/tools/machine_line_mark_scaling.c candidate/tools/machine_line_mark_scaling.c
+          compile_probe() {
+            local root="$1"
+            local output="$2"
+            local helper="$3"
+            clang -O2 -g -ffunction-sections -fdata-sections -Wall -Werror \
+              -Wno-unused-function -Wno-unused-variable \
+              -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SINGLE_THREADED=1 \
+              -DBUSTER_LINE_MARK_HELPER_BENCH="$helper" \
+              -I"$root/src" -fwrapv -fno-strict-aliasing -funsigned-char \
+              "$root/tools/machine_line_mark_scaling.c" \
+              "$root/src/buster/lib/compiler/codegen/machine.c" \
+              "$root/src/buster/lib/arena.c" "$root/src/buster/lib/os.c" \
+              "$root/src/buster/lib/integer.c" "$root/src/buster/lib/string.c" \
+              "$root/src/buster/lib/float.c" "$root/src/buster/lib/time.c" \
+              -Wl,--gc-sections -lpthread -ldl -lm -o "$output"
+          }
+          compile_machine_object() {
+            local root="$1"
+            local output="$2"
+            clang -O2 -g -ffunction-sections -fdata-sections -Wall -Werror \
+              -Wno-unused-function -Wno-unused-variable \
+              -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SINGLE_THREADED=1 \
+              -I"$root/src" -fwrapv -fno-strict-aliasing -funsigned-char \
+              -c "$root/src/buster/lib/compiler/codegen/machine.c" -o "$output"
+          }
+          compile_probe baseline evidence/bin/baseline-schedule 0
+          compile_probe candidate evidence/bin/candidate-schedule 0
+          compile_probe current evidence/bin/current-schedule 0
+          compile_probe candidate evidence/bin/candidate-helper 1
+          compile_probe current evidence/bin/current-helper 1
+          compile_machine_object baseline evidence/bin/baseline-machine.o
+          compile_machine_object candidate evidence/bin/candidate-machine.o
+          compile_machine_object current evidence/bin/current-machine.o
+          size -A evidence/bin/baseline-machine.o > evidence/baseline-machine.size
+          size -A evidence/bin/candidate-machine.o > evidence/candidate-machine.size
+          size -A evidence/bin/current-machine.o > evidence/current-machine.size
+          nm -S --size-sort evidence/bin/baseline-machine.o > evidence/baseline-machine.nm
+          nm -S --size-sort evidence/bin/candidate-machine.o > evidence/candidate-machine.nm
+          nm -S --size-sort evidence/bin/current-machine.o > evidence/current-machine.nm
+          objdump -d --no-show-raw-insn --disassemble=machine_schedule_remap_line_marks \
+            evidence/bin/candidate-machine.o > evidence/disassembly/candidate-remap.txt
+          objdump -d --no-show-raw-insn --disassemble=machine_schedule_function \
+            evidence/bin/baseline-machine.o > evidence/disassembly/baseline-schedule.txt
+          objdump -d --no-show-raw-insn --disassemble=machine_schedule_function \
+            evidence/bin/candidate-machine.o > evidence/disassembly/candidate-schedule.txt
+          sha256sum evidence/bin/* > evidence/binaries.sha256
+          {
+            printf 'workflow_head='; git -C current rev-parse HEAD
+            printf 'workflow_tree='; git -C current rev-parse 'HEAD^{tree}'
+            printf 'baseline_commit='; git -C baseline rev-parse HEAD
+            printf 'baseline_tree='; git -C baseline rev-parse 'HEAD^{tree}'
+            printf 'candidate_commit='; git -C candidate rev-parse HEAD
+            printf 'candidate_tree='; git -C candidate rev-parse 'HEAD^{tree}'
+            printf 'benchmark_source_sha256='; sha256sum current/tools/machine_line_mark_scaling.c | cut -d' ' -f1
+            printf 'cpu_allowed_list='; awk '/Cpus_allowed_list/ {print $2}' /proc/self/status
+            printf 'kernel='; uname -srmo
+            clang --version | head -1
+            lscpu
+          } > evidence/provenance.txt
+      - name: Compare exact scheduler revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed="$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status)"
+          cpu="${allowed%%,*}"
+          cpu="${cpu%%-*}"
+          : > evidence/schedule-raw.log
+          for size in 32 256 1024 4096 16384 65536; do
+            case "$size" in
+              32) samples=21 ;;
+              256) samples=15 ;;
+              1024) samples=11 ;;
+              4096) samples=7 ;;
+              16384) samples=5 ;;
+              65536) samples=3 ;;
+            esac
+            for sample in $(seq 1 "$samples"); do
+              if (( sample % 2 )); then order='baseline candidate'; else order='candidate baseline'; fi
+              for variant in $order; do
+                line="$(timeout 180s taskset -c "$cpu" "evidence/bin/$variant-schedule" schedule "$size" 1 1)"
+                printf 'variant=%s sample=%s %s\n' "$variant" "$sample" "$line" | tee -a evidence/schedule-raw.log
+              done
+            done
+            line="$(timeout 180s taskset -c "$cpu" evidence/bin/current-schedule schedule "$size" 1 1)"
+            printf 'variant=current sample=1 %s\n' "$line" | tee -a evidence/schedule-raw.log
+          done
+          /usr/bin/time -v -o evidence/baseline-largest.time \
+            taskset -c "$cpu" evidence/bin/baseline-schedule schedule 65536 1 1 > evidence/baseline-largest.log
+          /usr/bin/time -v -o evidence/candidate-largest.time \
+            taskset -c "$cpu" evidence/bin/candidate-schedule schedule 65536 1 1 > evidence/candidate-largest.log
+      - name: Measure ordered, crossover and disordered repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed="$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status)"
+          cpu="${allowed%%,*}"
+          cpu="${cpu%%-*}"
+          : > evidence/remap-raw.log
+          for mode in remap-ordered remap-reverse remap-nearly; do
+            for marks in 1 8 15 16 17 32 256 4096 65536; do
+              if [[ "$mode" == remap-nearly && "$marks" -eq 1 ]]; then continue; fi
+              if (( marks <= 32 )); then samples=31; batch=10000
+              elif (( marks <= 256 )); then samples=21; batch=2000
+              elif (( marks <= 4096 )); then samples=15; batch=100
+              else samples=9; batch=5
+              fi
+              for sample in $(seq 1 "$samples"); do
+                if (( sample % 2 )); then order='candidate current'; else order='current candidate'; fi
+                for variant in $order; do
+                  line="$(taskset -c "$cpu" "evidence/bin/$variant-helper" "$mode" "$marks" 1 "$batch")"
+                  printf 'variant=%s sample=%s %s\n' "$variant" "$sample" "$line" | tee -a evidence/remap-raw.log
+                done
+              done
+            done
+          done
+      - name: Validate identities and summarize measurements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import statistics
+          from collections import defaultdict
+          from pathlib import Path
+
+          def parse(path):
+              rows = []
+              for line in Path(path).read_text().splitlines():
+                  fields = dict(part.split('=', 1) for part in line.split())
+                  rows.append(fields)
+              return rows
+
+          schedule = parse('evidence/schedule-raw.log')
+          grouped = defaultdict(list)
+          for row in schedule:
+              grouped[(row['variant'], int(row['leaves']))].append(row)
+          schedule_summary = []
+          for leaves in sorted({int(row['leaves']) for row in schedule}):
+              baseline = grouped[('baseline', leaves)]
+              candidate = grouped[('candidate', leaves)]
+              current = grouped[('current', leaves)]
+              assert len(baseline) == len(candidate) and baseline and len(current) == 1
+              identity = ('rows', 'retained_bytes', 'permuted', 'displacement', 'hash')
+              for key in identity:
+                  assert {row[key] for row in baseline + candidate + current} == {baseline[0][key]}, (leaves, key)
+              before = statistics.median(int(row['schedule_ns']) for row in baseline)
+              after = statistics.median(int(row['schedule_ns']) for row in candidate)
+              schedule_summary.append({
+                  'leaves': leaves,
+                  'marks': int(baseline[0]['rows']),
+                  'pairs': len(baseline),
+                  'baseline_median_ns': before,
+                  'candidate_median_ns': after,
+                  'speedup': before / after,
+                  'baseline_ns_per_mark': before / int(baseline[0]['rows']),
+                  'candidate_ns_per_mark': after / int(candidate[0]['rows']),
+                  'hash': baseline[0]['hash'],
+              })
+
+          remap = parse('evidence/remap-raw.log')
+          remap_grouped = defaultdict(list)
+          for row in remap:
+              remap_grouped[(row['variant'], row['mode'], int(row['marks']))].append(row)
+          remap_summary = []
+          for mode, marks in sorted({(row['mode'], int(row['marks'])) for row in remap}):
+              candidate = remap_grouped[('candidate', mode, marks)]
+              current = remap_grouped[('current', mode, marks)]
+              assert len(candidate) == len(current) and candidate
+              identity = ('retained_bytes', 'permuted', 'displacement', 'hash')
+              for key in identity:
+                  assert {row[key] for row in candidate + current} == {candidate[0][key]}, (mode, marks, key)
+              remap_summary.append({
+                  'mode': mode,
+                  'marks': marks,
+                  'pairs': len(candidate),
+                  'candidate_median_ns': statistics.median(int(row['remap_ns']) for row in candidate),
+                  'current_median_ns': statistics.median(int(row['remap_ns']) for row in current),
+                  'retained_bytes': int(candidate[0]['retained_bytes']),
+                  'hash': candidate[0]['hash'],
+              })
+
+          def text_bytes(path):
+              total = 0
+              for line in Path(path).read_text().splitlines():
+                  fields = line.split()
+                  if len(fields) >= 2 and fields[0].startswith('.text') and fields[1].isdigit():
+                      total += int(fields[1])
+              return total
+
+          def symbol_bytes(path, symbol):
+              for line in Path(path).read_text().splitlines():
+                  fields = line.split()
+                  if fields and fields[-1] == symbol:
+                      return int(fields[1], 16)
+              raise AssertionError((path, symbol))
+
+          code = {
+              'baseline_text_bytes': text_bytes('evidence/baseline-machine.size'),
+              'candidate_text_bytes': text_bytes('evidence/candidate-machine.size'),
+              'current_text_bytes': text_bytes('evidence/current-machine.size'),
+              'candidate_remap_symbol_bytes': symbol_bytes('evidence/candidate-machine.nm', 'machine_schedule_remap_line_marks'),
+              'current_remap_symbol_bytes': symbol_bytes('evidence/current-machine.nm', 'machine_schedule_remap_line_marks'),
+              'baseline_schedule_symbol_bytes': symbol_bytes('evidence/baseline-machine.nm', 'machine_schedule_function'),
+              'candidate_schedule_symbol_bytes': symbol_bytes('evidence/candidate-machine.nm', 'machine_schedule_function'),
+          }
+          code['candidate_text_delta_bytes'] = code['candidate_text_bytes'] - code['baseline_text_bytes']
+          code['candidate_text_delta_percent'] = 100 * code['candidate_text_delta_bytes'] / code['baseline_text_bytes']
+          result = {'schedule': schedule_summary, 'remap': remap_summary, 'code': code}
+          Path('evidence/summary.json').write_text(json.dumps(result, indent=2) + '\n')
+
+          lines = ['# Issue 103 isolated acceptance', '', '## Exact pre/post scheduler scaling', '',
+                   '| Leaves | Marks | Pairs | Old median | Bounded median | Speedup | Old ns/mark | Bounded ns/mark |',
+                   '| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |']
+          for row in schedule_summary:
+              lines.append(f"| {row['leaves']:,} | {row['marks']:,} | {row['pairs']} | {row['baseline_median_ns']:,} ns | "
+                           f"{row['candidate_median_ns']:,} ns | {row['speedup']:.2f}x | "
+                           f"{row['baseline_ns_per_mark']:.2f} | {row['candidate_ns_per_mark']:.2f} |")
+          lines += ['', '## Isolated remapper medians', '',
+                    '| Mode | Marks | Pairs | Candidate | Current | Retained |',
+                    '| --- | ---: | ---: | ---: | ---: | ---: |']
+          for row in remap_summary:
+              lines.append(f"| {row['mode']} | {row['marks']:,} | {row['pairs']} | {row['candidate_median_ns']:,} ns | "
+                           f"{row['current_median_ns']:,} ns | {row['retained_bytes']:,} B |")
+          lines += ['', '## Production object text', '', '```json', json.dumps(code, indent=2), '```', '']
+          Path('evidence/summary.md').write_text('\n'.join(lines))
+          print(Path('evidence/summary.md').read_text())
+          PY
+      - name: Run final-head sanitizers
+        shell: bash
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          clang -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -ffunction-sections -fdata-sections -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SINGLE_THREADED=1 \
+            -DBUSTER_LINE_MARK_HELPER_BENCH=1 -Icurrent/src -fwrapv -fno-strict-aliasing -funsigned-char \
+            current/tools/machine_line_mark_scaling.c current/src/buster/lib/compiler/codegen/machine.c \
+            current/src/buster/lib/arena.c current/src/buster/lib/os.c current/src/buster/lib/integer.c \
+            current/src/buster/lib/string.c current/src/buster/lib/float.c current/src/buster/lib/time.c \
+            -Wl,--gc-sections -lpthread -ldl -lm -o evidence/bin/current-sanitized
+          evidence/bin/current-sanitized schedule 65536 1 1 | tee evidence/sanitizer-schedule.log
+          evidence/bin/current-sanitized remap-ordered 65536 1 1 | tee evidence/sanitizer-ordered.log
+          evidence/bin/current-sanitized remap-reverse 65536 1 1 | tee evidence/sanitizer-reverse.log
+          evidence/bin/current-sanitized remap-nearly 65536 1 1 | tee evidence/sanitizer-nearly.log
+      - name: Retain exact evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-103-isolated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
+      - name: Remove temporary workflow after successful publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C current config user.name David
+          git -C current config user.email davidgmbb@gmail.com
+          git -C current rm .github/workflows/issue-103-isolated-acceptance.yml
+          git -C current commit -m 'ci: remove issue 103 isolated acceptance runner'
+          git -C current push origin HEAD:codex/103-line-mark-acceptance-20260918
