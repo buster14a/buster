@@ -8595,7 +8595,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     u32 include_depth_limit = options.include_depth_limit ? options.include_depth_limit : 256;
     c_preprocess_builtins(arena, symbol_table, &first_macro, &last_macro, root_frame.logical_path,
                           (CSourceLocation){.line = 1, .column = 1});
-    c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
+    if (!options.already_preprocessed)
+    {
+        c_preprocess_command_operations(arena, space, symbol_table, options, &first_macro, &last_macro, &result);
+    }
     CIncludeFileTable include_files = {
         .arena = arena,
     };
@@ -8673,7 +8676,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 // an invalid directive rather than an assembly comment.
                 bool null_directive = token_index < lex.token_count &&
                                       (lex.tokens[token_index].kind == C_TOKEN_NEWLINE || lex.tokens[token_index].kind == C_TOKEN_END_OF_FILE);
-                if (!null_directive && !options.assembly_comment_lines)
+                if (!null_directive && !options.assembly_comment_lines && !options.already_preprocessed)
                 {
                     c_preprocess_diagnostic_push(arena, &result, c_lex_token_location(&source_frame->lex, token), C_DIAGNOSTIC_EXPECTED_DIRECTIVE,
                                                  S8("expected preprocessing directive after '#'"));
@@ -8712,7 +8715,14 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 {
                     source_frame->guard_state = C_INCLUDE_GUARD_DISQUALIFIED;
                 }
-                if (is_if || is_ifdef || is_ifndef)
+                if (options.already_preprocessed && !is_line && !is_pragma)
+                {
+                    // A cpp-output stream has already resolved conditionals,
+                    // definitions, includes and diagnostics. Unknown or stale
+                    // directive lines are tokenizer metadata here, not a
+                    // second preprocessing program.
+                }
+                else if (is_if || is_ifdef || is_ifndef)
                 {
                     c_preprocess_conditional_directive(arena, space, symbol_table, first_macro, &stamps, source_frame, conditional_directive,
                                                        directive, token_index, line_end, expansion_limit, &result, options, &conditional);
@@ -8742,17 +8752,24 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 }
                 else if (active && is_line)
                 {
-                    CPreprocessTokenNode* first_line = 0;
-                    CPreprocessTokenNode* last_line = 0;
-                    u64 line_token_count = 0;
-                    bool line_expanded = c_preprocess_expand(arena, space, symbol_table, first_macro, 0, 0, &stamps,
-                                                             c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end), (u32)(line_end - token_index),
-                                                             &first_line, &last_line, &line_token_count, expansion_limit, &result);
-                    CToken* line_tokens = arena_allocate(arena, CToken, line_token_count);
-                    u32 line_index = 0;
-                    for (CPreprocessTokenNode* node = first_line; node; node = node->next)
+                    u64 line_token_count = line_end - token_index;
+                    CToken* line_tokens = lex.tokens + token_index;
+                    bool line_expanded = true;
+                    if (!options.already_preprocessed)
                     {
-                        line_tokens[line_index++] = node->token.token;
+                        CPreprocessTokenNode* first_line = 0;
+                        CPreprocessTokenNode* last_line = 0;
+                        line_token_count = 0;
+                        line_expanded = c_preprocess_expand(arena, space, symbol_table, first_macro, 0, 0, &stamps,
+                                                            c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end),
+                                                            (u32)(line_end - token_index), &first_line, &last_line, &line_token_count,
+                                                            expansion_limit, &result);
+                        line_tokens = arena_allocate(arena, CToken, line_token_count);
+                        u32 line_index = 0;
+                        for (CPreprocessTokenNode* node = first_line; node; node = node->next)
+                        {
+                            line_tokens[line_index++] = node->token.token;
+                        }
                     }
                     u64 requested_line = 0;
                     bool has_file_name = line_token_count >= 2 && line_tokens[1].kind == C_TOKEN_STRING_LITERAL && line_tokens[1].length >= 2;
@@ -8963,14 +8980,20 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 }
                 else if (active && is_pragma)
                 {
-                    CPreprocessTokenNode* first_pragma = 0;
-                    CPreprocessTokenNode* last_pragma = 0;
-                    u64 pragma_token_count = 0;
-                    bool pragma_expanded = c_preprocess_expand(arena, space, symbol_table, first_macro, 0, 0, &stamps,
-                                                               c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end), (u32)(line_end - token_index),
-                                                               &first_pragma, &last_pragma, &pragma_token_count, expansion_limit, &result);
-                    CToken* pragma_tokens = 0;
-                    u32 expanded_pragma_count = c_preprocess_tokens_from_nodes(first_pragma, arena, &pragma_tokens);
+                    bool pragma_expanded = true;
+                    CToken* pragma_tokens = lex.tokens + token_index;
+                    u32 expanded_pragma_count = (u32)(line_end - token_index);
+                    if (!options.already_preprocessed)
+                    {
+                        CPreprocessTokenNode* first_pragma = 0;
+                        CPreprocessTokenNode* last_pragma = 0;
+                        u64 pragma_token_count = 0;
+                        pragma_expanded = c_preprocess_expand(arena, space, symbol_table, first_macro, 0, 0, &stamps,
+                                                              c_frame_wrap_tokens(arena, &stamps, source_frame, token_index, line_end),
+                                                              (u32)(line_end - token_index), &first_pragma, &last_pragma, &pragma_token_count,
+                                                              expansion_limit, &result);
+                        expanded_pragma_count = c_preprocess_tokens_from_nodes(first_pragma, arena, &pragma_tokens);
+                    }
                     if (pragma_expanded)
                     {
                         pragma_context.current_location = directive_location;
@@ -9015,21 +9038,24 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         bool source_conditionals = false;
         CPreprocessSourceSegment* first_segment = 0;
         CPreprocessSourceSegment* last_segment = 0;
-        if (classified)
+        if (!options.already_preprocessed)
         {
-            parenthesis_depth = c_pp_parenthesis_depth(class_masks, token_index, logical_end, 0);
-        }
-        else
-        {
-            for (u64 scan = token_index; scan < logical_end; scan += 1)
+            if (classified)
             {
-                if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                parenthesis_depth = c_pp_parenthesis_depth(class_masks, token_index, logical_end, 0);
+            }
+            else
+            {
+                for (u64 scan = token_index; scan < logical_end; scan += 1)
                 {
-                    parenthesis_depth += 1;
-                }
-                else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && parenthesis_depth)
-                {
-                    parenthesis_depth -= 1;
+                    if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+                    {
+                        parenthesis_depth += 1;
+                    }
+                    else if (c_token_is_punctuator(&lex.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS) && parenthesis_depth)
+                    {
+                        parenthesis_depth -= 1;
+                    }
                 }
             }
         }
@@ -9124,7 +9150,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         {
             needs_expansion = true;
         }
-        else if (classified)
+        else if (classified && !options.already_preprocessed)
         {
             u64 last_word = (logical_end - 1) / C_PP_CLASS_MASK_WINDOW;
             for (u64 word_index = token_index / C_PP_CLASS_MASK_WINDOW; word_index <= last_word && !needs_expansion; word_index += 1)
@@ -9139,7 +9165,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                 }
             }
         }
-        else
+        else if (!options.already_preprocessed)
         {
             for (u64 scan = token_index; scan < logical_end && !needs_expansion; scan += 1)
             {

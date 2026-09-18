@@ -49,6 +49,10 @@ typedef enum CompilerDriverLanguage
     COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY,
     COMPILER_DRIVER_LANGUAGE_METAL_AIR,
     COMPILER_DRIVER_LANGUAGE_ASSEMBLY,
+    // C tokens whose preprocessing directives and macro expansion have
+    // already completed (`.i` / `-x cpp-output`). Kept after the existing
+    // values so adding the phase distinction does not renumber the API.
+    COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT,
     COMPILER_DRIVER_LANGUAGE_COUNT,
 } CompilerDriverLanguage;
 
