@@ -1,0 +1,224 @@
+name: Repair PR 796 CI
+
+on:
+  push:
+    branches:
+      - fix/786-native-retirement-closure
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.event.head_commit.message == 'Run PR 796 CI repair'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the PR branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git init .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "${GITHUB_REF_NAME}"
+          git checkout -B "${GITHUB_REF_NAME}" FETCH_HEAD
+
+      - name: Repair CodeView capacity and parser coverage
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          codeview_path = Path("src/buster/lib/compiler/codeview/codeview.c")
+          codeview = codeview_path.read_text()
+
+          capacity_start_marker = (
+              "BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 function_count)\n"
+          )
+          location_marker = "BUSTER_GLOBAL_LOCAL void codeview_emit_location_range"
+          assert codeview.count(capacity_start_marker) == 1
+          capacity_start = codeview.index(capacity_start_marker)
+          capacity_end = codeview.index(location_marker, capacity_start)
+          capacity_helpers = r'''BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_variable(u64* capacity, DebugModel* model,
+                                                                    DebugVariableId id)
+{
+    if (!model || id >= model->variable_count || model->variables[id].kind == DEBUG_VARIABLE_GLOBAL)
+    {
+        return true;
+    }
+    DebugVariable* variable = model->variables + id;
+    for (u32 location_index = 0; location_index < variable->location_count; location_index += 1)
+    {
+        DebugLocationRange* range = variable->locations + location_index;
+        if (range->location.kind == DEBUG_LOCATION_REGISTER || range->location.kind == DEBUG_LOCATION_FRAME)
+        {
+            if (!codeview_relocation_capacity_add(capacity, 2))
+            {
+                return false;
+            }
+        }
+        else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
+        {
+            for (u32 piece_index = 0; piece_index < range->location.piece_count; piece_index += 1)
+            {
+                DebugLocationKind kind = range->location.pieces[piece_index].kind;
+                if ((kind == DEBUG_LOCATION_REGISTER || kind == DEBUG_LOCATION_FRAME) &&
+                    !codeview_relocation_capacity_add(capacity, 2))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_variables(u64* capacity, DebugModel* model,
+                                                                           DebugScope* scope)
+{
+    if (!scope)
+    {
+        return true;
+    }
+    for (u32 variable_index = 0; variable_index < scope->variable_count; variable_index += 1)
+    {
+        if (!codeview_relocation_capacity_add_variable(capacity, model, scope->variables[variable_index]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+'''
+          codeview = codeview[:capacity_start] + capacity_helpers + codeview[capacity_end:]
+
+          old_walk_block = '''        // One scratch stack and one child index for the whole module, not a
+        // scope_count-sized bump allocation (and full-model scan) per function.
+        CodeviewScopeWalk scope_walk = {0};
+        if (input.model && input.model->valid && input.model->scope_count && input.function_count)
+        {
+            scope_walk = codeview_scope_walk_make(arena, input.model);
+        }
+
+'''
+          assert codeview.count(old_walk_block) == 1
+          codeview = codeview.replace(old_walk_block, "", 1)
+
+          scope_tree_marker = "BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree"
+          assert codeview.count(scope_tree_marker) == 1
+          exact_capacity = r'''BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_tree(u64* capacity, DebugModel* model,
+                                                                      DebugScopeId root, CodeviewScopeWalk* walk)
+{
+    if (!capacity || !model || !walk || !walk->stack || root >= model->scope_count)
+    {
+        return false;
+    }
+    CodeviewScopeFrame* stack = walk->stack;
+    u32 stack_count = 1;
+    stack[0] = (CodeviewScopeFrame){.scope = root, .next_child = walk->first_child[root]};
+    while (stack_count)
+    {
+        CodeviewScopeFrame* frame = stack + stack_count - 1;
+        DebugScopeId child = frame->next_child;
+        if (child != DEBUG_SCOPE_INVALID)
+        {
+            frame->next_child = walk->next_sibling[child];
+            if (stack_count == model->scope_count ||
+                !codeview_relocation_capacity_add(capacity, 2) ||
+                !codeview_relocation_capacity_add_scope_variables(capacity, model, model->scopes + child))
+            {
+                return false;
+            }
+            stack[stack_count++] = (CodeviewScopeFrame){.scope = child, .next_child = walk->first_child[child]};
+        }
+        else
+        {
+            stack_count -= 1;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 function_count, CodeviewScopeWalk* walk)
+{
+    u64 capacity = 0;
+    if (!codeview_relocation_capacity_add(&capacity, (u64)function_count * 4))
+    {
+        return UINT64_MAX;
+    }
+    if (!model || !model->valid)
+    {
+        return capacity;
+    }
+    for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
+    {
+        if (model->variables[variable_index].kind == DEBUG_VARIABLE_GLOBAL &&
+            !codeview_relocation_capacity_add(&capacity, 2))
+        {
+            return UINT64_MAX;
+        }
+    }
+    u32 debug_function_count = BUSTER_MIN(function_count, model->function_count);
+    for (u32 function_index = 0; function_index < debug_function_count; function_index += 1)
+    {
+        DebugScopeId root = model->functions[function_index].scope;
+        if (root >= model->scope_count)
+        {
+            continue;
+        }
+        if (!codeview_relocation_capacity_add_scope_variables(&capacity, model, model->scopes + root) ||
+            !codeview_relocation_capacity_add_scope_tree(&capacity, model, root, walk))
+        {
+            return UINT64_MAX;
+        }
+    }
+    return capacity;
+}
+
+'''
+          codeview = codeview.replace(scope_tree_marker, exact_capacity + scope_tree_marker, 1)
+
+          old_capacity_call = "        u64 relocation_capacity = codeview_relocation_capacity(input.model, input.function_count);\n"
+          assert codeview.count(old_capacity_call) == 1
+          new_capacity_call = '''        // Count the same scope tree once per emitted function. Debug models may
+        // intentionally share a root scope, so a single model-wide scan can
+        // under-allocate the relocation array and invalidate the second use.
+        CodeviewScopeWalk scope_walk = {0};
+        if (input.model && input.model->valid && input.model->scope_count && input.function_count)
+        {
+            scope_walk = codeview_scope_walk_make(arena, input.model);
+        }
+        u64 relocation_capacity = codeview_relocation_capacity(input.model, input.function_count, &scope_walk);
+'''
+          codeview = codeview.replace(old_capacity_call, new_capacity_call, 1)
+          codeview_path.write_text(codeview)
+
+          test_path = Path("src/buster/tests/compiler/codegen/codegen_test.c")
+          test = test_path.read_text()
+          old_parser = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
+                {
+                    memcpy(&range_start, bytes.pointer + record + 10, 4);
+                    memcpy(&range_length, bytes.pointer + record + 16, 2);
+                }
+'''
+          new_parser = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 18)
+                {
+                    // offsetInParent is 32 bits; the relocated address starts after it.
+                    memcpy(&range_start, bytes.pointer + record + 12, 4);
+                    memcpy(&range_length, bytes.pointer + record + 18, 2);
+                }
+'''
+          assert test.count(old_parser) == 1
+          test_path.write_text(test.replace(old_parser, new_parser, 1))
+          PY
+
+          git diff --check
+          git diff -- src/buster/lib/compiler/codeview/codeview.c src/buster/tests/compiler/codegen/codegen_test.c
+
+      - name: Commit the repair
+        run: |
+          git rm .github/workflows/ci-repair-pr796.yml
+          git add src/buster/lib/compiler/codeview/codeview.c src/buster/tests/compiler/codegen/codegen_test.c
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(codeview): count shared-scope relocations"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
