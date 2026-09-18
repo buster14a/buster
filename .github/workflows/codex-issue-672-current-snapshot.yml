@@ -1,4 +1,4 @@
-name: Codex issue 672 complete payload extraction
+name: Codex issue 672 guarded publisher
 
 on:
   push:
@@ -6,23 +6,153 @@ on:
       - codex/issue-672-float16-codegen-20260918
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  payload:
+  publish:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check out pinned main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 7afd88a5990e8bd16bca82541890aedebe56a92c
+          fetch-depth: 1
+          path: work
+
+      - name: Check out recovered payload
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ff2131d7a4dd025d45fea7815e5037115aa7f800
           fetch-depth: 1
           persist-credentials: false
-      - name: Archive complete recovered implementation payload
-        run: tar -czf issue-672-complete-payload.tar.gz .github/issue672-payload
-      - name: Upload complete recovered implementation payload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          path: oldpayload
+
+      - name: Check out guarded audit delta
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          name: issue-672-complete-recovered-payload
-          path: issue-672-complete-payload.tar.gz
-          retention-days: 1
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: transport
+
+      - name: Reconstruct, verify, and publish source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          payload_parts=(
+            impl.00
+            impl.01
+            impl.02
+            impl.03a
+            impl.03b
+            impl.04
+            tests.00a
+            tests.00b
+            tests.01a
+            tests.01b
+          )
+          : > recovered.patch
+          for part in "${payload_parts[@]}"; do
+            base64 -d "oldpayload/.github/issue672-payload/${part}" >> recovered.patch
+          done
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          source = Path("recovered.patch").read_text().splitlines(keepends=True)
+          result = []
+          index = 0
+          hunk = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*?)(\n?)$")
+          while index < len(source):
+              match = hunk.match(source[index])
+              if not match:
+                  result.append(source[index])
+                  index += 1
+                  continue
+              next_index = index + 1
+              old_count = 0
+              new_count = 0
+              while next_index < len(source):
+                  line = source[next_index]
+                  if line.startswith("@@ ") or line.startswith("diff --git "):
+                      break
+                  if line.startswith(" "):
+                      old_count += 1
+                      new_count += 1
+                  elif line.startswith("-"):
+                      old_count += 1
+                  elif line.startswith("+"):
+                      new_count += 1
+                  elif line.startswith("\\ No newline at end of file"):
+                      pass
+                  else:
+                      raise SystemExit(f"unexpected patch line in hunk: {line!r}")
+                  next_index += 1
+              old_start, new_start, suffix, newline = match.groups()
+              result.append(f"@@ -{old_start},{old_count} +{new_start},{new_count} @@{suffix}{newline or chr(10)}")
+              result.extend(source[index + 1:next_index])
+              index = next_index
+          Path("recovered-recount.patch").write_text("".join(result))
+          PY
+
+          git -C work apply --check ../recovered-recount.patch
+          git -C work apply ../recovered-recount.patch
+
+          cat transport/.github/issue672-audit/part.* | base64 -d > audit-delta.patch
+          echo "cbaa72f57947a4be6e3bab7f1b58d8b66351a214aebfc5de33ae5b37d1a55334  audit-delta.patch" | sha256sum --check --strict
+          git -C work apply --check ../audit-delta.patch
+          git -C work apply ../audit-delta.patch
+
+          expected=(
+            docs/agents/frontend/wide-floats-assembly.md
+            src/buster/lib/compiler/codegen/codegen.c
+            src/buster/lib/compiler/codegen/machine_aarch64.c
+            src/buster/lib/compiler/codegen/machine_select.c
+            src/buster/lib/compiler/codegen/machine_x86_64.c
+            src/buster/lib/compiler/frontend/c/c_gen.c
+            src/buster/tests/compiler/driver/driver_test.c
+          )
+          mapfile -t actual < <(git -C work diff --name-only | sort)
+          printf '%s\n' "${expected[@]}" | sort > expected-files.txt
+          printf '%s\n' "${actual[@]}" > actual-files.txt
+          diff -u expected-files.txt actual-files.txt
+
+          cat > expected-blobs.txt <<'EOF'
+          191a927d2e6d477dec4e95a4c89cb0c6001be3aa  docs/agents/frontend/wide-floats-assembly.md
+          8e05ea12561a541f6a2c60509c9e5dae59bcd661  src/buster/lib/compiler/codegen/codegen.c
+          e77a2972dd676d633e1a85177954fd8ab8e0ab5e  src/buster/lib/compiler/codegen/machine_aarch64.c
+          a72d11742619f6791fb3f8ab1e39306c669bc259  src/buster/lib/compiler/codegen/machine_select.c
+          c73981df6f37b6035aca5dc269b6307197d54a8a  src/buster/lib/compiler/codegen/machine_x86_64.c
+          0c391cd31daed1c5c36476129b7b3becd5274950  src/buster/lib/compiler/frontend/c/c_gen.c
+          5fae9df041167c9cb22f16ec7164f781f1cdffde  src/buster/tests/compiler/driver/driver_test.c
+          EOF
+          while read -r expected_hash path; do
+            actual_hash=$(git -C work hash-object "$path")
+            test "$actual_hash" = "$expected_hash" || {
+              echo "blob mismatch for $path: expected $expected_hash, got $actual_hash" >&2
+              exit 1
+            }
+          done < expected-blobs.txt
+
+          git -C work diff --check
+          git -C work diff --binary > final.patch
+          echo "185d59458545b0aa8485bdad4de23db12f3e99e9a4fbfd35fff2e86ac21b1389  final.patch" | sha256sum --check --strict
+
+          git -C work config user.name "Issue 672 integration"
+          git -C work config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C work switch -c fix/672-binary16-codegen
+          git -C work add -- "${expected[@]}"
+          git -C work diff --cached --check
+          git -C work commit -m "codegen: implement binary16 arithmetic and ABI" -m "Implement IEEE binary16 scalar ABI positions, arithmetic, conversions, comparisons, truth conversion, negation, and scalarized vector lanes for native x86-64 and AArch64 code generation. Keep bfloat16 and non-native backend boundaries explicit, and add allocator, target, and mixed Clang/Buster interoperability regressions.\n\nCloses #672"
+          git -C work push origin HEAD:refs/heads/fix/672-binary16-codegen
+
+          {
+            echo "## Issue 672 publication"
+            echo
+            echo "- commit: $(git -C work rev-parse HEAD)"
+            echo "- tree: $(git -C work rev-parse HEAD^{tree})"
+            echo "- final patch: 185d59458545b0aa8485bdad4de23db12f3e99e9a4fbfd35fff2e86ac21b1389"
+          } >> "$GITHUB_STEP_SUMMARY"
