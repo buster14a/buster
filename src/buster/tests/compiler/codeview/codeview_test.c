@@ -452,9 +452,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX, .value_offset = 4, .size = 4},
     };
     DebugLocationRange model_locations[] = {
-        {.start = 0, .end = 12, .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX}},
-        {.start = 12, .end = 24, .location = {.kind = DEBUG_LOCATION_PIECEWISE, .pieces = model_pieces, .piece_count = BUSTER_ARRAY_LENGTH(model_pieces)}},
-        {.start = 24, .end = 32, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
+        {.start = 64, .end = 76, .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX}},
+        {.start = 76, .end = 88, .location = {.kind = DEBUG_LOCATION_PIECEWISE, .pieces = model_pieces, .piece_count = BUSTER_ARRAY_LENGTH(model_pieces)}},
+        {.start = 88, .end = 96, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
     };
     DebugVariableId model_variable_ids[] = {0};
     DebugVariable model_variables[] = {
@@ -472,22 +472,22 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         {
             .parent = DEBUG_SCOPE_INVALID,
             .kind = DEBUG_SCOPE_FUNCTION,
-            .start = 0,
-            .end = 32,
+            .start = 64,
+            .end = 96,
         },
         {
             .parent = 0,
             .kind = DEBUG_SCOPE_LEXICAL,
-            .start = 4,
-            .end = 28,
+            .start = 68,
+            .end = 92,
         },
         {
             .parent = 1,
             .kind = DEBUG_SCOPE_LEXICAL,
-            .start = 8,
-            .end = 24,
+            .start = 72,
+            .end = 88,
             // Promotion-like location transitions sit inside both lexical
-            // scopes, exercising zero placeholders around every defrange record.
+            // scopes, exercising relocations around every defrange record.
             .variables = model_variable_ids,
             .variable_count = BUSTER_ARRAY_LENGTH(model_variable_ids),
         },
@@ -499,6 +499,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
             .symbol = {.value = 0},
             .type = 1,
             .scope = 0,
+            .code_offset = 64,
             .code_size = 32,
         },
     };
@@ -506,8 +507,8 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         {
             .function = model_functions,
             .call_site = {.source = 0, .line = 8, .column = 9},
-            .start = 4,
-            .end = 20,
+            .start = 68,
+            .end = 84,
             .has_ranges = true,
         },
     };
@@ -528,12 +529,12 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     };
     DwarfFunction model_function = {
         .name = S8("model_function"),
-        .code_offset = 0,
+        .code_offset = 64,
         .code_size = 32,
         .file = 0,
         .line = 1,
     };
-    DwarfLineEntry model_line = {.code_offset = 0, .file = 0, .line = 1, .column = 1};
+    DwarfLineEntry model_line = {.code_offset = 64, .file = 0, .line = 1, .column = 1};
     CodeviewResult model_built = codeview_build(arguments->arena, (CodeviewInput){
                                                                      .model = &model,
                                                                      .producer = S8("buster"),
@@ -546,6 +547,20 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                                                                      .machine = CODEVIEW_MACHINE_X64,
                                                                  });
     BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);
+    BUSTER_TEST(arguments, model_built.relocation_count == 16);
+    for (u32 relocation_index = 0; relocation_index + 1 < model_built.relocation_count; relocation_index += 2)
+    {
+        CodeviewRelocation address = model_built.relocations[relocation_index];
+        CodeviewRelocation section = model_built.relocations[relocation_index + 1];
+        BUSTER_TEST(arguments, address.kind == CODEVIEW_RELOCATION_SECREL32 && section.kind == CODEVIEW_RELOCATION_SECTION16);
+        BUSTER_TEST(arguments, address.function == 0 && section.function == 0 && section.offset == address.offset + 4);
+        BUSTER_TEST(arguments, address.offset + 6 <= model_built.symbols.length);
+        if (address.offset + 6 <= model_built.symbols.length)
+        {
+            BUSTER_TEST(arguments, codeview_test_u32(model_built.symbols.pointer + address.offset) <= 24);
+            BUSTER_TEST(arguments, codeview_test_u16(model_built.symbols.pointer + section.offset) == 0);
+        }
+    }
     UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 3, 1, 2, 1);
     result.test_count += model_scope_links.test_count;
     result.succeeded_test_count += model_scope_links.succeeded_test_count;
