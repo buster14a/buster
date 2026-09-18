@@ -85,6 +85,8 @@ jobs:
           $OriginalTemp = $env:RUNNER_TEMP
           $OriginalWorkspace = $env:GITHUB_WORKSPACE
           $WorkflowSha = $env:GITHUB_SHA
+          # VS environment import can truncate multiline environment values.
+          $BenchmarkStepsJson = $env:BENCHMARK_STEPS | ConvertFrom-Json | ConvertTo-Json -Depth 10 -Compress
           $PairRoot = Join-Path $OriginalTemp 'issue-708'
           $Trial = [int]$env:BENCHMARK_TRIAL
           $Arms = if ($Trial % 2) { @('baseline', 'candidate') } else { @('candidate', 'baseline') }
@@ -149,7 +151,7 @@ jobs:
                 $Elapsed = [Math]::Round($Stopwatch.Elapsed.TotalSeconds, 3)
               }
               try {
-                $Steps = $env:BENCHMARK_STEPS | ConvertFrom-Json
+                $Steps = $BenchmarkStepsJson | ConvertFrom-Json
                 $Outcome = if ($MatrixExit -eq 0) { 'success' } else { 'failure' }
                 $Steps | Add-Member -NotePropertyName combinations_windows -NotePropertyValue @{ outcome=$Outcome; conclusion=$Outcome }
                 $env:BUSTER_CI_STEPS = $Steps | ConvertTo-Json -Depth 10 -Compress
