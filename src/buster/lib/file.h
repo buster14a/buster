@@ -11,10 +11,22 @@ struct FileReadOptions
     u32 map_required; // file_map_read returns an empty result instead of falling back to file_read.
 };
 
+// Identity captured from the same open descriptor that supplied `bytes`.
+// POSIX uses device/inode; Windows uses volume serial/file index. `valid` is
+// false for non-filesystem namespaces such as Android APK assets.
+typedef struct FileIdentity FileIdentity;
+struct FileIdentity
+{
+    u64 device;
+    u64 index;
+    bool valid;
+};
+
 typedef struct FileMapRead FileMapRead;
 struct FileMapRead
 {
     ByteSlice bytes;
+    FileIdentity identity;
     void* mapped_pointer;
     u64 mapped_size;
     void* mapped_handle;
@@ -24,6 +36,7 @@ typedef struct FileReadResult FileReadResult;
 struct FileReadResult
 {
     ByteSlice bytes;
+    FileIdentity identity;
     OsFileReadStatus status;
     OsError error;
 };
