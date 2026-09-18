@@ -11,20 +11,24 @@ permissions:
 jobs:
   release-validation:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Check out branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: codex/issue-114
           fetch-depth: 0
-      - name: Install generator dependency
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tcc
       - name: Validate repository patch
         run: git diff --check origin/main...HEAD
-      - name: Configure
-        run: ./build.sh generate
+      - name: Bootstrap hosted build driver
+        run: |
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+      - name: Configure Release tree
+        run: |
+          ./build/build generate
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
       - name: Release test suite
-        run: ./build.sh build --config Release -t test_all
+        run: ./build/build build --config Release -t test_all
+      - name: Release self-host fixed point
+        run: ./build/build test_self_host --config Release
