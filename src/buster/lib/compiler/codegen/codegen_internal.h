@@ -1,6 +1,10 @@
 #pragma once
 
+#include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+
+typedef struct MachineFunction MachineFunction;
+typedef struct MachineStackPlacement MachineStackPlacement;
 
 typedef struct CodegenBuffer CodegenBuffer;
 struct CodegenBuffer
@@ -91,6 +95,21 @@ struct X64Builder
 
 typedef IrAbiPart CodegenCanonicalAbiPart;
 typedef IrAbiValue CodegenCanonicalAbiValue;
+
+// Shared inline-assembly planning services. Machine selection uses these to
+// close a template over explicit physical registers before the shared
+// assembler encodes it; none of them emit canonical instructions.
+BUSTER_F_DECL bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, IrFunction* function,
+                                                            IrInstruction* instruction, IrInstructionExtra extra,
+                                                            X64Register* registers, u32* vector_registers,
+                                                            AssemblySyntax syntax, String8* source_out, String8* reason_out);
+BUSTER_F_DECL bool codegen_inline_assembly_clobber_register(String8 clobber, X64Register* register_out);
+BUSTER_F_DECL bool codegen_inline_assembly_clobber_vector_register(String8 clobber, u32* register_out);
+BUSTER_F_DECL bool codegen_inline_assembly_constraint_register(u64 constraint, X64Register* register_out);
+BUSTER_F_DECL IrSymbolId codegen_global_assembly_symbol(IrProgram* program, String8 name, Target target, IrSymbolKind kind);
+BUSTER_F_DECL bool codegen_assembly_durable_name(String8 durable, String8* name);
+BUSTER_F_DECL bool codegen_global_assembly_apply_symbol_directive(IrProgram* program, Target target, String8 line,
+                                                                  String8 durable_names, bool* recognized);
 
 // What the stack pointer is worth on entry to a body and at every call, and so
 // the alignment an outgoing-argument area gets for free.
@@ -203,4 +222,24 @@ BUSTER_F_DECL void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target,
 BUSTER_F_DECL void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_F_DECL void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value);
+BUSTER_F_DECL bool codegen_test_record_machine_locations(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
+                                                          MachineFunction const* function, MachineStackPlacement const* placement,
+                                                          u32 const* row_offsets, u32 function_start, u32 function_end, u32 frame_base_offset,
+                                                          Target target);
+// Recording into arena-owned seed storage, which grows with what it emits;
+// `capacity` carries the starting capacity in and the final one out.
+BUSTER_F_DECL bool codegen_test_record_machine_locations_growing(Arena* arena, CodegenModule* result, u32* capacity, IrFunction* ir_function,
+                                                                  MachineFunction const* function, MachineStackPlacement const* placement,
+                                                                  u32 const* row_offsets, u32 function_start, u32 function_end,
+                                                                  u32 frame_base_offset, Target target);
+// The widest change-point timeline the event-driven recording builds for a
+// function, so a test can assert the timelines stay sparse.
+BUSTER_F_DECL u32 codegen_test_machine_debug_widest_timeline(Arena* arena, MachineFunction const* function,
+                                                              MachineStackPlacement const* placement, u32 frame_base_offset, Target target);
+// Whole-function reference recording, for differential comparison against the
+// event-driven routine the compiler actually runs.
+BUSTER_F_DECL bool codegen_test_record_machine_locations_dense(Arena* arena, CodegenModule* result, u32 capacity, IrFunction* ir_function,
+                                                                MachineFunction const* function, MachineStackPlacement const* placement,
+                                                                u32 const* row_offsets, u32 function_start, u32 function_end,
+                                                                u32 frame_base_offset, Target target);
 #endif

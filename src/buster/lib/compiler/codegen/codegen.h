@@ -212,6 +212,7 @@ typedef enum CodegenModuleRelocationKind
     // the field explicitly.
     CODEGEN_MODULE_RELOCATION_X86_64_PC32,
     CODEGEN_MODULE_RELOCATION_AARCH64_CALL26,
+    CODEGEN_MODULE_RELOCATION_AARCH64_BRANCH26,
     CODEGEN_MODULE_RELOCATION_ABSOLUTE32,
     CODEGEN_MODULE_RELOCATION_ABSOLUTE64,
     CODEGEN_MODULE_RELOCATION_X86_64_TPOFF32,
@@ -254,43 +255,30 @@ typedef enum CodegenModuleRelocationKind
 
 struct CodegenModuleRelocation
 {
-    // The wide member leads so the record packs to 32 bytes; `source` is
-    // stored as u8 for the same reason (the enum has four values).
+    // The wide member leads and the three byte-sized fields fill the tail, so
+    // the authoritative relocation record packs to 24 bytes.
     s64 addend;
     IrSymbolId symbol;
     u32 offset;
     IrBlockId label_block;
     u8 source;
-    bool aarch64;
-    bool absolute;
+    // Static-label addressing is independent payload. Architecture, absolute
+    // width and every TLS property are derived from kind.
     bool label_address;
-    bool is_thread_local;
-    bool thread_local_low;
-    bool thread_local_index;
-    // Legacy compatibility bits.  `kind` is authoritative; these are kept
-    // only so old internal callers retain their ABI and so the independent
-    // TLS-index/low and absolute-width semantics remain inspectable while
-    // migration is in progress.  Producers must keep them consistent with
-    // kind; codegen_module_relocation_valid() rejects mismatches.
     u8 kind;
 };
 
 BUSTER_CT_CHECK((u32)CODEGEN_MODULE_RELOCATION_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK((u32)CODEGEN_MODULE_RELOCATION_SOURCE_COUNT <= UINT8_MAX);
 BUSTER_CT_CHECK(BUSTER_ALIGN_OF(CodegenModuleRelocation) == 8);
-BUSTER_CT_CHECK(sizeof(CodegenModuleRelocation) == 32);
+BUSTER_CT_CHECK(sizeof(CodegenModuleRelocation) == 24);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, addend) == 0);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, symbol) == 8);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, offset) == 12);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_block) == 16);
 BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, source) == 20);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, aarch64) == 21);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, absolute) == 22);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 23);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, is_thread_local) == 24);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_low) == 25);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, thread_local_index) == 26);
-BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 27);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, label_address) == 21);
+BUSTER_CT_CHECK(BUSTER_OFFSET_OF(CodegenModuleRelocation, kind) == 22);
 
 typedef struct CodegenModuleDataRelocation CodegenModuleDataRelocation;
 struct CodegenModuleDataRelocation
@@ -478,6 +466,11 @@ struct CodegenModule
     u8 reserved_failure[3];
     u32 entry_count;
     u32 function_count;
+    // Trailing function descriptors synthesized for labels defined by
+    // module-level assembly. Their source supplies no compiler unwind
+    // directives, so the ARM64 COFF writer retains them for symbol sizes but
+    // does not manufacture platform unwind records for them.
+    u32 assembly_function_count;
     u32 global_count;
     u32 relocation_count;
     u32 data_relocation_count;
@@ -556,11 +549,20 @@ struct CodegenModuleOptions
 BUSTER_F_DECL void codegen_prewarm(void);
 BUSTER_F_DECL void codegen_prewarm_for_target(Target target);
 BUSTER_F_DECL bool codegen_module_relocation_kind_valid(u8 kind);
+BUSTER_F_DECL bool codegen_module_relocation_kind_is_aarch64(u8 kind);
+BUSTER_F_DECL bool codegen_module_relocation_kind_is_absolute(u8 kind);
+BUSTER_F_DECL bool codegen_module_relocation_kind_is_thread_local(u8 kind);
+BUSTER_F_DECL bool codegen_module_relocation_kind_is_thread_local_low(u8 kind);
+BUSTER_F_DECL bool codegen_module_relocation_kind_is_thread_local_index(u8 kind);
 BUSTER_F_DECL bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation);
 // The canonical named-parameter classification the a64 variadic model is
 // defined over; the AArch64 machine selector's VA_START mirrors the
 // canonical emitter's simulation through this exact walk.
 BUSTER_F_DECL bool codegen_canonical_integer_aggregate_parts(IrProgram* program, IrTypeId type_id, u32* part_count);
+// Target-dependent wide-vector transport is shared by the canonical and MIR
+// x86-64 emitters so their register pieces cannot drift.
+BUSTER_F_DECL u32 codegen_canonical_x64_vector_part_registers(Target const* target, u32 size, u32* register_size);
+BUSTER_F_DECL u32 codegen_canonical_x64_windows_vector_argument_pieces(Target const* target, IrType* type, u32* piece_size);
 // The System V argument-area slot alignment the canonical layout gives one
 // stack argument; the x86-64 machine placement rounds its stack cursor by
 // this exact clamp so both emitters count the same padding eightbytes.

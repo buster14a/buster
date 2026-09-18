@@ -130,7 +130,7 @@ typedef struct CIrDecodedString CIrDecodedString;
 #define C_DECLARATION_KEYWORD_SLOT_COUNT 256
 
 /* Source/preprocessor tables consumed by the parser's keyword classifier. */
-BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[73];
+BUSTER_C_EXTERN String8 const c_declaration_keyword_spellings[75];
 BUSTER_C_EXTERN u8 c_declaration_keyword_slots[C_DECLARATION_KEYWORD_SLOT_COUNT];
 BUSTER_C_EXTERN bool c_declaration_keyword_slots_built;
 BUSTER_C_EXTERN void c_declaration_keyword_slots_build(void);
@@ -147,6 +147,14 @@ BUSTER_C_EXTERN bool c_parse_auto_type_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect);
 BUSTER_C_EXTERN bool c_parse_alignof_word(String8 spelling);
 BUSTER_C_EXTERN bool c_parse_alignas_word(String8 spelling);
+// The GNU layout attributes the frontend implements, as the parser spells
+// them. `__has_attribute` answers from these same predicates so the query
+// cannot claim an attribute layout does not implement, or deny one it does
+// (#639): packed and aligned reach layout through c_parse_layout_attributes,
+// and vector_size reaches the vector types through C_TOKEN_CLASS_VECTOR_SIZE.
+BUSTER_C_EXTERN bool c_parse_packed_word(String8 spelling);
+BUSTER_C_EXTERN bool c_parse_aligned_attribute_word(String8 spelling);
+BUSTER_C_EXTERN bool c_parse_vector_size_word(String8 spelling);
 // Whether an alignment record was spelled `_Alignas` rather than as a GNU
 // `aligned` attribute; see the definition for why the answer is read back out
 // of the token stream instead of stored in the record.
@@ -182,7 +190,8 @@ BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, C
 BUSTER_C_EXTERN bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                  u32 start, u32 end, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
-BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start);
+BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start,
+                                                   u32* invalid_specifier);
 BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_EXTERN u32 c_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_C_EXTERN bool c_type_parse_buffer_size_add(u64* size, u64 count, u64 element_size, u64 alignment);
@@ -250,6 +259,20 @@ BUSTER_C_EXTERN u32 c_parse_scope_distance(CParseResult* result, CScopeId candid
 BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken token, String8 spelling);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
+
+// One language constraint, not a claim that an expression or translation unit
+// has passed all semantic checks. These helpers use C bindings/types only;
+// neither a canonical program nor a lowered function is an input.
+typedef struct CCallArityDiagnostic CCallArityDiagnostic;
+struct CCallArityDiagnostic
+{
+    String8 message;
+    u32 token_index;
+};
+BUSTER_C_EXTERN bool c_semantic_call_accepts_arity(u32 parameter_count, bool is_variadic, bool is_unprototyped, u32 argument_count);
+BUSTER_C_EXTERN String8 c_semantic_call_arity_message(Arena* arena, String8 name, u32 parameter_count, bool is_variadic, u32 argument_count);
+BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
+                                                                      CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
 // `_Atomic T`'s size and alignment, given T's own; both layout engines ask it
 // (see c_atomic_promoted_layout in c_parse.c).
@@ -443,6 +466,27 @@ typedef enum CSymbolWellKnown
 // branch.
 #define C_SYMBOL_WELL_KNOWN_BIT(name) (1ull << (u64)(C_SYMBOL_WELL_KNOWN_##name))
 BUSTER_CT_CHECK(C_SYMBOL_WELL_KNOWN_COUNT <= 64);
+
+// The binding walk and __has_attribute share these spelling sets. Keep the
+// interned-token fast path: querying support must not add spelling comparisons
+// to every declaration's binding scan (#666).
+#define C_ATTRIBUTE_WORDS_WEAK (C_SYMBOL_WELL_KNOWN_BIT(WEAK) | C_SYMBOL_WELL_KNOWN_BIT(WEAK_GNU))
+#define C_ATTRIBUTE_WORDS_ALIAS (C_SYMBOL_WELL_KNOWN_BIT(ALIAS) | C_SYMBOL_WELL_KNOWN_BIT(ALIAS_GNU))
+#define C_ATTRIBUTE_WORDS_CONSTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(CONSTRUCTOR_GNU))
+#define C_ATTRIBUTE_WORDS_DESTRUCTOR (C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR) | C_SYMBOL_WELL_KNOWN_BIT(DESTRUCTOR_GNU))
+
+// _Noreturn is a declaration specifier, not a GNU attribute query spelling.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_noreturn_word(String8 spelling)
+{
+    return string_equal(spelling, S8("noreturn")) || string_equal(spelling, S8("__noreturn__"));
+}
+
+// Only the native object pipeline carries symbol aliases and initializer
+// arrays. Core Wasm and eBPF have neither lifecycle registration mechanism.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_attribute_native_binding_target(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64;
+}
 
 // Index 0 is the empty spelling that C_SYMBOL_WELL_KNOWN_NONE never matches.
 BUSTER_C_EXTERN String8 const c_symbol_well_known_spellings[C_SYMBOL_WELL_KNOWN_COUNT];

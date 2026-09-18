@@ -2,6 +2,7 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/os.h>
+#include <buster/lib/file.h>
 
 #if defined(_WIN32)
 #define BUSTER_UNICODE_OS_TO_UTF8_TEST(args, arena_value, utf8_value, utf16_value)                                                                             \
@@ -67,6 +68,26 @@ BUSTER_GLOBAL_LOCAL s128 string_test_s128(u64 low, u64 high)
         BUSTER_TEST_RAW((args), unicode_utf8.pointer[unicode_utf8.length] == 0, S8("string16_to_string8_arena did not write a terminator"));                   \
     } while (0)
 
+// Malformed UTF-8 is replaced, so it cannot round trip. Specify the expected
+// UTF-16 code units and the expected replaced UTF-8 bytes independently, and
+// check the length, the terminator, the code-unit bound the allocation rests
+// on, and the reclaimed arena tail the Windows builders append after.
+#define BUSTER_UTF8_TO_UTF16_TEST(args, arena_value, utf8_value, utf16_value, replaced_utf8_value)                                                             \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        Arena* unicode_arena = (arena_value);                                                                                                                  \
+        String8 unicode_utf8 = (utf8_value);                                                                                                                   \
+        String16 unicode_expected_utf16 = (utf16_value);                                                                                                       \
+        String16 unicode_utf16 = string16_from_string8(unicode_arena, unicode_utf8, true);                                                                     \
+        BUSTER_TEST_RAW((args), unicode_utf16.length == unicode_expected_utf16.length, S8("string16_from_string8 code unit count mismatch"));                  \
+        BUSTER_TEST_RAW((args), string16_equal(unicode_utf16, unicode_expected_utf16), S8("string16_from_string8 replacement mismatch"));                      \
+        BUSTER_TEST_RAW((args), unicode_utf16.pointer[unicode_utf16.length] == 0, S8("string16_from_string8 did not write a terminator"));                     \
+        BUSTER_TEST_RAW((args), unicode_utf16.length <= unicode_utf8.length, S8("string16_from_string8 exceeded its code unit bound"));                        \
+        BUSTER_TEST_RAW((args), unicode_utf16.pointer + unicode_utf16.length + 1 == arena_get_current_pointer(unicode_arena, char16),                          \
+                        S8("string16_from_string8 left an unreclaimed arena tail"));                                                                           \
+        BUSTER_STRING_TEST((args), string8_from_string16(unicode_arena, unicode_utf16, true), (replaced_utf8_value));                                          \
+    } while (0)
+
 BUSTER_GLOBAL_LOCAL IntegerParsingU64 string_test_parse_u64(String8 string, u32 base)
 {
     IntegerParsingU64 result;
@@ -94,6 +115,40 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     Arena* arena = arguments->arena;
+
+    {
+        SliceString8 empty = {0};
+        PosixStringList empty_list = posix_string_list_from_slice_string(arena, empty);
+        PosixStringList empty_environment = posix_environment_from_keys_and_values(arena, empty, empty);
+        BUSTER_TEST(arguments, empty_list[0] == 0);
+        BUSTER_TEST(arguments, empty_environment[0] == 0);
+
+        u64 large_count = 1024;
+        String8* parts = arena_allocate(arena, String8, large_count);
+        String8* keys = arena_allocate(arena, String8, large_count);
+        String8* values = arena_allocate(arena, String8, large_count);
+        for (u64 index = 0; index < large_count; index += 1)
+        {
+            parts[index] = S8("entry");
+            keys[index] = S8("KEY");
+            values[index] = S8("VALUE");
+        }
+
+        SliceString8 part_slice = {.pointer = parts, .length = large_count};
+        SliceString8 key_slice = {.pointer = keys, .length = large_count};
+        SliceString8 value_slice = {.pointer = values, .length = large_count};
+        PosixStringList large_list = posix_string_list_from_slice_string(arena, part_slice);
+        PosixStringList large_environment = posix_environment_from_keys_and_values(arena, key_slice, value_slice);
+        bool list_matches = large_list[large_count] == 0;
+        bool environment_matches = large_environment[large_count] == 0;
+        for (u64 index = 0; index < large_count; index += 1)
+        {
+            list_matches &= large_list[index] == parts[index].pointer;
+            environment_matches &= string_equal(string_from_pointer(large_environment[index]), S8("KEY=VALUE"));
+        }
+        BUSTER_TEST(arguments, list_matches);
+        BUSTER_TEST(arguments, environment_matches);
+    }
 
     {
         String8 empty = {0};
@@ -153,6 +208,69 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
         {
             StringIntegerParserCase parser = parsers[i];
+            // Independent explicit ranges cover every byte, including NUL,
+            // high-bit bytes and the punctuation gap between '9' and 'A'.
+            for (u32 byte = 0; byte <= UINT8_MAX; byte += 1)
+            {
+                u32 digit = parser.base;
+                if (byte >= '0' && byte <= '9')
+                {
+                    digit = byte - '0';
+                }
+                else if (parser.base == 16 && byte >= 'A' && byte <= 'F')
+                {
+                    digit = byte - 'A' + 10;
+                }
+                else if (parser.base == 16 && byte >= 'a' && byte <= 'f')
+                {
+                    digit = byte - 'a' + 10;
+                }
+                bool valid = digit < parser.base;
+                IntegerParsingStatus status = valid ? INTEGER_PARSING_SUCCESS : INTEGER_PARSING_INVALID;
+                u64 value = valid ? digit : 0;
+                u64 length = valid ? 1 : 0;
+                char8 code_unit = (char8)byte;
+                IntegerParsingU64 parsed = string_test_parse_u64((String8){.pointer = &code_unit, .length = 1}, parser.base);
+                BUSTER_TEST(arguments, parsed.status == status && parsed.value == value && parsed.length == length);
+                if (committed)
+                {
+                    pages[page_size - 1] = code_unit;
+                    parsed = string_test_parse_u64((String8){.pointer = pages + page_size - 1, .length = 1}, parser.base);
+                    BUSTER_TEST(arguments, parsed.status == status && parsed.value == value && parsed.length == length);
+                }
+                // A trailing digit must not resume parsing after an invalid byte.
+                char8 prefixed[] = {'1', code_unit, '1'};
+                u64 prefix_value = valid ? (u64)parser.base * parser.base + digit * parser.base + 1 : 1;
+                u64 prefix_length = valid ? BUSTER_ARRAY_LENGTH(prefixed) : 1;
+                parsed = string_test_parse_u64((String8){.pointer = prefixed, .length = BUSTER_ARRAY_LENGTH(prefixed)}, parser.base);
+                BUSTER_TEST(arguments, parsed.status == INTEGER_PARSING_SUCCESS && parsed.value == prefix_value && parsed.length == prefix_length);
+            }
+            String8 empty_inputs[] = {S8(""), {0}, {.length = UINT64_MAX}};
+            for (u64 j = 0; j < BUSTER_ARRAY_LENGTH(empty_inputs); j += 1)
+            {
+                IntegerParsingU64 parsed = string_test_parse_u64(empty_inputs[j], parser.base);
+                BUSTER_TEST(arguments, parsed.status == INTEGER_PARSING_INVALID && parsed.value == 0 && parsed.length == 0);
+            }
+            // Neither the largest value nor an overflow may consume punctuation.
+            // The longest prefix has 65 binary digits, then a separator and digit.
+            String8 boundary_prefixes[] = {parser.maximum, parser.overflow};
+            for (u64 j = 0; j < BUSTER_ARRAY_LENGTH(boundary_prefixes); j += 1)
+            {
+                char8 with_tail[67];
+                String8 prefix = boundary_prefixes[j];
+                if (BUSTER_REQUIRE(arguments, prefix.length <= BUSTER_ARRAY_LENGTH(with_tail) - 2))
+                {
+                    memcpy(with_tail, prefix.pointer, prefix.length);
+                    with_tail[prefix.length + 1] = '1';
+                    IntegerParsingStatus status = j == 0 ? INTEGER_PARSING_SUCCESS : INTEGER_PARSING_OVERFLOW;
+                    for (u32 punctuation = ':'; punctuation <= '?'; punctuation += 1)
+                    {
+                        with_tail[prefix.length] = (char8)punctuation;
+                        IntegerParsingU64 parsed = string_test_parse_u64((String8){.pointer = with_tail, .length = prefix.length + 2}, parser.base);
+                        BUSTER_TEST(arguments, parsed.status == status && parsed.value == UINT64_MAX && parsed.length == prefix.length);
+                    }
+                }
+            }
             String8 inputs[] = {
                 (String8){0}, (String8){.length = 1}, parser.invalid, S8("+1"), S8("-1"),
                 S8("0"), S8("000000000000000000000000000000000000000000000000000000000000000000001"),
@@ -180,7 +298,7 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             if (committed)
             {
                 IntegerParsingU64 empty_guard = string_test_parse_u64((String8){.pointer = pages + page_size}, parser.base);
-                BUSTER_TEST(arguments, empty_guard.status == INTEGER_PARSING_INVALID && empty_guard.length == 0);
+                BUSTER_TEST(arguments, empty_guard.status == INTEGER_PARSING_INVALID && empty_guard.value == 0 && empty_guard.length == 0);
                 // Overflow still consumes the complete digit prefix and stops
                 // before a tail instead of returning a plausible wrapped value.
                 memset(pages + page_size - 100, '1', 99);
@@ -287,6 +405,17 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             string_format(arena, S8("{u8:not_a_modifier}"), (u8)1);
             os_exit(0);
         }
+    }
+
+    // #106: the parent passes a malformed UTF-8 environment value and reads
+    // back what survived the Windows UTF-16 environment block in both
+    // directions. Echo before any test below spawns a child, so a child never
+    // reaches the spawning code itself.
+    String8 boundary_environment_value = os_get_environment_variable(S8("BUSTER_STRING_UNICODE_BOUNDARY"));
+    if (boundary_environment_value.length)
+    {
+        string_print(S8("BUSTER_UNICODE_BOUNDARY_VALUE[{S8}]\n"), boundary_environment_value);
+        os_exit(0);
     }
 
     // string8_format
@@ -451,6 +580,295 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
             char8 utf8_bytes[] = {'A', (char8)0xEF, (char8)0xBF, (char8)0xBD, 'B', 0};
             BUSTER_UTF16_TO_UTF8_TEST(arguments, arena, string16_from_pointer_length(utf16_bytes, 3), string_from_pointer_length(utf8_bytes, 5));
         }
+        {
+            // #106: the Windows UTF-16 boundary replaces malformed UTF-8 with
+            // U+FFFD instead of reinterpreting the byte as the scalar with
+            // that value. Every case below states the expected code units and
+            // the expected replaced bytes independently of the conversion.
+            {
+                // Empty input allocates nothing but its terminator.
+                char16 utf16_bytes[] = {0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, S8(""), string16_from_pointer_length(utf16_bytes, 0), S8(""));
+            }
+            {
+                // ASCII is untouched.
+                char16 utf16_bytes[] = {'A', 'Z', '0', '9', 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, S8("AZ09"), string16_from_pointer_length(utf16_bytes, 4), S8("AZ09"));
+            }
+            {
+                // The shortest form at each sequence length, and the last
+                // scalar below the surrogate block and the first above it.
+                char8 utf8_bytes[] = {(char8)0xC2, (char8)0x80, (char8)0xE0, (char8)0xA0, (char8)0x80,
+                                      (char8)0xF0, (char8)0x90, (char8)0x80, (char8)0x80, 0};
+                char16 utf16_bytes[] = {0x0080, 0x0800, 0xD800, 0xDC00, 0};
+                BUSTER_UNICODE_ROUND_TRIP_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 9), string16_from_pointer_length(utf16_bytes, 4));
+            }
+            {
+                char8 utf8_bytes[] = {(char8)0xED, (char8)0x9F, (char8)0xBF, (char8)0xEE, (char8)0x80, (char8)0x80, 0};
+                char16 utf16_bytes[] = {0xD7FF, 0xE000, 0};
+                BUSTER_UNICODE_ROUND_TRIP_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 6), string16_from_pointer_length(utf16_bytes, 2));
+            }
+            {
+                // Invalid leading bytes: 0xFF and 0xFE begin no sequence.
+                char8 utf8_bytes[] = {'a', (char8)0xFF, (char8)0xFE, 'b', 0};
+                char16 utf16_bytes[] = {'a', 0xFFFD, 0xFFFD, 'b', 0};
+                char8 replaced_bytes[] = {'a', (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 'b', 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 4), string16_from_pointer_length(utf16_bytes, 4),
+                                          string_from_pointer_length(replaced_bytes, 8));
+            }
+            {
+                // Continuation bytes with no leader in front of them.
+                char8 utf8_bytes[] = {(char8)0x80, (char8)0xBF, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 2), string16_from_pointer_length(utf16_bytes, 2),
+                                          string_from_pointer_length(replaced_bytes, 6));
+            }
+            {
+                // Overlong two-byte forms for U+0000 and U+007F.
+                char8 utf8_bytes[] = {(char8)0xC0, (char8)0x80, (char8)0xC1, (char8)0xBF, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD,
+                                          (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 4), string16_from_pointer_length(utf16_bytes, 4),
+                                          string_from_pointer_length(replaced_bytes, 12));
+            }
+            {
+                // An overlong three-byte form for U+002F, the encoding a path
+                // separator would hide behind.
+                char8 utf8_bytes[] = {(char8)0xE0, (char8)0x80, (char8)0xAF, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 3), string16_from_pointer_length(utf16_bytes, 3),
+                                          string_from_pointer_length(replaced_bytes, 9));
+            }
+            {
+                // An overlong four-byte form for U+0000.
+                char8 utf8_bytes[] = {(char8)0xF0, (char8)0x80, (char8)0x80, (char8)0x80, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD,
+                                          (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 4), string16_from_pointer_length(utf16_bytes, 4),
+                                          string_from_pointer_length(replaced_bytes, 12));
+            }
+            {
+                // A two-byte sequence truncated by the end of the input.
+                char8 utf8_bytes[] = {'x', (char8)0xC3, 0};
+                char16 utf16_bytes[] = {'x', 0xFFFD, 0};
+                char8 replaced_bytes[] = {'x', (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 2), string16_from_pointer_length(utf16_bytes, 2),
+                                          string_from_pointer_length(replaced_bytes, 4));
+            }
+            {
+                // A three-byte sequence truncated by the end of the input.
+                char8 utf8_bytes[] = {(char8)0xE2, (char8)0x82, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 2), string16_from_pointer_length(utf16_bytes, 2),
+                                          string_from_pointer_length(replaced_bytes, 6));
+            }
+            {
+                // A four-byte sequence truncated by the end of the input.
+                char8 utf8_bytes[] = {(char8)0xF0, (char8)0x9F, (char8)0x98, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 3), string16_from_pointer_length(utf16_bytes, 3),
+                                          string_from_pointer_length(replaced_bytes, 9));
+            }
+            {
+                // A bad continuation inside a three-byte sequence. Only the
+                // leader is replaced; the ASCII byte that interrupted it keeps
+                // its own meaning.
+                char8 utf8_bytes[] = {(char8)0xE2, '(', (char8)0xA1, 0};
+                char16 utf16_bytes[] = {0xFFFD, '(', 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, '(', (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 3), string16_from_pointer_length(utf16_bytes, 3),
+                                          string_from_pointer_length(replaced_bytes, 7));
+            }
+            {
+                // A bad continuation inside a four-byte sequence.
+                char8 utf8_bytes[] = {(char8)0xF0, (char8)0x9F, 'A', (char8)0x80, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 'A', 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD,
+                                          'A',        (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 4), string16_from_pointer_length(utf16_bytes, 4),
+                                          string_from_pointer_length(replaced_bytes, 10));
+            }
+            {
+                // UTF-16 surrogates encoded as UTF-8: U+D800 and U+DFFF.
+                char8 utf8_bytes[] = {(char8)0xED, (char8)0xA0, (char8)0x80, (char8)0xED, (char8)0xBF, (char8)0xBF, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD,
+                                          (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 6), string16_from_pointer_length(utf16_bytes, 6),
+                                          string_from_pointer_length(replaced_bytes, 18));
+            }
+            {
+                // U+110000, one past the last scalar, and a leader that can
+                // only ever encode an out-of-range scalar.
+                char8 utf8_bytes[] = {(char8)0xF4, (char8)0x90, (char8)0x80, (char8)0x80, (char8)0xF5, (char8)0x80, (char8)0x80, (char8)0x80, 0};
+                char16 utf16_bytes[] = {0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0};
+                char8 replaced_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF,
+                                          (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF,
+                                          (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 8), string16_from_pointer_length(utf16_bytes, 8),
+                                          string_from_pointer_length(replaced_bytes, 24));
+            }
+            {
+                // Valid ASCII, BMP and supplementary text either side of the
+                // replaced bytes keeps its own encoding.
+                char8 utf8_bytes[] = {'A',         (char8)0xC3, (char8)0xA9, (char8)0xFF, (char8)0xF0,
+                                      (char8)0x9F, (char8)0x98, (char8)0x80, (char8)0x80, 0};
+                char16 utf16_bytes[] = {'A', 0x00E9, 0xFFFD, 0xD83D, 0xDE00, 0xFFFD, 0};
+                char8 replaced_bytes[] = {'A',         (char8)0xC3, (char8)0xA9, (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xF0,
+                                          (char8)0x9F, (char8)0x98, (char8)0x80, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF8_TO_UTF16_TEST(arguments, arena, string_from_pointer_length(utf8_bytes, 9), string16_from_pointer_length(utf16_bytes, 6),
+                                          string_from_pointer_length(replaced_bytes, 13));
+            }
+        }
+        {
+            // Isolated UTF-16 surrogates are replaced one code unit at a time,
+            // including a high surrogate standing at the end of the input and
+            // one standing directly in front of a well-formed pair.
+            {
+                char16 utf16_bytes[] = {'A', 0xD83D, 0};
+                char8 utf8_bytes[] = {'A', (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF16_TO_UTF8_TEST(arguments, arena, string16_from_pointer_length(utf16_bytes, 2), string_from_pointer_length(utf8_bytes, 4));
+            }
+            {
+                char16 utf16_bytes[] = {0xDBFF, 0};
+                char8 utf8_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                BUSTER_UTF16_TO_UTF8_TEST(arguments, arena, string16_from_pointer_length(utf16_bytes, 1), string_from_pointer_length(utf8_bytes, 3));
+            }
+            {
+                char16 utf16_bytes[] = {0xD83D, 0xD83D, 0xDE00, 0};
+                char8 utf8_bytes[] = {(char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xF0, (char8)0x9F, (char8)0x98, (char8)0x80, 0};
+                BUSTER_UTF16_TO_UTF8_TEST(arguments, arena, string16_from_pointer_length(utf16_bytes, 3), string_from_pointer_length(utf8_bytes, 7));
+            }
+        }
+        {
+            // The Windows list builders append each converted fragment at the
+            // arena cursor, so replacement has to leave that cursor exactly at
+            // the end of the text it wrote. Check the whole block, both
+            // terminators included, against independently written code units.
+            char8 key_bytes[] = {'K', (char8)0xFF, 0};
+            char8 value_bytes[] = {(char8)0xC3, 'v', 0};
+            String8 keys[] = {string_from_pointer_length(key_bytes, 2), S8("B")};
+            String8 values[] = {string_from_pointer_length(value_bytes, 2), S8("2")};
+            const char16 expected_block[] = {'K', 0xFFFD, '=', 0xFFFD, 'v', 0, 'B', '=', '2', 0, 0};
+            WindowsStringList block = windows_environment_from_keys_and_values(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(keys),
+                                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(values));
+            BUSTER_TEST(arguments, string16_equal(string16_from_pointer_length(block, BUSTER_ARRAY_LENGTH(expected_block)),
+                                                  string16_from_pointer_length(expected_block, BUSTER_ARRAY_LENGTH(expected_block))));
+        }
+        {
+            // The same for the command-line builder. These bytes need no
+            // quoting, so the replacement is the only thing that changes.
+            char8 argument_bytes[] = {'a', (char8)0xE2, (char8)0x82, 'z', 0};
+            String8 parts[] = {string_from_pointer_length(argument_bytes, 4), S8("b")};
+            const char16 expected_list[] = {'a', 0xFFFD, 0xFFFD, 'z', ' ', 'b', 0};
+            WindowsStringList list = windows_string_list_from_slice_string(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts));
+            BUSTER_TEST(arguments, string16_equal(string16_from_pointer_length(list, BUSTER_ARRAY_LENGTH(expected_list)),
+                                                  string16_from_pointer_length(expected_list, BUSTER_ARRAY_LENGTH(expected_list))));
+        }
+#if BUSTER_WINDOWS
+        {
+            // Native acceptance. The conversions above are portable, so they
+            // cannot show what Windows itself receives. Drive a real path
+            // through the wide file API and a real argument and environment
+            // value through CreateProcessW (#106).
+            {
+                // A file created through a malformed UTF-8 path is the file the
+                // replaced path names: both reach the OS as the same UTF-16.
+                // The two paths share a root and a process id and differ only
+                // in the suffix written here.
+                char8 malformed_suffix_bytes[] = {'-', (char8)0xFF, (char8)0xC3, '.', 'b', 'i', 'n', 0};
+                char8 replaced_suffix_bytes[] = {'-', (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, '.', 'b', 'i', 'n', 0};
+                String8 malformed_path = buster_test_temporary_path(arena, S8("unicode-boundary"), string_from_pointer_length(malformed_suffix_bytes, 7));
+                String8 replaced_path = buster_test_temporary_path(arena, S8("unicode-boundary"), string_from_pointer_length(replaced_suffix_bytes, 11));
+                if (BUSTER_REQUIRE(arguments, malformed_path.length != 0 && replaced_path.length != 0))
+                {
+                    u8 payload_bytes[] = {'b', 'o', 'u', 'n', 'd', 'a', 'r', 'y'};
+                    ByteSlice payload = {payload_bytes, BUSTER_ARRAY_LENGTH(payload_bytes)};
+                    os_file_delete(replaced_path);
+                    BUSTER_TEST(arguments, file_write(malformed_path, payload));
+                    ByteSlice read_back = file_read(arena, replaced_path, (FileReadOptions){0});
+                    if (BUSTER_REQUIRE(arguments, read_back.length == payload.length))
+                    {
+                        BUSTER_TEST(arguments, memory_compare(read_back.pointer, payload.pointer, payload.length));
+                    }
+                    BUSTER_TEST(arguments, os_file_delete(replaced_path));
+                }
+            }
+            {
+                // A malformed argument crosses into the child's command line
+                // and back out of its own argv parse. The unsupported-option
+                // diagnostic echoes exactly what the child ended up holding,
+                // and the child fails before running any test.
+                char8 malformed_argument_bytes[] = {'-', '-', (char8)0xFF, (char8)0xC2, 0};
+                char8 replaced_argument_bytes[] = {'-', '-', (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 0};
+                String8 child_arguments[] = {
+                    program_state->input.arguments.pointer[0],
+                    S8("test"),
+                    string_from_pointer_length(malformed_argument_bytes, 4),
+                };
+                String8 environment_keys[] = {S8("BUSTER_UNICODE_BOUNDARY_ARGUMENT_CHILD")};
+                String8 environment_values[] = {S8("1")};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
+                                                            (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+                    String8 output = (String8){.pointer = (char8*)wait_result.streams[STANDARD_STREAM_OUTPUT].pointer,
+                                               .length = wait_result.streams[STANDARD_STREAM_OUTPUT].length};
+                    String8 expected =
+                        string_format(arena, S8("test: unsupported option: {S8}\n"), string_from_pointer_length(replaced_argument_bytes, 8));
+                    BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
+                    BUSTER_TEST(arguments, string_first_sequence(output, expected) != BUSTER_STRING_NO_MATCH);
+                }
+            }
+            {
+                // A malformed environment value crosses the UTF-16 environment
+                // block in both directions. The child inherits this process's
+                // environment plus the echo key, so everything it runs before
+                // the echo still has what it needs.
+                char8 malformed_value_bytes[] = {'v', (char8)0xFF, (char8)0xE0, (char8)0x80, 'w', 0};
+                char8 replaced_value_bytes[] = {'v',         (char8)0xEF, (char8)0xBF, (char8)0xBD, (char8)0xEF, (char8)0xBF,
+                                                (char8)0xBD, (char8)0xEF, (char8)0xBF, (char8)0xBD, 'w',         0};
+                String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+                SliceString8 inherited_keys = program_state->input.environment_keys;
+                SliceString8 inherited_values = program_state->input.environment_values;
+                u64 inherited_count = BUSTER_MIN(inherited_keys.length, inherited_values.length);
+                String8* child_keys = arena_allocate(arena, String8, inherited_count + 1);
+                String8* child_values = arena_allocate(arena, String8, inherited_count + 1);
+                for (u64 i = 0; i < inherited_count; i += 1)
+                {
+                    child_keys[i] = inherited_keys.pointer[i];
+                    child_values[i] = inherited_values.pointer[i];
+                }
+                child_keys[inherited_count] = S8("BUSTER_STRING_UNICODE_BOUNDARY");
+                child_values[inherited_count] = string_from_pointer_length(malformed_value_bytes, 5);
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                            (SliceString8){.pointer = child_keys, .length = inherited_count + 1},
+                                                            (SliceString8){.pointer = child_values, .length = inherited_count + 1},
+                                                            (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait_result = os_process_wait_sync(arena, spawn);
+                    String8 output = (String8){.pointer = (char8*)wait_result.streams[STANDARD_STREAM_OUTPUT].pointer,
+                                               .length = wait_result.streams[STANDARD_STREAM_OUTPUT].length};
+                    String8 expected =
+                        string_format(arena, S8("BUSTER_UNICODE_BOUNDARY_VALUE[{S8}]\n"), string_from_pointer_length(replaced_value_bytes, 11));
+                    BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
+                    BUSTER_TEST(arguments, string_first_sequence(output, expected) != BUSTER_STRING_NO_MATCH);
+                }
+            }
+        }
+#endif
 
         enum UnsignedFormatTestCase
         {
@@ -6011,11 +6429,33 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                 {S8(" \t \t"), 0, {{0}}},
                 {S8("\"\""), 1, {S8("")}},
                 {S8("\"\" \"\" \"\""), 3, {S8(""), S8(""), S8("")}},
-                {S8("\"a\"\"b\""), 1, {S8("ab")}},
+                // Two quotes inside a quoted argument are one literal quote
+                // (#637). The pair is consumed and quoting continues, so the
+                // argument does not end here and the quote reaches argv.
+                {S8("\"a\"\"b\""), 1, {S8("a\"b")}},
                 {S8("a\" b\"c d"), 2, {S8("a bc"), S8("d")}},
                 {S8("\"unterminated a b"), 1, {S8("unterminated a b")}},
                 {S8("a\r\nb c"), 2, {S8("a\r\nb"), S8("c")}},
-                {S8("\"\"a a\"\" \"\"\"\""), 3, {S8("a"), S8("a"), S8("")}},
+                {S8("\"\"a a\"\" \"\"\"\""), 3, {S8("a"), S8("a"), S8("\"")}},
+                // The rule applies only while quoted: outside a quoted run the
+                // same two characters open and immediately close one.
+                {S8("a\"\"b"), 1, {S8("ab")}},
+                // The three raw command lines reported in #637, with the
+                // executable name in front as a real command line carries it.
+                {S8("prog \"a\"\"b\""), 2, {S8("prog"), S8("a\"b")}},
+                {S8("prog \"a\"\" b\" tail"), 3, {S8("prog"), S8("a\" b"), S8("tail")}},
+                {S8("prog \"-DNAME=\"\"hello\"\"\""), 2, {S8("prog"), S8("-DNAME=\"hello\"")}},
+                // A literal quote produced by the pair, standing at the end of
+                // a quoted run and against an argument boundary.
+                {S8("\"a\"\"\" b"), 2, {S8("a\""), S8("b")}},
+                // Adjacent backslash runs. An even run before the pair decodes
+                // to half as many backslashes and still leaves the argument
+                // quoted; an odd run escapes its own quote and leaves quoting
+                // untouched, so the pair that follows is still the literal one.
+                {S8("\"a\\\\\"\"b\""), 1, {S8("a\\\"b")}},
+                {S8("\"a\\\"\"\"b\""), 1, {S8("a\"\"b")}},
+                // Empty arguments on both sides of a pair-bearing argument.
+                {S8("\"\" \"a\"\"b\" \"\""), 3, {S8(""), S8("a\"b"), S8("")}},
             };
             u64 before_null = arena->position;
             SliceString8 null_parts = slice_string_from_windows_string_list(arena, 0);
@@ -6179,6 +6619,74 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
                     }
                 }
             }
+        }
+    }
+
+    {
+        // #638: an argument builder flushes a valid slice at every initial
+        // arena alignment, including the empty one. `start` used to round its
+        // saved position up while leaving the cursor where it was, so an empty
+        // flush subtracted the larger saved start from the smaller cursor and
+        // the unsigned byte count underflowed. Walk every residue of String8's
+        // alignment on an already dirty arena and check the empty,
+        // single-argument and multi-argument shapes against exact lengths,
+        // exact bytes, and the cursor the builder is supposed to leave behind.
+        String8 appended[] = {
+            S8("driver"), S8("--flag"), S8(""), S8("value with spaces"),
+        };
+        for (u64 residue = 0; residue < BUSTER_ALIGN_OF(String8); residue += 1)
+        {
+            for (u64 count = 0; count <= BUSTER_ARRAY_LENGTH(appended); count += 1)
+            {
+                u64 restore = arena->position;
+                u64 unaligned = align_forward(arena->position, BUSTER_ALIGN_OF(String8)) + residue;
+                (void)arena_allocate(arena, char8, unaligned - arena->position);
+                BUSTER_TEST(arguments, arena->position == unaligned);
+
+                OsArgumentBuilder builder = os_argument_builder_start(arena);
+                for (u64 i = 0; i < count; i += 1)
+                {
+                    os_argument_builder_append(&builder, appended[i]);
+                }
+                SliceString8 flushed = os_argument_builder_flush(&builder);
+                u64 expected_start = align_forward(unaligned, BUSTER_ALIGN_OF(String8));
+
+                BUSTER_TEST(arguments, flushed.length == count);
+                BUSTER_TEST(arguments, arena->position == expected_start + count * sizeof(String8));
+                BUSTER_TEST(arguments, (u8*)flushed.pointer == arena_get_byte_pointer_align(arena, expected_start, BUSTER_ALIGN_OF(String8)));
+                for (u64 i = 0; i < BUSTER_MIN(flushed.length, count); i += 1)
+                {
+                    BUSTER_STRING_TEST(arguments, flushed.pointer[i], appended[i]);
+                }
+                arena_set_position(arena, restore);
+            }
+        }
+        // Two builders in sequence on the same arena: the second starts from
+        // the cursor the first one left and neither observes the other's
+        // elements. The reused arena is dirty from every case above.
+        {
+            u64 restore = arena->position;
+            (void)arena_allocate(arena, char8, 1);
+            OsArgumentBuilder first = os_argument_builder_start(arena);
+            os_argument_builder_append(&first, S8("first"));
+            SliceString8 first_flushed = os_argument_builder_flush(&first);
+            OsArgumentBuilder second = os_argument_builder_start(arena);
+            SliceString8 second_flushed = os_argument_builder_flush(&second);
+            OsArgumentBuilder third = os_argument_builder_start(arena);
+            os_argument_builder_append(&third, S8("third"));
+            os_argument_builder_append(&third, S8("fourth"));
+            SliceString8 third_flushed = os_argument_builder_flush(&third);
+
+            BUSTER_TEST(arguments, first_flushed.length == 1);
+            BUSTER_TEST(arguments, second_flushed.length == 0);
+            BUSTER_TEST(arguments, third_flushed.length == 2);
+            if (first_flushed.length == 1 && third_flushed.length == 2)
+            {
+                BUSTER_STRING_TEST(arguments, first_flushed.pointer[0], S8("first"));
+                BUSTER_STRING_TEST(arguments, third_flushed.pointer[0], S8("third"));
+                BUSTER_STRING_TEST(arguments, third_flushed.pointer[1], S8("fourth"));
+            }
+            arena_set_position(arena, restore);
         }
     }
 

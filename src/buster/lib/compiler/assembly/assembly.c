@@ -12,9 +12,9 @@
 // selection and encoding go through the generated metadata
 // (assembly_x86_metadata_select_source_form, x86_64_metadata.h), with the
 // assembly_x86_instruction_size/encode paths covering the legacy subset
-// and every prefix family up to EVEX/APX; AArch64 parsing walks the
-// generated syntax templates and semantic tables (aarch64_syntax.h,
-// aarch64_*_semantics.h) and encodes through aarch64_encoding.h.
+// and every prefix family up to EVEX/APX; AArch64 parsing uses the generated
+// syntax/semantic tables and compact architectural front doors such as the
+// scalar GPR memory family, all encoded through aarch64_encoding.h.
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   assembly_space .. assembly_symbol_intern       builder plumbing, labels,
@@ -40,6 +40,7 @@
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_control_semantics.h>
+#include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
 #include <buster/lib/compiler/assembly/aarch64_system_semantics.h>
 #include <buster/lib/compiler/assembly/aarch64_system_registers.h>
 #include <buster/lib/compiler/assembly/aarch64_syntax.h>
@@ -471,8 +472,10 @@ typedef enum AssemblyEncodingKind
 {
     ASSEMBLY_ENCODING_HANDWRITTEN,
     ASSEMBLY_ENCODING_AARCH64_FIXED_WORD,
+    ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS,
     ASSEMBLY_ENCODING_AARCH64_M1_GPR,
     ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
+    ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY,
     ASSEMBLY_ENCODING_AARCH64_CONTROL,
     ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS,
     ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER,
@@ -508,11 +511,12 @@ struct AssemblyInstruction
     bool metadata;
     u8 metadata_operand_count;
     bool metadata_include_implicit;
-    u8 metadata_reserved;
+    bool metadata_private_pc8_long;
     u32 metadata_form_id;
     u32 fixed_word;
     u32 aarch64_gpr_form_index;
     u32 aarch64_scalar_integer_form_index;
+    u32 aarch64_scalar_memory_form_id;
     u32 aarch64_control_row_index;
     u32 aarch64_direct_simd_row_index;
     u8 aarch64_direct_simd_registers[4];
@@ -532,7 +536,9 @@ struct AssemblyInstruction
     BusterAarch64ControlInstruction aarch64_control_instruction;
     AssemblyExpression aarch64_control_expressions[4];
     u8 aarch64_control_expression_mask;
-    u8 aarch64_control_reserved[3];
+    bool aarch64_control_private_long;
+    u8 aarch64_control_private_expression;
+    u8 aarch64_control_reserved;
     BusterAarch64SystemInstruction aarch64_system_instruction;
     u16 aarch64_system_register_encoding;
     u8 aarch64_system_register_operation;
@@ -560,6 +566,7 @@ struct AssemblyBuilder
     u32 diagnostic_capacity;
     u64 output_capacity;
     u64 output_count;
+    bool private_inline_labels;
     // The metadata parser reports this transient semantic fact to the outer
     // source adapter when a feature-gated typed decorator candidate is the
     // authoritative form.  It prevents the handwritten INVALID_OPERANDS
@@ -737,6 +744,34 @@ BUSTER_GLOBAL_LOCAL bool assembly_word_equal(String8 left, String8 right)
         }
     }
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_memory_mnemonic(String8 mnemonic, u8* size, bool* store)
+{
+    static const struct
+    {
+        String8 mnemonic;
+        u8 size;
+        bool store;
+    } forms[] = {
+        {S8_INITIALIZER("ldr"), 0, false},
+        {S8_INITIALIZER("str"), 0, true},
+        {S8_INITIALIZER("ldrb"), 1, false},
+        {S8_INITIALIZER("strb"), 1, true},
+        {S8_INITIALIZER("ldrh"), 2, false},
+        {S8_INITIALIZER("strh"), 2, true},
+    };
+    bool found = false;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(forms) && !found; index += 1)
+    {
+        if (assembly_word_equal(mnemonic, forms[index].mnemonic))
+        {
+            if (size) *size = forms[index].size;
+            if (store) *store = forms[index].store;
+            found = true;
+        }
+    }
+    return found;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_gpr_register_parse(String8 text, AssemblyRegister* result)
@@ -1761,6 +1796,21 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_lookup(Target target, String8 m
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_register_lookup(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
+{
+    bool supported = result && target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target) &&
+                     (assembly_word_equal(mnemonic, S8("mrs")) || assembly_word_equal(mnemonic, S8("msr")));
+    if (supported)
+    {
+        *result = (AssemblyInstructionInfo){
+            .opcode = ASSEMBLY_OPCODE_COUNT,
+            .operand_count = 2,
+            .encoding_kind = ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER,
+        };
+    }
+    return supported;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_fixed_row(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
 {
     if (!result || !buster_aarch64_arm_m1_fixed_target(target))
@@ -1780,7 +1830,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_fixed_row(Target target, String
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_lookup(Target target, String8 mnemonic, AssemblyInstructionInfo* result)
 {
-    if (result && buster_aarch64_arm_m1_fixed_target(target))
+    // These control, PC-relative and conditional-select forms are base A64;
+    // the generated table's historical M1 provenance must not target-gate
+    // inline assembly compiled for generic Linux, Darwin or Windows CPUs.
+    if (result && target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target))
     {
         bool conditional = false;
         u64 condition = 0;
@@ -4001,6 +4054,24 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
         {
             *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_AARCH64_BL, .operand_count = 1};
         }
+        else if (assembly_aarch64_scalar_memory_mnemonic(mnemonic, 0, 0))
+        {
+            *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
+                                                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY};
+        }
+        else if (assembly_word_equal(mnemonic, S8("mov")))
+        {
+            *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
+                                                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS};
+        }
+        else if (assembly_word_equal(mnemonic, S8("cmp")) || assembly_word_equal(mnemonic, S8("cmn")))
+        {
+            // CMP/CMN are architectural aliases of SUBS/ADDS with ZR as the
+            // destination.  The scalar parser materializes that implicit
+            // operand so the generated canonical encoder remains authoritative.
+            *result = (AssemblyInstructionInfo){.opcode = ASSEMBLY_OPCODE_COUNT, .operand_count = 2,
+                                                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER};
+        }
         else
         {
             if (assembly_aarch64_direct_simd_lookup(mnemonic, result))
@@ -4015,65 +4086,70 @@ BUSTER_GLOBAL_LOCAL bool assembly_instruction_lookup(Target target, AssemblySynt
             {
                 return true;
             }
-            if (!buster_aarch64_arm_m1_scalar_integer_target(target)) return false;
-            u32 scalar_form_count = buster_aarch64_arm_m1_scalar_integer_form_count();
-            u8 scalar_operand_count = 0;
-            bool scalar_found = false;
-            for (u32 form_index = 0; form_index < scalar_form_count; form_index += 1)
+            if (!assembly_aarch64_system_register_lookup(target, mnemonic, result))
             {
-                BusterAarch64ArmM1ScalarIntegerForm form = {0};
-                if (!buster_aarch64_arm_m1_scalar_integer_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic)) continue;
-                if (!scalar_found)
-                {
-                    scalar_operand_count = form.operand_count;
-                    scalar_found = true;
-                }
-                else if (scalar_operand_count != form.operand_count)
+                if (!target_cpu_features_are_valid(target))
                 {
                     return false;
                 }
-            }
-            if (scalar_found)
-            {
+                u32 scalar_form_count = buster_aarch64_arm_m1_scalar_integer_form_count();
+                u8 scalar_operand_count = 0;
+                bool scalar_found = false;
+                for (u32 form_index = 0; form_index < scalar_form_count; form_index += 1)
+                {
+                    BusterAarch64ArmM1ScalarIntegerForm form = {0};
+                    if (!buster_aarch64_arm_m1_scalar_integer_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic)) continue;
+                    if (!scalar_found)
+                    {
+                        scalar_operand_count = form.operand_count;
+                        scalar_found = true;
+                    }
+                    else if (scalar_operand_count != form.operand_count)
+                    {
+                        return false;
+                    }
+                }
+                if (scalar_found)
+                {
+                    *result = (AssemblyInstructionInfo){
+                        .opcode = ASSEMBLY_OPCODE_COUNT,
+                        .operand_count = scalar_operand_count,
+                        .encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
+                    };
+                    return true;
+                }
+                if (assembly_aarch64_control_lookup(target, mnemonic, result))
+                {
+                    return true;
+                }
+                // The canonical direct-GPR projection is target-gated. Keep the
+                // mnemonic known even when an explicit feature subtraction later
+                // rejects the selected row, so diagnostics distinguish unsupported
+                // features from malformed operands.
+                u32 form_count = buster_aarch64_arm_m1_gpr_form_count();
+                u8 operand_count = 0;
+                bool found = false;
+                for (u32 form_index = 0; form_index < form_count; form_index += 1)
+                {
+                    BusterAarch64ArmM1GprForm form = {0};
+                    if (!buster_aarch64_arm_m1_gpr_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic)) continue;
+                    if (!found)
+                    {
+                        operand_count = form.operand_count;
+                        found = true;
+                    }
+                    else if (operand_count != form.operand_count)
+                    {
+                        return false;
+                    }
+                }
+                if (!found) return false;
                 *result = (AssemblyInstructionInfo){
                     .opcode = ASSEMBLY_OPCODE_COUNT,
-                    .operand_count = scalar_operand_count,
-                    .encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER,
+                    .operand_count = operand_count,
+                    .encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_GPR,
                 };
-                return true;
             }
-            if (assembly_aarch64_control_lookup(target, mnemonic, result))
-            {
-                return true;
-            }
-            // The canonical direct-GPR projection is target-gated. Keep the
-            // mnemonic known even when an explicit feature subtraction later
-            // rejects the selected row, so diagnostics distinguish unsupported
-            // features from malformed operands.
-            if (!buster_aarch64_arm_m1_gpr_target(target)) return false;
-            u32 form_count = buster_aarch64_arm_m1_gpr_form_count();
-            u8 operand_count = 0;
-            bool found = false;
-            for (u32 form_index = 0; form_index < form_count; form_index += 1)
-            {
-                BusterAarch64ArmM1GprForm form = {0};
-                if (!buster_aarch64_arm_m1_gpr_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic)) continue;
-                if (!found)
-                {
-                    operand_count = form.operand_count;
-                    found = true;
-                }
-                else if (operand_count != form.operand_count)
-                {
-                    return false;
-                }
-            }
-            if (!found) return false;
-            *result = (AssemblyInstructionInfo){
-                .opcode = ASSEMBLY_OPCODE_COUNT,
-                .operand_count = operand_count,
-                .encoding_kind = ASSEMBLY_ENCODING_AARCH64_M1_GPR,
-            };
         }
         return true;
     }
@@ -7910,6 +7986,92 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_constant(AssemblyBuilder* build
     return !expression.has_unsigned_addend || expression.unsigned_addend <= UINT64_MAX;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_memory_instruction_parse(AssemblyBuilder* builder, String8 mnemonic,
+                                                                           String8 operands_text,
+                                                                           AssemblyInstruction* instruction)
+{
+    u8 memory_size = 0;
+    bool store = false;
+    bool valid = builder && instruction && assembly_aarch64_scalar_memory_mnemonic(mnemonic, &memory_size, &store);
+    String8 operands[2] = {0};
+    u32 operand_count = 0;
+    u64 cursor = 0;
+    while (valid && cursor < operands_text.length)
+    {
+        valid = operand_count < BUSTER_ARRAY_LENGTH(operands) &&
+                assembly_operand_split_next(operands_text, &cursor, operands + operand_count) == ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+        operand_count += valid;
+    }
+    valid = valid && operand_count == BUSTER_ARRAY_LENGTH(operands);
+
+    AssemblyRegister data = {0};
+    if (valid)
+    {
+        valid = assembly_aarch64_gpr_register_parse(operands[0], &data) && !data.stack_pointer;
+        if (valid && !memory_size)
+        {
+            memory_size = data.width == 32 ? 4 : data.width == 64 ? 8 : 0;
+            valid = memory_size != 0;
+        }
+        else if (valid)
+        {
+            valid = data.width == 32;
+        }
+    }
+
+    String8 memory_text = valid ? assembly_trim(operands[1]) : (String8){0};
+    valid = valid && memory_text.length >= 3 && memory_text.pointer[0] == '[' &&
+            memory_text.pointer[memory_text.length - 1] == ']';
+    String8 memory_operands[2] = {0};
+    u32 memory_operand_count = 0;
+    cursor = 0;
+    String8 memory_contents = valid ? assembly_trim(string_slice(memory_text, 1, memory_text.length - 1)) : (String8){0};
+    while (valid && cursor < memory_contents.length)
+    {
+        valid = memory_operand_count < BUSTER_ARRAY_LENGTH(memory_operands) &&
+                assembly_operand_split_next(memory_contents, &cursor, memory_operands + memory_operand_count) ==
+                    ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+        memory_operand_count += valid;
+    }
+    valid = valid && memory_operand_count >= 1 && memory_operand_count <= 2;
+
+    AssemblyRegister base = {0};
+    if (valid)
+    {
+        valid = assembly_aarch64_gpr_register_parse(memory_operands[0], &base) && base.width == 64 &&
+                (base.index != 31 || base.stack_pointer);
+    }
+    u64 offset = 0;
+    if (valid && memory_operand_count == 2)
+    {
+        String8 offset_text = assembly_trim(memory_operands[1]);
+        valid = offset_text.length && offset_text.pointer[0] == '#' &&
+                assembly_aarch64_scalar_constant(builder, offset_text, &offset) && !(offset % memory_size) &&
+                offset / memory_size <= UINT32_C(0xfff);
+    }
+    if (valid)
+    {
+        instruction->aarch64_scalar_memory_form_id =
+            store ? memory_size == 1   ? BUSTER_AARCH64_GENERATED_FORM_STRBBUI
+                    : memory_size == 2 ? BUSTER_AARCH64_GENERATED_FORM_STRHHUI
+                    : memory_size == 4 ? BUSTER_AARCH64_GENERATED_FORM_STRWUI
+                                       : BUSTER_AARCH64_GENERATED_FORM_STRXUI
+                  : memory_size == 1   ? BUSTER_AARCH64_GENERATED_FORM_LDRBBUI
+                    : memory_size == 2 ? BUSTER_AARCH64_GENERATED_FORM_LDRHHUI
+                    : memory_size == 4 ? BUSTER_AARCH64_GENERATED_FORM_LDRWUI
+                                       : BUSTER_AARCH64_GENERATED_FORM_LDRXUI;
+        instruction->operands[0] = (AssemblyOperand){.reg = data, .kind = ASSEMBLY_OPERAND_REGISTER};
+        instruction->operands[1] = (AssemblyOperand){
+            .memory = {.displacement = {.addend = (s64)offset, .unsigned_addend = offset, .has_unsigned_addend = true},
+                       .base = base, .width = (u16)(memory_size * 8u), .has_base = true, .width_explicit = true},
+            .kind = ASSEMBLY_OPERAND_MEMORY,
+        };
+        instruction->operand_count = 2;
+        instruction->size = 4;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_modifier(String8 text, A64ScalarIntModifier* result)
 {
     text = assembly_trim(text);
@@ -7966,6 +8128,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
     A64ScalarIntModifier parsed_modifiers[1] = {0};
     u32 operand_count = 0;
     u32 modifier_count = 0;
+    bool compare_alias = assembly_word_equal(mnemonic, S8("cmp"));
+    bool compare_negative_alias = assembly_word_equal(mnemonic, S8("cmn"));
     bool is_condcmp = assembly_word_equal(mnemonic, S8("ccmn")) || assembly_word_equal(mnemonic, S8("ccmp"));
     for (u32 index = 0; index < token_count; index += 1)
     {
@@ -8008,8 +8172,26 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
         }
         parsed_operands[operand_count++] = (A64ScalarIntOperand){.kind = A64_SCALAR_INT_OPERAND_IMMEDIATE, .value = value};
     }
+    String8 encoded_mnemonic = mnemonic;
+    if (compare_alias || compare_negative_alias)
+    {
+        if (!operand_count || operand_count >= BUSTER_ARRAY_LENGTH(parsed_operands) ||
+            parsed_operands[0].kind != A64_SCALAR_INT_OPERAND_REGISTER)
+        {
+            return false;
+        }
+        memmove(parsed_operands + 1, parsed_operands, sizeof(*parsed_operands) * operand_count);
+        parsed_operands[0] = (A64ScalarIntOperand){
+            .kind = A64_SCALAR_INT_OPERAND_REGISTER,
+            .width = parsed_operands[1].width,
+            .index = 31,
+        };
+        operand_count += 1;
+        encoded_mnemonic = compare_alias ? S8("subs") : S8("adds");
+    }
     u32 form_index = UINT32_MAX;
-    if (!buster_aarch64_arm_m1_scalar_integer_find_form(mnemonic, parsed_operands, operand_count, parsed_modifiers, modifier_count, &form_index))
+    if (!buster_aarch64_arm_m1_scalar_integer_find_form(encoded_mnemonic, parsed_operands, operand_count, parsed_modifiers, modifier_count,
+                                                         &form_index))
     {
         return false;
     }
@@ -8043,15 +8225,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_scalar_instruction_parse(AssemblyBuild
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_m1_collision_parse(AssemblyBuilder* builder, String8 mnemonic, String8 operands_text,
                                                              AssemblyInstruction* instruction, u32 line, u32 column)
 {
-    if (builder && instruction)
+    if (builder && instruction && target_cpu_features_are_valid(builder->target))
     {
         u32 initial_diagnostic_count = builder->result.diagnostic_count;
         u32 saved_diagnostic_count = initial_diagnostic_count;
 
         bool scalar_known = false;
         u8 scalar_operand_count = 0;
-        for (u32 form_index = 0; buster_aarch64_arm_m1_scalar_integer_target(builder->target) &&
-                                  form_index < buster_aarch64_arm_m1_scalar_integer_form_count(); form_index += 1)
+        for (u32 form_index = 0; form_index < buster_aarch64_arm_m1_scalar_integer_form_count(); form_index += 1)
         {
             BusterAarch64ArmM1ScalarIntegerForm form = {0};
             if (!buster_aarch64_arm_m1_scalar_integer_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic))
@@ -8088,8 +8269,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_m1_collision_parse(AssemblyBuilder* bu
 
         bool gpr_known = false;
         u8 gpr_operand_count = 0;
-        for (u32 form_index = 0; buster_aarch64_arm_m1_gpr_target(builder->target) &&
-                                  form_index < buster_aarch64_arm_m1_gpr_form_count(); form_index += 1)
+        for (u32 form_index = 0; form_index < buster_aarch64_arm_m1_gpr_form_count(); form_index += 1)
         {
             BusterAarch64ArmM1GprForm form = {0};
             if (!buster_aarch64_arm_m1_gpr_form(form_index, &form) || !assembly_word_equal(mnemonic, form.mnemonic))
@@ -9663,6 +9843,49 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_instruction_parse(AssemblyBuild
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_system_register_instruction_parse(String8 mnemonic, String8 operands_text,
+                                                                             AssemblyInstruction* instruction)
+{
+    String8 tokens[2] = {0};
+    String8 trimmed_operands = assembly_trim(operands_text);
+    u32 token_count = 0;
+    u64 cursor = 0;
+    bool valid = instruction &&
+                 (assembly_word_equal(mnemonic, S8("mrs")) || assembly_word_equal(mnemonic, S8("msr"))) &&
+                 trimmed_operands.length && trimmed_operands.pointer[trimmed_operands.length - 1] != ',';
+    while (valid && cursor < operands_text.length)
+    {
+        String8 token = {0};
+        valid = token_count < BUSTER_ARRAY_LENGTH(tokens) &&
+                assembly_operand_split_next(operands_text, &cursor, &token) == ASSEMBLY_OPERAND_SPLIT_SUCCESS;
+        if (valid)
+        {
+            tokens[token_count++] = assembly_trim(token);
+        }
+    }
+
+    bool read = assembly_word_equal(mnemonic, S8("mrs"));
+    u32 register_token = read ? 0u : 1u;
+    u32 system_token = read ? 1u : 0u;
+    AssemblyRegister reg = {0};
+    Aarch64SystemRegisterLookup lookup = {0};
+    valid = valid && token_count == BUSTER_ARRAY_LENGTH(tokens) &&
+            assembly_aarch64_gpr_register_parse(tokens[register_token], &reg) && reg.width == 64 && !reg.stack_pointer &&
+            (assembly_word_equal(tokens[system_token], S8("fpsr")) || assembly_word_equal(tokens[system_token], S8("fpcr"))) &&
+            aarch64_system_register_lookup_name(tokens[system_token], &lookup) &&
+            (read ? (lookup.mode & AARCH64_SYSTEM_REGISTER_MODE_READ) : (lookup.mode & AARCH64_SYSTEM_REGISTER_MODE_WRITE));
+    if (valid)
+    {
+        instruction->aarch64_system_register_encoding = lookup.packed_encoding;
+        instruction->aarch64_system_register_operation = read ? ASSEMBLY_AARCH64_SYSTEM_REGISTER_MRS
+                                                               : ASSEMBLY_AARCH64_SYSTEM_REGISTER_MSR;
+        instruction->aarch64_system_register_rt = reg.index;
+        instruction->operand_count = 2;
+        instruction->size = 4;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_row_select(String8 mnemonic, BusterAarch64ControlInstruction candidate,
                                                               u32* row_index)
 {
@@ -9699,6 +9922,80 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_row_select(String8 mnemonic, B
     }
 
     return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_inline_private_label_name(String8 name)
+{
+    String8 prefix = S8(".Lbuster.inline.asm.");
+    return name.length > prefix.length && !memcmp(name.pointer, prefix.pointer, prefix.length);
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_private_short_control(AssemblyBuilder* builder, u32 row_index, u8 expression_mask,
+                                                                 AssemblyExpression const expressions[4], u8* operand_out)
+{
+    BusterAarch64ControlSemanticRecord row = {0};
+    AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+    bool private_label = false;
+    if (builder && builder->private_inline_labels && expressions && buster_aarch64_control_semantic_row(row_index, &row))
+    {
+        if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
+        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) kind = ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19;
+        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) kind = ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+        for (u32 operand_index = 0; !private_label && kind != ASSEMBLY_RELOCATION_COUNT && operand_index < 4; operand_index += 1)
+        {
+            AssemblyExpression expression = expressions[operand_index];
+            bool valid_symbol = expression.has_symbol && expression.symbol < builder->result.symbol_count;
+            String8 symbol_name = valid_symbol
+                                      ? builder->result.symbols[expression.symbol].name
+                                      : (String8){0};
+            private_label = (expression_mask & (u8)(1u << operand_index)) &&
+                            valid_symbol && !builder->result.symbols[expression.symbol].defined &&
+                            assembly_inline_private_label_name(symbol_name);
+            if (private_label && operand_out)
+            {
+                *operand_out = (u8)operand_index;
+            }
+        }
+    }
+    return private_label;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_aarch64_expand_private_short_branch_word(AssemblyRelocationKind kind, u32 word, u32 words[2])
+{
+    bool valid = words && (kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19 ||
+                           kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 ||
+                           kind == ASSEMBLY_RELOCATION_AARCH64_TESTBR14);
+    if (valid && kind == ASSEMBLY_RELOCATION_AARCH64_CONDBR19)
+    {
+        valid = (word & UINT32_C(0xff000010)) == UINT32_C(0x54000000);
+        if ((word & 0xfu) < 14u)
+        {
+            word = (word & ~UINT32_C(0x00ffffe0)) | (UINT32_C(2) << 5);
+            word ^= 1u;
+        }
+        else
+        {
+            word = UINT32_C(0xd503201f);
+        }
+    }
+    else if (valid && kind == ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19)
+    {
+        valid = (word & UINT32_C(0x7e000000)) == UINT32_C(0x34000000);
+        word = (word & ~UINT32_C(0x00ffffe0)) | (UINT32_C(2) << 5);
+        word ^= UINT32_C(1) << 24;
+    }
+    else if (valid)
+    {
+        valid = (word & UINT32_C(0x7e000000)) == UINT32_C(0x36000000);
+        word = (word & ~UINT32_C(0x0007ffe0)) | (UINT32_C(2) << 5);
+        word ^= UINT32_C(1) << 24;
+    }
+    if (valid)
+    {
+        words[0] = word;
+        words[1] = UINT32_C(0x14000000);
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_instruction_parse(AssemblyBuilder* builder, String8 mnemonic,
@@ -9830,7 +10127,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_control_instruction_parse(AssemblyBuil
     instruction->aarch64_control_expression_mask = expression_mask;
     memcpy(instruction->aarch64_control_expressions, expressions, sizeof(expressions));
     instruction->operand_count = candidate.operand_count;
-    instruction->size = 4;
+    instruction->aarch64_control_private_long =
+        assembly_aarch64_private_short_control(builder, row_index, expression_mask, expressions,
+                                               &instruction->aarch64_control_private_expression);
+    instruction->size = instruction->aarch64_control_private_long ? 8 : 4;
     return true;
 }
 
@@ -10018,7 +10318,21 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         .fixed_word = info.fixed_word,
         .aarch64_direct_simd_row_index = info.aarch64_direct_simd_row_index,
     };
-    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS)
+    bool system_register_handled = false;
+    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER)
+    {
+        system_register_handled = true;
+        if (!assembly_aarch64_system_register_instruction_parse(mnemonic, operands, &instruction))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid AArch64 system-register operands"));
+        }
+        else
+        {
+            builder->instructions[builder->instruction_count++] = instruction;
+        }
+    }
+    if (!system_register_handled && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS)
     {
         if (!assembly_aarch64_system_instruction_parse(builder, mnemonic, operands, &instruction, info.aarch64_system_row_index))
         {
@@ -10029,7 +10343,18 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         builder->instructions[builder->instruction_count++] = instruction;
         return;
     }
-    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER)
+    if (!system_register_handled && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY)
+    {
+        if (!assembly_aarch64_scalar_memory_instruction_parse(builder, mnemonic, operands, &instruction))
+        {
+            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                (u32)operands.length, S8("invalid AArch64 scalar memory operands"));
+            return;
+        }
+        builder->instructions[builder->instruction_count++] = instruction;
+        return;
+    }
+    if (!system_register_handled && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER)
     {
         if (!assembly_aarch64_scalar_instruction_parse(builder, mnemonic, operands, &instruction, line, column))
         {
@@ -10044,7 +10369,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         builder->instructions[builder->instruction_count++] = instruction;
         return;
     }
-    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_DIRECT_SIMD)
+    if (!system_register_handled && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_DIRECT_SIMD)
     {
         AssemblyInstruction direct_instruction = instruction;
         u32 diagnostic_count = builder->result.diagnostic_count;
@@ -10091,7 +10416,7 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         }
         return;
     }
-    if (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_CONTROL)
+    if (!system_register_handled && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_CONTROL)
     {
         if (!assembly_aarch64_control_instruction_parse(builder, mnemonic, operands, &instruction))
         {
@@ -10102,447 +10427,466 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         builder->instructions[builder->instruction_count++] = instruction;
         return;
     }
-    u8 parsed_operand_count = 0;
-    u64 operand_start = 0;
-    while (operand_start < operands.length && parsed_operand_count < BUSTER_ARRAY_LENGTH(instruction.operands))
+    if (!system_register_handled)
     {
-        u64 next_operand_start = operand_start;
-        String8 text = {0};
-        if (assembly_operand_split_next(operands, &next_operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
+        u8 parsed_operand_count = 0;
+        u64 operand_start = 0;
+        while (operand_start < operands.length && parsed_operand_count < BUSTER_ARRAY_LENGTH(instruction.operands))
         {
-            break;
-        }
-        if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
-        {
-            String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
-            u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? 1
-                               : assembly_word_equal(decorator, S8("rd-sae")) ? 2
-                               : assembly_word_equal(decorator, S8("ru-sae")) ? 3
-                               : assembly_word_equal(decorator, S8("rz-sae")) ? 4
-                                                                              : 0;
-            u8 pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
-            if (pseudo_sae)
+            u64 next_operand_start = operand_start;
+            String8 text = {0};
+            if (assembly_operand_split_next(operands, &next_operand_start, &text) != ASSEMBLY_OPERAND_SPLIT_SUCCESS)
             {
-                AssemblyVectorForm const* pseudo_form = assembly_x86_vector_form(info.opcode);
-                u8 immediate_form = pseudo_form && (pseudo_form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE);
-                u8 canonical_position = syntax == ASSEMBLY_SYNTAX_INTEL
-                                             ? (immediate_form ? parsed_operand_count + 1 == info.operand_count
-                                                               : parsed_operand_count == info.operand_count)
-                                             : (immediate_form && parsed_operand_count == 1);
-                if (!canonical_position || leading_sae)
+                break;
+            }
+            if (text.length >= 3 && text.pointer[0] == '{' && text.pointer[text.length - 1] == '}')
+            {
+                String8 decorator = assembly_trim(string_slice(text, 1, text.length - 1));
+                u8 pseudo_rounding = assembly_word_equal(decorator, S8("rn-sae")) ? 1
+                                   : assembly_word_equal(decorator, S8("rd-sae")) ? 2
+                                   : assembly_word_equal(decorator, S8("ru-sae")) ? 3
+                                   : assembly_word_equal(decorator, S8("rz-sae")) ? 4
+                                                                                  : 0;
+                u8 pseudo_sae = assembly_word_equal(decorator, S8("sae")) || pseudo_rounding != 0;
+                if (pseudo_sae)
+                {
+                    AssemblyVectorForm const* pseudo_form = assembly_x86_vector_form(info.opcode);
+                    u8 immediate_form = pseudo_form && (pseudo_form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE);
+                    u8 canonical_position = syntax == ASSEMBLY_SYNTAX_INTEL
+                                                 ? (immediate_form ? parsed_operand_count + 1 == info.operand_count
+                                                                   : parsed_operand_count == info.operand_count)
+                                                 : (immediate_form && parsed_operand_count == 1);
+                    if (!canonical_position || leading_sae)
+                    {
+                        break;
+                    }
+                    leading_rounding = pseudo_rounding;
+                    leading_sae = true;
+                    operand_start = next_operand_start;
+                    continue;
+                }
+            }
+            AssemblyOperand* operand = instruction.operands + parsed_operand_count;
+            u8 branch = info.opcode == ASSEMBLY_OPCODE_X86_CALL || info.opcode == ASSEMBLY_OPCODE_X86_JMP || info.opcode == ASSEMBLY_OPCODE_X86_JCC;
+            u8 indirect = syntax == ASSEMBLY_SYNTAX_ATT && branch && text.length && text.pointer[0] == '*';
+            if (indirect)
+            {
+                text.pointer += 1;
+                text.length -= 1;
+            }
+            if (!assembly_x86_operand_decorators_parse(&text, syntax, operand, 0))
+            {
+                break;
+            }
+            bool att_immediate = syntax == ASSEMBLY_SYNTAX_ATT && text.length && text.pointer[0] == '$';
+            if (att_immediate)
+            {
+                text.pointer += 1;
+                text.length -= 1;
+            }
+            if (target.cpu_arch == CPU_ARCH_AARCH64 &&
+                (instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR ||
+                 instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS))
+            {
+                if (!assembly_aarch64_gpr_register_parse(text, &operand->reg))
                 {
                     break;
                 }
-                leading_rounding = pseudo_rounding;
-                leading_sae = true;
-                operand_start = next_operand_start;
-                continue;
+                operand->kind = ASSEMBLY_OPERAND_REGISTER;
             }
-        }
-        AssemblyOperand* operand = instruction.operands + parsed_operand_count;
-        u8 branch = info.opcode == ASSEMBLY_OPCODE_X86_CALL || info.opcode == ASSEMBLY_OPCODE_X86_JMP || info.opcode == ASSEMBLY_OPCODE_X86_JCC;
-        u8 indirect = syntax == ASSEMBLY_SYNTAX_ATT && branch && text.length && text.pointer[0] == '*';
-        if (indirect)
-        {
-            text.pointer += 1;
-            text.length -= 1;
-        }
-        if (!assembly_x86_operand_decorators_parse(&text, syntax, operand, 0))
-        {
-            break;
-        }
-        bool att_immediate = syntax == ASSEMBLY_SYNTAX_ATT && text.length && text.pointer[0] == '$';
-        if (att_immediate)
-        {
-            text.pointer += 1;
-            text.length -= 1;
-        }
-        if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
-        {
-            if (!assembly_aarch64_gpr_register_parse(text, &operand->reg))
+            else if (target.cpu_arch == CPU_ARCH_X86_64 && !att_immediate && assembly_register_parse(text, syntax, &operand->reg))
             {
-                break;
+                if (syntax == ASSEMBLY_SYNTAX_ATT && branch && !indirect)
+                {
+                    break;
+                }
+                operand->kind = ASSEMBLY_OPERAND_REGISTER;
             }
-            operand->kind = ASSEMBLY_OPERAND_REGISTER;
+            else if (target.cpu_arch == CPU_ARCH_X86_64 && !att_immediate && assembly_x86_memory_parse(builder, text, syntax, &operand->memory) &&
+                     !(branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect && operand->memory.absolute))
+            {
+                if (branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect)
+                {
+                    break;
+                }
+                operand->kind = ASSEMBLY_OPERAND_MEMORY;
+            }
+            else if (att_immediate)
+            {
+                if (!text.length || !assembly_expression_parse(builder, text, &operand->expression))
+                {
+                    break;
+                }
+                operand->kind = ASSEMBLY_OPERAND_EXPRESSION;
+            }
+            else
+            {
+                if (syntax != ASSEMBLY_SYNTAX_ATT && text.length && text.pointer[0] == '$')
+                {
+                    break;
+                }
+                else if (syntax == ASSEMBLY_SYNTAX_ATT && target.cpu_arch == CPU_ARCH_X86_64 && !branch)
+                {
+                    break;
+                }
+                if (!assembly_expression_parse(builder, text, &operand->expression))
+                {
+                    break;
+                }
+                operand->kind = ASSEMBLY_OPERAND_EXPRESSION;
+            }
+            parsed_operand_count += 1;
+            operand_start = next_operand_start;
         }
-        else if (target.cpu_arch == CPU_ARCH_X86_64 && !att_immediate && assembly_register_parse(text, syntax, &operand->reg))
-        {
-            if (syntax == ASSEMBLY_SYNTAX_ATT && branch && !indirect)
-            {
-                break;
-            }
-            operand->kind = ASSEMBLY_OPERAND_REGISTER;
-        }
-        else if (target.cpu_arch == CPU_ARCH_X86_64 && !att_immediate && assembly_x86_memory_parse(builder, text, syntax, &operand->memory) &&
-                 !(branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect && operand->memory.absolute))
-        {
-            if (branch && syntax == ASSEMBLY_SYNTAX_ATT && !indirect)
-            {
-                break;
-            }
-            operand->kind = ASSEMBLY_OPERAND_MEMORY;
-        }
-        else if (att_immediate)
-        {
-            if (!text.length || !assembly_expression_parse(builder, text, &operand->expression))
-            {
-                break;
-            }
-            operand->kind = ASSEMBLY_OPERAND_EXPRESSION;
-        }
-        else
-        {
-            if (syntax != ASSEMBLY_SYNTAX_ATT && text.length && text.pointer[0] == '$')
-            {
-                break;
-            }
-            else if (syntax == ASSEMBLY_SYNTAX_ATT && target.cpu_arch == CPU_ARCH_X86_64 && !branch)
-            {
-                break;
-            }
-            if (!assembly_expression_parse(builder, text, &operand->expression))
-            {
-                break;
-            }
-            operand->kind = ASSEMBLY_OPERAND_EXPRESSION;
-        }
-        parsed_operand_count += 1;
-        operand_start = next_operand_start;
-    }
-    u8 valid_operand_count = target.cpu_arch == CPU_ARCH_X86_64
-                                   ? assembly_x86_operand_count_valid(info.opcode, parsed_operand_count, info.operand_count)
-                                   : parsed_operand_count == info.operand_count;
-    if (!valid_operand_count || operand_start < operands.length)
-    {
-        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                            (u32)operands.length, S8("invalid instruction operands"));
-        return;
-    }
-    instruction.operand_count = parsed_operand_count;
-    if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
-    {
-        A64GprOperand gpr_operands[4] = {0};
-        if (parsed_operand_count > BUSTER_ARRAY_LENGTH(gpr_operands))
+        u8 valid_operand_count = target.cpu_arch == CPU_ARCH_X86_64
+                                       ? assembly_x86_operand_count_valid(info.opcode, parsed_operand_count, info.operand_count)
+                                       : parsed_operand_count == info.operand_count;
+        if (!valid_operand_count || operand_start < operands.length)
         {
             assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                                 (u32)operands.length, S8("invalid instruction operands"));
             return;
         }
-        for (u32 operand_index = 0; operand_index < parsed_operand_count; operand_index += 1)
+        instruction.operand_count = parsed_operand_count;
+        if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS)
         {
-            AssemblyOperand operand = instruction.operands[operand_index];
-            if (operand.kind != ASSEMBLY_OPERAND_REGISTER || operand.reg.class != ASSEMBLY_REGISTER_GPR)
+            AssemblyRegister destination = instruction.operands[0].reg;
+            AssemblyRegister source = instruction.operands[1].reg;
+            if (parsed_operand_count != 2 || destination.class != ASSEMBLY_REGISTER_GPR || source.class != ASSEMBLY_REGISTER_GPR ||
+                destination.width != source.width || (destination.width != 32 && destination.width != 64) ||
+                destination.stack_pointer || source.stack_pointer)
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                                     (u32)operands.length, S8("invalid instruction operands"));
                 return;
             }
-            gpr_operands[operand_index] = (A64GprOperand){
-                .index = operand.reg.index,
-                .width = (u8)operand.reg.width,
-                .stack_pointer = operand.reg.stack_pointer,
-            };
         }
-        u32 form_index = UINT32_MAX;
-        if (!buster_aarch64_arm_m1_gpr_find_form(mnemonic, gpr_operands, parsed_operand_count, &form_index))
+        else if (target.cpu_arch == CPU_ARCH_AARCH64 && instruction.encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
         {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                (u32)operands.length, S8("invalid instruction operands"));
-            return;
+            A64GprOperand gpr_operands[4] = {0};
+            if (parsed_operand_count > BUSTER_ARRAY_LENGTH(gpr_operands))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                    (u32)operands.length, S8("invalid instruction operands"));
+                return;
+            }
+            for (u32 operand_index = 0; operand_index < parsed_operand_count; operand_index += 1)
+            {
+                AssemblyOperand operand = instruction.operands[operand_index];
+                if (operand.kind != ASSEMBLY_OPERAND_REGISTER || operand.reg.class != ASSEMBLY_REGISTER_GPR)
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                        (u32)operands.length, S8("invalid instruction operands"));
+                    return;
+                }
+                gpr_operands[operand_index] = (A64GprOperand){
+                    .index = operand.reg.index,
+                    .width = (u8)operand.reg.width,
+                    .stack_pointer = operand.reg.stack_pointer,
+                };
+            }
+            u32 form_index = UINT32_MAX;
+            if (!buster_aarch64_arm_m1_gpr_find_form(mnemonic, gpr_operands, parsed_operand_count, &form_index))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                    (u32)operands.length, S8("invalid instruction operands"));
+                return;
+            }
+            BusterAarch64ArmM1GprForm form = {0};
+            if (!buster_aarch64_arm_m1_gpr_form(form_index, &form))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                    (u32)operands.length, S8("invalid instruction operands"));
+                return;
+            }
+            if (form.required_feature != TARGET_CPU_FEATURE_NONE && !target_cpu_feature_has(target, form.required_feature))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                    S8("instruction requires an enabled AArch64 target feature"));
+                return;
+            }
+            instruction.aarch64_gpr_form_index = form_index;
         }
-        BusterAarch64ArmM1GprForm form = {0};
-        if (!buster_aarch64_arm_m1_gpr_form(form_index, &form))
+        if (target.cpu_arch == CPU_ARCH_X86_64 && info.amd_form && syntax == ASSEMBLY_SYNTAX_ATT)
         {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                (u32)operands.length, S8("invalid instruction operands"));
-            return;
+            for (u32 left = 0; left < parsed_operand_count / 2; left += 1)
+            {
+                AssemblyOperand temporary = instruction.operands[left];
+                u32 right = parsed_operand_count - 1 - left;
+                instruction.operands[left] = instruction.operands[right];
+                instruction.operands[right] = temporary;
+            }
         }
-        if (form.required_feature != TARGET_CPU_FEATURE_NONE && !target_cpu_feature_has(target, form.required_feature))
+        else if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 2)
         {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                S8("instruction requires an enabled AArch64 target feature"));
-            return;
+            AssemblyOperand temporary = instruction.operands[0];
+            instruction.operands[0] = instruction.operands[1];
+            instruction.operands[1] = temporary;
         }
-        instruction.aarch64_gpr_form_index = form_index;
-    }
-    if (target.cpu_arch == CPU_ARCH_X86_64 && info.amd_form && syntax == ASSEMBLY_SYNTAX_ATT)
-    {
-        for (u32 left = 0; left < parsed_operand_count / 2; left += 1)
-        {
-            AssemblyOperand temporary = instruction.operands[left];
-            u32 right = parsed_operand_count - 1 - left;
-            instruction.operands[left] = instruction.operands[right];
-            instruction.operands[right] = temporary;
-        }
-    }
-    else if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 2)
-    {
-        AssemblyOperand temporary = instruction.operands[0];
-        instruction.operands[0] = instruction.operands[1];
-        instruction.operands[1] = temporary;
-    }
-    else if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 3)
-    {
-        AssemblyVectorForm const* vector_form = assembly_x86_vector_form(instruction.opcode);
-        if (vector_form && (vector_form->flags & ASSEMBLY_VECTOR_FORM_SOURCE_RM) &&
-            (vector_form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE))
-        {
-            AssemblyOperand immediate = instruction.operands[0];
-            AssemblyOperand source = instruction.operands[1];
-            AssemblyOperand destination = instruction.operands[2];
-            instruction.operands[0] = destination;
-            instruction.operands[1] = source;
-            instruction.operands[2] = immediate;
-        }
-        else
-        {
-            AssemblyOperand destination = instruction.operands[2];
-            instruction.operands[2] = instruction.operands[0];
-            instruction.operands[0] = destination;
-        }
-    }
-    if (target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        if (syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 4 && !info.amd_form)
+        else if (target.cpu_arch == CPU_ARCH_X86_64 && syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 3)
         {
             AssemblyVectorForm const* vector_form = assembly_x86_vector_form(instruction.opcode);
-            if (vector_form && (vector_form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION) &&
+            if (vector_form && (vector_form->flags & ASSEMBLY_VECTOR_FORM_SOURCE_RM) &&
                 (vector_form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE))
             {
                 AssemblyOperand immediate = instruction.operands[0];
-                AssemblyOperand source_2 = instruction.operands[1];
-                AssemblyOperand source_1 = instruction.operands[2];
-                AssemblyOperand destination = instruction.operands[3];
+                AssemblyOperand source = instruction.operands[1];
+                AssemblyOperand destination = instruction.operands[2];
                 instruction.operands[0] = destination;
-                instruction.operands[1] = source_1;
-                instruction.operands[2] = source_2;
-                instruction.operands[3] = immediate;
+                instruction.operands[1] = source;
+                instruction.operands[2] = immediate;
             }
             else
             {
-                AssemblyOperand source_2 = instruction.operands[0];
-                AssemblyOperand source_1 = instruction.operands[1];
                 AssemblyOperand destination = instruction.operands[2];
-                AssemblyOperand immediate = instruction.operands[3];
+                instruction.operands[2] = instruction.operands[0];
                 instruction.operands[0] = destination;
-                instruction.operands[1] = source_1;
-                instruction.operands[2] = source_2;
-                instruction.operands[3] = immediate;
             }
         }
-        assembly_x86_x87_normalize_omitted_operands(&instruction, syntax);
-        if (instruction.opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction.operand_count == 2 &&
-            instruction.operands[1].kind == ASSEMBLY_OPERAND_EXPRESSION)
+        if (target.cpu_arch == CPU_ARCH_X86_64)
         {
-            instruction.operands[2] = instruction.operands[1];
-            instruction.operands[1] = instruction.operands[0];
-            instruction.operand_count = 3;
-        }
-        if (leading_sae)
-        {
-            AssemblyVectorForm const* leading_form = assembly_x86_vector_form(instruction.opcode);
-            u8 leading_mask_destination = leading_form && (leading_form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION);
-            u8 leading_register_valid = instruction.operand_count && instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER &&
-                                        ((leading_mask_destination && instruction.operands[0].reg.class == ASSEMBLY_REGISTER_OPMASK) ||
-                                         (!leading_mask_destination && assembly_x86_vector_register(instruction.operands[0].reg)));
-            if (!leading_register_valid || instruction.operands[0].rounding || instruction.operands[0].sae)
+            if (syntax == ASSEMBLY_SYNTAX_ATT && parsed_operand_count == 4 && !info.amd_form)
             {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                    (u32)operands.length, S8("invalid instruction decorators"));
-                return;
+                AssemblyVectorForm const* vector_form = assembly_x86_vector_form(instruction.opcode);
+                if (vector_form && (vector_form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION) &&
+                    (vector_form->flags & ASSEMBLY_VECTOR_FORM_IMMEDIATE))
+                {
+                    AssemblyOperand immediate = instruction.operands[0];
+                    AssemblyOperand source_2 = instruction.operands[1];
+                    AssemblyOperand source_1 = instruction.operands[2];
+                    AssemblyOperand destination = instruction.operands[3];
+                    instruction.operands[0] = destination;
+                    instruction.operands[1] = source_1;
+                    instruction.operands[2] = source_2;
+                    instruction.operands[3] = immediate;
+                }
+                else
+                {
+                    AssemblyOperand source_2 = instruction.operands[0];
+                    AssemblyOperand source_1 = instruction.operands[1];
+                    AssemblyOperand destination = instruction.operands[2];
+                    AssemblyOperand immediate = instruction.operands[3];
+                    instruction.operands[0] = destination;
+                    instruction.operands[1] = source_1;
+                    instruction.operands[2] = source_2;
+                    instruction.operands[3] = immediate;
+                }
             }
-            instruction.operands[0].rounding = leading_rounding;
-            instruction.operands[0].sae = true;
-        }
-    }
-    if (target.cpu_arch == CPU_ARCH_X86_64 && instruction.opcode == ASSEMBLY_OPCODE_X86_MOV &&
-        ((instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER &&
-          instruction.operands[0].reg.class == ASSEMBLY_REGISTER_MMX) ||
-         (instruction.operands[1].kind == ASSEMBLY_OPERAND_REGISTER &&
-          instruction.operands[1].reg.class == ASSEMBLY_REGISTER_MMX)))
-    {
-        instruction.opcode = ASSEMBLY_OPCODE_X86_MOVQ_MMX;
-    }
-    if (info.suffix_width)
-    {
-        instruction.width = info.suffix_width;
-        for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
-        {
-            u8 suffix_applies = true;
-            if (instruction.opcode == ASSEMBLY_OPCODE_X86_LEA || assembly_x86_opcode_is_rotate(instruction.opcode) ||
-                instruction.opcode == ASSEMBLY_OPCODE_X86_MOVZX || instruction.opcode == ASSEMBLY_OPCODE_X86_MOVSX ||
-                instruction.opcode == ASSEMBLY_OPCODE_X86_MOVSXD)
+            assembly_x86_x87_normalize_omitted_operands(&instruction, syntax);
+            if (instruction.opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction.operand_count == 2 &&
+                instruction.operands[1].kind == ASSEMBLY_OPERAND_EXPRESSION)
             {
-                suffix_applies = operand_index == 0;
+                instruction.operands[2] = instruction.operands[1];
+                instruction.operands[1] = instruction.operands[0];
+                instruction.operand_count = 3;
             }
-            else if (instruction.opcode == ASSEMBLY_OPCODE_X86_SHLD || instruction.opcode == ASSEMBLY_OPCODE_X86_SHRD)
+            if (leading_sae)
             {
-                suffix_applies = operand_index < 2;
-            }
-            else if (assembly_x86_opcode_is_shift(instruction.opcode))
-            {
-                suffix_applies = operand_index + 1 < instruction.operand_count;
-            }
-            if (!suffix_applies)
-            {
-                continue;
-            }
-            if (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_REGISTER && instruction.operands[operand_index].reg.width != info.suffix_width)
-            {
-                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                    (u32)operands.length, S8("register width does not match mnemonic suffix"));
-                return;
-            }
-            if (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_MEMORY)
-            {
-                if (instruction.operands[operand_index].memory.width && instruction.operands[operand_index].memory.width != info.suffix_width)
+                AssemblyVectorForm const* leading_form = assembly_x86_vector_form(instruction.opcode);
+                u8 leading_mask_destination = leading_form && (leading_form->flags & ASSEMBLY_VECTOR_FORM_MASK_DESTINATION);
+                u8 leading_register_valid = instruction.operand_count && instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER &&
+                                            ((leading_mask_destination && instruction.operands[0].reg.class == ASSEMBLY_REGISTER_OPMASK) ||
+                                             (!leading_mask_destination && assembly_x86_vector_register(instruction.operands[0].reg)));
+                if (!leading_register_valid || instruction.operands[0].rounding || instruction.operands[0].sae)
                 {
                     assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                        (u32)operands.length, S8("memory width does not match mnemonic suffix"));
+                                        (u32)operands.length, S8("invalid instruction decorators"));
                     return;
                 }
-                instruction.operands[operand_index].memory.width = info.suffix_width;
+                instruction.operands[0].rounding = leading_rounding;
+                instruction.operands[0].sae = true;
             }
         }
-    }
-    if (info.source_width)
-    {
-        AssemblyOperand* source = instruction.operands + 1;
-        if (source->kind == ASSEMBLY_OPERAND_REGISTER && source->reg.width != info.source_width)
+        if (target.cpu_arch == CPU_ARCH_X86_64 && instruction.opcode == ASSEMBLY_OPCODE_X86_MOV &&
+            ((instruction.operands[0].kind == ASSEMBLY_OPERAND_REGISTER &&
+              instruction.operands[0].reg.class == ASSEMBLY_REGISTER_MMX) ||
+             (instruction.operands[1].kind == ASSEMBLY_OPERAND_REGISTER &&
+              instruction.operands[1].reg.class == ASSEMBLY_REGISTER_MMX)))
         {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                (u32)operands.length, S8("source width does not match mnemonic"));
-            return;
+            instruction.opcode = ASSEMBLY_OPCODE_X86_MOVQ_MMX;
         }
-        if (source->kind == ASSEMBLY_OPERAND_MEMORY)
+        if (info.suffix_width)
         {
-            if (source->memory.width && source->memory.width != info.source_width)
+            instruction.width = info.suffix_width;
+            for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
+            {
+                u8 suffix_applies = true;
+                if (instruction.opcode == ASSEMBLY_OPCODE_X86_LEA || assembly_x86_opcode_is_rotate(instruction.opcode) ||
+                    instruction.opcode == ASSEMBLY_OPCODE_X86_MOVZX || instruction.opcode == ASSEMBLY_OPCODE_X86_MOVSX ||
+                    instruction.opcode == ASSEMBLY_OPCODE_X86_MOVSXD)
+                {
+                    suffix_applies = operand_index == 0;
+                }
+                else if (instruction.opcode == ASSEMBLY_OPCODE_X86_SHLD || instruction.opcode == ASSEMBLY_OPCODE_X86_SHRD)
+                {
+                    suffix_applies = operand_index < 2;
+                }
+                else if (assembly_x86_opcode_is_shift(instruction.opcode))
+                {
+                    suffix_applies = operand_index + 1 < instruction.operand_count;
+                }
+                if (!suffix_applies)
+                {
+                    continue;
+                }
+                if (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_REGISTER && instruction.operands[operand_index].reg.width != info.suffix_width)
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                        (u32)operands.length, S8("register width does not match mnemonic suffix"));
+                    return;
+                }
+                if (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_MEMORY)
+                {
+                    if (instruction.operands[operand_index].memory.width && instruction.operands[operand_index].memory.width != info.suffix_width)
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                            (u32)operands.length, S8("memory width does not match mnemonic suffix"));
+                        return;
+                    }
+                    instruction.operands[operand_index].memory.width = info.suffix_width;
+                }
+            }
+        }
+        if (info.source_width)
+        {
+            AssemblyOperand* source = instruction.operands + 1;
+            if (source->kind == ASSEMBLY_OPERAND_REGISTER && source->reg.width != info.source_width)
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                    (u32)operands.length, S8("memory width does not match mnemonic"));
+                                    (u32)operands.length, S8("source width does not match mnemonic"));
                 return;
             }
-            source->memory.width = info.source_width;
+            if (source->kind == ASSEMBLY_OPERAND_MEMORY)
+            {
+                if (source->memory.width && source->memory.width != info.source_width)
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                        (u32)operands.length, S8("memory width does not match mnemonic"));
+                    return;
+                }
+                source->memory.width = info.source_width;
+            }
         }
-    }
-    if (target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        instruction.evex = assembly_x86_instruction_uses_evex(instruction, target);
-        AssemblyVectorForm const* vector_form = assembly_x86_vector_form(instruction.opcode);
-        if (vector_form && instruction.evex && (vector_form->flags & ASSEMBLY_VECTOR_FORM_VEX_ONLY))
+        if (target.cpu_arch == CPU_ARCH_X86_64)
         {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                (u32)operands.length, S8("the mnemonic has no EVEX form"));
-            return;
-        }
-        if (vector_form && instruction.evex)
-        {
-            u16 vector_width = assembly_x86_instruction_vector_width(instruction, vector_form);
-            if (!assembly_x86_target_has_evex(target, vector_width, (u8)((vector_form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) != 0)))
+            instruction.evex = assembly_x86_instruction_uses_evex(instruction, target);
+            AssemblyVectorForm const* vector_form = assembly_x86_vector_form(instruction.opcode);
+            if (vector_form && instruction.evex && (vector_form->flags & ASSEMBLY_VECTOR_FORM_VEX_ONLY))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                    (u32)operands.length, S8("the mnemonic has no EVEX form"));
+                return;
+            }
+            if (vector_form && instruction.evex)
+            {
+                u16 vector_width = assembly_x86_instruction_vector_width(instruction, vector_form);
+                if (!assembly_x86_target_has_evex(target, vector_width, (u8)((vector_form->flags & ASSEMBLY_VECTOR_FORM_SCALAR) != 0)))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                        vector_width == 512 ? S8("512-bit EVEX instruction requires avx512f or avx10.512")
+                                                            : S8("EVEX instruction requires avx512vl or avx10"));
+                    return;
+                }
+                if ((vector_form->flags & ASSEMBLY_VECTOR_FORM_AVX512BW) &&
+                    !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW) &&
+                    !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_1) &&
+                    !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_2))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                        S8("instruction requires avx512bw or avx10"));
+                    return;
+                }
+                if ((vector_form->flags & ASSEMBLY_VECTOR_FORM_AVX512DQ) &&
+                    !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512DQ) &&
+                    !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_1) &&
+                    !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_2))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                        S8("instruction requires avx512dq or avx10"));
+                    return;
+                }
+            }
+            if (assembly_x86_opcode_is_mask(instruction.opcode) &&
+                !assembly_x86_target_has_mask_feature(target, instruction.opcode))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                    vector_width == 512 ? S8("512-bit EVEX instruction requires avx512f or avx10.512")
-                                                        : S8("EVEX instruction requires avx512vl or avx10"));
+                                    assembly_x86_mask_feature_name(instruction.opcode));
                 return;
             }
-            if ((vector_form->flags & ASSEMBLY_VECTOR_FORM_AVX512BW) &&
-                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW) &&
-                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_1) &&
-                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_2))
+            if (assembly_x86_opcode_is_amx(instruction.opcode) &&
+                !assembly_x86_target_has_amx_feature(target, instruction.opcode))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                    S8("instruction requires avx512bw or avx10"));
+                                    assembly_x86_amx_feature_name(instruction.opcode));
                 return;
             }
-            if ((vector_form->flags & ASSEMBLY_VECTOR_FORM_AVX512DQ) &&
-                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512DQ) &&
-                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_1) &&
-                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX10_2))
+            if ((assembly_x86_instruction_has_extended_gpr(instruction) || instruction.no_flags ||
+                 instruction.opcode == ASSEMBLY_OPCODE_X86_APX_PUSH2 || instruction.opcode == ASSEMBLY_OPCODE_X86_APX_POP2 ||
+                 (assembly_x86_opcode_is_apx_ndd(instruction.opcode) && instruction.operand_count == 3 &&
+                  !(instruction.opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction.operands[2].kind == ASSEMBLY_OPERAND_EXPRESSION))) &&
+                !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_APX))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                    S8("instruction requires avx512dq or avx10"));
+                                    S8("instruction requires the apx target feature"));
                 return;
             }
         }
-        if (assembly_x86_opcode_is_mask(instruction.opcode) &&
-            !assembly_x86_target_has_mask_feature(target, instruction.opcode))
+        if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_opcode_is_avx_integer(info.opcode) &&
+            !instruction.evex && !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX2))
         {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                assembly_x86_mask_feature_name(instruction.opcode));
-            return;
+            u8 requires_avx2 = false;
+            for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
+            {
+                requires_avx2 = requires_avx2 || (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_REGISTER &&
+                                                   instruction.operands[operand_index].reg.class == ASSEMBLY_REGISTER_YMM);
+            }
+            if (requires_avx2)
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                    S8("256-bit packed integer instruction requires the avx2 target feature"));
+                return;
+            }
         }
-        if (assembly_x86_opcode_is_amx(instruction.opcode) &&
-            !assembly_x86_target_has_amx_feature(target, instruction.opcode))
+        if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_opcode_is_legacy_packed(info.opcode) &&
+            !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_SSE2))
         {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                assembly_x86_amx_feature_name(instruction.opcode));
-            return;
+            u8 requires_sse2 = false;
+            for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
+            {
+                requires_sse2 = requires_sse2 || (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_REGISTER &&
+                                                   instruction.operands[operand_index].reg.class == ASSEMBLY_REGISTER_XMM);
+            }
+            if (requires_sse2)
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
+                                    S8("XMM packed integer instruction requires the sse2 target feature"));
+                return;
+            }
         }
-        if ((assembly_x86_instruction_has_extended_gpr(instruction) || instruction.no_flags ||
-             instruction.opcode == ASSEMBLY_OPCODE_X86_APX_PUSH2 || instruction.opcode == ASSEMBLY_OPCODE_X86_APX_POP2 ||
-             (assembly_x86_opcode_is_apx_ndd(instruction.opcode) && instruction.operand_count == 3 &&
-              !(instruction.opcode == ASSEMBLY_OPCODE_X86_IMUL && instruction.operands[2].kind == ASSEMBLY_OPERAND_EXPRESSION))) &&
-            !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_APX))
+        if (target.cpu_arch == CPU_ARCH_X86_64)
         {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                S8("instruction requires the apx target feature"));
-            return;
+            if (!assembly_x86_instruction_size(&instruction) || (info.suffix_width && instruction.width && info.suffix_width != instruction.width))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                    (u32)operands.length, S8("unsupported x86 operand form"));
+                return;
+            }
         }
+        else
+        {
+            instruction.size = 4;
+            if (instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_M1_GPR &&
+                instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS &&
+                instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_CONTROL && instruction.operand_count &&
+                instruction.operands[0].kind != ASSEMBLY_OPERAND_EXPRESSION)
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
+                                    (u32)operands.length, S8("invalid AArch64 operand form"));
+                return;
+            }
+        }
+        builder->instructions[builder->instruction_count++] = instruction;
     }
-    if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_opcode_is_avx_integer(info.opcode) &&
-        !instruction.evex && !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX2))
-    {
-        u8 requires_avx2 = false;
-        for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
-        {
-            requires_avx2 = requires_avx2 || (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_REGISTER &&
-                                               instruction.operands[operand_index].reg.class == ASSEMBLY_REGISTER_YMM);
-        }
-        if (requires_avx2)
-        {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                S8("256-bit packed integer instruction requires the avx2 target feature"));
-            return;
-        }
-    }
-    if (target.cpu_arch == CPU_ARCH_X86_64 && assembly_x86_opcode_is_legacy_packed(info.opcode) &&
-        !target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_SSE2))
-    {
-        u8 requires_sse2 = false;
-        for (u32 operand_index = 0; operand_index < instruction.operand_count; operand_index += 1)
-        {
-            requires_sse2 = requires_sse2 || (instruction.operands[operand_index].kind == ASSEMBLY_OPERAND_REGISTER &&
-                                               instruction.operands[operand_index].reg.class == ASSEMBLY_REGISTER_XMM);
-        }
-        if (requires_sse2)
-        {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, line, column, (u32)mnemonic.length,
-                                S8("XMM packed integer instruction requires the sse2 target feature"));
-            return;
-        }
-    }
-    if (target.cpu_arch == CPU_ARCH_X86_64)
-    {
-        if (!assembly_x86_instruction_size(&instruction) || (info.suffix_width && instruction.width && info.suffix_width != instruction.width))
-        {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                (u32)operands.length, S8("unsupported x86 operand form"));
-            return;
-        }
-    }
-    else
-    {
-        instruction.size = 4;
-        if (instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_M1_GPR &&
-            instruction.encoding_kind != ASSEMBLY_ENCODING_AARCH64_CONTROL && instruction.operand_count &&
-            instruction.operands[0].kind != ASSEMBLY_OPERAND_EXPRESSION)
-        {
-            assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
-                                (u32)operands.length, S8("invalid AArch64 operand form"));
-            return;
-        }
-    }
-    builder->instructions[builder->instruction_count++] = instruction;
 }
 
 BUSTER_GLOBAL_LOCAL u32 assembly_x86_metadata_feature_names(Target target, String8* names, u32 capacity)
@@ -10974,6 +11318,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_relative_mnemonic(String8 mnemoni
            assembly_word_equal(mnemonic, S8("loope")) || assembly_word_equal(mnemonic, S8("loopz")) ||
            assembly_word_equal(mnemonic, S8("loopne")) || assembly_word_equal(mnemonic, S8("loopnz")) ||
            assembly_word_equal(mnemonic, S8("xbegin"));
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_private_pc8_mnemonic(String8 mnemonic)
+{
+    return assembly_word_equal(mnemonic, S8("jcxz")) || assembly_word_equal(mnemonic, S8("jecxz")) ||
+           assembly_word_equal(mnemonic, S8("jrcxz")) || assembly_word_equal(mnemonic, S8("loop")) ||
+           assembly_word_equal(mnemonic, S8("loope")) || assembly_word_equal(mnemonic, S8("loopz")) ||
+           assembly_word_equal(mnemonic, S8("loopne")) || assembly_word_equal(mnemonic, S8("loopnz"));
 }
 
 BUSTER_GLOBAL_LOCAL String8 assembly_x86_metadata_att_string_alias(AssemblySyntax syntax, String8 mnemonic)
@@ -12772,12 +13124,31 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
     {
         return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
     }
+    bool private_pc8_long = false;
+    if (builder->private_inline_labels && assembly_x86_metadata_private_pc8_mnemonic(mnemonic))
+    {
+        for (u32 operand_index = 0; !private_pc8_long && operand_index < operand_count; operand_index += 1)
+        {
+            BusterX86MetadataPhysicalOperand operand = physical[operand_index];
+            u32 symbol_index = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE && operand.has_symbol
+                                   ? assembly_symbol_find(builder, operand.symbol)
+                                   : UINT32_MAX;
+            private_pc8_long = symbol_index < builder->result.symbol_count &&
+                               !builder->result.symbols[symbol_index].defined &&
+                               assembly_inline_private_label_name(builder->result.symbols[symbol_index].name);
+        }
+    }
+    if (private_pc8_long && selection.selected_byte_count > UINT32_MAX - 7u)
+    {
+        return BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY;
+    }
     AssemblyInstruction instruction = {
         .offset = offset,
         .line = line,
         .column = column,
-        .size = selection.selected_byte_count,
+        .size = selection.selected_byte_count + (private_pc8_long ? 7u : 0u),
         .metadata = true,
+        .metadata_private_pc8_long = private_pc8_long,
         .metadata_operand_count = (u8)operand_count,
         .metadata_include_implicit = query.include_implicit,
         .metadata_form_id = selection.form_id,
@@ -13810,7 +14181,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         .relocations = metadata_relocations,
         .relocation_capacity = BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY,
     });
-    if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.byte_count != instruction->size ||
+    u32 metadata_size = instruction->size - (instruction->metadata_private_pc8_long ? 7u : 0u);
+    if (emitted.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || emitted.byte_count != metadata_size ||
         builder->result.relocation_count > builder->relocation_capacity ||
         emitted.relocation_count > builder->relocation_capacity - builder->result.relocation_count)
     {
@@ -13831,7 +14203,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
             return false;
         }
     }
-    if (builder->output_count > builder->output_capacity || emitted.byte_count > builder->output_capacity - builder->output_count)
+    if (builder->output_count > builder->output_capacity || instruction->size > builder->output_capacity - builder->output_count)
     {
         assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_OUTPUT_CAPACITY, instruction->line, instruction->column, 1);
         return false;
@@ -13839,6 +14211,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
     u32 relocation_symbols[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
     AssemblyRelocationKind relocation_kinds[BUSTER_X86_METADATA_EMIT_RELOCATION_CAPACITY] = {0};
     u32 unresolved_relocation_count = 0;
+    u32 private_relocation = UINT32_MAX;
     for (u32 relocation_index = 0; relocation_index < emitted.relocation_count; relocation_index += 1)
     {
         BusterX86MetadataRelocation relocation = metadata_relocations[relocation_index];
@@ -13851,17 +14224,26 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         }
         if (!builder->result.symbols[symbol].defined)
         {
-            if (instruction->offset > UINT64_MAX - relocation.offset)
+            bool private_pc8 = instruction->metadata_private_pc8_long && kind == ASSEMBLY_RELOCATION_X86_PC8 &&
+                               assembly_inline_private_label_name(builder->result.symbols[symbol].name);
+            if (instruction->offset > UINT64_MAX - relocation.offset ||
+                (private_pc8 && (private_relocation != UINT32_MAX || relocation.width != 1 ||
+                                 relocation.offset >= emitted.byte_count || relocation.addend < INT64_MIN + 3)))
             {
                 assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION, instruction->line, instruction->column, 1);
                 return false;
+            }
+            if (private_pc8)
+            {
+                private_relocation = relocation_index;
             }
             relocation_symbols[unresolved_relocation_count] = symbol;
             relocation_kinds[unresolved_relocation_count] = kind;
             unresolved_relocation_count += 1;
         }
     }
-    if (unresolved_relocation_count > builder->relocation_capacity - builder->result.relocation_count)
+    if (unresolved_relocation_count > builder->relocation_capacity - builder->result.relocation_count ||
+        (instruction->metadata_private_pc8_long && private_relocation == UINT32_MAX))
     {
         assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_RELOCATION_CAPACITY, instruction->line, instruction->column, 1);
         return false;
@@ -13875,16 +14257,33 @@ BUSTER_GLOBAL_LOCAL bool assembly_x86_metadata_emit(AssemblyBuilder* builder, As
         {
             continue;
         }
+        bool private_pc8 = relocation_index == private_relocation;
+        u64 relocation_offset = private_pc8 ? (u64)emitted.byte_count + 3u : relocation.offset;
+        if (instruction->offset > UINT64_MAX - relocation_offset)
+        {
+            assembly_x86_metadata_diagnostic(builder, BUSTER_X86_METADATA_ENCODE_INVALID_EXPRESSION, instruction->line, instruction->column, 1);
+            return false;
+        }
         builder->result.relocations[builder->result.relocation_count++] = (AssemblyRelocation){
-            .addend = relocation.addend,
-            .offset = instruction->offset + relocation.offset,
+            .addend = private_pc8 ? relocation.addend - 3 : relocation.addend,
+            .offset = instruction->offset + relocation_offset,
             .symbol = relocation_symbols[unresolved_index],
-            .kind = relocation_kinds[unresolved_index],
+            .kind = private_pc8 ? ASSEMBLY_RELOCATION_X86_PC32 : relocation_kinds[unresolved_index],
         };
         unresolved_index += 1;
     }
     memcpy(builder->result.bytes.pointer + builder->output_count, bytes, emitted.byte_count);
-    builder->output_count += emitted.byte_count;
+    if (instruction->metadata_private_pc8_long)
+    {
+        u64 output = builder->output_count;
+        BusterX86MetadataRelocation relocation = metadata_relocations[private_relocation];
+        builder->result.bytes.pointer[output + relocation.offset] = 2;
+        builder->result.bytes.pointer[output + emitted.byte_count] = 0xebu;
+        builder->result.bytes.pointer[output + emitted.byte_count + 1u] = 5;
+        builder->result.bytes.pointer[output + emitted.byte_count + 2u] = 0xe9u;
+        memset(builder->result.bytes.pointer + output + emitted.byte_count + 3u, 0, sizeof(u32));
+    }
+    builder->output_count += instruction->size;
     return true;
 }
 
@@ -13927,7 +14326,8 @@ BUSTER_GLOBAL_LOCAL bool assembly_aarch64_target_difference(s64 target, u64 plac
 
 BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
 {
-    for (u32 instruction_index = 0; instruction_index < builder->instruction_count; instruction_index += 1)
+    bool emission_failed = false;
+    for (u32 instruction_index = 0; instruction_index < builder->instruction_count && !emission_failed; instruction_index += 1)
     {
         AssemblyInstruction* instruction = builder->instructions + instruction_index;
         if (builder->output_count != instruction->offset)
@@ -13949,6 +14349,32 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             assembly_emit_u32(builder, instruction->fixed_word);
             continue;
         }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_SCALAR_MEMORY)
+        {
+            AssemblyRegister data = instruction->operands[0].reg;
+            AssemblyMemory memory = instruction->operands[1].memory;
+            u32 field_values[3] = {data.index, memory.base.index,
+                                   (u32)(memory.displacement.unsigned_addend / (memory.width / 8u))};
+            u32 word = 0;
+            if (!a64_generated_production_raw_encode(instruction->aarch64_scalar_memory_form_id, field_values,
+                                                      BUSTER_ARRAY_LENGTH(field_values), &word))
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("AArch64 scalar memory instruction could not be encoded"));
+                return;
+            }
+            assembly_emit_u32(builder, word);
+            continue;
+        }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_GPR_ALIAS)
+        {
+            AssemblyRegister destination = instruction->operands[0].reg;
+            AssemblyRegister source = instruction->operands[1].reg;
+            u32 word = (destination.width == 64 ? UINT32_C(0xaa0003e0) : UINT32_C(0x2a0003e0)) |
+                       ((u32)source.index << 16) | destination.index;
+            assembly_emit_u32(builder, word);
+            continue;
+        }
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_GPR)
         {
             A64GprOperand gpr_operands[4] = {0};
@@ -13962,7 +14388,8 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 };
             }
             u32 word = 0;
-            if (!a64_arm_m1_gpr_encode(builder->target, instruction->aarch64_gpr_form_index, gpr_operands, instruction->operand_count, &word))
+            if (!buster_aarch64_gpr_encode_for_target(builder->target, instruction->aarch64_gpr_form_index, gpr_operands,
+                                                       instruction->operand_count, &word))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
                                     S8("AArch64 instruction could not be encoded"));
@@ -14099,6 +14526,51 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                                     S8("AArch64 control instruction could not be encoded"));
                 return;
             }
+            if (instruction->aarch64_control_private_long)
+            {
+                BusterAarch64ControlSemanticRecord row = {0};
+                AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+                AssemblyExpression expression = {0};
+                if (buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &row))
+                {
+                    if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
+                    else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) kind = ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19;
+                    else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) kind = ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+                }
+                u8 expression_index = instruction->aarch64_control_private_expression;
+                bool expression_found = expression_index < 4 &&
+                                        (instruction->aarch64_control_expression_mask & (u8)(1u << expression_index));
+                expression = expression_found ? instruction->aarch64_control_expressions[expression_index] : (AssemblyExpression){0};
+                u32 words[2] = {0};
+                if (!expression_found || !assembly_aarch64_expand_private_short_branch_word(kind, word, words))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                        S8("AArch64 private branch instruction could not be expanded"));
+                    return;
+                }
+                s64 target = 0;
+                if (assembly_expression_target(builder, expression, &target))
+                {
+                    s64 displacement = 0;
+                    if (!assembly_aarch64_target_difference(target, instruction->offset + sizeof(u32), &displacement) ||
+                        !a64_pc_relative_patch(A64_OPCODE_B, words[1], displacement, &words[1]))
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                            S8("AArch64 private branch target is out of range or unaligned"));
+                        return;
+                    }
+                }
+                else if (!assembly_relocation_append(builder, instruction->offset + sizeof(u32), expression,
+                                                     ASSEMBLY_RELOCATION_AARCH64_BRANCH26, 0))
+                {
+                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                        S8("AArch64 private branch relocation addend is out of range"));
+                    return;
+                }
+                assembly_emit_u32(builder, words[0]);
+                assembly_emit_u32(builder, words[1]);
+                continue;
+            }
             for (u32 operand_index = 0; operand_index < 4; operand_index += 1)
             {
                 if (!(instruction->aarch64_control_expression_mask & (u8)(1u << operand_index)))
@@ -14109,9 +14581,26 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
                 s64 target = 0;
                 if (!assembly_expression_target(builder, expression, &target))
                 {
-                    assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
-                                        S8("AArch64 control relocation requires a local label"));
-                    return;
+                    BusterAarch64ControlSemanticRecord row = {0};
+                    AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
+                    String8 symbol_name = expression.has_symbol && expression.symbol < builder->result.symbol_count
+                                              ? builder->result.symbols[expression.symbol].name
+                                              : (String8){0};
+                    bool private_label = builder->private_inline_labels && assembly_inline_private_label_name(symbol_name);
+                    if (private_label && buster_aarch64_control_semantic_row(instruction->aarch64_control_row_index, &row))
+                    {
+                        if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_B_COND19) kind = ASSEMBLY_RELOCATION_AARCH64_CONDBR19;
+                        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_COMPARE19) kind = ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19;
+                        else if (row.fixup_kind == BUSTER_AARCH64_CONTROL_FIXUP_TEST14) kind = ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+                    }
+                    if (kind == ASSEMBLY_RELOCATION_COUNT ||
+                        !assembly_relocation_append(builder, instruction->offset, expression, kind, 0))
+                    {
+                        assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_BRANCH_OUT_OF_RANGE, instruction->line, instruction->column, 1,
+                                            S8("AArch64 control relocation requires a local branch label"));
+                        return;
+                    }
+                    continue;
                 }
                 if (target < 0 || (u64)target > UINT64_MAX)
                 {
@@ -14140,6 +14629,26 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
             assembly_emit_u32(builder, word);
             continue;
         }
+        if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_REGISTER)
+        {
+            u32 word = 0;
+            bool encoded = instruction->aarch64_system_register_operation == ASSEMBLY_AARCH64_SYSTEM_REGISTER_MRS
+                               ? aarch64_system_register_encode_mrs(instruction->aarch64_system_register_encoding,
+                                                                    instruction->aarch64_system_register_rt, &word)
+                               : instruction->aarch64_system_register_operation == ASSEMBLY_AARCH64_SYSTEM_REGISTER_MSR
+                                     ? aarch64_system_register_encode_msr(instruction->aarch64_system_register_encoding,
+                                                                          instruction->aarch64_system_register_rt, &word)
+                                     : false;
+            if (!encoded)
+            {
+                assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
+                                    S8("AArch64 system-register instruction could not be encoded"));
+                emission_failed = true;
+                continue;
+            }
+            assembly_emit_u32(builder, word);
+            continue;
+        }
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_SYSTEM_SEMANTICS)
         {
             u32 word = 0;
@@ -14155,11 +14664,11 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         if (instruction->encoding_kind == ASSEMBLY_ENCODING_AARCH64_M1_SCALAR_INTEGER)
         {
             u32 word = 0;
-            if (!a64_arm_m1_scalar_integer_encode(builder->target, instruction->aarch64_scalar_integer_form_index,
-                                                  instruction->aarch64_scalar_integer_operands,
-                                                  instruction->aarch64_scalar_integer_operand_count,
-                                                  instruction->aarch64_scalar_integer_modifiers,
-                                                  instruction->aarch64_scalar_integer_modifier_count, &word))
+            if (!buster_aarch64_scalar_integer_encode_for_target(builder->target, instruction->aarch64_scalar_integer_form_index,
+                                                                  instruction->aarch64_scalar_integer_operands,
+                                                                  instruction->aarch64_scalar_integer_operand_count,
+                                                                  instruction->aarch64_scalar_integer_modifiers,
+                                                                  instruction->aarch64_scalar_integer_modifier_count, &word))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, instruction->line, instruction->column, 1,
                                     S8("AArch64 instruction could not be encoded"));
@@ -14215,7 +14724,10 @@ BUSTER_GLOBAL_LOCAL void assembly_instructions_emit(AssemblyBuilder* builder)
         }
         assembly_emit_u32(builder, word);
     }
-    builder->result.bytes.length = builder->output_count;
+    if (!emission_failed)
+    {
+        builder->result.bytes.length = builder->output_count;
+    }
 }
 
 AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncodeOptions options)
@@ -14242,6 +14754,7 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
     AssemblyBuilder builder = {
         .arena = arena,
         .target = options.target,
+        .private_inline_labels = options.private_inline_labels,
         // A small set of source aliases (currently WAIT-prefixed x87 FINIT
         // and FCLEX) expands into multiple metadata instructions.
         .instruction_capacity = line_count * 2,
@@ -14277,6 +14790,11 @@ AssemblyEncodeResult assembly_encode(Arena* arena, String8 source, AssemblyEncod
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool assembly_test_aarch64_expand_private_short_branch(AssemblyRelocationKind kind, u32 word, u32 words[2])
+{
+    return assembly_aarch64_expand_private_short_branch_word(kind, word, words);
+}
+
 bool assembly_test_split_operands(String8 source, String8* operands, u32 operand_capacity, u32* operand_count)
 {
     if (!operand_count || (source.length && !source.pointer) || (operand_capacity && !operands))

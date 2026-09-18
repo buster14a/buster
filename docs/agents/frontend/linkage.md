@@ -40,6 +40,20 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   difference. `static const unsigned short *const ptable = table+128;` in
   musl's `__ctype_b_loc.c` is the shape, and `FILE *const stdout` is the one
   every program has.
+- **GNU attribute feature queries follow semantic support, not parser tolerance.**
+  `c_conditional_attribute_supported` shares spelling sets with the binding
+  walk and the `noreturn` reader. Plain/reserved `noreturn` answers true;
+  native aliases and lifecycle attributes answer true where their consumers
+  preserve them. `weak` remains false on Windows/UEFI because COFF cannot
+  serialize weak definitions. Core Wasm/eBPF do not advertise these native
+  binding families, and UEFI does not advertise lifecycle attributes because
+  its image linker refuses registrations. `_Noreturn` is a specifier, not a
+  GNU query spelling. Keep `__has_c_attribute` separate; this change does not
+  expand its namespace/version contract. `c_test_gnu_attribute_queries` pins
+  the target/spelling matrix and guarded noreturn control flow;
+  `compiler_driver_test_attribute_queries` reads emitted ELF/Mach-O/COFF
+  symbols and initializer arrays, then runs the guarded fixture through
+  native source and object links in all four allocators (GitHub #666).
 - **`__attribute__((weak))` and `__attribute__((alias("target")))`** reach the
   object file, because musl publishes `malloc`, `free`, `errno` and most of
   its pthread surface as weak aliases of internal names. Weak is
@@ -292,6 +306,25 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   symbol's copy-slot address, including aliases. Untyped exported AArch64
   ELF text labels can serve as assembly entry points; explicit object types
   remain data. Mach-O, PE and TLS relocation contracts remain separate.
+
+- Ordinary Windows ARM64 address pairs use the PE-specific
+  `PAGEBASE_REL21`/`PAGEOFFSET_12A` object kinds (COFF types 4/6), never the
+  loader-owned TLS kinds. COFF's ADRP field is a signed, unscaled imm21 byte
+  addend and its ADD field is an unsigned imm12 byte addend; the reader validates
+  and clears both before publishing a relocation, and the writer restores
+  them without replacing opcode or register bits. This implementation admits
+  the exact zero-shift ADD form emitted by VC14.44 and rejects shifted ADD,
+  SUB, ADDS and unrelated instructions. Type 7 ordinarily accepts the scaled
+  unsigned-immediate load/store and PRFM encodings, preserving the operation
+  and registers while clearing or restoring the immediate. Reserved,
+  unscaled and register-offset forms fail closed. The exact `__tls_index`
+  symbol remains a distinct DATA-symbol contract restricted to a 32-bit
+  unsigned-immediate LDR; the writer binds index-pair relocations to that
+  loader symbol. TLS section offsets use type 9
+  (`SECREL_LOW12A`); type 15 is `BRANCH19` and is not treated as TLS. ARM64
+  CodeView uses `SECREL` type 8 and the two-byte `SECTION` type 13, retaining
+  checked inline addends. The PE linker applies all of these only after final
+  layout and returns no executable bytes on a relocation failure.
 
   Independent Clang/QEMU fixtures for GitHub #355:
 

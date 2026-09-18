@@ -1,59 +1,60 @@
 #!/usr/bin/env python3
-"""Write bounded, fail-closed CI diagnostics without copying the environment.
+"""CI summary entry point with fail-closed retained evidence."""
 
-Inputs are explicit step outcomes, required step IDs, and runner metadata.
-Build/test orchestration remains in build.c and the existing mobile launchers.
-"""
-import html
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
 import sys
 
-
-def assess(steps, required):
-    missing = [name for name in required if steps.get(name, {}).get("outcome") != "success"]
-    failed = [name for name, step in steps.items() if step.get("outcome") in ("failure", "cancelled")]
-    return sorted(set(missing + failed))
+import ci_summary_core as _core
+import ci_metamorphic_evidence as _metamorphic
+import mobile_coverage as _mobile
 
 
-def write_report(environment):
-    steps = json.loads(environment.get("BUSTER_CI_STEPS", "{}"))
-    required = environment.get("BUSTER_CI_REQUIRED", "").split()
-    if not isinstance(steps, dict) or not required:
-        raise ValueError("A step map and an explicit nonempty required-step list are mandatory")
-    failures = assess(steps, required)
-    metadata = {key: environment.get(key, "unknown") for key in (
-        "GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_REF", "GITHUB_RUN_ID",
-        "GITHUB_RUN_ATTEMPT", "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion", "BUSTER_CI_RUNNER")}
-    report = {"schema": 1, "metadata": metadata, "required_steps": required,
-              "steps": steps, "unsatisfied_steps": failures, "success": not failures}
-    output = Path(environment["RUNNER_TEMP"]) / "buster-ci"
-    output.mkdir(parents=True, exist_ok=True)
-    (output / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    lines = ["## Buster CI", "", "**Result: " + ("FAILURE" if failures else "SUCCESS") + "**", ""]
-    for key, value in metadata.items():
-        lines.append(f"{key}: <code>{html.escape(str(value))}</code><br>")
-    lines += ["", "| Step | Outcome |", "|---|---|"]
-    for name, step in steps.items():
-        lines.append(f"| {html.escape(name).replace('|', '&#124;')} | "
-                     f"{html.escape(step.get('outcome', 'missing'))} |")
-    if failures:
-        lines += ["", "Missing, skipped, cancelled, or failed required work is not a pass."]
-    reproduction = environment.get("BUSTER_CI_REPRO", "See docs/ci-github-actions.md.")
-    # HTML escaping keeps branch names and command text out of Markdown fences.
-    lines += ["", "### Reproduce", "", "Check out the exact GITHUB_SHA above. "
-              "Use the same runner image and tool versions recorded in the job log.",
-              "", "<pre>" + html.escape(reproduction) + "</pre>", "",
-              "The diagnostic artifact contains result.json and captured logs. "
-              "It contains no cached build products or environment/credential dump.", ""]
-    text = "\n".join(lines)
-    (output / "summary.md").write_text(text, encoding="utf-8")
-    if environment.get("GITHUB_STEP_SUMMARY"):
-        with Path(environment["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
-            stream.write(text)
-    print("CI_SUMMARY " + ("failure: " + ", ".join(failures) if failures else "success"))
-    return 1 if failures else 0
+_core_write_report = _core.write_report
+_core_validate_coverage_manifest = _core.validate_coverage_manifest
+_core_coverage_summary = _core._coverage_summary
+
+
+def validate_coverage_manifest(manifest, environment=None, *, expected_mode="ci"):
+    if isinstance(manifest, dict) and manifest.get("kind") == _mobile.KIND:
+        if expected_mode != "ci":
+            return ["mobile coverage manifest mode does not match consumer expectation"]
+        return _mobile.validate_manifest(manifest, environment or {})
+    return _core_validate_coverage_manifest(manifest, environment, expected_mode=expected_mode)
+
+
+def coverage_summary(manifest, errors):
+    if isinstance(manifest, dict) and manifest.get("kind") == _mobile.KIND:
+        return _mobile.coverage_summary(manifest, errors)
+    return _core_coverage_summary(manifest, errors)
+
+
+def write_report(environment, *, expected_coverage_mode="ci"):
+    effective = dict(environment)
+    try:
+        _metamorphic.collect_from_environment(effective)
+    except (_metamorphic.EvidenceError, OSError, UnicodeError, ValueError) as error:
+        runner_temp = Path(effective["RUNNER_TEMP"])
+        try:
+            _metamorphic.record_error(runner_temp / "buster-ci" / "metamorphic", effective, error)
+        except OSError as record_error:
+            print(f"Metamorphic evidence error record failed: {record_error}", file=sys.stderr)
+        print(f"Metamorphic evidence retention failed: {error}", file=sys.stderr)
+        steps = json.loads(effective.get("BUSTER_CI_STEPS", "{}"))
+        if not isinstance(steps, dict):
+            steps = {}
+        steps["metamorphic_evidence"] = {"outcome": "failure", "conclusion": "failure"}
+        effective["BUSTER_CI_STEPS"] = json.dumps(steps)
+        required = effective.get("BUSTER_CI_REQUIRED", "").split()
+        if "metamorphic_evidence" not in required:
+            required.append("metamorphic_evidence")
+        effective["BUSTER_CI_REQUIRED"] = " ".join(required)
+
+    _mobile.prepare_summary(effective)
+    return _core_write_report(effective, expected_coverage_mode=expected_coverage_mode)
 
 
 def main():
@@ -64,6 +65,12 @@ def main():
         print(f"CI summary failed: {error}", file=sys.stderr)
     return status
 
+
+_core.validate_coverage_manifest = validate_coverage_manifest
+_core._coverage_summary = coverage_summary
+_core.write_report = write_report
+_core.main = main
+sys.modules[__name__] = _core
 
 if __name__ == "__main__":
     sys.exit(main())

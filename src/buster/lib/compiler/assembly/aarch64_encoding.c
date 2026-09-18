@@ -10,6 +10,9 @@
 // decoders that recover operands from words for the differential tests.
 // Encoders validate operands and constraints before emitting; an
 // unencodable request returns false rather than a wrong word.
+// Test-only seams (buster_aarch64_metadata_test_*) expose the fail-closed
+// predicate bit, the packed-access counter, and a probe over the generated
+// counted blob readers.
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h>
@@ -19,8 +22,6 @@
 #if BUSTER_COMPILER_CLANG
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Woverlength-strings"
-#pragma clang diagnostic ignored "-Wimplicit-int-conversion"
-#pragma clang diagnostic ignored "-Wsign-conversion"
 #elif BUSTER_COMPILER_GCC
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Woverlength-strings"
@@ -725,7 +726,11 @@ bool buster_aarch64_arm_m1_fixed_lookup(String8 spelling, BusterAarch64ArmM1Fixe
 
 bool buster_aarch64_arm_m1_fixed_target(Target target)
 {
-    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
+    // The table records exact words imported while the Apple-M1 profile was
+    // the only AArch64 assembly consumer.  Its rows are architectural Arm
+    // encodings, and each non-base row carries the feature checked below; the
+    // provenance of the table must not exclude generic AArch64 targets.
+    return target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target);
 }
 
 bool buster_aarch64_arm_m1_fixed_supported_for_target(BusterAarch64ArmM1FixedSpelling fixed, Target target)
@@ -930,6 +935,39 @@ bool buster_aarch64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOpera
     }
     *word = result;
     return true;
+}
+
+bool buster_aarch64_gpr_encode_for_target(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count, u32* word)
+{
+    bool result = false;
+    if (word && target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target) &&
+        form_index < BUSTER_AARCH64_ARM_M1_GPR_FORM_COUNT)
+    {
+        BusterAarch64ArmM1GprGeneratedForm const* form = buster_aarch64_arm_m1_gpr_generated_forms + form_index;
+        if (a64_gpr_generated_form_valid(form) &&
+            (form->required_feature == TARGET_CPU_FEATURE_NONE || target_cpu_feature_has(target, form->required_feature)) &&
+            operand_count == form->operand_count && (!operand_count || operands))
+        {
+            u32 encoded = form->fixed_value;
+            result = true;
+            for (u32 index = 0; result && index < operand_count; index += 1)
+            {
+                result = a64_gpr_operand_valid(form->operands[index], operands[index]);
+                if (result)
+                {
+                    encoded |= (u32)operands[index].index << form->operands[index].bit_lsb;
+                }
+            }
+            BusterAarch64CanonicalDecodeResult decoded = {0};
+            result = result && buster_aarch64_canonical_decode(target, encoded, &decoded) == BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS &&
+                     decoded.arm_row_digest == form->arm_row_digest;
+            if (result)
+            {
+                *word = encoded;
+            }
+        }
+    }
+    return result;
 }
 
 bool buster_aarch64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands, u32 operand_count,
@@ -1319,6 +1357,29 @@ bool buster_aarch64_arm_m1_scalar_integer_encode(Target target, u32 form_index, 
         return false;
     }
     return a64_scalar_recipe_encode(form, operands, operand_count, modifiers, modifier_count, word);
+}
+
+bool buster_aarch64_scalar_integer_encode_for_target(Target target, u32 form_index, A64ScalarIntOperand const* operands, u32 operand_count,
+                                                      A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* word)
+{
+    bool result = false;
+    if (word && target.cpu_arch == CPU_ARCH_AARCH64 && target_cpu_features_are_valid(target) &&
+        form_index < BUSTER_AARCH64_ARM_M1_SCALAR_INTEGER_FORM_COUNT)
+    {
+        BusterAarch64ArmM1ScalarIntegerGeneratedForm const* form = buster_aarch64_arm_m1_scalar_integer_generated_forms + form_index;
+        u32 encoded = 0;
+        result = a64_scalar_generated_form_valid(form) &&
+                 (form->required_feature == TARGET_CPU_FEATURE_NONE || target_cpu_feature_has(target, form->required_feature)) &&
+                 a64_scalar_recipe_encode(form, operands, operand_count, modifiers, modifier_count, &encoded);
+        BusterAarch64CanonicalDecodeResult decoded = {0};
+        result = result && buster_aarch64_canonical_decode(target, encoded, &decoded) == BUSTER_AARCH64_CANONICAL_DECODE_SUCCESS &&
+                 decoded.arm_row_digest == form->arm_row_digest;
+        if (result)
+        {
+            *word = encoded;
+        }
+    }
+    return result;
 }
 
 bool buster_aarch64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic, A64ScalarIntOperand const* operands,
@@ -1785,6 +1846,48 @@ bool buster_aarch64_metadata_test_predicate_parse_error_fails_closed(Target targ
     };
     return !a64_metadata_form_predicates_supported(malformed, target);
 }
+
+// One case per generated blob, expanded from the blob's own generated symbol
+// names so the probe calls the production readers rather than a copy of them.
+#define A64_GENERATED_BLOB_PROBE_CASE(INDEX, BLOB)                              \
+    case (INDEX):                                                               \
+        probe.name = S8(#BLOB);                                                 \
+        probe.byte_count = BLOB##_BYTE_COUNT;                                   \
+        probe.value = BLOB##_u16_counted(BLOB##_BYTE_COUNT, offset);            \
+        probe.truncated = BLOB##_u16_counted(offset + 1u, offset);              \
+        probe.past_end = BLOB##_u16_counted(offset, offset);                    \
+        probe.low = BLOB##_u8_counted(BLOB##_BYTE_COUNT, offset);               \
+        probe.high = BLOB##_u8_counted(BLOB##_BYTE_COUNT, offset + 1u);         \
+        supported = true;                                                       \
+        break
+
+bool buster_aarch64_metadata_test_generated_blob_probe(u32 blob, u64 offset, BusterAarch64GeneratedBlobProbe* result)
+{
+    BusterAarch64GeneratedBlobProbe probe = {0};
+    bool supported = false;
+    switch (blob)
+    {
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_STRING_POOL, buster_aarch64_generated_string_pool);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_SEGMENTS, buster_aarch64_generated_segments_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_FIELDS, buster_aarch64_generated_fields_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_OPERANDS, buster_aarch64_generated_operands_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_PREDICATES, buster_aarch64_generated_predicates_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_FORMS, buster_aarch64_generated_forms_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_MNEMONIC_RANGES, buster_aarch64_generated_mnemonic_ranges_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_MNEMONIC_CANDIDATES, buster_aarch64_generated_mnemonic_candidates_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_SIGNATURE_RANGES, buster_aarch64_generated_signature_ranges_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_SIGNATURE_CANDIDATES, buster_aarch64_generated_signature_candidates_blob);
+        A64_GENERATED_BLOB_PROBE_CASE(BUSTER_AARCH64_GENERATED_BLOB_COVERAGE, buster_aarch64_generated_coverage_blob);
+        default:
+            break;
+    }
+    if (supported)
+    {
+        *result = probe;
+    }
+    return supported;
+}
+#undef A64_GENERATED_BLOB_PROBE_CASE
 #endif
 
 bool a64_generated_production_raw_encode(u32 form_id, u32 const* field_values, u32 field_count, u32* word)

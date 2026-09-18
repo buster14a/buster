@@ -232,6 +232,7 @@ typedef enum CDiagnosticKind
     C_DIAGNOSTIC_INVALID_LINE,
     C_DIAGNOSTIC_INVALID_ALIGNMENT,
     C_DIAGNOSTIC_INVALID_ATOMIC_TYPE,
+    C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS,
     C_DIAGNOSTIC_INVALID_FLEXIBLE_ARRAY_MEMBER,
     C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH,
     C_DIAGNOSTIC_EXPECTED_DECLARATION,
@@ -382,6 +383,11 @@ struct CPreprocessDetail
     CSourceMetrics source_unique;
     CSourceFileMetrics* lexed_files;
     CPreprocessedMetrics preprocessed;
+#if BUSTER_INCLUDE_TESTS
+    // Actual include-identity table slot examinations for end-to-end scaling
+    // fixtures. Tests-disabled builds neither store nor increment this value.
+    u64 include_file_probe_count;
+#endif
     u32 lexed_file_count;
 };
 
@@ -666,13 +672,23 @@ typedef enum CTypeKind
     C_TYPE_UNSIGNED_LONG_LONG,
     C_TYPE_INT128,
     C_TYPE_UNSIGNED_INT128,
+    // IEEE-754 binary16, spelled `_Float16`.  It is a real type, not a
+    // storage-only alias: it has its own two-byte layout, its own rank below
+    // `float` in the usual arithmetic conversions, and its own place in the
+    // vector element ladder.  Clang's `avx512fp16intrin.h` declares
+    // `__m512h` out of it, which is what brought it in.
+    C_TYPE_FLOAT16,
+    C_TYPE_BFLOAT16,
     C_TYPE_FLOAT,
     C_TYPE_DOUBLE,
     C_TYPE_LONG_DOUBLE,
-    // The three C99 complex types. Each is laid out as two contiguous
-    // elements of its underlying real type -- real part first -- which is
-    // both what the psABIs specify and what lets the IR model them as
-    // two-field aggregates (see c_ir_scalar_type).
+    // The three C99 complex types and the `_Float16 _Complex` extension
+    // beside them. Each is laid out as two contiguous elements of its
+    // underlying real type -- real part first -- which is both what the
+    // psABIs specify and what lets the IR model them as two-field
+    // aggregates (see c_ir_scalar_type). Clang's `_mm512_set1_pch` takes a
+    // `_Float16 _Complex` parameter, which is what brought the half form in.
+    C_TYPE_FLOAT16_COMPLEX,
     C_TYPE_FLOAT_COMPLEX,
     C_TYPE_DOUBLE_COMPLEX,
     C_TYPE_LONG_DOUBLE_COMPLEX,
@@ -694,12 +710,13 @@ typedef enum CTypeKind
 // real kind that has no complex counterpart (C only defines the three).
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_type_kind_is_complex(CTypeKind kind)
 {
-    return kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
+    return kind == C_TYPE_FLOAT16_COMPLEX || kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
 }
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_element(CTypeKind kind)
 {
-    return kind == C_TYPE_FLOAT_COMPLEX         ? C_TYPE_FLOAT
+    return kind == C_TYPE_FLOAT16_COMPLEX       ? C_TYPE_FLOAT16
+           : kind == C_TYPE_FLOAT_COMPLEX       ? C_TYPE_FLOAT
            : kind == C_TYPE_DOUBLE_COMPLEX      ? C_TYPE_DOUBLE
            : kind == C_TYPE_LONG_DOUBLE_COMPLEX ? C_TYPE_LONG_DOUBLE
                                                 : C_TYPE_INVALID;
@@ -707,7 +724,8 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_compl
 
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_of(CTypeKind kind)
 {
-    return kind == C_TYPE_FLOAT         ? C_TYPE_FLOAT_COMPLEX
+    return kind == C_TYPE_FLOAT16       ? C_TYPE_FLOAT16_COMPLEX
+           : kind == C_TYPE_FLOAT       ? C_TYPE_FLOAT_COMPLEX
            : kind == C_TYPE_DOUBLE      ? C_TYPE_DOUBLE_COMPLEX
            : kind == C_TYPE_LONG_DOUBLE ? C_TYPE_LONG_DOUBLE_COMPLEX
                                         : C_TYPE_INVALID;
@@ -1144,14 +1162,17 @@ struct CTokenPositionIndex
     u32* attribute_positions;
     // Per token: the position of the matching closer for every opening
     // (/[/{ whose whole group is properly nested across all three delimiter
-    // kinds, else UINT32_MAX. A mismatched closer unmatches everything still
-    // open, so scans over malformed regions keep their exact scalar walks.
-    u32* matching_delimiters;
+    // kinds, plus one; zero where there is none. A mismatched closer unmatches
+    // everything still open, so scans over malformed regions keep their exact
+    // scalar walks. The stored bias makes the unmatched majority the zero a
+    // fresh arena page already holds, and every reader subtracts one, which
+    // turns that zero back into the UINT32_MAX the range tests already reject.
+    u32* matching_delimiters_plus_one;
     u32 vector_size_count;
     u32 alignas_count;
     u32 label_candidate_count;
     u32 attribute_count;
-    // Delimiter scan verdicts that matching_delimiters alone cannot carry:
+    // Delimiter scan verdicts that matching_delimiters_plus_one alone cannot carry:
     // closers that matched nothing (mismatched or excess) plus openers still
     // unmatched at the end of the stream. Zero means the whole stream is
     // properly nested, which is what lets a consumer trust the array for any
@@ -1189,10 +1210,16 @@ struct CParseResult
     CAggregateLookup* aggregate_lookup;
     CTokenPositionIndex* position_index;
     CIdentifierUse* identifier_uses;
-    u32* identifier_use_by_token;
+    // First recorded use of each token, plus one, so an unused token is the
+    // zero the operating system already supplied; c_parse_identifier_use_index
+    // subtracts one and returns C_ID_UNDERLYING_INVALID for it unchanged.
+    u32* identifier_use_by_token_plus_one;
     // Lazily computed per-token spelling-predicate bits, indexed like
-    // identifier_use_by_token; see C_TOKEN_CLASS_* in c.c.
+    // identifier_use_by_token_plus_one; see C_TOKEN_CLASS_* in c.c.
     u8* token_classes;
+    // Lazy worklist of typed BF16 target-builtin calls, checked before unused
+    // definitions can disappear. Other translation units allocate no storage.
+    u32* bfloat16_builtin_calls;
     // Children of each scope in ascending token-interval order, built by
     // c_parse_index_scope_children once scopes are final; zero when absent.
     // c_parse_scope_for_token descends this index instead of scanning every
@@ -1258,6 +1285,8 @@ struct CParseResult
     u32 noreturn_function_type_capacity;
     u32 type_alignment_count;
     u32 type_alignment_capacity;
+    u32 bfloat16_builtin_call_count;
+    u32 bfloat16_builtin_call_capacity;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase

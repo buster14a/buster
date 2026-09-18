@@ -194,6 +194,13 @@ struct IrSourceMapCursor
 
 #define IR_SOURCE_MAP_CURSOR_EMPTY ((IrSourceMapCursor){.memo_offset = UINT32_MAX})
 
+typedef enum IrFloatFormat
+{
+    IR_FLOAT_FORMAT_IEEE,
+    IR_FLOAT_FORMAT_BFLOAT16,
+    IR_FLOAT_FORMAT_COUNT,
+} IrFloatFormat;
+
 typedef enum IrTypeKind
 {
     IR_TYPE_VOID,
@@ -340,9 +347,12 @@ struct IrFieldAccessPiece
 };
 
 // A bit-field spans at most nine bytes -- sixty-four bits starting seven bits
-// into one -- and a descending power-of-two decomposition of nine bytes is
-// eight plus one, so three pieces cover every span.
+// into one. The first descending power-of-two decomposition that needs four
+// pieces is fifteen (eight plus four plus two plus one); seven is the largest
+// admitted decomposition, with four plus two plus one, that needs three.
+#define IR_FIELD_ACCESS_MAX_SIZE 9
 #define IR_FIELD_ACCESS_PIECE_CAPACITY 3
+BUSTER_CT_CHECK(IR_FIELD_ACCESS_MAX_SIZE < 8 + 4 + 2 + 1 && IR_FIELD_ACCESS_PIECE_CAPACITY >= 3);
 
 typedef struct IrEnumMember IrEnumMember;
 struct IrEnumMember
@@ -400,6 +410,7 @@ struct IrType
     // the type `void (i32, ...)`. `(void)` and C23's `()` are ordinary
     // zero-parameter prototypes and never set it.
     bool is_unprototyped;
+    u8 float_format;
 };
 
 typedef struct IrTypeTable IrTypeTable;

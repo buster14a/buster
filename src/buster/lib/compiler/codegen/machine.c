@@ -14,6 +14,7 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
+#include <buster/lib/compiler/assembly/assembly.h>
 
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
@@ -333,6 +334,25 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
         .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
     },
+    [MACHINE_X64_INLINE_ASSEMBLY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (UINT64_C(1) << MACHINE_X64_REGISTER_COUNT) - 1u,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_NONE] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
     [MACHINE_X64_SHL32] = MACHINE_INFO_SHIFT(),
     [MACHINE_X64_SHL64] = MACHINE_INFO_SHIFT(),
     [MACHINE_X64_SAR32] = MACHINE_INFO_SHIFT(),
@@ -621,6 +641,29 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
         .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX),
+        .memory_effect = MACHINE_MEMORY_EFFECT_ATOMIC,
+    },
+    [MACHINE_X64_ATOMIC_STORE16] = {
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX),
+        .memory_effect = MACHINE_MEMORY_EFFECT_ATOMIC,
+    },
+    [MACHINE_X64_ATOMIC_LOAD16] = {
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX),
+        .memory_effect = MACHINE_MEMORY_EFFECT_ATOMIC,
+    },
+    [MACHINE_X64_ATOMIC_RMW16] = {
+        .operand_count = 4,
+        .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1ull << MACHINE_X64_RAX) | (1ull << MACHINE_X64_RDX) | (1ull << MACHINE_X64_RBX) | (1ull << MACHINE_X64_RCX) |
+                        (1ull << MACHINE_X64_R8) | (1ull << MACHINE_X64_R9),
+        .memory_effect = MACHINE_MEMORY_EFFECT_ATOMIC,
     },
     [MACHINE_X64_MFENCE] = {
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
@@ -858,22 +901,28 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL, MACHINE_OPERAND_FRAME},
     },
     [MACHINE_A64_LEA_OFFSET] = MACHINE_INFO_MOVE(),
-    // The copies run through the reserved X17 data scratch, so unlike their
-    // x86-64 counterparts they clobber no allocatable register.
+    // Large copies use X9/X10 cursors and reserved X16/X17 count/data
+    // scratches. Declare cursor clobbers even for the short inline form.
     [MACHINE_A64_COPY_FRAME_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_FRAME},
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X10),
     },
     [MACHINE_A64_COPY_FRAME_FROM_PTR] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_FRAME, MACHINE_OPERAND_USE_GENERAL},
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X10),
     },
     [MACHINE_A64_COPY_PTR_FROM_FRAME] = {
         .operand_count = 2,
         .operand_info = {MACHINE_OPERAND_USE_GENERAL, MACHINE_OPERAND_FRAME},
         .memory_effect = MACHINE_MEMORY_EFFECT_READ_WRITE,
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (1u << MACHINE_A64_X9) | (1u << MACHINE_A64_X10),
     },
     [MACHINE_A64_B] = {
         .operand_count = 1,
@@ -1117,6 +1166,25 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
         .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
         .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
     },
+    [MACHINE_A64_INLINE_ASSEMBLY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE | MACHINE_OPCODE_ATTRIBUTE_CONSTRAINED,
+        .clobber_mask = (UINT64_C(1) << MACHINE_A64_REGISTER_COUNT) - 1u,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_NONE] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+    },
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS] = {
+        .attributes = MACHINE_OPCODE_ATTRIBUTE_SIDE_EFFECTS | MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE,
+        .memory_effect = MACHINE_MEMORY_EFFECT_BARRIER,
+    },
     [MACHINE_A64_LEA_TLS] = {
         .operand_count = 1,
         .operand_info = {MACHINE_OPERAND_DEFINE_GENERAL},
@@ -1178,7 +1246,7 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
 // The registry is indexed by opcode offset from MOV_RI, so it has to span the
 // whole x86-64 range: this names the last opcode in it, and a new one added
 // past that has to be named here instead.
-BUSTER_CT_CHECK(MACHINE_X64_MULH64 - MACHINE_X64_MOV_RI + 1 == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
+BUSTER_CT_CHECK(MACHINE_X64_ATOMIC_RMW16 - MACHINE_X64_MOV_RI + 1 == MACHINE_X86_64_EMIT_REGISTRY_COUNT);
 
 BUSTER_GLOBAL_LOCAL MachineX64EmitRegistryEntry const machine_x86_64_emit_registry[MACHINE_X86_64_EMIT_REGISTRY_COUNT] = {
 #define MACHINE_X64_REGISTRY_ROW(opcode_value, category_value, index_value, status_value) \
@@ -1468,6 +1536,16 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_YIELD] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 74,
     [MACHINE_X64_ASM_IDENTITY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 75,
     [MACHINE_A64_ASM_IDENTITY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 76,
+    [MACHINE_X64_INLINE_ASSEMBLY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 77,
+    [MACHINE_A64_INLINE_ASSEMBLY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 78,
+    [MACHINE_X64_INLINE_EFFECTS_NONE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 79,
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 80,
+    [MACHINE_X64_INLINE_EFFECTS_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 81,
+    [MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 82,
+    [MACHINE_A64_INLINE_EFFECTS_NONE] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 83,
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 84,
+    [MACHINE_A64_INLINE_EFFECTS_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 85,
+    [MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 86,
     [MACHINE_X64_KMOV_FROM_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 50,
     [MACHINE_X64_KMOV_TO_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 51,
     [MACHINE_X64_KMOV] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 52,
@@ -1540,6 +1618,8 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
         flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) ? MACHINE_OPCODE_ROW_TERMINATOR : 0u;
         flags |= (opcode == MACHINE_X64_INDIRECT_BRANCH || opcode == MACHINE_A64_INDIRECT_BRANCH) ? MACHINE_OPCODE_ROW_INDIRECT_BRANCH : 0u;
         flags |= info->clobber_mask ? MACHINE_OPCODE_ROW_CLOBBERS : 0u;
+        flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_DEFINE) ? MACHINE_OPCODE_ROW_FLAGS_DEFINE : 0u;
+        flags |= (info->attributes & MACHINE_OPCODE_ATTRIBUTE_FLAGS_USE) ? MACHINE_OPCODE_ROW_FLAGS_USE : 0u;
         // The encoder's per-row byte budget, which was a nine-arm switch over
         // the same opcode this row is keyed by. Switches and aggregate copies
         // expand with their side data and keep the flag; everything else is
@@ -1590,7 +1670,12 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
             encode_budget = 48;
             break;
         case MACHINE_X64_ATOMIC_CMPXCHG16:
+        case MACHINE_X64_ATOMIC_STORE16:
+        case MACHINE_X64_ATOMIC_LOAD16:
             encode_budget = 96;
+            break;
+        case MACHINE_X64_ATOMIC_RMW16:
+            encode_budget = 128;
             break;
         default:
             break;
@@ -1629,6 +1714,30 @@ MachineOpcodeRow const* machine_opcode_row_table(void)
     return machine_opcode_row_records;
 }
 
+MachineOpcodeRow machine_instruction_opcode_row(MachineFunction const* function, MachineInstruction const* instruction)
+{
+    MachineOpcodeRow row = {0};
+    machine_opcode_rows_once();
+    if (instruction && instruction->opcode < MACHINE_OPCODE_COUNT)
+    {
+        row = machine_opcode_row_records[instruction->opcode];
+        bool inline_assembly = instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY ||
+                               instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY;
+        if (inline_assembly && function && instruction->payload < function->inline_assembly_count)
+        {
+            MachineInlineAssembly const* assembly = function->inline_assemblies + instruction->payload;
+            row.clobber_mask = assembly->clobber_mask;
+            row.flags &= (u8)~(MACHINE_OPCODE_ROW_CLOBBERS | MACHINE_OPCODE_ROW_TERMINATOR | MACHINE_OPCODE_ROW_FLAGS_DEFINE);
+            row.flags |= assembly->clobber_mask ? MACHINE_OPCODE_ROW_CLOBBERS : 0;
+            row.flags |= (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) ? MACHINE_OPCODE_ROW_TERMINATOR : 0;
+            row.flags |= (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS) ? MACHINE_OPCODE_ROW_FLAGS_DEFINE : 0;
+            row.schedule_flags = MACHINE_SCHEDULE_UNIT_BARRIER |
+                                 ((assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY) ? MACHINE_SCHEDULE_UNIT_MEMORY : 0);
+        }
+    }
+    return row;
+}
+
 u32 machine_x86_64_emit_registry_count(void)
 {
     return MACHINE_X86_64_EMIT_REGISTRY_COUNT;
@@ -1642,7 +1751,7 @@ MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_entry(u32 ordina
 MachineX64EmitRegistryEntry const* machine_x86_64_emit_registry_find(MachineOpcode opcode)
 {
     MachineX64EmitRegistryEntry const* result;
-    if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_MULH64)
+    if (opcode < MACHINE_X64_MOV_RI || opcode > MACHINE_X64_ATOMIC_RMW16)
     {
         result = 0;
     }
@@ -2014,7 +2123,7 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_pair_parameter(MachineFunctio
             {
                 (*pairs)[value].registers[part] = machine_builder_virtual_register(builder, (MachineVirtualRegister){
                     .definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                    .typed_origin = IR_ID_UNDERLYING_INVALID});
+                    .typed_origin = value});
             }
         }
     }
@@ -2163,9 +2272,25 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
             MachineBlock* blocks = arena_allocate(arena, MachineBlock, new_block_count);
             MachineEdge* edges = arena_allocate(arena, MachineEdge, new_edge_count);
             MachineSwitchCase* switch_cases = arena_allocate(arena, MachineSwitchCase, function->switch_case_count);
+            MachineInlineAssembly* inline_assemblies = function->inline_assemblies;
+            MachineInlineAssemblyRelocation* inline_assembly_relocations = function->inline_assembly_relocations;
+            result = (!function->inline_assembly_count || function->inline_assemblies) &&
+                     (!function->inline_assembly_relocation_count || function->inline_assembly_relocations);
             if (function->switch_case_count)
             {
                 memcpy(switch_cases, function->switch_cases, sizeof(*switch_cases) * function->switch_case_count);
+            }
+            if (result && function->inline_assembly_count)
+            {
+                inline_assemblies = arena_allocate(arena, MachineInlineAssembly, function->inline_assembly_count);
+                memcpy(inline_assemblies, function->inline_assemblies, sizeof(*inline_assemblies) * function->inline_assembly_count);
+            }
+            if (result && function->inline_assembly_relocation_count)
+            {
+                inline_assembly_relocations =
+                    arena_allocate(arena, MachineInlineAssemblyRelocation, function->inline_assembly_relocation_count);
+                memcpy(inline_assembly_relocations, function->inline_assembly_relocations,
+                       sizeof(*inline_assembly_relocations) * function->inline_assembly_relocation_count);
             }
             u64 scratch_position = arena->position;
             u32* old_to_new = arena_allocate(arena, u32, old_block_count);
@@ -2210,6 +2335,34 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                     if (machine_function_parameter_edge_needs_split(function, function->edges + edge_index))
                     {
                         split_blocks[edge_index] = block_cursor++;
+                    }
+                }
+            }
+            for (u32 assembly_index = 0; result && assembly_index < function->inline_assembly_count; assembly_index += 1)
+            {
+                MachineInlineAssembly* assembly = inline_assemblies + assembly_index;
+                bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
+                result = assembly->first_relocation <= function->inline_assembly_relocation_count &&
+                         assembly->relocation_count <= function->inline_assembly_relocation_count - assembly->first_relocation &&
+                         (!terminator || assembly->fallthrough_block < old_block_count);
+                if (result && terminator)
+                {
+                    assembly->fallthrough_block = old_to_new[assembly->fallthrough_block];
+                }
+                for (u32 relocation_index = 0; result && relocation_index < assembly->relocation_count; relocation_index += 1)
+                {
+                    MachineInlineAssemblyRelocation* relocation =
+                        inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                    result = !relocation->is_block ||
+                             (relocation->block < old_block_count &&
+                              (!relocation->is_control || relocation->continuation_block < old_block_count));
+                    if (result && relocation->is_block)
+                    {
+                        relocation->block = old_to_new[relocation->block];
+                        if (relocation->is_control)
+                        {
+                            relocation->continuation_block = old_to_new[relocation->continuation_block];
+                        }
                     }
                 }
             }
@@ -2383,6 +2536,8 @@ bool machine_function_split_parameter_edges(Arena* arena, MachineFunction* funct
                 function->edges = edges;
                 function->edge_count = new_edge_count;
                 function->switch_cases = switch_cases;
+                function->inline_assemblies = inline_assemblies;
+                function->inline_assembly_relocations = inline_assembly_relocations;
             }
             arena_set_position(arena, scratch_position);
         }
@@ -2500,6 +2655,699 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_compact_virtual_registers(Arena* arena,
     scratch_end(scratch);
     return mutable_count;
 }
+
+// Staged debug values double from this floor; most functions publish
+// fewer values than one growth step.
+#define MACHINE_DEBUG_VALUE_STAGE_MINIMUM 64u
+
+// Debug-value selection facts. Debug info is on by default, so every native
+// compile builds `MachineDebugValue` tables. The lookups each table entry needs
+// -- which virtual registers carry an IR value, which instruction produced a
+// parameter or a canonical local -- are gathered once per function here and
+// answered by index, instead of rescanning the register file and instruction
+// stream for every debug local.
+typedef struct MachineDebugOrigin MachineDebugOrigin;
+struct MachineDebugOrigin
+{
+    // Only the first two matter: a value in one register is a REFERENCE and a
+    // value in exactly two is PIECEWISE. The count still separates "two" from
+    // "more than two", which is neither.
+    u32 registers[2];
+    u32 count;
+    bool promoted;
+    u8 reserved[3];
+};
+
+typedef struct MachineDebugFacts MachineDebugFacts;
+struct MachineDebugFacts
+{
+    MachineDebugOrigin* origins;
+    u32 origin_count;
+    // First IR_OPCODE_ARGUMENT result per parameter ordinal. Ordinals count
+    // parameter debug locals, so the table is sized by those.
+    IrValueId* argument_results;
+    u32 argument_count;
+    // First LOCAL/ARGUMENT result per canonical local at or past local_count.
+    // Those locals have no slot in the place array, and there are normally
+    // none at all, so an open-addressed table beats an array over the range.
+    u32* wide_keys;
+    IrValueId* wide_places;
+    u32 wide_mask;
+    u32 reserved;
+};
+
+BUSTER_GLOBAL_LOCAL u32 machine_debug_wide_slot(u32 key, u32 mask)
+{
+    return ((key * UINT32_C(2654435761)) >> 8) & mask;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_debug_facts_build(Arena* arena, IrFunction* function, MachineFunction* machine_function, MachineDebugFacts* facts)
+{
+    facts->origin_count = function->value_count;
+    facts->origins = arena_allocate(arena, MachineDebugOrigin, facts->origin_count ? facts->origin_count : 1u);
+    memset(facts->origins, 0, sizeof(*facts->origins) * (u64)(facts->origin_count ? facts->origin_count : 1u));
+    for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
+    {
+        MachineVirtualRegister const* virtual_register = machine_function->virtual_registers + register_index;
+        if (virtual_register->typed_origin < facts->origin_count)
+        {
+            MachineDebugOrigin* origin = facts->origins + virtual_register->typed_origin;
+            if (origin->count < BUSTER_ARRAY_LENGTH(origin->registers))
+            {
+                origin->registers[origin->count] = register_index;
+            }
+            origin->count += 1u;
+            origin->promoted = origin->promoted || (virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) != 0;
+        }
+    }
+    facts->argument_count = function->debug_local_count;
+    facts->argument_results = arena_allocate(arena, IrValueId, facts->argument_count ? facts->argument_count : 1u);
+    memset(facts->argument_results, 0xff, sizeof(IrValueId) * (u64)(facts->argument_count ? facts->argument_count : 1u));
+    u32 wide_count = 0;
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        IrInstruction const* instruction = function->instructions + instruction_index;
+        wide_count += (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT) &&
+                      instruction->result.value < function->value_count && instruction->canonical_local.value >= function->local_count &&
+                      instruction->canonical_local.value != IR_ID_UNDERLYING_INVALID;
+    }
+    u32 wide_slots = 8u;
+    while (wide_slots / 2u < wide_count && wide_slots < (1u << 30))
+    {
+        wide_slots *= 2u;
+    }
+    facts->wide_mask = wide_slots - 1u;
+    facts->wide_keys = arena_allocate(arena, u32, wide_slots);
+    facts->wide_places = arena_allocate(arena, IrValueId, wide_slots);
+    memset(facts->wide_keys, 0xff, sizeof(u32) * (u64)wide_slots);
+    memset(facts->wide_places, 0xff, sizeof(IrValueId) * (u64)wide_slots);
+    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    {
+        IrInstruction const* instruction = function->instructions + instruction_index;
+        if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->result.value < function->value_count && instruction->immediate_count &&
+            instruction->immediates && instruction->immediates[0] < facts->argument_count &&
+            facts->argument_results[instruction->immediates[0]].value == IR_ID_UNDERLYING_INVALID)
+        {
+            facts->argument_results[instruction->immediates[0]] = instruction->result;
+        }
+        if ((instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT) &&
+            instruction->result.value < function->value_count && instruction->canonical_local.value >= function->local_count &&
+            instruction->canonical_local.value != IR_ID_UNDERLYING_INVALID)
+        {
+            u32 key = instruction->canonical_local.value;
+            u32 slot = machine_debug_wide_slot(key, facts->wide_mask);
+            while (facts->wide_keys[slot] != UINT32_MAX && facts->wide_keys[slot] != key)
+            {
+                slot = (slot + 1u) & facts->wide_mask;
+            }
+            if (facts->wide_keys[slot] == UINT32_MAX)
+            {
+                facts->wide_keys[slot] = key;
+                facts->wide_places[slot] = instruction->result;
+            }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId machine_debug_wide_place(MachineDebugFacts const* facts, u32 key)
+{
+    u32 slot = machine_debug_wide_slot(key, facts->wide_mask);
+    while (facts->wide_keys[slot] != UINT32_MAX && facts->wide_keys[slot] != key)
+    {
+        slot = (slot + 1u) & facts->wide_mask;
+    }
+    return facts->wide_keys[slot] == key ? facts->wide_places[slot] : IR_VALUE_ID_INVALID;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_debug_place_promoted(MachineFunction const* machine_function, MachineDebugFacts const* facts, IrValueId place)
+{
+    bool promoted = false;
+    if (place.value < facts->origin_count)
+    {
+        promoted = facts->origins[place.value].promoted;
+    }
+    else
+    {
+        // A place outside the value table has no index entry. Nothing the
+        // frontend publishes lands here; answering it directly keeps the
+        // indexed path free of a validity flag it would never clear.
+        for (u32 register_index = 0; !promoted && register_index < machine_function->virtual_register_count; register_index += 1)
+        {
+            MachineVirtualRegister const* virtual_register = machine_function->virtual_registers + register_index;
+            promoted = virtual_register->typed_origin == place.value &&
+                       (virtual_register->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) != 0;
+        }
+    }
+    return promoted;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_debug_constant_value(IrFunction const* function, IrValueId value, u64* constant_out)
+{
+    bool result = false;
+    // The arrays are checked, not just their counts. The debug-value builder
+    // reaches this from a path that already tolerates a null row pointer beside
+    // a non-zero instruction count, so a count alone does not establish that
+    // either array is there to read.
+    if (function && constant_out && function->values && function->instructions && value.value < function->value_count)
+    {
+        IrInstructionId definition = function->values[value.value].definition;
+        if (definition.value < function->instruction_count)
+        {
+            IrInstruction const* instruction = function->instructions + definition.value;
+            if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->immediate_count == 1 && instruction->immediates &&
+                !instruction->immediate_is_negative)
+            {
+                *constant_out = instruction->immediates[0];
+                result = true;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL MachineDebugValue machine_debug_value_make(IrProgram* program, IrFunction* ir_function, MachineDebugFacts const* facts,
+                                                                u32 const* value_stack_slots, u32 const* value_indirect_slots, IrLocalId local,
+                                                                IrValueId value, u32 first_instruction, u32 instruction_count)
+{
+    MachineDebugValue result = {
+        .local = local,
+        .first_instruction = first_instruction,
+        .instruction_count = instruction_count,
+        .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+    };
+    IrType* type = value.value < ir_function->value_count
+                       ? ir_type_from_id(&program->types, ir_function->values[value.value].canonical_type)
+                       : 0;
+    u64 constant = 0;
+    bool indirect = value.value < ir_function->value_count && value_indirect_slots && value_indirect_slots[value.value] != UINT32_MAX;
+    if (type && type->layout.resolved && type->layout.size <= UINT8_MAX)
+    {
+        result.value_size = (u8)type->layout.size;
+    }
+    if (!indirect && type && type->layout.resolved && type->layout.size <= 8 && machine_debug_constant_value(ir_function, value, &constant))
+    {
+        result.kind = MACHINE_DEBUG_VALUE_CONSTANT;
+        result.constant = constant;
+    }
+    else if (!indirect && value.value < ir_function->value_count)
+    {
+        MachineDebugOrigin const* origin = facts->origins + value.value;
+        if (origin->count == 1)
+        {
+            // The debug register namespaces exposed by the consumers describe
+            // at most a 128-bit vector. Do not mislabel a wider allocated value.
+            if (result.value_size && result.value_size <= 16)
+            {
+                result.kind = MACHINE_DEBUG_VALUE_REFERENCE;
+                result.pieces[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, origin->registers[0]);
+                result.piece_count = 1;
+                result.piece_sizes[0] = result.value_size;
+            }
+        }
+        else if (origin->count == 2 && type && type->layout.resolved && type->layout.size > 8 && type->layout.size <= 16)
+        {
+            result.kind = MACHINE_DEBUG_VALUE_PIECEWISE;
+            result.pieces[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, origin->registers[0]);
+            result.pieces[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, origin->registers[1]);
+            result.piece_count = 2;
+            result.piece_sizes[0] = 8;
+            result.piece_sizes[1] = (u8)(type->layout.size - 8);
+        }
+        else if (!origin->count && value_stack_slots && value_stack_slots[value.value] != UINT32_MAX)
+        {
+            result.kind = MACHINE_DEBUG_VALUE_REFERENCE;
+            result.pieces[0] = machine_ref_make(MACHINE_REF_STACK_SLOT, value_stack_slots[value.value]);
+            result.piece_count = 1;
+            result.piece_sizes[0] = result.value_size;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place(IrFunction* function, MachineFunction* machine_function, MachineDebugFacts const* facts,
+                                                         IrValueId const* local_places, IrDebugLocal const* local, u32 parameter_ordinal)
+{
+    IrValueId parameter_place = IR_VALUE_ID_INVALID;
+    if (local->is_parameter && function->published_cfg)
+    {
+        for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
+        {
+            IrCfgParameter const* parameter = function->published_cfg->parameters + parameter_index;
+            if (parameter->canonical_local.value == local->id.value)
+            {
+                parameter_place = parameter->value;
+                break;
+            }
+        }
+    }
+    if (local->is_parameter && parameter_place.value == IR_ID_UNDERLYING_INVALID && parameter_ordinal < facts->argument_count)
+    {
+        parameter_place = facts->argument_results[parameter_ordinal];
+    }
+    IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
+    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID)
+    {
+        place = parameter_place;
+    }
+    if (place.value != IR_ID_UNDERLYING_INVALID && machine_debug_place_promoted(machine_function, facts, place))
+    {
+        // A promoted place is only an implementation cell. Preserve the ABI
+        // parameter value when one exists; canonical block-local SSA values
+        // carry every non-parameter source variable's value.
+        place = parameter_place;
+    }
+    if (place.value == IR_ID_UNDERLYING_INVALID && local->is_parameter)
+    {
+        place = parameter_place;
+    }
+    if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= function->local_count)
+    {
+        place = machine_debug_wide_place(facts, local->id.value);
+    }
+    return place;
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId machine_debug_block_value(IrFunction* function, IrDebugLocal const* local, u32 block_index)
+{
+    IrBlock const* block = function->blocks + block_index;
+    IrCfgBlock const* published = function->published_cfg->blocks + block_index;
+    IrValueId value = block->local_values && local->id.value < function->local_count
+                          ? block->local_values[local->id.value]
+                          : IR_VALUE_ID_INVALID;
+    if (value.value == IR_ID_UNDERLYING_INVALID)
+    {
+        for (u32 parameter_index = 0; parameter_index < published->parameter_count; parameter_index += 1)
+        {
+            IrCfgParameter const* parameter = function->published_cfg->parameters + published->parameter_offset + parameter_index;
+            if (parameter->canonical_local.value == local->id.value)
+            {
+                value = parameter->value;
+                break;
+            }
+        }
+    }
+    return value;
+}
+
+BUSTER_GLOBAL_LOCAL MachineDebugValue* machine_debug_values_reserve(Arena* arena, MachineDebugValue* values, u32 count, u32* capacity)
+{
+    MachineDebugValue* result = values;
+    if (count >= *capacity)
+    {
+        u32 grown = *capacity ? *capacity * 2u : MACHINE_DEBUG_VALUE_STAGE_MINIMUM;
+        result = arena_allocate(arena, MachineDebugValue, grown);
+        if (count)
+        {
+            memcpy(result, values, sizeof(*result) * (u64)count);
+        }
+        *capacity = grown;
+    }
+    return result;
+}
+
+// Debug values in one pass over the debug locals: each local's place is
+// computed once, and the block values a place-less local contributes are
+// appended as they are found. The staged array doubles in scratch and is
+// copied into an exact-size table, so the caller's arena still receives one
+// allocation sized by the values that exist.
+BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* program, IrFunction* ir_function,
+                                                     MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                     u32 const* value_indirect_slots)
+{
+    bool result = arena && program && ir_function && machine_function;
+    if (result && ir_function->debug_local_count)
+    {
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        IrValueId* local_places = arena_allocate(scratch.arena, IrValueId, ir_function->local_count ? ir_function->local_count : 1);
+        memset(local_places, 0xff, sizeof(*local_places) * (u64)ir_function->local_count);
+        for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = ir_function->instructions + instruction_index;
+            if (instruction->result.value < ir_function->value_count && instruction->canonical_local.value < ir_function->local_count &&
+                local_places[instruction->canonical_local.value].value == IR_ID_UNDERLYING_INVALID)
+            {
+                local_places[instruction->canonical_local.value] = instruction->result;
+            }
+        }
+        MachineDebugFacts facts = {0};
+        machine_debug_facts_build(scratch.arena, ir_function, machine_function, &facts);
+        MachineDebugValue* staged = 0;
+        u32 staged_capacity = 0;
+        u32 value_count = 0;
+        u32 parameter_ordinal = 0;
+        for (u32 debug_index = 0; result && debug_index < ir_function->debug_local_count; debug_index += 1)
+        {
+            IrDebugLocal* local = ir_function->debug_locals + debug_index;
+            if (local->id.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrValueId place = machine_debug_local_place(ir_function, machine_function, &facts, local_places, local, parameter_ordinal);
+            parameter_ordinal += local->is_parameter;
+            u32 emitted = 0;
+            if (place.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrInstructionId first = IR_INSTRUCTION_ID_INVALID;
+                IrInstructionId definition = place.value < ir_function->value_count ? ir_function->values[place.value].definition : IR_INSTRUCTION_ID_INVALID;
+                IrInstruction* instruction = definition.value < ir_function->instruction_count ? ir_function->instructions + definition.value : 0;
+                if (local->id.value < ir_function->local_count && instruction && instruction->result.value == place.value &&
+                    instruction->canonical_local.value == local->id.value && instruction->opcode != IR_OPCODE_LOCAL &&
+                    instruction->opcode != IR_OPCODE_ARGUMENT)
+                {
+                    first = definition;
+                }
+                u32 instruction_count = first.value < ir_function->instruction_count ? ir_function->instruction_count - first.value : 0;
+                result = value_count < UINT32_MAX;
+                if (result)
+                {
+                    staged = machine_debug_values_reserve(scratch.arena, staged, value_count, &staged_capacity);
+                    staged[value_count] = machine_debug_value_make(program, ir_function, &facts, value_stack_slots, value_indirect_slots,
+                                                                   local->id, place,
+                                                                   first.value < ir_function->instruction_count ? first.value : UINT32_MAX,
+                                                                   instruction_count);
+                    value_count += 1u;
+                    emitted += 1u;
+                }
+            }
+            else
+            {
+                for (u32 block_index = 0; result && block_index < ir_function->block_count; block_index += 1)
+                {
+                    IrBlock* block = ir_function->blocks + block_index;
+                    IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
+                    IrValueId value = machine_debug_block_value(ir_function, local, block_index);
+                    if (value.value != IR_ID_UNDERLYING_INVALID && published->instruction_count)
+                    {
+                        result = value_count < UINT32_MAX;
+                        if (result)
+                        {
+                            staged = machine_debug_values_reserve(scratch.arena, staged, value_count, &staged_capacity);
+                            staged[value_count] = machine_debug_value_make(program, ir_function, &facts, value_stack_slots, value_indirect_slots,
+                                                                           local->id, value, block->first_instruction.value,
+                                                                           published->instruction_count);
+                            value_count += 1u;
+                            emitted += 1u;
+                        }
+                    }
+                }
+            }
+            if (result && !emitted)
+            {
+                result = value_count < UINT32_MAX;
+                if (result)
+                {
+                    staged = machine_debug_values_reserve(scratch.arena, staged, value_count, &staged_capacity);
+                    staged[value_count] = (MachineDebugValue){
+                        .local = local->id,
+                        .first_instruction = UINT32_MAX,
+                        .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+                    };
+                    value_count += 1u;
+                }
+            }
+        }
+        if (result)
+        {
+            MachineDebugValue* values = arena_allocate(arena, MachineDebugValue, value_count ? value_count : 1);
+            if (value_count)
+            {
+                memcpy(values, staged, sizeof(*values) * (u64)value_count);
+            }
+            machine_function->debug_values = values;
+            machine_function->debug_value_count = value_count;
+        }
+        scratch_end(scratch);
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+// Two-pass whole-array debug-value selection, kept as the differential
+// reference for the indexed builder above: it must produce the same table.
+// Production never calls it.
+BUSTER_GLOBAL_LOCAL MachineDebugValue machine_debug_value_make_dense(IrProgram* program, IrFunction* ir_function,
+                                                                MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                                u32 const* value_indirect_slots, IrLocalId local, IrValueId value,
+                                                                u32 first_instruction, u32 instruction_count)
+{
+    MachineDebugValue result = {
+        .local = local,
+        .first_instruction = first_instruction,
+        .instruction_count = instruction_count,
+        .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+    };
+    IrType* type = value.value < ir_function->value_count
+                       ? ir_type_from_id(&program->types, ir_function->values[value.value].canonical_type)
+                       : 0;
+    u64 constant = 0;
+    bool indirect = value.value < ir_function->value_count && value_indirect_slots && value_indirect_slots[value.value] != UINT32_MAX;
+    if (type && type->layout.resolved && type->layout.size <= UINT8_MAX)
+    {
+        result.value_size = (u8)type->layout.size;
+    }
+    if (!indirect && type && type->layout.resolved && type->layout.size <= 8 && machine_debug_constant_value(ir_function, value, &constant))
+    {
+        result.kind = MACHINE_DEBUG_VALUE_CONSTANT;
+        result.constant = constant;
+    }
+    else if (!indirect && value.value < ir_function->value_count)
+    {
+        u32 registers[2] = {UINT32_MAX, UINT32_MAX};
+        u32 register_count = 0;
+        for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
+        {
+            if (machine_function->virtual_registers[register_index].typed_origin == value.value)
+            {
+                if (register_count < BUSTER_ARRAY_LENGTH(registers))
+                {
+                    registers[register_count] = register_index;
+                }
+                register_count += 1;
+            }
+        }
+        if (register_count == 1)
+        {
+            // The debug register namespaces exposed by the consumers describe
+            // at most a 128-bit vector. Do not mislabel a wider allocated value.
+            if (result.value_size && result.value_size <= 16)
+            {
+                result.kind = MACHINE_DEBUG_VALUE_REFERENCE;
+                result.pieces[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[0]);
+                result.piece_count = 1;
+                result.piece_sizes[0] = result.value_size;
+            }
+        }
+        else if (register_count == 2 && type && type->layout.resolved && type->layout.size > 8 && type->layout.size <= 16)
+        {
+            result.kind = MACHINE_DEBUG_VALUE_PIECEWISE;
+            result.pieces[0] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[0]);
+            result.pieces[1] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[1]);
+            result.piece_count = 2;
+            result.piece_sizes[0] = 8;
+            result.piece_sizes[1] = (u8)(type->layout.size - 8);
+        }
+        else if (!register_count && value_stack_slots && value_stack_slots[value.value] != UINT32_MAX)
+        {
+            result.kind = MACHINE_DEBUG_VALUE_REFERENCE;
+            result.pieces[0] = machine_ref_make(MACHINE_REF_STACK_SLOT, value_stack_slots[value.value]);
+            result.piece_count = 1;
+            result.piece_sizes[0] = result.value_size;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place_dense(IrFunction* function, MachineFunction* machine_function,
+                                                         IrValueId const* local_places, IrDebugLocal const* local,
+                                                         u32 parameter_ordinal)
+{
+    IrValueId parameter_place = IR_VALUE_ID_INVALID;
+    if (local->is_parameter && function->published_cfg)
+    {
+        for (u32 parameter_index = 0; parameter_index < function->published_cfg->parameter_count; parameter_index += 1)
+        {
+            IrCfgParameter const* parameter = function->published_cfg->parameters + parameter_index;
+            if (parameter->canonical_local.value == local->id.value)
+            {
+                parameter_place = parameter->value;
+                break;
+            }
+        }
+    }
+    if (local->is_parameter && parameter_place.value == IR_ID_UNDERLYING_INVALID)
+    {
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction const* instruction = function->instructions + instruction_index;
+            if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->result.value < function->value_count &&
+                instruction->immediate_count && instruction->immediates && instruction->immediates[0] == parameter_ordinal)
+            {
+                parameter_place = instruction->result;
+                break;
+            }
+        }
+    }
+    IrValueId place = local->id.value < function->local_count ? local_places[local->id.value] : IR_VALUE_ID_INVALID;
+    if (local->is_parameter && place.value == IR_ID_UNDERLYING_INVALID)
+    {
+        place = parameter_place;
+    }
+    if (place.value != IR_ID_UNDERLYING_INVALID)
+    {
+        for (u32 register_index = 0; register_index < machine_function->virtual_register_count; register_index += 1)
+        {
+            MachineVirtualRegister const* reg = machine_function->virtual_registers + register_index;
+            if (reg->typed_origin == place.value && (reg->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE))
+            {
+                // A promoted place is only an implementation cell. Canonical
+                // block-local SSA values carry the source variable's value.
+                place = parameter_place;
+                break;
+            }
+        }
+    }
+    if (place.value == IR_ID_UNDERLYING_INVALID && local->is_parameter)
+    {
+        place = parameter_place;
+    }
+    if (place.value == IR_ID_UNDERLYING_INVALID && local->id.value >= function->local_count)
+    {
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction const* instruction = function->instructions + instruction_index;
+            if (instruction->result.value < function->value_count && instruction->canonical_local.value == local->id.value &&
+                (instruction->opcode == IR_OPCODE_LOCAL || instruction->opcode == IR_OPCODE_ARGUMENT))
+            {
+                place = instruction->result;
+                break;
+            }
+        }
+    }
+    return place;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_debug_values_build_dense(Arena* arena, IrProgram* program, IrFunction* ir_function,
+                                                     MachineFunction* machine_function, u32 const* value_stack_slots,
+                                                     u32 const* value_indirect_slots)
+{
+    bool result = arena && program && ir_function && machine_function;
+    u64 capacity64 = 0;
+    if (result && ir_function->debug_local_count)
+    {
+        IrValueId* local_places = arena_allocate(arena, IrValueId, ir_function->local_count ? ir_function->local_count : 1);
+        memset(local_places, 0xff, sizeof(*local_places) * ir_function->local_count);
+        for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
+        {
+            IrInstruction* instruction = ir_function->instructions + instruction_index;
+            if (instruction->result.value < ir_function->value_count && instruction->canonical_local.value < ir_function->local_count &&
+                local_places[instruction->canonical_local.value].value == IR_ID_UNDERLYING_INVALID)
+            {
+                local_places[instruction->canonical_local.value] = instruction->result;
+            }
+        }
+        u32 parameter_ordinal = 0;
+        for (u32 debug_index = 0; result && debug_index < ir_function->debug_local_count; debug_index += 1)
+        {
+            IrDebugLocal const* local = ir_function->debug_locals + debug_index;
+            if (local->id.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrValueId place = machine_debug_local_place_dense(ir_function, machine_function, local_places, local, parameter_ordinal);
+            parameter_ordinal += local->is_parameter;
+            u64 local_capacity = place.value != IR_ID_UNDERLYING_INVALID;
+            if (!local_capacity)
+            {
+                for (u32 block_index = 0; block_index < ir_function->block_count; block_index += 1)
+                {
+                    IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
+                    IrValueId value = machine_debug_block_value(ir_function, local, block_index);
+                    local_capacity += value.value != IR_ID_UNDERLYING_INVALID && published->instruction_count;
+                }
+            }
+            local_capacity = local_capacity ? local_capacity : 1;
+            result = local_capacity <= UINT32_MAX - capacity64;
+            capacity64 += result ? local_capacity : 0;
+        }
+        u32 capacity = result ? (u32)capacity64 : 0;
+        MachineDebugValue* values = result ? arena_allocate(arena, MachineDebugValue, capacity ? capacity : 1) : 0;
+        u32 value_count = 0;
+        parameter_ordinal = 0;
+        for (u32 debug_index = 0; result && debug_index < ir_function->debug_local_count; debug_index += 1)
+        {
+            IrDebugLocal* local = ir_function->debug_locals + debug_index;
+            if (local->id.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrValueId place = machine_debug_local_place_dense(ir_function, machine_function, local_places, local, parameter_ordinal);
+            parameter_ordinal += local->is_parameter;
+            bool emitted = false;
+            if (place.value != IR_ID_UNDERLYING_INVALID)
+            {
+                IrInstructionId first = IR_INSTRUCTION_ID_INVALID;
+                IrInstructionId definition = place.value < ir_function->value_count ? ir_function->values[place.value].definition : IR_INSTRUCTION_ID_INVALID;
+                IrInstruction* instruction = definition.value < ir_function->instruction_count ? ir_function->instructions + definition.value : 0;
+                if (local->id.value < ir_function->local_count && instruction && instruction->result.value == place.value &&
+                    instruction->canonical_local.value == local->id.value && instruction->opcode != IR_OPCODE_LOCAL &&
+                    instruction->opcode != IR_OPCODE_ARGUMENT)
+                {
+                    first = definition;
+                }
+                u32 instruction_count = first.value < ir_function->instruction_count ? ir_function->instruction_count - first.value : 0;
+                values[value_count++] = machine_debug_value_make_dense(program, ir_function, machine_function, value_stack_slots,
+                                                                 value_indirect_slots, local->id, place,
+                                                                 first.value < ir_function->instruction_count ? first.value : UINT32_MAX,
+                                                                 instruction_count);
+                emitted = true;
+            }
+            else
+            {
+                for (u32 block_index = 0; block_index < ir_function->block_count; block_index += 1)
+                {
+                    IrBlock* block = ir_function->blocks + block_index;
+                    IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
+                    IrValueId value = machine_debug_block_value(ir_function, local, block_index);
+                    if (value.value != IR_ID_UNDERLYING_INVALID && published->instruction_count)
+                    {
+                        values[value_count++] = machine_debug_value_make_dense(program, ir_function, machine_function, value_stack_slots,
+                                                                         value_indirect_slots, local->id, value,
+                                                                         block->first_instruction.value, published->instruction_count);
+                        emitted = true;
+                    }
+                }
+            }
+            if (!emitted)
+            {
+                values[value_count++] = (MachineDebugValue){
+                    .local = local->id,
+                    .first_instruction = UINT32_MAX,
+                    .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+                };
+            }
+        }
+        result = result && value_count == capacity;
+        if (result)
+        {
+            machine_function->debug_values = values;
+            machine_function->debug_value_count = value_count;
+        }
+    }
+    return result;
+}
+
+bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function, MachineFunction* machine_function,
+                                     u32 const* value_stack_slots, u32 const* value_indirect_slots)
+{
+    return machine_debug_values_build(arena, program, function, machine_function, value_stack_slots, value_indirect_slots);
+}
+
+bool machine_test_debug_values_build_dense(Arena* arena, IrProgram* program, IrFunction* function, MachineFunction* machine_function,
+                                           u32 const* value_stack_slots, u32 const* value_indirect_slots)
+{
+    return machine_debug_values_build_dense(arena, program, function, machine_function, value_stack_slots, value_indirect_slots);
+}
+#endif
 
 // Loop-depth frequency classes from the finished block structure. A
 // backward block reference — a block-ref operand or a switch-case target
@@ -2714,6 +3562,42 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             valid = machine_ref_kind(frame) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
                     function->stack_slot_sizes[slot] >= 16 && instruction->payload == 0;
         } break;
+        case MACHINE_X64_ATOMIC_STORE16:
+        {
+            MachineRef desired = instruction->operands[0];
+            u32 slot = machine_ref_payload(desired);
+            // The row always publishes one sixteen-byte desired image.  The
+            // three frame operands are deliberately repeated so the
+            // constrained allocator can keep the value live across the
+            // CMPXCHG16B retry loop without inventing an address-sized
+            // operand class.
+            valid = instruction->payload >= 9 && instruction->payload <= 16 && instruction->flags == 0 &&
+                    machine_ref_kind(desired) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                    function->stack_slot_sizes[slot] >= 16 && instruction->operands[1] == desired &&
+                    instruction->operands[2] == desired;
+        } break;
+        case MACHINE_X64_ATOMIC_LOAD16:
+        {
+            MachineRef result = instruction->operands[0];
+            u32 slot = machine_ref_payload(result);
+            valid = instruction->payload >= 9 && instruction->payload <= 16 && instruction->flags == 0 &&
+                    machine_ref_kind(result) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count &&
+                    function->stack_slot_sizes[slot] >= 16 && instruction->operands[1] == result &&
+                    instruction->operands[2] == result;
+        } break;
+        case MACHINE_X64_ATOMIC_RMW16:
+        {
+            MachineRef result = instruction->operands[0];
+            MachineRef desired = instruction->operands[1];
+            u32 result_slot = machine_ref_payload(result);
+            u32 desired_slot = machine_ref_payload(desired);
+            u32 atomic_operation = instruction->payload >> 8;
+            valid = (instruction->payload & 0xffu) == 16 && atomic_operation < IR_ATOMIC_OPERATION_COUNT &&
+                    instruction->flags == 0 && machine_ref_kind(result) == MACHINE_REF_STACK_SLOT &&
+                    result_slot < function->stack_slot_count && function->stack_slot_sizes[result_slot] >= 16 &&
+                    machine_ref_kind(desired) == MACHINE_REF_STACK_SLOT && desired_slot < function->stack_slot_count &&
+                    function->stack_slot_sizes[desired_slot] >= 16 && instruction->operands[2] == desired;
+        } break;
         case MACHINE_X64_LOAD_XMM_FRAME128:
         case MACHINE_X64_STORE_XMM_FRAME128:
         case MACHINE_X64_LOAD_YMM_FRAME256:
@@ -2725,6 +3609,180 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             valid = machine_ref_kind(frame) == MACHINE_REF_STACK_SLOT && slot < function->stack_slot_count && instruction->flags == 0 &&
                     (u64)instruction->payload + bytes <= function->stack_slot_sizes[slot];
         } break;
+        case MACHINE_X64_INLINE_ASSEMBLY:
+        case MACHINE_A64_INLINE_ASSEMBLY:
+        {
+            valid = instruction->payload < function->inline_assembly_count;
+            MachineInlineAssembly* assembly = valid ? function->inline_assemblies + instruction->payload : 0;
+            valid = valid && assembly->first_operand <= function->inline_assembly_operand_count &&
+                    assembly->operand_count <= function->inline_assembly_operand_count - assembly->first_operand &&
+                    assembly->first_relocation <= function->inline_assembly_relocation_count &&
+                    assembly->relocation_count <= function->inline_assembly_relocation_count - assembly->first_relocation &&
+                    (assembly->effects & ~(MACHINE_INLINE_ASSEMBLY_EFFECT_MEMORY | MACHINE_INLINE_ASSEMBLY_EFFECT_FLAGS |
+                                           MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR | MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP)) == 0 &&
+                    (!assembly->bytes.length || assembly->bytes.pointer) && (!assembly->source.length || assembly->source.pointer);
+            if (valid && function->target)
+            {
+                valid = (assembly->clobber_mask >> function->target->register_count) == 0;
+            }
+            u32 x87_top_count = 0;
+            u32 x87_below_count = 0;
+            u16 expected_preserved_vector_mask = 0;
+            if (valid && instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY && function->target == machine_target_x86_64_windows())
+            {
+                expected_preserved_vector_mask =
+                    (u16)((assembly->clobber_mask >> MACHINE_X64_ZMM0) & MACHINE_INLINE_ASSEMBLY_WIN64_PRESERVED_VECTOR_MASK);
+            }
+            u8 x87_top_flags = 0;
+            u8 x87_below_flags = 0;
+            u64 operand_register_mask = 0;
+            for (u32 operand_index = 0; valid && operand_index < assembly->operand_count; operand_index += 1)
+            {
+                MachineInlineAssemblyOperand* operand = function->inline_assembly_operands + assembly->first_operand + operand_index;
+                bool memory = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY) != 0;
+                bool vector = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR) != 0;
+                bool x87_top = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP) != 0;
+                bool x87_below = (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW) != 0;
+                valid = operand->stack_slot < function->stack_slot_count && operand->byte_size && operand->byte_size <= 16 &&
+                        function->stack_slot_sizes[operand->stack_slot] >= operand->byte_size &&
+                        operand->constraint_class < IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT &&
+                        operand->physical_register < (function->target ? function->target->register_count : MACHINE_TARGET_REGISTER_LIMIT) &&
+                        (operand->flags & ~(MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_MEMORY | MACHINE_INLINE_ASSEMBLY_OPERAND_VECTOR |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_X87_TOP | MACHINE_INLINE_ASSEMBLY_OPERAND_X87_BELOW |
+                                            MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER)) == 0 &&
+                        (operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) != 0 &&
+                        (!(operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER) ||
+                         (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) &&
+                        memory == IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(operand->constraint_class) &&
+                        vector == IR_INLINE_ASSEMBLY_CONSTRAINT_IS_VECTOR(operand->constraint_class) &&
+                        x87_top == (operand->constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_T) &&
+                        x87_below == (operand->constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_U) && !(x87_top && x87_below);
+                if (valid && function->target)
+                {
+                    bool physical_vector = (function->target->vector_register_mask & (UINT64_C(1) << operand->physical_register)) != 0;
+                    valid = physical_vector == vector && ((!x87_top && !x87_below) || function->target == machine_target_x86_64());
+                }
+                operand_register_mask |= valid && !x87_top && !x87_below ? UINT64_C(1) << operand->physical_register : 0;
+                x87_top_count += x87_top;
+                x87_below_count += x87_below;
+                x87_top_flags |= x87_top ? operand->flags : 0;
+                x87_below_flags |= x87_below ? operand->flags : 0;
+                if (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY && function->target == machine_target_x86_64_windows() &&
+                    vector && operand->physical_register >= MACHINE_X64_ZMM6 && operand->physical_register <= MACHINE_X64_ZMM15)
+                {
+                    expected_preserved_vector_mask |= (u16)(1u << (operand->physical_register - MACHINE_X64_ZMM0));
+                }
+                for (u32 previous_index = 0; valid && previous_index < operand_index; previous_index += 1)
+                {
+                    MachineInlineAssemblyOperand* previous = function->inline_assembly_operands + assembly->first_operand + previous_index;
+                    bool shared_register = previous->physical_register == operand->physical_register;
+                    bool shared_slot = previous->stack_slot == operand->stack_slot;
+                    bool early_conflict = shared_register && !shared_slot &&
+                        (((previous->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                          (operand->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) ||
+                         ((operand->flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          (MACHINE_INLINE_ASSEMBLY_OPERAND_EARLY_CLOBBER | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) &&
+                          (previous->flags & MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)));
+                    valid = !shared_slot || (shared_register && previous->byte_size == operand->byte_size);
+                    valid = valid && !early_conflict;
+                }
+            }
+            u32 preserved_vector_count = 0;
+            for (u32 vector_register = 6; vector_register < 16; vector_register += 1)
+            {
+                preserved_vector_count += ((u32)expected_preserved_vector_mask >> vector_register) & 1u;
+            }
+            bool terminator = (assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_TERMINATOR) != 0;
+            valid = valid && (assembly->clobber_mask & operand_register_mask) == operand_register_mask &&
+                    x87_top_count <= 1 && x87_below_count <= 1 && (!x87_below_count || x87_top_count == 1) &&
+                    (!(assembly->effects & MACHINE_INLINE_ASSEMBLY_EFFECT_X87_POP) ||
+                     (x87_top_count == 1 && x87_below_count == 0 &&
+                      (x87_top_flags & (MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT | MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT)) ==
+                          MACHINE_INLINE_ASSEMBLY_OPERAND_INPUT)) &&
+                    (!(x87_below_flags & MACHINE_INLINE_ASSEMBLY_OPERAND_OUTPUT) ||
+                     instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY) &&
+                    (!preserved_vector_count ||
+                     (assembly->preserved_vector_slot < function->stack_slot_count &&
+                      function->stack_slot_sizes[assembly->preserved_vector_slot] >= preserved_vector_count * 16u)) &&
+                    (terminator
+                         ? assembly->declared_successor_count && assembly->declared_successor_count <= assembly->successor_count &&
+                               assembly->successor_count && assembly->fallthrough_block < function->block_count &&
+                               assembly->successor_count <= function->block_count - assembly->fallthrough_block
+                         : assembly->successor_count == 0 && assembly->declared_successor_count == 0);
+            u32 control_relocation_count = 0;
+            for (u32 relocation_index = 0; valid && relocation_index < assembly->relocation_count; relocation_index += 1)
+            {
+                MachineInlineAssemblyRelocation* relocation =
+                    function->inline_assembly_relocations + assembly->first_relocation + relocation_index;
+                valid = relocation->kind < ASSEMBLY_RELOCATION_COUNT && relocation->offset < assembly->bytes.length &&
+                        (relocation->is_block
+                             ? relocation->block < function->block_count && relocation->target_index < assembly->declared_successor_count
+                             : relocation->symbol.length && relocation->symbol.pointer && !relocation->is_control &&
+                                   relocation->block == UINT32_MAX && relocation->continuation_block == UINT32_MAX &&
+                                   relocation->target_index == UINT32_MAX);
+                if (valid && relocation->is_block)
+                {
+                    bool x64_kind = instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY &&
+                                    relocation->kind == ASSEMBLY_RELOCATION_X86_PC32;
+                    bool a64_kind = instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY &&
+                                    relocation->kind == ASSEMBLY_RELOCATION_AARCH64_BRANCH26;
+                    u32 word = 0;
+                    if (a64_kind && relocation->offset <= assembly->bytes.length && sizeof(word) <= assembly->bytes.length - relocation->offset)
+                    {
+                        memcpy(&word, assembly->bytes.pointer + relocation->offset, sizeof(word));
+                    }
+                    bool a64_control = a64_kind && !(relocation->offset & 3u) &&
+                                       (word & UINT32_C(0xfc000000)) == UINT32_C(0x14000000);
+                    bool x64_control = x64_kind &&
+                                       ((relocation->offset && assembly->bytes.pointer[relocation->offset - 1u] == 0xe9u) ||
+                                        (relocation->offset >= 2u && assembly->bytes.pointer[relocation->offset - 2u] == 0x0fu &&
+                                         (assembly->bytes.pointer[relocation->offset - 1u] & 0xf0u) == 0x80u));
+                    bool x64_address = x64_kind && relocation->offset >= 2u &&
+                                       assembly->bytes.pointer[relocation->offset - 2u] == 0x8du &&
+                                       (assembly->bytes.pointer[relocation->offset - 1u] & 0xc7u) == 0x05u;
+                    valid = terminator && (x64_control || x64_address || a64_control) &&
+                            relocation->is_control == (x64_control || a64_control) &&
+                            relocation->offset <= assembly->bytes.length &&
+                            sizeof(u32) <= assembly->bytes.length - relocation->offset &&
+                            (!a64_kind || a64_control) &&
+                            (relocation->is_control
+                                 ? relocation->continuation_block == assembly->fallthrough_block + assembly->declared_successor_count +
+                                                                               control_relocation_count++
+                                 : relocation->continuation_block == UINT32_MAX);
+                    if (valid && relocation->is_control)
+                    {
+                        MachineBlock* continuation = function->blocks + relocation->continuation_block;
+                        MachineInstruction* branch = continuation->instruction_count
+                                                         ? function->instructions + continuation->first_instruction +
+                                                               continuation->instruction_count - 1u
+                                                         : 0;
+                        valid = branch &&
+                                (branch->opcode == MACHINE_X64_JMP || branch->opcode == MACHINE_A64_B) &&
+                                machine_ref_kind(branch->operands[0]) == MACHINE_REF_BLOCK &&
+                                machine_ref_payload(branch->operands[0]) == relocation->block;
+                    }
+                }
+                else if (valid)
+                {
+                    valid = relocation->kind != ASSEMBLY_RELOCATION_AARCH64_CONDBR19 &&
+                            relocation->kind != ASSEMBLY_RELOCATION_AARCH64_COMPAREBR19 &&
+                            relocation->kind != ASSEMBLY_RELOCATION_AARCH64_TESTBR14;
+                }
+            }
+            valid = valid && control_relocation_count == (u32)assembly->successor_count - (u32)assembly->declared_successor_count;
+        } break;
+        case MACHINE_X64_INLINE_EFFECTS_NONE:
+        case MACHINE_X64_INLINE_EFFECTS_MEMORY:
+        case MACHINE_X64_INLINE_EFFECTS_FLAGS:
+        case MACHINE_X64_INLINE_EFFECTS_MEMORY_FLAGS:
+        case MACHINE_A64_INLINE_EFFECTS_NONE:
+        case MACHINE_A64_INLINE_EFFECTS_MEMORY:
+        case MACHINE_A64_INLINE_EFFECTS_FLAGS:
+        case MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS:
+            valid = instruction->payload <= 2;
+            break;
         case MACHINE_A64_LOAD_INCOMING:
             valid = instruction->flags == 0 || instruction->flags == 1 || instruction->flags == 2 ||
                     instruction->flags == 4 || instruction->flags == 8;
@@ -3158,7 +4216,11 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         (function->edge_copy_source_count && !function->edge_copy_sources) ||
         (function->switch_case_count && !function->switch_cases) || (function->immediate_count && !function->immediates) ||
         (function->stack_slot_count && !function->stack_slot_sizes) || (function->call_target_count && !function->call_targets) ||
-        (function->line_mark_count && !function->line_marks) || (function->va_arg_count && !function->va_args))
+        (function->line_mark_count && !function->line_marks) || (function->debug_value_count && !function->debug_values) ||
+        (function->va_arg_count && !function->va_args) ||
+        (function->inline_assembly_count && !function->inline_assemblies) ||
+        (function->inline_assembly_operand_count && !function->inline_assembly_operands) ||
+        (function->inline_assembly_relocation_count && !function->inline_assembly_relocations))
     {
         result.error = MACHINE_VERIFY_STORAGE;
         return result;
@@ -3223,6 +4285,36 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
         if (row > function->instruction_count || (mark_index && row < function->line_marks[mark_index - 1u].row))
         {
             result.operand = mark_index;
+            MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
+        }
+    }
+    for (u32 debug_index = 0; debug_index < function->debug_value_count; debug_index += 1)
+    {
+        MachineDebugValue const* value = function->debug_values + debug_index;
+        bool valid = value->kind < MACHINE_DEBUG_VALUE_KIND_COUNT && value->local.value != IR_ID_UNDERLYING_INVALID &&
+                     (value->first_instruction == UINT32_MAX ||
+                      (value->instruction_count && value->first_instruction <= UINT32_MAX - value->instruction_count));
+        if (value->kind == MACHINE_DEBUG_VALUE_REFERENCE || value->kind == MACHINE_DEBUG_VALUE_PIECEWISE)
+        {
+            u32 expected_count = value->kind == MACHINE_DEBUG_VALUE_REFERENCE ? 1u : 2u;
+            valid = valid && value->piece_count == expected_count;
+            for (u32 piece_index = 0; piece_index < value->piece_count && valid; piece_index += 1)
+            {
+                MachineRef piece = value->pieces[piece_index];
+                MachineRefKind kind = machine_ref_kind(piece);
+                u32 payload = machine_ref_payload(piece);
+                valid = (kind == MACHINE_REF_VIRTUAL_REGISTER && payload < function->virtual_register_count) ||
+                        (kind == MACHINE_REF_STACK_SLOT && payload < function->stack_slot_count);
+                valid = valid && (value->kind != MACHINE_DEBUG_VALUE_PIECEWISE || value->piece_sizes[piece_index]);
+            }
+        }
+        else
+        {
+            valid = valid && !value->piece_count;
+        }
+        if (!valid)
+        {
+            result.operand = debug_index;
             MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
         }
     }
@@ -3403,11 +4495,43 @@ MachineVerifyResult machine_verify_function(MachineFunction* function)
             {
                 MACHINE_VERIFY_REJECT(MACHINE_VERIFY_PAYLOAD);
             }
-            bool is_terminator = (info->attributes & MACHINE_OPCODE_ATTRIBUTE_TERMINATOR) != 0;
+            bool is_terminator = (machine_instruction_opcode_row(function, instruction).flags & MACHINE_OPCODE_ROW_TERMINATOR) != 0;
             bool is_last = offset == block->instruction_count - 1;
             if (is_terminator != is_last)
             {
                 MACHINE_VERIFY_REJECT(MACHINE_VERIFY_TERMINATOR);
+            }
+            if (is_terminator && (instruction->opcode == MACHINE_X64_INLINE_ASSEMBLY || instruction->opcode == MACHINE_A64_INLINE_ASSEMBLY))
+            {
+                MachineInlineAssembly* assembly = function->inline_assemblies + instruction->payload;
+                for (u32 successor = 0; successor < assembly->successor_count; successor += 1)
+                {
+                    u32 destination = assembly->fallthrough_block + successor;
+                    bool edge_found = false;
+                    for (u32 edge_index = 0; !edge_found && edge_index < function->edge_count; edge_index += 1)
+                    {
+                        MachineEdge* edge = function->edges + edge_index;
+                        edge_found = edge->source_block == block_index && edge->destination_block == destination;
+                    }
+                    if (!edge_found)
+                    {
+                        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
+                    }
+                }
+                for (u32 edge_index = 0; edge_index < function->edge_count; edge_index += 1)
+                {
+                    MachineEdge* edge = function->edges + edge_index;
+                    if (edge->source_block != block_index)
+                    {
+                        continue;
+                    }
+                    bool declared = edge->destination_block >= assembly->fallthrough_block &&
+                                    edge->destination_block - assembly->fallthrough_block < assembly->successor_count;
+                    if (!declared)
+                    {
+                        MACHINE_VERIFY_REJECT(MACHINE_VERIFY_EDGE_RANGE);
+                    }
+                }
             }
             for (u32 operand_index = 0; operand_index < BUSTER_ARRAY_LENGTH(instruction->operands); operand_index += 1)
             {
@@ -3636,12 +4760,13 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_stack_placement_build_core(Are
             {
                 return placement;
             }
-            placement.callee_saved_mask |= info->clobber_mask & target->callee_saved_mask;
+            placement.callee_saved_mask |= machine_instruction_opcode_row(function, function->instructions + instruction_index).clobber_mask &
+                                           target->callee_saved_mask;
         }
         u32 push_count = 0;
         for (u32 physical_register = 0; physical_register < target->register_count; physical_register += 1)
         {
-            push_count += (placement.callee_saved_mask >> physical_register) & 1u;
+            push_count += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
         }
         // The callee-saved save area sits below the frame pointer only when the
         // pushes follow it. Where they precede it — Win64 — the saves are at the
@@ -4082,7 +5207,7 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 
 BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                                     bool assume_validated, bool position_independent, bool predicate_residency,
-                                                                                    MachineSelectionModule* module)
+                                                                                    bool preserve_debug_values, MachineSelectionModule* module)
 {
     MachineSelectResult result = {.failed_opcode = IR_OPCODE_COUNT};
     if (arena && program && function)
@@ -4092,8 +5217,8 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
         {
             switch (target.cpu_arch)
             {
-                break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, predicate_residency, module);
-                break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated);
+                break; case CPU_ARCH_X86_64: result = machine_select_canonical_function_x86_64(arena, program, function, target, position_independent, assume_validated, predicate_residency, preserve_debug_values, module);
+                break; case CPU_ARCH_AARCH64: result = machine_select_canonical_function_aarch64(arena, program, function, target, assume_validated, preserve_debug_values);
                 break; default: BUSTER_TODO();
             }
         }
@@ -4108,13 +5233,15 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
 
 MachineSelectResult machine_select_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, false, false, true, 0);
+    return machine_select_canonical_function_internal(arena, program, function, target, false, false, true, false, 0);
 }
 
 MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
-                                                                bool position_independent, bool predicate_residency, MachineSelectionModule* module)
+                                                                bool position_independent, bool predicate_residency, bool preserve_debug_values,
+                                                                MachineSelectionModule* module)
 {
-    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent, predicate_residency, module);
+    return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent, predicate_residency,
+                                                      preserve_debug_values, module);
 }
 
 MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target)

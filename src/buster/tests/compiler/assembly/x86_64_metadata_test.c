@@ -2348,7 +2348,9 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
         for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(registers); size_index += 1)
         {
             u16 vector_bits = (u16)(128u << size_index);
-            u16 memory_bits = vector_bits / test_case.memory_divisor;
+            // Both operands promote to int; fixture widths are at most 512 bits.
+            u16 memory_bits = (u16)(vector_bits / test_case.memory_divisor);
+            valid &= (u32)memory_bits * test_case.memory_divisor == vector_bits;
             BusterX86MetadataFormKey key = {0};
             bool key_ready = buster_x86_metadata_form_key(test_case.forms[size_index], &key);
             valid &= key_ready;

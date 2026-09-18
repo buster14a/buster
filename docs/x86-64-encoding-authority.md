@@ -49,7 +49,7 @@ not just function names containing `encode`.
 | `link.c:link_elf_relax_thread_local`, general-dynamic arm | Migrated: metadata-derived FS MOV + fixed-displacement LEA replacement. |
 | The same function, initial-exec arm | Migrated: metadata-derived ADD input/output forms, not manual REX/ModRM surgery. |
 | `link.c:link_forwarding_runtime_object` | Migrated in the [forwarding follow-up](x86-64-forwarding-authority.md): metadata-prepared XOR/JMP recipes; object ABI policy stays in the linker. |
-| `link.c:link_x86_relax_got_load` | Migrated: bounded section adapter; metadata derives and validates the MOV/LEA pair and its PC32 field. Broader GOTPCRELX conversions remain #78. |
+| `link.c:link_x86_relax_got_reference` | Migrated: bounded section adapter carrying the psABI spelling and addend; metadata derives and validates every conversion the psABI table names, and the patch each replacement takes. Was the MOV/LEA pair alone (#267) until #78 opened the rest. |
 | `assembly_unit.c:assembly_unit_directive_align` | Migrated: shared target-aware derived padding. Explicit source fill stays data; #228 partial AArch64-word policy is preserved. |
 | `codegen.c:codegen_generate_canonical_module_attempt` | Migrated: same shared padding helper; x86 NOP is derived once and bulk-filled with one memset per gap. |
 

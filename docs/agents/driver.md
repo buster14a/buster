@@ -82,9 +82,10 @@ Signature rejection maps to `codegen.unsupported-abi`; opcode and encoding
 rejection map to `codegen.unsupported-instruction`; verification maps to
 `codegen.invalid-ir`; placement and output capacity map to `codegen.capacity`.
 
-The signature-reason negative control uses the currently unsupported 32-byte
-Win64 vector ABI. Narrow vectors and argument count have strict-success regressions and
-must not be constrained to keep a telemetry test failing.
+The opcode-reason negative control uses seventeen inline-assembly operands,
+above the current MIR limit of sixteen. Wide Win64 vectors, scalar fixed-register
+assembly, and argument count retain strict-success coverage; do not constrain
+supported inputs to keep a negative test failing.
 
 For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
 names the source tuple, not the destination register width. A broadcast

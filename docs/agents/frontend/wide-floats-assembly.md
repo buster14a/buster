@@ -1,4 +1,4 @@
-# Long double, assembly, and Wasm boundaries
+# `_Float16`, long double, assembly, and Wasm boundaries
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
@@ -11,9 +11,76 @@ observer cover those images across the native target/mode/frontend/PIC matrix.
 AArch64 binary128 widening uses ordinary MIR frame images; see the machine
 guide for its exact conversion and native floating-environment checks. This
 does not claim binary128 scalar ABI or arithmetic support.
+The host FENV fixture in `tests/host_aarch64_float_to_f128.c` uses ordinary
+GNU inline asm for `mrs`/`msr` reads and writes of `fpsr`/`fpcr`; the baseline
+AArch64 inline-assembly vocabulary selects these checked system-register rows
+as closed MIR transactions, with strict no-fallback compilation retaining
+their source/debug locations.
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+- **`_Float16` is IEEE-754 binary16, and it is a real type rather than a
+  storage alias.** Two naturally aligned bytes on every supported target
+  (`TargetDataLayout.float16_type`, `C_TYPE_FLOAT16`), its own rank below
+  `float` in the usual arithmetic conversions, its own place in the
+  `vector_size` element ladder, and `_Float16 _Complex` beside it as clang's
+  extension (`C_TYPE_FLOAT16_COMPLEX`, two contiguous halves). The C23
+  `f16`/`F16` constant suffix and the `__FLT16_*__` prelude macros carry it,
+  and every constant rounds through one encoder pair,
+  `c_ir_float16_bits_from_f64` / `c_ir_float16_to_f64` in `c_gen.c`: no host
+  half type is used, because the compiler builds under four C compilers and
+  cross-compiles. Every static-initializer writer routes its 16-bit case
+  through that pair; the byte strings in `c_test_float16_type` were taken
+  from clang 18 compiling the same spellings.
+
+  **Code generation does not implement binary16 yet.** No backend has its
+  arithmetic, its conversions, or its ABI position, so a function that needs
+  a half value at run time is refused by the existing structured codegen
+  diagnostic (`codegen.unsupported-abi`, `codegen.unsupported-instruction`)
+  rather than emitted. What does reach an object today is everything the
+  frontend settles on its own: layout, `sizeof`/`_Alignof`, type
+  compatibility, folded constants and static initializers. That is enough for
+  the LLVM FP16 resource headers, whose `static __inline__` intrinsic bodies
+  are analyzed and then dropped unused. Lifting the restriction is
+  backend-owned work: binary16 loads/stores, f16↔f32 conversion, and the SSE
+  or NEON argument class.
+- **`__bf16` has a distinct bfloat16 representation.** Its own
+  `C_TYPE_BFLOAT16`, `TargetDataLayout.bfloat16_type` (two naturally aligned
+  bytes), and `IrType.float_format` discriminating `IR_FLOAT_FORMAT_BFLOAT16`
+  from `IR_FLOAT_FORMAT_IEEE` at the same 16-bit width; an equal-width
+  identity conversion between the two formats is invalid. Scalar constants
+  round once from the binary64 carrier through
+  `c_ir_bfloat16_bits_from_f64`, and integer-to-bfloat16 conversion uses
+  precision 8. No backend implements 16-bit float runtime operations, so a
+  `__bf16` value needed at run time is refused by the structured codegen
+  diagnostic, as binary16 is. Mixed `_Float16`/`__bf16` arithmetic selects
+  `_Float16`: bfloat16 carries the lower conversion rank
+  (`c_ir_float_conversion_rank` ranks it below binary16 despite equal storage
+  width), so the usual arithmetic conversions convert `__bf16` to `_Float16`
+  numerically, never as an identity. This can reduce exponent range.
+
+  Wide-source constants retain their target x87/binary128 payload in the two
+  integer limbs of `CIrConstantValue`; `c_ir_constant_float_literal` rounds a
+  literal in its source format first, and `c_ir_constant_wide_float_cast`
+  rounds directly to the destination through the existing rational machinery.
+  Neither casts nor arithmetic/comparison/truth/integer consumers may read a
+  wide value through the binary64 carrier. Scalar, array, aggregate and local
+  static BF16 initializers use this path. An explicit cast to `double` still
+  deliberately rounds to binary64. The binary128 rational converter uses a
+  two-limb quotient, not a host extended type or a new numeric dependency.
+  This does not add native BF16 arithmetic/ABI or binary128 scalar ABI support.
+
+  `c_parse_bfloat16_builtin` carries the LLVM18 BF16/AVX-NE-CONVERT signatures
+  and the select/FMA dependencies used by the pristine resource headers.
+  Identifier binding and type queries record their uses in a sparse worklist;
+  `c_parse_validate_bfloat16_builtin_calls` checks arity and operand types
+  before unused definitions are omitted. Nested, unreachable and unevaluated
+  calls are still checked. Same-sized GNU arithmetic vectors are convertible
+  by value; pointer pointees retain format/size identity, with ordinary C
+  null/void-pointer conversions. This signature checking is not a claim of
+  native intrinsic lowering. `c_test_bfloat16_semantic_acceptance` covers
+  source-format rounding on six layouts in both frontend forms, mixed-format
+  identity, positive/negative builtin operands, and deep nested calls.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and
@@ -129,9 +196,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   emitter adds one to `IrProgram.symbols` when the search misses, which is what
   lets a startup object define `_start`. Two things follow from the AT&T/Intel
   dialect being x86-only: the emitter passes `ASSEMBLY_SYNTAX_DEFAULT` for
-  every other target, and the assembler's AArch64 vocabulary is the bootstrap
-  control-flow set, so an AArch64 block gets `bl`, `brk`, `ret` and `nop` and
-  not an ADRP/ADD page pair. A block that fails reports through
+  every other target. The assembler's AArch64 vocabulary contains the
+  bootstrap control-flow set (`bl`, `brk`, `ret` and `nop`) and the checked
+  baseline `mrs`/`msr` system-register rows for `fpsr` and `fpcr`, but not an
+  ADRP/ADD page pair. A block that fails reports through
   `CodegenModule.failed_in_assembly` and the block/line beside it, which is what
   keeps the driver's diagnostic off the next C function in the file. The
   *inline*-assembly arm of `codegen_generate_canonical_module_attempt` shares

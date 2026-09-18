@@ -1,7 +1,8 @@
 /* Reproducible compiler-throughput harness, not a generated-program benchmark.
  * Ownership: this executable owns deterministic inputs and per-process timing;
  * build.c owns compiler construction. No third-party library is required.
- * Map: tp_generate (workloads), tp_measure (commands), tp_run (paired trials),
+ * Map: tp_generate (synthetic workloads), tp_workload_check/tp_workload_admit
+ * (real-source qualification), tp_measure (commands), tp_run (paired trials),
  * tp_compare (strict raw-sample replay and CI decision), tp_self_test (tests).
  * qualification.h owns optional dedicated-host admission and cooperative locks.
  */
@@ -14,6 +15,7 @@
 #include "platform.h"
 #include "hash.h"
 #include "stats.h"
+#include "retirement_stats.h"
 #include <stdarg.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -58,17 +60,31 @@ typedef struct TpConfig
     char const* candidate_id;
     char const* machine_id;
     char const* lock_file;
+    int lease_fd, lease_fd_explicit;
     TpHost const* host;
     char const* profile;
     char const* self_host_root;
     char const* self_host_generated;
     char const* allocation_baseline;
     char const* allocation_candidate;
+    char const* descriptor;
+    char const* source_root;
+    char const* compiler;
+    char const* evidence;
+    char const* evidence_outcome;
+    char const* qualification_id;
+    char const* dependency_manifest;
+    char const* resource_manifest;
+    char const* sysroot_manifest;
+    char const* sdk_manifest;
+    char const* environment_manifest;
+    char const* runtime_manifest;
+    char const* retirement_input;
     char const* flags[TP_MAX_FLAGS];
     unsigned flag_count;
     unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
     int cpu, pmu, require_pmu, guard, identical;
-    int assembly;
+    int assembly, output_explicit;
 } TpConfig;
 
 typedef struct TpWorkload
@@ -187,12 +203,17 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->seed = 20260907;
     config->scale = 1;
     config->cpu = -1;
+    config->lease_fd = -1;
     config->guard = 1;
     int ok = 1, selected_workloads = 0;
     for (int i = 2; i < argc && ok; ++i)
     {
         char const* key = argv[i];
-        if (!strcmp(key, "--pmu"))
+        if ((!strcmp(config->command, "check-workload") || !strcmp(config->command, "admit-workload")) && i == 2 && key[0] != '-')
+        {
+            config->descriptor = key;
+        }
+        else if (!strcmp(key, "--pmu"))
         {
             config->pmu = 1;
         }
@@ -217,18 +238,37 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         else
         {
             char const* value = argv[++i];
-            if (!strcmp(key, "--output")) config->output = value;
+            if (!strcmp(key, "--output")) { config->output = value; config->output_explicit = 1; }
             else if (!strcmp(key, "--baseline")) config->baseline = value;
             else if (!strcmp(key, "--candidate")) config->candidate = value;
             else if (!strcmp(key, "--baseline-id")) config->baseline_id = value;
             else if (!strcmp(key, "--candidate-id")) config->candidate_id = value;
             else if (!strcmp(key, "--machine-id")) config->machine_id = value;
             else if (!strcmp(key, "--lock-file")) config->lock_file = value;
+            else if (!strcmp(key, "--lease-fd"))
+            {
+                unsigned descriptor = 0;
+                ok = !config->lease_fd_explicit && tp_number(value, &descriptor) && descriptor >= 3 && descriptor <= INT_MAX;
+                if (ok) config->lease_fd = (int)descriptor;
+                config->lease_fd_explicit = 1;
+            }
             else if (!strcmp(key, "--profile")) config->profile = value;
             else if (!strcmp(key, "--self-host-root")) config->self_host_root = value;
             else if (!strcmp(key, "--self-host-generated")) config->self_host_generated = value;
             else if (!strcmp(key, "--allocation-baseline")) config->allocation_baseline = value;
             else if (!strcmp(key, "--allocation-candidate")) config->allocation_candidate = value;
+            else if (!strcmp(key, "--source-root")) config->source_root = value;
+            else if (!strcmp(key, "--compiler")) config->compiler = value;
+            else if (!strcmp(key, "--evidence")) config->evidence = value;
+            else if (!strcmp(key, "--evidence-outcome")) config->evidence_outcome = value;
+            else if (!strcmp(key, "--qualification-id")) config->qualification_id = value;
+            else if (!strcmp(key, "--dependency-manifest")) config->dependency_manifest = value;
+            else if (!strcmp(key, "--resource-manifest")) config->resource_manifest = value;
+            else if (!strcmp(key, "--sysroot-manifest")) config->sysroot_manifest = value;
+            else if (!strcmp(key, "--sdk-manifest")) config->sdk_manifest = value;
+            else if (!strcmp(key, "--environment-manifest")) config->environment_manifest = value;
+            else if (!strcmp(key, "--runtime-manifest")) config->runtime_manifest = value;
+            else if (!strcmp(key, "--input")) config->retirement_input = value;
             else if (!strcmp(key, "--pairs")) ok = tp_number(value, &config->pairs);
             else if (!strcmp(key, "--warmups")) ok = tp_number(value, &config->warmups);
             else if (!strcmp(key, "--timeout")) ok = tp_number(value, &config->timeout);
@@ -312,7 +352,28 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         tp_error("both allocation compilers, or both self-host root/generated paths, must be supplied together");
         ok = 0;
     }
-    if (config->machine_id || config->lock_file || !strcmp(config->command, "qualify"))
+    if (!strcmp(config->command, "check-workload") &&
+        (!config->descriptor || !config->source_root || !config->compiler || !config->evidence || !config->evidence_outcome))
+    {
+        tp_error("check-workload requires DESCRIPTOR, --source-root, --compiler, --evidence and --evidence-outcome");
+        ok = 0;
+    }
+    if (!strcmp(config->command, "admit-workload") &&
+        (!config->descriptor || !config->source_root || !config->compiler || !config->evidence ||
+         !config->evidence_outcome || !config->output_explicit || !config->qualification_id || !config->dependency_manifest ||
+         !config->resource_manifest || !config->sysroot_manifest || !config->sdk_manifest ||
+         !config->environment_manifest || !config->runtime_manifest))
+    {
+        tp_error("admit-workload requires DESCRIPTOR, source/compiler/oracle evidence, output, qualification id and all closure manifests");
+        ok = 0;
+    }
+    if (!strcmp(config->command, "retirement-replay") &&
+        (!config->retirement_input || !config->output_explicit))
+    {
+        tp_error("retirement-replay requires --input SERIES_FILE and --output RESULT_JSON");
+        ok = 0;
+    }
+    if (config->machine_id || config->lock_file || config->lease_fd_explicit || !strcmp(config->command, "qualify"))
     {
         int dedicated = config->machine_id && config->machine_id[0] &&
                         strlen(config->machine_id) < TP_HOST_LABEL_CAP && config->lock_file &&
@@ -1278,6 +1339,8 @@ static int tp_compare(char const* root)
 }
 
 #include "tree.h"
+static int tp_mkdirs(char const* path);
+#include "workload.h"
 
 static int tp_mkdirs(char const* path)
 {
@@ -1658,14 +1721,176 @@ static int tp_self_test(void)
     return failures ? 1 : 0;
 }
 
+/* Replay the approved #619 family through its C implementation.  This is an
+ * intentionally small adapter for the performance-binding workflow: input is
+ * a predeclared text stream of one logical member per block, and each member
+ * invokes tp_retirement_assess exactly once.  The one result contains both
+ * rounds and the pooled scope; callers must not run one invocation per scope.
+ * It computes no acceptance verdict for the workflow binding itself. */
+static char const* tp_retirement_outcome_name(TpRetirementOutcome outcome)
+{
+    char const* result = "invalid";
+    if (outcome == TP_RETIREMENT_PASS) result = "pass";
+    else if (outcome == TP_RETIREMENT_REGRESSION) result = "regression";
+    else if (outcome == TP_RETIREMENT_INCONCLUSIVE) result = "inconclusive";
+    return result;
+}
+
+static int tp_retirement_replay(TpConfig const* config)
+{
+    FILE* input = fopen(config->retirement_input, "rb");
+    FILE* output = NULL;
+    double* workspace = NULL;
+    int ok = input != NULL;
+    unsigned version = 0, bootstrap_members = 0, cell_members = 0, pairs = 0;
+    unsigned resamples = 0, frozen = 0, members = 0;
+    uint64_t seed = 0;
+    char line[4096];
+    if (!ok) tp_error("cannot open retirement series input %s", config->retirement_input);
+    if (ok)
+    {
+        ok = fgets(line, sizeof(line), input) != NULL &&
+             sscanf(line, "version=%u seed=%" SCNu64 " bootstrap_members=%u cell_members=%u pairs=%u resamples=%u frozen=%u members=%u",
+                    &version, &seed, &bootstrap_members, &cell_members, &pairs,
+                    &resamples, &frozen, &members) == 8;
+        ok = ok && version == TP_RETIREMENT_STATISTICS_VERSION && frozen == 1 &&
+             members > 0;
+    }
+    TpRetirementPlan plan = {
+        .seed = seed,
+        .version = version,
+        .bootstrap_members_per_scope = bootstrap_members,
+        .cell_members_per_scope = cell_members,
+        .pairs_per_round = pairs,
+        .resamples = resamples,
+        .frozen_before_samples = frozen,
+    };
+    unsigned expected_members = bootstrap_members + cell_members;
+    if (ok && (bootstrap_members == 0 ||
+               bootstrap_members > TP_RETIREMENT_MAX_BOOTSTRAP_MEMBERS_PER_SCOPE ||
+               cell_members == 0 ||
+               cell_members > TP_RETIREMENT_MAX_CELL_MEMBERS_PER_SCOPE ||
+               pairs < TP_RETIREMENT_MIN_PAIRS_PER_ROUND ||
+               pairs > TP_RETIREMENT_MAX_PAIRS_PER_ROUND || (pairs & 1) ||
+               resamples < TP_RETIREMENT_MIN_RESAMPLES ||
+               resamples > TP_RETIREMENT_MAX_RESAMPLES || seed == 0 ||
+               expected_members != bootstrap_members + cell_members ||
+               members != expected_members))
+        ok = 0;
+    if (ok) workspace = (double*)malloc((size_t)resamples * sizeof(*workspace));
+    if (ok && !workspace) ok = 0;
+    if (ok)
+    {
+        output = fopen(config->output, "wb");
+        ok = output != NULL;
+    }
+    if (ok) fputs("{\"schema\":\"buster-native-retirement-statistics-replay-v1\",\"version\":1,\"members\":[", output);
+    char previous_member[128] = {0};
+    unsigned previous_metric = 0;
+    for (unsigned member_index = 0; ok && member_index < members; ++member_index)
+    {
+        char member[128];
+        unsigned metric = 0, kind = 0, family_index = 0, cells = 0;
+        unsigned member_pairs = 0, member_resamples = 0;
+        double limit = 0.0;
+        ok = fgets(line, sizeof(line), input) != NULL &&
+             sscanf(line, "member=%127s metric=%u kind=%u family=%u cells=%u pairs=%u resamples=%u limit=%lf",
+                    member, &metric, &kind, &family_index, &cells, &member_pairs,
+                    &member_resamples, &limit) == 8;
+        if (!ok) break;
+        if (member_index && (strcmp(member, previous_member) < 0 ||
+                             (strcmp(member, previous_member) == 0 && metric <= previous_metric)))
+            ok = 0;
+        if (ok)
+        {
+            memcpy(previous_member, member, strlen(member) + 1);
+            previous_metric = metric;
+        }
+        size_t ratio_count = 0;
+        if (ok) ok = metric < TP_RETIREMENT_VARIABLE_METRICS &&
+                    kind < TP_RETIREMENT_MEMBER_KINDS && cells > 0 &&
+                    cells <= TP_RETIREMENT_MAX_CELLS && member_pairs == pairs &&
+                    member_resamples == (kind == TP_RETIREMENT_BOOTSTRAP_MEMBER ? resamples : 0) &&
+                    isfinite(limit) && limit > 0.0 &&
+                    (size_t)cells <= SIZE_MAX / (TP_RETIREMENT_ROUNDS * (size_t)pairs);
+        if (ok) ratio_count = (size_t)cells * TP_RETIREMENT_ROUNDS * pairs;
+        double* ratios = ok ? (double*)malloc(ratio_count * sizeof(*ratios)) : NULL;
+        if (ok && !ratios) ok = 0;
+        for (size_t ratio_index = 0; ok && ratio_index < ratio_count; ++ratio_index)
+        {
+            double ratio = 0.0;
+            char extra = 0;
+            ok = fgets(line, sizeof(line), input) != NULL &&
+                 sscanf(line, "ratio=%lf %c", &ratio, &extra) == 1 &&
+                 isfinite(ratio) && ratio > 0.0;
+            if (ok) ratios[ratio_index] = ratio;
+        }
+        if (ok) ok = fgets(line, sizeof(line), input) != NULL && !strcmp(line, "end\n");
+        TpRetirementSeries series = {
+            .ratios = ratios,
+            .ratio_count = ratio_count,
+            .cell_count = cells,
+            .observed_pairs = {pairs, pairs},
+            .member_kind = kind,
+            .family_index = family_index,
+            .metric_index = metric,
+            .limit = limit,
+        };
+        TpRetirementResult result = {0};
+        if (ok)
+        {
+            result = tp_retirement_assess(&plan, &series,
+                                          kind == TP_RETIREMENT_BOOTSTRAP_MEMBER ? workspace : NULL,
+                                          kind == TP_RETIREMENT_BOOTSTRAP_MEMBER ? resamples : 0);
+            ok = result.valid;
+        }
+        if (ok)
+        {
+            if (member_index) fputc(',', output);
+            fputs("{\"member\":", output); tp_json_string(output, member);
+            fprintf(output, ",\"metric\":%u,\"kind\":%u,\"family_index\":%u,\"outcome\":\"%s\",\"valid\":true,\"resampled\":%s,\"resamples\":%u,\"tail_alpha\":",
+                    metric, kind, family_index, tp_retirement_outcome_name(result.outcome),
+                    result.resampled ? "true" : "false", result.resamples);
+            tp_json_number(output, result.tail_alpha);
+            fputs(",\"round\":[{\"estimate\":", output); tp_json_number(output, result.round[0].estimate);
+            fputs(",\"lower\":", output); tp_json_number(output, result.round[0].lower);
+            fputs(",\"upper\":", output); tp_json_number(output, result.round[0].upper);
+            fputs("},{\"estimate\":", output); tp_json_number(output, result.round[1].estimate);
+            fputs(",\"lower\":", output); tp_json_number(output, result.round[1].lower);
+            fputs(",\"upper\":", output); tp_json_number(output, result.round[1].upper);
+            fputs("}],\"pooled\":{\"estimate\":", output); tp_json_number(output, result.pooled.estimate);
+            fputs(",\"lower\":", output); tp_json_number(output, result.pooled.lower);
+            fputs(",\"upper\":", output); tp_json_number(output, result.pooled.upper);
+            fputs("}}", output);
+        }
+        free(ratios);
+    }
+    if (ok)
+    {
+        char extra = 0;
+        ok = !fgets(line, sizeof(line), input) || (sscanf(line, " %c", &extra) != 1);
+        if (ok) fputs("]}\n", output);
+    }
+    if (output && fclose(output) != 0) ok = 0;
+    if (input && fclose(input) != 0) ok = 0;
+    free(workspace);
+    if (!ok) tp_error("invalid #619 retirement statistics replay input or result");
+    return ok ? 0 : 2;
+}
+
 static void tp_help(void)
 {
     fputs("Compiler throughput (native C; result schema 2, input schema 1)\n\n"
           "  throughput generate --output DIR [--profile smoke|ci|full] [--seed N] [--scale N]\n"
           "  throughput run --baseline IDE --candidate IDE --output NEW_DIR [options]\n"
           "  throughput compare --output RESULT_DIR\n"
+          "  throughput retirement-replay --input SERIES_FILE --output RESULT_JSON\n"
           "  throughput self-test\n"
-          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH\n\n"
+          "  throughput check-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome OUTCOME\n"
+          "  throughput admit-workload DESCRIPTOR --source-root DIR --compiler IDE --evidence FILE --evidence-outcome pass\n"
+          "    --output NEW_DIR --qualification-id ID --dependency-manifest FILE --resource-manifest FILE\n"
+          "    --sysroot-manifest FILE --sdk-manifest FILE --environment-manifest FILE --runtime-manifest FILE\n"
+          "  throughput qualify --cpu N|auto --machine-id LABEL --lock-file ABSOLUTE_PATH [--lease-fd N]\n\n"
           "Options: --pairs N (20+ for guard; two rounds), --warmups N, --mode all|none|mir-stack|fast|quality,\n"
           "--timeout SECONDS, --cpu N|auto, --flag ARG (repeatable), --baseline-id LABEL, --candidate-id LABEL,\n"
           "--workload NAME (repeatable; first replaces defaults; names below, or default|all),\n"
@@ -1673,9 +1898,14 @@ static void tp_help(void)
           "--pmu (separate replays), --require-pmu, --allocation-baseline IDE --allocation-candidate IDE,\n"
           "--self-host-root FROZEN_TREE --self-host-generated GENERATED_DIR, --require-identical-output,\n"
           "--no-guard (required for custom workload runs; no performance pass claimed).\n"
+          "Descriptor outcomes: pass|failed|inconclusive|unavailable. check-workload verifies exact staged inputs,\n"
+          "compiler and evidence identities, but never executes the oracle or admits a workload.\n"
+          "admit-workload requires a passing oracle marker, hashes every closure manifest, performs the pinned\n"
+          "object and compile-link operations, executes the artifact and emits an admission receipt only on success.\n"
           "Workloads: tiny_startup, large_function, many_functions, symbol_table, control_flow, backend_pressure,\n"
           "macros, aggregate-abi. Default: the first six, in fixed corpus order regardless of selection order.\n"
           "Dedicated Linux run/qualify: --machine-id LABEL --lock-file ABSOLUTE_PATH --cpu N|auto.\n"
+          "A service may additionally pass its held lease with --lease-fd N; it requires --lock-file and is not inherited by compiler children.\n"
           "qualify prints read-only observations to stdout; does not prove isolation or benchmark noise.\n"
           "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n\n"
           "Exit: 0 no confirmed regression (inspect inconclusive warnings), 1 confirmed regression,\n"
@@ -1693,7 +1923,8 @@ int main(int argc, char** argv)
     int admitted = tp_options(argc, argv, &config);
     if (admitted && config.machine_id)
     {
-        int error = tp_host_lock_acquire(config.lock_file, &lock);
+        int error = config.lease_fd_explicit ? tp_host_lock_adopt(config.lock_file, config.lease_fd, &lock) :
+                                              tp_host_lock_acquire(config.lock_file, &lock);
         if (!error) error = tp_host_capture(&host, config.cpu, config.machine_id, config.lock_file);
         admitted = error == 0;
         if (admitted) config.host = &host;
@@ -1730,6 +1961,27 @@ int main(int argc, char** argv)
             ok = fflush(stdout) == 0 && ok;
             result = ok ? 0 : 2;
         }
+        else if (!strcmp(config.command, "check-workload"))
+        {
+            TpWorkloadCheckOptions options = {
+                config.descriptor, config.source_root, config.compiler, config.evidence, config.evidence_outcome};
+            result = tp_workload_check(options) ? 0 : 2;
+        }
+        else if (!strcmp(config.command, "admit-workload"))
+        {
+            TpWorkloadAdmitOptions options = {
+                .check = {config.descriptor, config.source_root, config.compiler, config.evidence, config.evidence_outcome},
+                .output = config.output,
+                .qualification_id = config.qualification_id,
+                .dependency_manifest = config.dependency_manifest,
+                .resource_manifest = config.resource_manifest,
+                .sysroot_manifest = config.sysroot_manifest,
+                .sdk_manifest = config.sdk_manifest,
+                .environment_manifest = config.environment_manifest,
+                .runtime_manifest = config.runtime_manifest,
+            };
+            result = tp_workload_admit(options) ? 0 : 2;
+        }
         else if (!strcmp(config.command, "run"))
         {
             result = tp_run(config);
@@ -1737,6 +1989,10 @@ int main(int argc, char** argv)
         else if (!strcmp(config.command, "compare"))
         {
             result = tp_compare(config.output);
+        }
+        else if (!strcmp(config.command, "retirement-replay"))
+        {
+            result = tp_retirement_replay(&config);
         }
         else
         {

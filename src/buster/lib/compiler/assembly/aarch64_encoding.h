@@ -282,8 +282,9 @@ BUSTER_F_DECL bool buster_aarch64_metadata_mnemonic_candidate(BusterAarch64Metad
 
 // Arm's canonical Apple-M1 fixed-spelling projection is an independent,
 // compact catalog.  Unlike the LLVM candidate index above, these rows are
-// selected directly from the Arm canonical artifact and are safe for the
-// explicit Apple-M1 target parser path only.
+// selected directly from the Arm canonical artifact.  The historical M1 name
+// describes their import provenance; target feature checks make the exact
+// architectural words available to every valid AArch64 profile.
 typedef struct BusterAarch64ArmM1FixedSpelling BusterAarch64ArmM1FixedSpelling;
 struct BusterAarch64ArmM1FixedSpelling
 {
@@ -352,7 +353,9 @@ BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_find_form(String8 mnemonic, A64GprO
 BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count,
                                                     u32* word);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_gpr_encode_mnemonic(Target target, String8 mnemonic, A64GprOperand const* operands,
-                                                             u32 operand_count, u32* word);
+                                                              u32 operand_count, u32* word);
+BUSTER_F_DECL bool buster_aarch64_gpr_encode_for_target(Target target, u32 form_index, A64GprOperand const* operands,
+                                                        u32 operand_count, u32* word);
 // Short aliases used by assembler-side code and tests.
 BUSTER_F_DECL bool a64_arm_m1_gpr_find_form(String8 mnemonic, A64GprOperand const* operands, u32 operand_count, u32* form_index);
 BUSTER_F_DECL bool a64_arm_m1_gpr_encode(Target target, u32 form_index, A64GprOperand const* operands, u32 operand_count, u32* word);
@@ -475,9 +478,13 @@ BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_encode(Target target, u3
                                                               u32 operand_count, A64ScalarIntModifier const* modifiers,
                                                               u32 modifier_count, u32* word);
 BUSTER_F_DECL bool buster_aarch64_arm_m1_scalar_integer_encode_mnemonic(Target target, String8 mnemonic,
-                                                                       A64ScalarIntOperand const* operands, u32 operand_count,
-                                                                       A64ScalarIntModifier const* modifiers, u32 modifier_count,
-                                                                       u32* word);
+                                                                         A64ScalarIntOperand const* operands, u32 operand_count,
+                                                                         A64ScalarIntModifier const* modifiers, u32 modifier_count,
+                                                                         u32* word);
+BUSTER_F_DECL bool buster_aarch64_scalar_integer_encode_for_target(Target target, u32 form_index,
+                                                                   A64ScalarIntOperand const* operands, u32 operand_count,
+                                                                   A64ScalarIntModifier const* modifiers, u32 modifier_count,
+                                                                   u32* word);
 // Short aliases used by assembler-side code and tests.
 BUSTER_F_DECL bool a64_arm_m1_scalar_integer_find_form(String8 mnemonic, A64ScalarIntOperand const* operands, u32 operand_count,
                                                        A64ScalarIntModifier const* modifiers, u32 modifier_count, u32* form_index);
@@ -671,4 +678,43 @@ BUSTER_F_DECL BusterAarch64CanonicalDecodeStatus buster_aarch64_canonical_decode
 BUSTER_F_DECL bool buster_aarch64_metadata_test_predicate_parse_error_fails_closed(Target target);
 BUSTER_F_DECL void buster_aarch64_metadata_test_reset_packed_access_counter(void);
 BUSTER_F_DECL u32 buster_aarch64_metadata_test_packed_access_count(void);
+
+// Test seam over the generated counted blob readers. Every generated AArch64
+// blob instantiates one shared reader template, so probing each blob covers
+// every instantiation of it. `value` is the production little-endian u16
+// reader at `offset` under the blob's own pinned byte count; `low` and `high`
+// are the counted byte reads it is defined to compose, so a probe pins byte
+// order and the full 16-bit range without restating the reader's expression.
+// `truncated` and `past_end` re-read the same offset under byte counts that
+// exclude the second byte and both bytes, which is how a counted reader
+// reports a window outside the explicit count.
+typedef struct BusterAarch64GeneratedBlobProbe BusterAarch64GeneratedBlobProbe;
+struct BusterAarch64GeneratedBlobProbe
+{
+    String8 name;
+    u64 byte_count;
+    u16 value;
+    u16 truncated;
+    u16 past_end;
+    u8 low;
+    u8 high;
+};
+// One entry per generated AArch64 blob, in the order the generator emits
+// them: ten in the generated header plus the coverage include's blob.
+enum
+{
+    BUSTER_AARCH64_GENERATED_BLOB_STRING_POOL,
+    BUSTER_AARCH64_GENERATED_BLOB_SEGMENTS,
+    BUSTER_AARCH64_GENERATED_BLOB_FIELDS,
+    BUSTER_AARCH64_GENERATED_BLOB_OPERANDS,
+    BUSTER_AARCH64_GENERATED_BLOB_PREDICATES,
+    BUSTER_AARCH64_GENERATED_BLOB_FORMS,
+    BUSTER_AARCH64_GENERATED_BLOB_MNEMONIC_RANGES,
+    BUSTER_AARCH64_GENERATED_BLOB_MNEMONIC_CANDIDATES,
+    BUSTER_AARCH64_GENERATED_BLOB_SIGNATURE_RANGES,
+    BUSTER_AARCH64_GENERATED_BLOB_SIGNATURE_CANDIDATES,
+    BUSTER_AARCH64_GENERATED_BLOB_COVERAGE,
+    BUSTER_AARCH64_GENERATED_BLOB_COUNT,
+};
+BUSTER_F_DECL bool buster_aarch64_metadata_test_generated_blob_probe(u32 blob, u64 offset, BusterAarch64GeneratedBlobProbe* result);
 #endif

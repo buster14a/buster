@@ -3,6 +3,7 @@ if (POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
 
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/ZigCompilerId.cmake")
 project(buster C)
 
 set (CMAKE_COLOR_DIAGNOSTICS ON)
@@ -129,6 +130,11 @@ option(BUSTER_BENCH_ALLOCATIONS "Count calling-thread arena requests in diagnost
 option(BUSTER_INSTRUMENT "Enable fine-grained timing instrumentation for ide bench" OFF)
 option(BUSTER_FUZZ_AVAILABLE "Build with runtime fuzzing support" OFF)
 option(BUSTER_LTO "Enable LTO" OFF)
+set(BUSTER_PGO_GENERATE "" CACHE PATH "Directory for Clang instrumentation profile output")
+set(BUSTER_PGO_USE "" CACHE FILEPATH "Merged Clang instrumentation profile to consume")
+set(BUSTER_PGO_MANIFEST "" CACHE FILEPATH "Manifest that seals BUSTER_PGO_USE")
+set(BUSTER_PGO_FINGERPRINT "" CACHE STRING "Expected production-profile training fingerprint")
+option(BUSTER_PRODUCTION_PROFILE "Enable explicit debug-free production compiler policy" OFF)
 option(BUSTER_CHECK_OPTIONAL_WARNINGS "Probe and enable optional compiler warning flags" ON)
 option(BUSTER_DEVELOPER_TARGETS "Enable convenience run/test/debug targets" ON)
 
@@ -148,6 +154,170 @@ else()
 endif()
 option(BUSTER_DEBUG_INFO "Emit debug information in optimized configurations" ${BUSTER_PROFILING_DEFAULT})
 option(BUSTER_FRAME_POINTERS "Keep frame pointers in optimized configurations" ${BUSTER_PROFILING_DEFAULT})
+
+set(BUSTER_PGO_ENABLED OFF)
+if (NOT "${BUSTER_PGO_GENERATE}" STREQUAL "" OR NOT "${BUSTER_PGO_USE}" STREQUAL "")
+    set(BUSTER_PGO_ENABLED ON)
+endif()
+
+if (NOT "${BUSTER_PGO_GENERATE}" STREQUAL "" AND NOT "${BUSTER_PGO_USE}" STREQUAL "")
+    message(FATAL_ERROR "BUSTER_PGO_GENERATE and BUSTER_PGO_USE are mutually exclusive")
+endif()
+
+if (BUSTER_PRODUCTION_PROFILE OR BUSTER_PGO_ENABLED)
+    if (NOT (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) OR C_COMPILER_ZIG OR C_COMPILER_TCC)
+        message(FATAL_ERROR "The production PGO profile requires native Clang or AppleClang")
+    endif()
+endif()
+
+if (BUSTER_PRODUCTION_PROFILE)
+    if (BUSTER_DEBUG_INFO)
+        message(FATAL_ERROR "BUSTER_PRODUCTION_PROFILE requires BUSTER_DEBUG_INFO=OFF")
+    endif()
+    if (BUSTER_SANITIZE OR BUSTER_FUZZ_AVAILABLE OR BUSTER_TIME_TRACE OR BUSTER_INSTRUMENT)
+        message(FATAL_ERROR "BUSTER_PRODUCTION_PROFILE cannot be combined with sanitizers, fuzzing, time tracing or fine-grained instrumentation")
+    endif()
+endif()
+
+if (BUSTER_PGO_ENABLED AND NOT BUSTER_PRODUCTION_PROFILE)
+    message(FATAL_ERROR "Clang PGO generation/use requires BUSTER_PRODUCTION_PROFILE=ON")
+endif()
+
+if (NOT "${BUSTER_PGO_GENERATE}" STREQUAL "")
+    if (NOT IS_ABSOLUTE "${BUSTER_PGO_GENERATE}")
+        message(FATAL_ERROR "BUSTER_PGO_GENERATE must be an absolute path")
+    endif()
+    file(MAKE_DIRECTORY "${BUSTER_PGO_GENERATE}")
+endif()
+
+if (NOT "${BUSTER_PGO_USE}" STREQUAL "")
+    if (NOT IS_ABSOLUTE "${BUSTER_PGO_USE}" OR NOT EXISTS "${BUSTER_PGO_USE}")
+        message(FATAL_ERROR "BUSTER_PGO_USE must name an existing absolute .profdata file")
+    endif()
+    if (NOT IS_ABSOLUTE "${BUSTER_PGO_MANIFEST}" OR NOT EXISTS "${BUSTER_PGO_MANIFEST}")
+        message(FATAL_ERROR "BUSTER_PGO_MANIFEST must name an existing absolute manifest")
+    endif()
+
+    string(LENGTH "${BUSTER_PGO_FINGERPRINT}" BUSTER_PGO_FINGERPRINT_LENGTH)
+    if (NOT BUSTER_PGO_FINGERPRINT_LENGTH EQUAL 64 OR NOT BUSTER_PGO_FINGERPRINT MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR "BUSTER_PGO_FINGERPRINT must be one lowercase SHA-256 digest")
+    endif()
+
+    file(STRINGS "${BUSTER_PGO_MANIFEST}" BUSTER_PGO_MANIFEST_LINES)
+    list(LENGTH BUSTER_PGO_MANIFEST_LINES BUSTER_PGO_MANIFEST_LINE_COUNT)
+    if (BUSTER_PGO_MANIFEST_LINE_COUNT EQUAL 0)
+        message(FATAL_ERROR "BUSTER_PGO_MANIFEST is empty")
+    endif()
+    list(GET BUSTER_PGO_MANIFEST_LINES 0 BUSTER_PGO_MANIFEST_VERSION)
+    if (NOT BUSTER_PGO_MANIFEST_VERSION STREQUAL "BUSTER_PGO_PROFILE_V1")
+        message(FATAL_ERROR "Unsupported BUSTER_PGO_MANIFEST version: ${BUSTER_PGO_MANIFEST_VERSION}")
+    endif()
+
+    set(BUSTER_PGO_MANIFEST_FINGERPRINT "")
+    set(BUSTER_PGO_MANIFEST_PROFILE_SHA256 "")
+    set(BUSTER_PGO_MANIFEST_SOURCE_REVISION "")
+    set(BUSTER_PGO_MANIFEST_SOURCE_TREE "")
+    set(BUSTER_PGO_MANIFEST_CLANG_SHA256 "")
+    foreach(BUSTER_PGO_MANIFEST_LINE IN LISTS BUSTER_PGO_MANIFEST_LINES)
+        if (BUSTER_PGO_MANIFEST_LINE MATCHES "^fingerprint=([0-9a-f]+)$")
+            if (BUSTER_PGO_MANIFEST_FINGERPRINT)
+                message(FATAL_ERROR "Duplicate fingerprint in BUSTER_PGO_MANIFEST")
+            endif()
+            set(BUSTER_PGO_MANIFEST_FINGERPRINT "${CMAKE_MATCH_1}")
+        elseif(BUSTER_PGO_MANIFEST_LINE MATCHES "^profile_sha256=([0-9a-f]+)$")
+            if (BUSTER_PGO_MANIFEST_PROFILE_SHA256)
+                message(FATAL_ERROR "Duplicate profile_sha256 in BUSTER_PGO_MANIFEST")
+            endif()
+            set(BUSTER_PGO_MANIFEST_PROFILE_SHA256 "${CMAKE_MATCH_1}")
+        elseif(BUSTER_PGO_MANIFEST_LINE MATCHES "^source_revision=([0-9a-f]+)$")
+            if (BUSTER_PGO_MANIFEST_SOURCE_REVISION)
+                message(FATAL_ERROR "Duplicate source_revision in BUSTER_PGO_MANIFEST")
+            endif()
+            set(BUSTER_PGO_MANIFEST_SOURCE_REVISION "${CMAKE_MATCH_1}")
+        elseif(BUSTER_PGO_MANIFEST_LINE MATCHES "^source_tree=([0-9a-f]+)$")
+            if (BUSTER_PGO_MANIFEST_SOURCE_TREE)
+                message(FATAL_ERROR "Duplicate source_tree in BUSTER_PGO_MANIFEST")
+            endif()
+            set(BUSTER_PGO_MANIFEST_SOURCE_TREE "${CMAKE_MATCH_1}")
+        elseif(BUSTER_PGO_MANIFEST_LINE MATCHES "^clang_sha256=([0-9a-f]+)$")
+            if (BUSTER_PGO_MANIFEST_CLANG_SHA256)
+                message(FATAL_ERROR "Duplicate clang_sha256 in BUSTER_PGO_MANIFEST")
+            endif()
+            set(BUSTER_PGO_MANIFEST_CLANG_SHA256 "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
+
+    foreach(BUSTER_PGO_REQUIRED_DIGEST IN ITEMS
+        BUSTER_PGO_MANIFEST_FINGERPRINT
+        BUSTER_PGO_MANIFEST_PROFILE_SHA256
+        BUSTER_PGO_MANIFEST_CLANG_SHA256
+    )
+        string(LENGTH "${${BUSTER_PGO_REQUIRED_DIGEST}}" BUSTER_PGO_REQUIRED_DIGEST_LENGTH)
+        if (NOT BUSTER_PGO_REQUIRED_DIGEST_LENGTH EQUAL 64)
+            message(FATAL_ERROR "${BUSTER_PGO_REQUIRED_DIGEST} is missing or is not SHA-256")
+        endif()
+    endforeach()
+    foreach(BUSTER_PGO_REQUIRED_GIT_ID IN ITEMS
+        BUSTER_PGO_MANIFEST_SOURCE_REVISION
+        BUSTER_PGO_MANIFEST_SOURCE_TREE
+    )
+        string(LENGTH "${${BUSTER_PGO_REQUIRED_GIT_ID}}" BUSTER_PGO_REQUIRED_GIT_ID_LENGTH)
+        if (NOT (BUSTER_PGO_REQUIRED_GIT_ID_LENGTH EQUAL 40 OR BUSTER_PGO_REQUIRED_GIT_ID_LENGTH EQUAL 64))
+            message(FATAL_ERROR "${BUSTER_PGO_REQUIRED_GIT_ID} is missing or invalid")
+        endif()
+    endforeach()
+
+    if (NOT BUSTER_PGO_MANIFEST_FINGERPRINT STREQUAL BUSTER_PGO_FINGERPRINT)
+        message(FATAL_ERROR "PGO training fingerprint mismatch")
+    endif()
+
+    file(SHA256 "${BUSTER_PGO_USE}" BUSTER_PGO_CURRENT_PROFILE_SHA256)
+    if (NOT BUSTER_PGO_MANIFEST_PROFILE_SHA256 STREQUAL BUSTER_PGO_CURRENT_PROFILE_SHA256)
+        message(FATAL_ERROR "PGO profile hash mismatch")
+    endif()
+    file(SHA256 "${CMAKE_C_COMPILER}" BUSTER_PGO_CURRENT_CLANG_SHA256)
+    if (NOT BUSTER_PGO_MANIFEST_CLANG_SHA256 STREQUAL BUSTER_PGO_CURRENT_CLANG_SHA256)
+        message(FATAL_ERROR "PGO compiler hash mismatch")
+    endif()
+
+    find_program(BUSTER_PGO_GIT_EXECUTABLE NAMES git)
+    if (NOT BUSTER_PGO_GIT_EXECUTABLE)
+        message(FATAL_ERROR "git is required to validate BUSTER_PGO_MANIFEST")
+    endif()
+    execute_process(
+        COMMAND "${BUSTER_PGO_GIT_EXECUTABLE}" rev-parse --verify HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE BUSTER_PGO_CURRENT_SOURCE_REVISION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_PGO_CURRENT_SOURCE_REVISION_RESULT
+    )
+    execute_process(
+        COMMAND "${BUSTER_PGO_GIT_EXECUTABLE}" rev-parse --verify "HEAD^{tree}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE BUSTER_PGO_CURRENT_SOURCE_TREE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_PGO_CURRENT_SOURCE_TREE_RESULT
+    )
+    execute_process(
+        COMMAND "${BUSTER_PGO_GIT_EXECUTABLE}" status --porcelain=v1 --untracked-files=all -- . ":(exclude)build" ":(exclude)build/**"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE BUSTER_PGO_SOURCE_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE BUSTER_PGO_SOURCE_STATUS_RESULT
+    )
+    if (NOT BUSTER_PGO_CURRENT_SOURCE_REVISION_RESULT EQUAL 0 OR
+        NOT BUSTER_PGO_CURRENT_SOURCE_TREE_RESULT EQUAL 0 OR
+        NOT BUSTER_PGO_SOURCE_STATUS_RESULT EQUAL 0 OR
+        NOT BUSTER_PGO_SOURCE_STATUS STREQUAL "")
+        message(FATAL_ERROR "PGO use requires a clean Git checkout outside build/ with a readable HEAD and tree")
+    endif()
+    if (NOT BUSTER_PGO_MANIFEST_SOURCE_REVISION STREQUAL BUSTER_PGO_CURRENT_SOURCE_REVISION)
+        message(FATAL_ERROR "PGO source revision mismatch")
+    endif()
+    if (NOT BUSTER_PGO_MANIFEST_SOURCE_TREE STREQUAL BUSTER_PGO_CURRENT_SOURCE_TREE)
+        message(FATAL_ERROR "PGO source tree mismatch")
+    endif()
+endif()
 
 set(BUSTER_SANITIZER_REDUCED_DEBUG OFF)
 if (BUSTER_SANITIZE AND NOT WIN32 AND (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND NOT C_COMPILER_ZIG)
@@ -702,6 +872,11 @@ message(STATUS "BUSTER_TIME_TRACE: ${BUSTER_TIME_TRACE}")
 message(STATUS "BUSTER_INSTRUMENT: ${BUSTER_INSTRUMENT}")
 message(STATUS "BUSTER_FUZZ_AVAILABLE: ${BUSTER_FUZZ_AVAILABLE}")
 message(STATUS "BUSTER_LTO: ${BUSTER_LTO}")
+message(STATUS "BUSTER_PRODUCTION_PROFILE: ${BUSTER_PRODUCTION_PROFILE}")
+message(STATUS "BUSTER_PGO_GENERATE: ${BUSTER_PGO_GENERATE}")
+message(STATUS "BUSTER_PGO_USE: ${BUSTER_PGO_USE}")
+message(STATUS "BUSTER_PGO_MANIFEST: ${BUSTER_PGO_MANIFEST}")
+message(STATUS "BUSTER_PGO_FINGERPRINT: ${BUSTER_PGO_FINGERPRINT}")
 message(STATUS "BUSTER_CHECK_OPTIONAL_WARNINGS: ${BUSTER_CHECK_OPTIONAL_WARNINGS}")
 message(STATUS "BUSTER_DEVELOPER_TARGETS: ${BUSTER_DEVELOPER_TARGETS}")
 message(STATUS "BUSTER_REQUIRE_VULKAN_SDK: ${BUSTER_REQUIRE_VULKAN_SDK}")
@@ -878,6 +1053,7 @@ buster_register_module(hash "${BUSTER_SOURCE_DIR}/hash${COMMON_EXTENSION}")
 set(BUSTER_TEST_SOURCES
     src/buster/tests/byte_writer_test.c
     src/buster/tests/arena_test.c
+    src/buster/tests/integer_test.c
     src/buster/tests/sanitizer_test.c
     src/buster/tests/hash_test.c
     src/buster/tests/simd_test.c
@@ -888,6 +1064,8 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/truetype_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
+    src/buster/tests/compiler/frontend/c/once_test.c
+    src/buster/tests/compiler/frontend/c/macro_conditional_test.c
     src/buster/tests/compiler/assembly/aarch64_encoding_test.c
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c
@@ -930,6 +1108,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
     src/buster/tests/byte_writer_test.h
     src/buster/tests/arena_test.h
+    src/buster/tests/integer_test.h
     src/buster/tests/sanitizer_test.h
     src/buster/tests/sanitizer_test_internal.h
     src/buster/tests/hash_test.h
@@ -943,6 +1122,8 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
     src/buster/tests/compiler/frontend/c/c_test.h
+    src/buster/tests/compiler/frontend/c/once_test.h
+    src/buster/tests/compiler/frontend/c/macro_conditional_test.h
     src/buster/tests/compiler/assembly/aarch64_encoding_test.h
     src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.h
     src/buster/tests/compiler/assembly/aarch64_control_semantics_test.h
@@ -982,6 +1163,25 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/driver/object_path_test.h
 )
 set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
+
+
+# This assertion-heavy translation unit is intentionally not optimized. Its
+# runtime coverage does not depend on optimizer output, while optimizing it has
+# historically required several GiB of compiler RSS. Keep debug records only
+# for sanitizer configurations where they are diagnostically useful.
+set(BUSTER_X86_METADATA_TEST_SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/buster/tests/compiler/assembly/x86_64_metadata_test.c"
+)
+if (C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)
+    set_property(SOURCE "${BUSTER_X86_METADATA_TEST_SOURCE}" APPEND PROPERTY COMPILE_OPTIONS
+        "$<${BUSTER_OPTIMIZE_CONDITION}:-O0>"
+        "$<$<AND:${BUSTER_OPTIMIZE_CONDITION},$<NOT:$<BOOL:${BUSTER_SANITIZE}>>>:-g0>"
+    )
+elseif (C_COMPILER_MSVC_FAMILIY)
+    set_property(SOURCE "${BUSTER_X86_METADATA_TEST_SOURCE}" APPEND PROPERTY COMPILE_OPTIONS
+        "$<${BUSTER_OPTIMIZE_CONDITION}:/Od>"
+    )
+endif()
 
 set(GNU_FAMILY_OPTIONS
     -fwrapv
@@ -1556,6 +1756,41 @@ function(executable_add name is_buster_program main_file)
         target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:-fno-omit-frame-pointer>")
     endif()
 
+    # Production policy is explicit and Release-only. Ordinary optimized
+    # developer builds retain their existing debug/frame-pointer defaults.
+    if (BUSTER_PRODUCTION_PROFILE AND C_COMPILER_GNU_FAMILY)
+        target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:-g0>")
+    endif()
+
+    if (BUSTER_LTO)
+        if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND NOT C_COMPILER_ZIG)
+            target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:-flto=thin>")
+            target_link_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:-flto=thin>")
+        elseif(C_COMPILER_GNU)
+            target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:-flto>")
+            target_link_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:-flto>")
+        elseif(C_COMPILER_MSVC)
+            target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:/GL>")
+            target_link_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:/LTCG>")
+        else()
+            message(FATAL_ERROR "BUSTER_LTO is unsupported by this compiler")
+        endif()
+    endif()
+
+    if (NOT "${BUSTER_PGO_GENERATE}" STREQUAL "")
+        set(BUSTER_PGO_GENERATE_FLAG "-fprofile-generate=${BUSTER_PGO_GENERATE}")
+        target_compile_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_GENERATE_FLAG}>")
+        target_link_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_GENERATE_FLAG}>")
+    elseif(NOT "${BUSTER_PGO_USE}" STREQUAL "")
+        set(BUSTER_PGO_USE_FLAG "-fprofile-use=${BUSTER_PGO_USE}")
+        target_compile_options(${name} PRIVATE
+            "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_USE_FLAG}>"
+            "$<${BUSTER_OPTIMIZE_CONDITION}:-Werror=profile-instr-out-of-date>"
+            "$<${BUSTER_OPTIMIZE_CONDITION}:-Wno-profile-instr-unprofiled>"
+        )
+        target_link_options(${name} PRIVATE "$<${BUSTER_OPTIMIZE_CONDITION}:${BUSTER_PGO_USE_FLAG}>")
+    endif()
+
     if (NOT ${BUSTER_CROSS_COMPILE})
         if (C_COMPILER_GNU_FAMILY)
             target_compile_options(${name} PRIVATE ${GNU_FAMILY_NATIVE_TARGET})
@@ -1773,6 +2008,15 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
+# The headless compiler has no production font consumer.  Keep the reusable
+# module registered above, but add it to ide only when its registered tests are
+# present.  A future product target using font_provider must name truetype in
+# its own module inventory rather than relying on ide's test dependency.
+set(BUSTER_COMPILER_TEST_MODULES)
+if (BUSTER_INCLUDE_TESTS)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype)
+endif()
+
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
 buster_add_executable(ide src/buster/apps/ide/ide.c
     MODULES
@@ -1782,7 +2026,7 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
     integer
     string
     float
-    truetype
+    ${BUSTER_COMPILER_TEST_MODULES}
     compiler_c_frontend
     compiler_aarch64_encoding
     compiler_aarch64_exact_bridge

@@ -164,6 +164,17 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   named parameters and ordinary macros retain it.
   `tests/basic_c_macro_empty_paste.c` covers empty operands, chained pastes,
   surrounding tokens, rescanning, and GNU comma behavior (GitHub #220).
+- Source `#if`, `#ifdef`, `#ifndef`, `#elif`, `#else`, and `#endif` lines may
+  cross an in-progress function-like macro invocation as the GCC/Clang
+  compatibility extension. The source driver processes each conditional once
+  and gives only active source-token segments to the existing iterative macro
+  argument collector; inactive delimiters do not affect argument shape. Other
+  directive categories retain their ordinary line-level contract and still do
+  not execute inside an invocation. C17 and GNU17 share this compatibility
+  behavior; no separate strict-mode diagnostic is added. The registered
+  `c_macro_conditional_tests` module compares semantic token sequences with
+  independent Clang/GCC preprocessors and runs a Buster-built selected-branch
+  fixture through both C lowering modes (GitHub #76).
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a
@@ -177,6 +188,12 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `C_DIAGNOSTIC_INVALID_INTEGER_LITERAL`; preprocessing keeps the conditional
   directive diagnostic. `c_test_integer_spelling_consistency` and
   `tests/basic_c_integer_literals.c` cover these contracts (GitHub #148).
+- Enumerator integer evaluation keeps an ordinary expression as a view of the
+  original preprocessed token stream. `c_parse_generic_constant_tokens` only
+  materializes a stream when the expression contains a `_Generic` selection
+  whose selected association must be flattened; it must not copy the complete
+  translation unit for every ordinary enumerator. The private alias regression
+  and the nested generic-constant cases cover both paths (GitHub #797).
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
@@ -495,6 +512,40 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
 - Native lowering is `canonical IR -> machine IR -> scheduling/register
   allocation -> encoding`. Selection patterns and scheduling classes remain
   separate metadata domains even when they share instruction-form IDs.
+- Every primitive type-specifier scan validates the collected word set through
+  `c_parse_primitive_specifiers_valid`, and `c_parse_ast`'s token walk calls
+  `c_parser_validate_type_specifiers` on each contiguous type-word run so
+  unused bodies, `_Static_assert`/`sizeof` operands, and other machineless
+  type queries diagnose before semantic analysis. A contradictory or
+  unsupported set
+  (`signed unsigned`, `long float`, `_Complex int`, any `_Imaginary`, repeated
+  type words, more than two `long`s) is a `C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS`
+  error at the first specifier word, never a silent drop that lets an
+  implicit-int or guessed-int answer continue. Complex-integer and imaginary
+  types are deliberately unsupported, not partially accepted; `_Complex` alone
+  and its `__complex`/`__complex__` aliases on the three C99 real floating kinds
+  remain valid. `_Float16` and its complex extension use the same validity
+  gate in both scanners, retaining the binary16 specifier contract while
+  rejecting contradictory or repeated half-type words with a diagnostic.
+  A type name refused this way pins `sizeof`/`_Alignof` to the
+  recorded constraint instead of falling back to a guessed `int`.
+- A `struct`, `union` or `enum` specifier names a type exactly as a primitive
+  word does, so a set that spells both (`int struct S`, `struct S unsigned`)
+  or two tags (`struct S enum E`) is the same error at the same first
+  specifier word. `c_parse_type_specifier_token` is the one question behind
+  it -- it runs `c_ir_primitive_type_kind` over a single token, so no second
+  list of spellings can drift from the scans -- and it is asked of the words
+  the aggregate scan stepped over to reach the tag keyword, of a type word
+  left standing where a declarator belongs (which is also how a second
+  specifier after a typedef name is caught), and of each word in a token-walk
+  run that carries a tag. That run spans the tag's name, so `struct S int` is
+  one run and not two; a definition body ends it instead, leaving the
+  declarations inside the braces to be walked on their own. Before this,
+  `int struct S v` took the aggregate's layout under a spelling it never had
+  and `struct S int v` was accepted with no definition emitted at all.
+  Regressions:
+  `c_test_type_specifier_diagnostics` and `compiler_driver_test_type_specifiers`,
+  which also verify a refused compilation preserves or never creates the output.
 
 ## Immutable aggregate and complex construction
 
@@ -563,3 +614,15 @@ without retaining arena allocations that a code-buffer retry could discard.
 The type table must not grow beyond the reserved count inside such a checkpoint.
 `allocated_bytes` counts context page/directory bytes; `classified_values` counts
 completed cache misses cumulatively, including misses after invalidation.
+
+## Large aggregate initialization
+
+Plain aggregates of at least 4 KiB use a bounded canonical byte loop for their
+initial zero image, then the existing nested initializer walker applies explicit
+values and designators once. The type worklist checks every member and rejects
+volatile or atomic storage from this representation shortcut. Existing integer,
+floating, boolean and null-pointer zero representations are retained; no libc
+helper is introduced. Small or qualified aggregates retain typed construction.
+The large-frame fixture checks zeroed nested storage, explicit values, copies
+and odd byte tails under both frontend lowering modes. This prevents initializer
+expansion from exceeding Windows ARM64's unwind function-size limit.

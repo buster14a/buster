@@ -53,6 +53,19 @@ boot_timeout_seconds=${BUSTER_IOS_BOOT_TIMEOUT_SECONDS:-180}
 install_timeout_seconds=${BUSTER_IOS_INSTALL_TIMEOUT_SECONDS:-120}
 codesign_timeout_seconds=${BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS:-60}
 shutdown_timeout_seconds=${BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS:-30}
+# GitHub's macOS 26 Apple-Silicon CoreSimulator can need substantially
+# longer than 30 seconds to quiesce after the full Debug+Release batch.
+# Preserve the tighter local/self-hosted budget and every explicit caller
+# override, but give the hosted arm64 lane enough time to complete an
+# orderly shutdown before the postcondition recovery path is needed.
+if [[ -z ${BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS:-} \
+    && ${GITHUB_ACTIONS:-false} == true \
+    && ${RUNNER_ENVIRONMENT:-} == github-hosted \
+    && ${RUNNER_OS:-} == macOS \
+    && ${RUNNER_ARCH:-} == ARM64 \
+    && ${BUSTER_IOS_ARCH:-arm64} == arm64 ]]; then
+    shutdown_timeout_seconds=90
+fi
 monitor_command_timeout_seconds=${BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS:-10}
 result_marker_success="BUSTER_IOS_RESULT: SUCCESS"
 result_marker_failure="BUSTER_IOS_RESULT: FAILURE"
@@ -111,7 +124,7 @@ capture_lifecycle_output() {
 import sys
 remaining = 65536
 total = 0
-with open(sys.argv[1], "wb") as output:
+with open(sys.argv[1], "wb", buffering=0) as output:
     while True:
         chunk = sys.stdin.buffer.read1(4096)
         if not chunk:
@@ -196,7 +209,9 @@ run_lifecycle_phase() {
     } >"$status_log"; then
         echo "error: could not retain iOS $phase status at $status_log" >&2
         result=1
+        outcome=evidence-failure
     fi
+    last_lifecycle_outcome=$outcome
     cat "$status_log" >&2 || true
     if [[ $result -ne 0 ]]; then
         # Full bounded raw output remains in the artifact, independent of the
@@ -207,11 +222,253 @@ run_lifecycle_phase() {
     return "$result"
 }
 
+simulator_udid_is_valid() {
+    local value=$1
+    [[ $value =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
+}
+
+# simctl create writes one canonical UUID on stdout. Since lifecycle evidence
+# combines stdout and stderr, reject every other nonempty line instead of
+# treating an arbitrary diagnostic or device name as an owned identity.
+read_simulator_create_identity() {
+    local path=$1
+    local line candidate= valid_count=0 invalid_count=0
+    if [[ ! -f $path ]]; then
+        return 1
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        line=${line%$'\r'}
+        if [[ -z $line ]]; then
+            continue
+        fi
+        if simulator_udid_is_valid "$line"; then
+            candidate=$line
+            valid_count=$((valid_count + 1))
+        else
+            invalid_count=$((invalid_count + 1))
+        fi
+    done <"$path"
+    if [[ $valid_count -eq 1 && $invalid_count -eq 0 ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
+adopt_pending_create_identity() {
+    local candidate=
+    if [[ ${pending_create_owned:-0} -eq 1 && -z ${udid:-} \
+        && -n ${pending_create_log:-} ]]; then
+        if candidate=$(read_simulator_create_identity "$pending_create_log"); then
+            udid=$candidate
+            simulator_owned=1
+            pending_create_owned=0
+            pending_create_log=
+            echo "Recovered pending invocation-owned replacement simulator identity $udid for cleanup" >&2
+        fi
+    fi
+}
+
 print_simulator_diagnostics() {
     echo "----- iOS simulator devices -----" >&2
     run_with_timeout "$monitor_command_timeout_seconds" xcrun simctl list devices >&2 || true
     echo "----- iOS simulator runtimes -----" >&2
     run_with_timeout "$monitor_command_timeout_seconds" xcrun simctl list runtimes >&2 || true
+}
+
+verify_shutdown_postcondition() {
+    local probe_log="${console_log_base}.shutdown-postcondition.log"
+    local result_log="${console_log_base}.shutdown-postcondition.result.log"
+    local parsed_state=
+    local summary
+
+    shutdown_postcondition_probe_status=not-run
+    shutdown_postcondition_parser_status=not-run
+    shutdown_postcondition_state=unavailable
+    shutdown_disposition=unresolved-failure
+    if run_lifecycle_phase shutdown-postcondition batch "$console_log_base" \
+        "$monitor_command_timeout_seconds" xcrun simctl list devices -j; then
+        shutdown_postcondition_probe_status=0
+    else
+        shutdown_postcondition_probe_status=$?
+    fi
+    if [[ $shutdown_postcondition_probe_status -eq 0 ]]; then
+        if parsed_state=$(run_with_timeout "$monitor_command_timeout_seconds" \
+            python3 - "$udid" "$probe_log" <<'PY_STATE'
+import json
+import sys
+
+target, path = sys.argv[1:]
+try:
+    with open(path, "r", encoding="utf-8") as stream:
+        data = json.load(stream)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    sys.exit(2)
+devices = data.get("devices") if isinstance(data, dict) else None
+if not isinstance(devices, dict):
+    sys.exit(2)
+matches = []
+for runtime_devices in devices.values():
+    if not isinstance(runtime_devices, list):
+        sys.exit(2)
+    for device in runtime_devices:
+        if not isinstance(device, dict):
+            sys.exit(2)
+        if device.get("udid") == target:
+            matches.append(device)
+if len(matches) != 1:
+    sys.exit(3)
+state = matches[0].get("state")
+if not isinstance(state, str):
+    sys.exit(2)
+if state == "Shutdown":
+    print("Shutdown")
+    sys.exit(0)
+print("non-shutdown")
+sys.exit(4)
+PY_STATE
+        ); then
+            shutdown_postcondition_parser_status=0
+        else
+            shutdown_postcondition_parser_status=$?
+        fi
+        if [[ -n $parsed_state ]]; then
+            shutdown_postcondition_state=$parsed_state
+        fi
+        if [[ $shutdown_postcondition_parser_status -eq 0 \
+            && $shutdown_postcondition_state == Shutdown ]]; then
+            shutdown_disposition=verified-shutdown-after-timeout
+        fi
+    fi
+    summary="BUSTER_IOS_SHUTDOWN_POSTCONDITION simulator_udid=$udid eligibility=$shutdown_postcondition_eligible probe_status=$shutdown_postcondition_probe_status parser_status=$shutdown_postcondition_parser_status state=$shutdown_postcondition_state disposition=$shutdown_disposition"
+    if ! printf '%s\n' "$summary" >"$result_log"; then
+        shutdown_disposition=unresolved-evidence-failure
+        summary="BUSTER_IOS_SHUTDOWN_POSTCONDITION simulator_udid=$udid eligibility=$shutdown_postcondition_eligible probe_status=$shutdown_postcondition_probe_status parser_status=$shutdown_postcondition_parser_status state=$shutdown_postcondition_state disposition=$shutdown_disposition"
+        echo "error: could not retain iOS shutdown postcondition result at $result_log" >&2
+    fi
+    printf '%s\n' "$summary" >&2
+    [[ $shutdown_disposition == verified-shutdown-after-timeout ]]
+}
+
+verify_shutdown_recovery_postcondition() {
+    local probe_log="${console_log_base}.shutdown-recovery-postcondition.log"
+    local result_log="${console_log_base}.shutdown-recovery-postcondition.result.log"
+    local parsed_state=
+    local summary
+
+    shutdown_recovery_probe_status=not-run
+    shutdown_recovery_parser_status=not-run
+    shutdown_recovery_state=unavailable
+    shutdown_recovery_disposition=unresolved-failure
+    if run_lifecycle_phase shutdown-recovery-postcondition batch "$console_log_base" \
+        "$monitor_command_timeout_seconds" xcrun simctl list devices -j; then
+        shutdown_recovery_probe_status=0
+    else
+        shutdown_recovery_probe_status=$?
+    fi
+    if [[ $shutdown_recovery_probe_status == 0 ]]; then
+        if parsed_state=$(run_with_timeout "$monitor_command_timeout_seconds" \
+            python3 - "$udid" "$probe_log" <<'PY_STATE'
+import json
+import sys
+
+target, path = sys.argv[1:]
+try:
+    with open(path, "r", encoding="utf-8") as stream:
+        data = json.load(stream)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    sys.exit(2)
+devices = data.get("devices") if isinstance(data, dict) else None
+if not isinstance(devices, dict):
+    sys.exit(2)
+matches = []
+for runtime_devices in devices.values():
+    if not isinstance(runtime_devices, list):
+        sys.exit(2)
+    for device in runtime_devices:
+        if not isinstance(device, dict):
+            sys.exit(2)
+        if device.get("udid") == target:
+            matches.append(device)
+if len(matches) != 1:
+    sys.exit(3)
+state = matches[0].get("state")
+if not isinstance(state, str):
+    sys.exit(2)
+if state == "Shutdown":
+    print("Shutdown")
+    sys.exit(0)
+print("non-shutdown")
+sys.exit(4)
+PY_STATE
+        ); then
+            shutdown_recovery_parser_status=0
+        else
+            shutdown_recovery_parser_status=$?
+        fi
+        if [[ -n $parsed_state ]]; then
+            shutdown_recovery_state=$parsed_state
+        fi
+        if [[ $shutdown_recovery_parser_status == 0 \
+            && $shutdown_recovery_state == Shutdown ]]; then
+            shutdown_recovery_disposition=verified-shutdown-after-retry
+        fi
+    fi
+    summary="BUSTER_IOS_SHUTDOWN_RECOVERY_POSTCONDITION simulator_udid=$udid probe_status=$shutdown_recovery_probe_status parser_status=$shutdown_recovery_parser_status state=$shutdown_recovery_state disposition=$shutdown_recovery_disposition"
+    if ! printf '%s\n' "$summary" >"$result_log"; then
+        shutdown_recovery_disposition=unresolved-evidence-failure
+        summary="BUSTER_IOS_SHUTDOWN_RECOVERY_POSTCONDITION simulator_udid=$udid probe_status=$shutdown_recovery_probe_status parser_status=$shutdown_recovery_parser_status state=$shutdown_recovery_state disposition=$shutdown_recovery_disposition"
+        echo "error: could not retain iOS shutdown recovery postcondition result at $result_log" >&2
+    fi
+    printf '%s\n' "$summary" >&2
+    [[ $shutdown_recovery_disposition == verified-shutdown-after-retry ]]
+}
+
+recover_shutdown_after_non_shutdown_postcondition() {
+    local result_log="${console_log_base}.shutdown-recovery.result.log"
+    local initial_probe_status=$shutdown_postcondition_probe_status
+    local initial_parser_status=$shutdown_postcondition_parser_status
+    local initial_state=$shutdown_postcondition_state
+    local final_verified=0
+    local evidence_status=0
+    local summary
+
+    shutdown_recovery_status=not-run
+    shutdown_recovery_outcome=not-run
+    shutdown_recovery_probe_status=not-run
+    shutdown_recovery_parser_status=not-run
+    shutdown_recovery_state=unavailable
+    shutdown_recovery_disposition=unresolved-failure
+    echo "Retrying shutdown once for invocation-owned iOS simulator $udid" >&2
+    if run_lifecycle_phase shutdown-recovery batch "$console_log_base" \
+        "$shutdown_timeout_seconds" xcrun simctl shutdown "$udid"; then
+        shutdown_recovery_status=0
+        shutdown_recovery_outcome=$last_lifecycle_outcome
+    else
+        shutdown_recovery_status=$?
+        shutdown_recovery_outcome=$last_lifecycle_outcome
+    fi
+    if [[ $shutdown_recovery_status == 0 || $shutdown_recovery_outcome == timeout ]]; then
+        if verify_shutdown_recovery_postcondition; then
+            final_verified=1
+        fi
+        shutdown_postcondition_probe_status=$shutdown_recovery_probe_status
+        shutdown_postcondition_parser_status=$shutdown_recovery_parser_status
+        shutdown_postcondition_state=$shutdown_recovery_state
+        if [[ $final_verified -eq 1 ]]; then
+            shutdown_disposition=recovered-shutdown-after-timeout
+        fi
+    fi
+    summary="BUSTER_IOS_SHUTDOWN_RECOVERY simulator_udid=$udid eligibility=$shutdown_postcondition_eligible initial_probe_status=$initial_probe_status initial_parser_status=$initial_parser_status initial_state=$initial_state retry_status=$shutdown_recovery_status retry_outcome=$shutdown_recovery_outcome final_probe_status=$shutdown_recovery_probe_status final_parser_status=$shutdown_recovery_parser_status final_state=$shutdown_recovery_state disposition=$shutdown_disposition"
+    if ! printf '%s\n' "$summary" >"$result_log"; then
+        evidence_status=1
+        shutdown_disposition=unresolved-evidence-failure
+        shutdown_recovery_disposition=unresolved-evidence-failure
+        summary="BUSTER_IOS_SHUTDOWN_RECOVERY simulator_udid=$udid eligibility=$shutdown_postcondition_eligible initial_probe_status=$initial_probe_status initial_parser_status=$initial_parser_status initial_state=$initial_state retry_status=$shutdown_recovery_status retry_outcome=$shutdown_recovery_outcome final_probe_status=$shutdown_recovery_probe_status final_parser_status=$shutdown_recovery_parser_status final_state=$shutdown_recovery_state disposition=$shutdown_disposition"
+        echo "error: could not retain iOS shutdown recovery result at $result_log" >&2
+    fi
+    printf '%s\n' "$summary" >&2
+    [[ $evidence_status -eq 0 && $shutdown_disposition == recovered-shutdown-after-timeout ]]
 }
 
 collect_launch_diagnostics() {
@@ -382,6 +639,29 @@ launch_stream_is_running() {
 }
 
 udid=${BUSTER_IOS_SIMULATOR_UDID:-}
+explicit_simulator_udid=0
+if [[ -n $udid ]]; then
+    explicit_simulator_udid=1
+fi
+simulator_owned=0
+runtime=
+device_type=
+boot_recovery_eligible=0
+shutdown_postcondition_eligible=0
+shutdown_postcondition_probe_status=not-run
+shutdown_postcondition_parser_status=not-run
+shutdown_postcondition_state=unavailable
+shutdown_disposition=not-attempted
+shutdown_recovery_status=not-run
+shutdown_recovery_outcome=not-run
+shutdown_recovery_probe_status=not-run
+shutdown_recovery_parser_status=not-run
+shutdown_recovery_state=unavailable
+shutdown_recovery_disposition=not-attempted
+boot_disposition=unresolved
+last_lifecycle_outcome=unavailable
+pending_create_log=
+pending_create_owned=0
 active_launch_stream_pid=
 active_launch_reader_pid=
 active_launch_pipe_dir=
@@ -390,26 +670,52 @@ cleanup() {
     local status=$?
     local prior_status=$status
     local shutdown_status
+    local shutdown_outcome=unavailable
     local cleanup_summary
     trap - EXIT INT TERM
     if [[ -n ${active_launch_stream_pid:-}${active_launch_reader_pid:-}${active_launch_pipe_dir:-} ]]; then
         stop_launch_stream "$active_launch_stream_pid"
         active_launch_stream_pid=
     fi
+    # A cancellation can interrupt the bounded create phase after simctl has
+    # emitted the replacement UUID but before the phase function returns.
+    # Adopt only a canonical identity from that invocation-owned evidence.
+    adopt_pending_create_identity
     # Always shut down the selected device. Batch mode reaches this trap once,
     # after both app bundles have had independent install/launch checks.
     if [[ -n ${udid:-} ]]; then
         echo "Shutting down iOS simulator $udid"
         if run_lifecycle_phase shutdown batch "$console_log_base" "$shutdown_timeout_seconds" xcrun simctl shutdown "$udid"; then
             shutdown_status=0
+            shutdown_outcome=$last_lifecycle_outcome
+            shutdown_disposition=direct-success
         else
             shutdown_status=$?
-            echo "warning: failed to shut down iOS simulator $udid" >&2
-            if [[ $status -eq 0 ]]; then
-                status=1
+            shutdown_outcome=$last_lifecycle_outcome
+            if [[ $shutdown_outcome == timeout && $shutdown_postcondition_eligible -eq 1 ]]; then
+                if verify_shutdown_postcondition; then
+                    echo "warning: iOS simulator shutdown command timed out, but the exact invocation-owned device reached Shutdown" >&2
+                elif [[ $prior_status -eq 0 \
+                    && $shutdown_postcondition_probe_status == 0 \
+                    && $shutdown_postcondition_parser_status == 4 \
+                    && $shutdown_postcondition_state == non-shutdown ]] \
+                    && recover_shutdown_after_non_shutdown_postcondition; then
+                    echo "warning: iOS simulator remained non-Shutdown after the first timeout, but reached Shutdown after one bounded exact-device retry" >&2
+                else
+                    echo "warning: failed to verify or recover the exact iOS simulator shutdown postcondition after timeout" >&2
+                    if [[ $status -eq 0 ]]; then
+                        status=1
+                    fi
+                fi
+            else
+                shutdown_disposition=unresolved-failure
+                echo "warning: failed to shut down iOS simulator $udid" >&2
+                if [[ $status -eq 0 ]]; then
+                    status=1
+                fi
             fi
         fi
-        cleanup_summary="BUSTER_IOS_CLEANUP prior_status=$prior_status shutdown_status=$shutdown_status result_status=$status"
+        cleanup_summary="BUSTER_IOS_CLEANUP simulator_udid=$udid prior_status=$prior_status shutdown_status=$shutdown_status shutdown_outcome=$shutdown_outcome postcondition_eligibility=$shutdown_postcondition_eligible postcondition_probe_status=$shutdown_postcondition_probe_status postcondition_parser_status=$shutdown_postcondition_parser_status postcondition_state=$shutdown_postcondition_state shutdown_disposition=$shutdown_disposition result_status=$status"
         printf '%s\n' "$cleanup_summary" >>"${console_log_base}.shutdown.status.log" || true
         printf '%s\n' "$cleanup_summary" >&2
     fi
@@ -509,6 +815,7 @@ if [[ -z $udid ]]; then
         echo "error: failed to create iOS simulator '$device_name'" >&2
         exit 1
     fi
+    simulator_owned=1
 fi
 
 echo "Using simulator $device_name ($udid)"
@@ -518,19 +825,154 @@ echo "Using simulator $device_name ($udid)"
 # trap after the batch, and an already-booted selected device can be reused.
 run_with_timeout "$monitor_command_timeout_seconds" xcrun simctl delete unavailable 2>/dev/null || true
 
-boot_started=$SECONDS
-if run_with_timeout "$boot_timeout_seconds" xcrun simctl boot "$udid" 2>/dev/null; then
-    :
+run_boot_readiness_attempt() {
+    local attempt=$1
+    local evidence_base="${console_log_base}.boot.attempt-${attempt}"
+    local started=$SECONDS
+    local boot_status=0
+    local readiness_status=0
+    local readiness_outcome=unavailable
+
+    # Keep boot and readiness evidence attempt-qualified. Recovery is decided
+    # only from the readiness helper's proven deadline outcome below.
+    if run_lifecycle_phase boot "$attempt" "$evidence_base" "$boot_timeout_seconds" \
+        xcrun simctl boot "$udid"; then
+        boot_status=0
+    else
+        boot_status=$?
+        echo "iOS simulator boot attempt ${attempt} returned status ${boot_status}; continuing to bootstatus (it may already be booted)" >&2
+    fi
+    if run_lifecycle_phase bootstatus "$attempt" "$evidence_base" "$boot_timeout_seconds" \
+        xcrun simctl bootstatus "$udid" -b; then
+        readiness_status=0
+    else
+        readiness_status=$?
+        readiness_outcome=$last_lifecycle_outcome
+    fi
+    if [[ $readiness_status -eq 0 ]]; then
+        readiness_outcome=success
+    fi
+    boot_attempt_boot_status=$boot_status
+    boot_attempt_readiness_status=$readiness_status
+    boot_attempt_readiness_outcome=$readiness_outcome
+    boot_attempt_elapsed=$((SECONDS - started))
+    printf 'BUSTER_IOS_BOOT_ATTEMPT attempt=%s udid=%s boot_status=%s readiness_status=%s readiness_outcome=%s elapsed_seconds=%s evidence_base=%s\n' \
+        "$attempt" "$udid" "$boot_status" "$readiness_status" "$readiness_outcome" \
+        "$boot_attempt_elapsed" "$evidence_base" >&2
+    echo "TIMING_IOS boot_seconds=$boot_attempt_elapsed attempt=$attempt" >&2
+    return "$readiness_status"
+}
+
+recover_boot_readiness() {
+    local old_udid=$udid
+    local recovery_evidence_base="${console_log_base}.boot-recovery"
+    local shutdown_status=0
+    local delete_status=0
+    local create_status=0
+    local replacement_udid=
+    local recovery_status=1
+    local create_log="${recovery_evidence_base}.recovery-create.log"
+
+    # This path is reached only for an invocation-created hosted ARM64 device;
+    # each destructive/device-creation command has its own lifecycle deadline.
+    echo "iOS simulator readiness timed out on owned hosted ARM64 device $old_udid; attempting one bounded replacement" >&2
+    if run_lifecycle_phase recovery-shutdown attempt-1 "$recovery_evidence_base" "$shutdown_timeout_seconds" \
+        xcrun simctl shutdown "$old_udid"; then
+        shutdown_status=0
+    else
+        shutdown_status=$?
+        echo "error: could not shut down the first iOS simulator before recovery" >&2
+    fi
+    if [[ $shutdown_status -eq 0 ]]; then
+        if run_lifecycle_phase recovery-delete attempt-1 "$recovery_evidence_base" "$shutdown_timeout_seconds" \
+            xcrun simctl delete "$old_udid"; then
+            delete_status=0
+            udid=
+        else
+            delete_status=$?
+            echo "error: could not delete the first iOS simulator during recovery" >&2
+        fi
+    fi
+    if [[ $shutdown_status -eq 0 && $delete_status -eq 0 ]]; then
+        pending_create_log=$create_log
+        pending_create_owned=1
+        if run_lifecycle_phase recovery-create attempt-1 "$recovery_evidence_base" "$boot_timeout_seconds" \
+            xcrun simctl create "$device_name" "$device_type" "$runtime"; then
+            create_status=0
+        else
+            create_status=$?
+            echo "error: could not create a replacement iOS simulator during recovery" >&2
+        fi
+    fi
+    # Also run this after a normal phase return; cleanup runs the same strict
+    # parser if cancellation interrupts the phase before reaching this point.
+    adopt_pending_create_identity
+    if [[ -n $udid && $udid != "$old_udid" ]]; then
+        replacement_udid=$udid
+    fi
+    if [[ $shutdown_status -eq 0 && $delete_status -eq 0 && $create_status -eq 0 ]]; then
+        if [[ -z $replacement_udid ]]; then
+            echo "error: replacement simulator creation did not return a valid device identity" >&2
+            create_status=1
+        else
+            echo "Created replacement iOS simulator $udid using runtime=$runtime device_type=$device_type" >&2
+            if run_boot_readiness_attempt 2; then
+                recovery_status=0
+            else
+                echo "error: replacement iOS simulator did not become ready on the one permitted retry" >&2
+            fi
+        fi
+    fi
+    printf 'BUSTER_IOS_BOOT_RECOVERY attempt=1 old_udid=%s shutdown_status=%s delete_status=%s create_status=%s replacement_udid=%s readiness_status=%s result=%s\n' \
+        "$old_udid" "$shutdown_status" "$delete_status" "$create_status" \
+        "${replacement_udid:-unavailable}" "${boot_attempt_readiness_status:-unavailable}" \
+        "$recovery_status" >&2
+    return "$recovery_status"
+}
+
+if [[ $simulator_owned -eq 1 && $explicit_simulator_udid -eq 0 \
+    && ${GITHUB_ACTIONS:-false} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted \
+    && ${RUNNER_OS:-} == macOS \
+    && ${RUNNER_ARCH:-} == ARM64 && ${BUSTER_IOS_ARCH:-arm64} == arm64 ]]; then
+    boot_recovery_eligible=1
+    shutdown_postcondition_eligible=1
+fi
+printf 'BUSTER_IOS_BOOT_RECOVERY eligibility=%s owned=%s explicit_udid=%s github_actions=%s runner_environment=%s runner_os=%s runner_arch=%s ios_arch=%s\n' \
+    "$boot_recovery_eligible" "$simulator_owned" "$explicit_simulator_udid" \
+    "${GITHUB_ACTIONS:-false}" "${RUNNER_ENVIRONMENT:-unavailable}" \
+    "${RUNNER_OS:-unavailable}" "${RUNNER_ARCH:-unavailable}" \
+    "${BUSTER_IOS_ARCH:-default}" >&2
+
+if run_boot_readiness_attempt 1; then
+    boot_disposition=first-attempt-success
 else
-    boot_status=$?
-    echo "iOS simulator boot returned status $boot_status; continuing to bootstatus (it may already be booted)" >&2
+    first_readiness_status=$?
+    if [[ $boot_recovery_eligible -eq 1 && $boot_attempt_readiness_outcome == timeout ]]; then
+        if recover_boot_readiness; then
+            boot_disposition=recovered-infrastructure-pending-tests
+        else
+            boot_disposition=unrecovered-failure
+            echo "error: iOS simulator boot recovery failed; both readiness attempts and recovery statuses are retained" >&2
+            echo "BUSTER_IOS_BOOT_DISPOSITION=$boot_disposition" >&2
+            exit 1
+        fi
+    else
+        if [[ $boot_recovery_eligible -eq 0 ]]; then
+            echo "iOS simulator boot recovery not eligible for this device/invocation; preserving established failure behavior" >&2
+        elif [[ $boot_attempt_readiness_outcome != timeout ]]; then
+            echo "iOS simulator readiness failed with outcome=$boot_attempt_readiness_outcome; no recovery is permitted" >&2
+        fi
+        if [[ $boot_attempt_readiness_outcome == timeout ]]; then
+            echo "error: iOS simulator did not become ready within ${boot_timeout_seconds}s" >&2
+        else
+            echo "error: iOS simulator readiness command failed with outcome=$boot_attempt_readiness_outcome" >&2
+        fi
+        print_simulator_diagnostics
+        boot_disposition=unrecovered-failure
+        echo "BUSTER_IOS_BOOT_DISPOSITION=$boot_disposition" >&2
+        exit "$first_readiness_status"
+    fi
 fi
-if ! run_with_timeout "$boot_timeout_seconds" xcrun simctl bootstatus "$udid" -b; then
-    echo "error: iOS simulator did not become ready within ${boot_timeout_seconds}s" >&2
-    print_simulator_diagnostics
-    exit 1
-fi
-echo "TIMING_IOS boot_seconds=$((SECONDS - boot_started))"
 
 console_log_for_label() {
     local label=$1
@@ -704,5 +1146,16 @@ for index in "${!bundle_paths[@]}"; do
         overall_status=1
     fi
 done
+
+if [[ $boot_disposition == recovered-infrastructure-pending-tests ]]; then
+    if [[ $overall_status -eq 0 ]]; then
+        boot_disposition=recovered-infrastructure-failure
+    else
+        boot_disposition=recovered-boot-but-test-failure
+    fi
+elif [[ $boot_disposition == first-attempt-success && $overall_status -ne 0 ]]; then
+    boot_disposition=first-attempt-boot-success-but-test-failure
+fi
+printf 'BUSTER_IOS_BOOT_DISPOSITION=%s\n' "$boot_disposition" >&2
 
 exit "$overall_status"

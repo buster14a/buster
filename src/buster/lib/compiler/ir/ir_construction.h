@@ -1,8 +1,9 @@
 #pragma once
 
-// Calling-thread construction work, owned by ir.c and present only in the
-// existing allocation diagnostic build. These are cumulative event/row counts,
-// not timings, live memory, all-lane totals, or a second IR representation.
+// Calling-thread construction, preparation, and validation work, owned by ir.c
+// and present only in the existing allocation diagnostic build. These are
+// cumulative event/row counts, not timings, live memory, all-lane totals, or a
+// second IR representation.
 // Normal builds do not evaluate recording arguments or retain counter storage.
 #include <buster/lib/base.h>
 
@@ -76,7 +77,47 @@
     X(CFG_UNIQUE_EDGES, cfg_unique_edges) \
     X(CFG_PARAMETER_VISITS, cfg_parameter_visits) \
     X(CFG_INCOMING_VISITS, cfg_incoming_visits) \
-    X(CFG_COPY_SOURCES, cfg_copy_sources)
+    X(CFG_COPY_SOURCES, cfg_copy_sources) \
+    X(VALIDATION_CALLS, validation_calls) \
+    X(VALIDATION_OWNERSHIP_FUNCTION_SCANS, validation_ownership_function_scans) \
+    X(VALIDATION_PUBLISHED_CFG_CHECKS, validation_published_cfg_checks) \
+    X(VALIDATION_OWNERSHIP_FUNCTIONS, validation_ownership_functions) \
+    X(VALIDATION_OWNERSHIP_BLOCKS, validation_ownership_blocks) \
+    X(VALIDATION_OWNERSHIP_INSTRUCTIONS, validation_ownership_instructions) \
+    X(VALIDATION_OWNERSHIP_BYTES_CLEARED, validation_ownership_bytes_cleared) \
+    X(VALIDATION_GLOBALS, validation_globals) \
+    X(VALIDATION_GLOBAL_RELOCATIONS, validation_global_relocations) \
+    X(VALIDATION_GLOBAL_RELOCATION_PAIRS, validation_global_relocation_pairs) \
+    X(VALIDATION_ALIASES, validation_aliases) \
+    X(VALIDATION_INITIALIZERS, validation_initializers) \
+    X(VALIDATION_FUNCTIONS, validation_functions) \
+    X(VALIDATION_VALUE_BLOCKS, validation_value_blocks) \
+    X(VALIDATION_VALUE_PARAMETERS, validation_value_parameters) \
+    X(VALIDATION_VALUES, validation_values) \
+    X(VALIDATION_VALUE_PROVENANCE_CHECKS, validation_value_provenance_checks) \
+    X(VALIDATION_VALUE_PROVENANCE_BLOCKS, validation_value_provenance_blocks) \
+    X(VALIDATION_BLOCKS, validation_blocks) \
+    X(VALIDATION_PARAMETERS, validation_parameters) \
+    X(VALIDATION_INCOMING_VALUES, validation_incoming_values) \
+    X(VALIDATION_PARAMETER_PROVENANCE_CHECKS, validation_parameter_provenance_checks) \
+    X(VALIDATION_INSTRUCTIONS, validation_instructions) \
+    X(VALIDATION_OPERAND_IDS, validation_operand_ids) \
+    X(VALIDATION_TARGET_IDS, validation_target_ids) \
+    X(VALIDATION_RESULT_RELATIONSHIPS, validation_result_relationships) \
+    X(VALIDATION_OPERATION_CHECKS, validation_operation_checks) \
+    X(VALIDATION_CONVERSION_CHECKS, validation_conversion_checks) \
+    X(VALIDATION_CALL_CHECKS, validation_call_checks) \
+    X(VALIDATION_CALL_ARGUMENTS, validation_call_arguments) \
+    X(VALIDATION_INSTRUCTION_PROVENANCE_CHECKS, validation_instruction_provenance_checks) \
+    X(VALIDATION_TERMINATOR_CHECKS, validation_terminator_checks) \
+    X(PREPARATION_CALLS, preparation_calls) \
+    X(PREPARATION_INPUT_VALIDATIONS, preparation_input_validations) \
+    X(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, preparation_promotion_output_validations) \
+    X(PREPARATION_FAST_INPUT_VALIDATIONS, preparation_fast_input_validations) \
+    X(PREPARATION_FAST_OUTPUT_VALIDATIONS, preparation_fast_output_validations) \
+    X(PREPARATION_PROMOTION_FUNCTIONS, preparation_promotion_functions) \
+    X(PREPARATION_FAST_FUNCTIONS, preparation_fast_functions) \
+    X(PREPARATION_PUBLICATION_FUNCTIONS, preparation_publication_functions)
 
 typedef enum IrConstructionCounter
 {
@@ -99,4 +140,11 @@ BUSTER_F_DECL String8 ir_construction_counter_name(IrConstructionCounter counter
 #define IR_CONSTRUCTION_RECORD(counter, amount) ir_construction_record(IR_CONSTRUCTION_##counter, (u64)(amount))
 #else
 #define IR_CONSTRUCTION_RECORD(counter, amount) ((void)0)
+#endif
+
+#if BUSTER_UNITY_BUILD && BUSTER_INCLUDE_TESTS
+// ide.c includes the construction surface before entering the test-only Clang
+// optnone region. Preload the production append inline here so test headers
+// cannot stamp optnone onto it before c_gen.c is included.
+#include <buster/lib/compiler/ir/ir_append.h>
 #endif

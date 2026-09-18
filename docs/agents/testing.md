@@ -102,7 +102,70 @@
   `tests/mobile_ci_scripts_test.sh`. The Android and iOS fixture suites include
   the production CMake graph with controlled targets and real Ninja
   Multi-Config scheduling. They are host graph evidence; native mobile
-  compilation and device/simulator execution remain separate CI gates.
+  compilation and device/simulator execution remain separate CI gates. Android
+  resolves safe `.` and `..` segments inside the rooted APK asset namespace so
+  nested quoted includes consume the same fixture bytes as desktop tests;
+  traversal above the asset root is rejected.
+- On GitHub-hosted macOS arm64, `ios/test_ci.sh` supplies a 180-second
+  codesign deadline when the caller has not supplied one. This is separate
+  from the test-execution, boot, install, and shutdown deadlines. Local and
+  self-hosted defaults remain unchanged, and an explicit
+  `BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS` is preserved for launcher validation.
+  No signing retry or failure suppression is introduced. The policy and native
+  status propagation are covered by `python3 ios/hosted_signing_budget_test.py`
+  in the mobile lifecycle workflow; actual Apple signing and simulator tests
+  remain a distinct native CI gate.
+- For an invocation-owned GitHub-hosted macOS arm64 simulator, a true
+  shutdown-helper timeout is first reconciled against one bounded exact-UDID
+  state probe. If a successful payload still leaves that device non-Shutdown,
+  the launcher retries shutdown for that exact UDID once and requires a second
+  bounded probe to prove `Shutdown`. Retry rejection, ambiguous or malformed
+  identity evidence, a final non-Shutdown state, borrowed/explicit devices,
+  and every pre-existing payload failure remain failed. The retained recovery
+  receipt distinguishes this path from direct shutdown and the already-Shutdown
+  timeout reconciliation; `ios/hosted_signing_budget_test.py` covers both the
+  successful and fail-closed cases.
+- Android CI reports per-phase status lines that must be read together before
+  treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
+  per configuration with `config=`, `phase=` and the wrapper's exit `status=`),
+  `ANDROID_MONITOR_RESULT` (logcat reader/producer exit statuses, the monitor
+  deadline, and the payload's `elapsed_seconds`, `headroom_seconds` and
+  `headroom_warning`), `ANDROID_CONFIG_RESULT` (test_ci.sh, one line per selected
+  configuration, `not-run` when a configuration never reached execution), and
+  `ANDROID_BATCH_RESULT` (test_ci.sh batch phase, first failed configuration,
+  preserved overall status, and emulator cleanup status). The workflow step
+  itself ends with `ANDROID_CI_RESULT` separating `payload_status` from
+  `cleanup_status`. A later Release success never clears an earlier Debug
+  failure: always inspect every `ANDROID_CONFIG_RESULT` line — both Debug and
+  Release — plus the batch line's `status=` field; a missing per-config line or
+  `status=not-run` is itself evidence of an incomplete run.
+  `android/run_tests.sh` bounds each complete suite with a 180-second monitor
+  watchdog, independently of adb command/install/boot deadlines. Debug compiler
+  fixtures exceeded the former 60-second budget while still reporting progress
+  in PR #687's run `35157195321`; this is a correctness-suite execution budget,
+  not a throughput threshold. `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` explicitly
+  overrides it. Terminal markers end monitoring immediately, and timeout,
+  malformed or missing markers still fail; the fake monitor suite checks the
+  default and override without lengthening its short timeout failure controls.
+  Payload interruption statuses 130/143 stop the batch immediately and remain
+  the workflow status even when emulator cleanup also fails; unstarted
+  configurations remain `not-run`. Ordinary test failures still run the later
+  configurations and keep the batch failed. Run `bash android/run_tests_test.sh`
+  alongside the frozen shared mobile suite to cover both attribution and
+  cancellation through the real workflow body. Android/workflow changes also
+  schedule the unchanged frozen-support contract checks automatically.
+  Reader status 0 with producer status 124/137 is the payload exhausting its own
+  `BUSTER_ANDROID_TEST_TIMEOUT_SECONDS` deadline, not emulator teardown: the
+  wrapper names that at the failure, reports how many log lines the payload
+  emitted with a truncated last line, and the summary repeats it as a
+  `Payload deadline:` note. A payload that passes with less than
+  `BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT` (default 25) of its deadline
+  left reports `headroom_warning=yes` and a wrapper warning while still passing.
+  Treat that as a signal to find the payload regression, not as a reason to
+  raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
+  The lifecycle helper treats an owned terminated zombie as already stopped,
+  not as a signalable emulator; the harness holds a child unreaped to cover
+  this path deterministically. Unknown process-state queries remain fail-closed.
 
 ## Throughput runner integration
 
@@ -112,6 +175,24 @@ before compiler/configuration trees. The tool links shared foundations through
 timeout/descendant cleanup, argv, diagnostics and dedicated-host locking.
 SHA-256 and recoverable file/path contracts also run in the registered hash and
 OS module tests. See `tools/throughput/README.md` for the diagnostic build.
+
+## Bench service self-test
+
+`./build.sh bench_service self-test` (and its `--sanitize` variant) runs the
+POSIX queue, materializer, journal-replay and fake-worker regressions plus the
+Linux lease-handoff and result-evidence suites; see
+`tools/bench_service/README.md` for the full contract. Interrupted workers
+retain and hash existing result evidence into the published `BQ-BUNDLE-V1`
+index, a bundle-only crash prefix completes idempotently, and invalid
+published controls are never repaired. The coordinator removes the
+`.lease-handoff` socket before the worker is continued. On Linux the suite
+also runs a materializer-to-recipe bridge: a real `bq_materialize` fixture
+feeds the real `bench_service_recipe` build graph through
+`bench_service_recipe_self_test JOB TOKEN WORKSPACE BASE CANDIDATE RESULT`,
+with only the external build and throughput programs stubbed, followed by the
+fixed no-argument recipe suite. These tests are fake-backend and
+stubbed-external evidence; privileged live-systemd and deployment
+qualification remain explicit operator gates and are not covered here.
 
 ## Configured external compiler fixtures
 
@@ -125,6 +206,10 @@ The argument-policy regression runs on every test host; real ELF fixture
 compilation, relocation inspection, linking and execution are native Linux
 x86-64 checks. They preserve signed absolute `R_X86_64_32S` and GOTPCREL
 coverage; the indexed fixture makes both GCC and Clang produce those forms.
+The fixture is compiled `-O2`, because that is where both narrow an address to
+32 bits and emit a GOT load with no REX prefix -- the `R_X86_64_GOTPCRELX`
+shapes the linker converts to an absolute immediate rather than to an address
+computation.
 For x86-64 Linux, the native linker removes an undefined
 `_GLOBAL_OFFSET_TABLE_` marker only when no relocation or explicit entry request
 uses it. It copies the symbol/relocation view before remapping indices, preserving

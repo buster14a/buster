@@ -325,6 +325,228 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_construction_appends(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_validation_census(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_BENCH_ALLOCATIONS
+    IrTypeId parameter_type = {.value = 1};
+    IrType types[] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_POINTER, .element_type = {.value = 3},
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0},
+         .parameter_types = &parameter_type, .parameter_count = 1},
+        {.id = {.value = 3}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 0}},
+    };
+    u64 argument_index = 0;
+    IrValueId call_operand = {.value = 0};
+    IrValue value = {.canonical_type = {.value = 1}, .definition = {.value = 0}, .category = IR_VALUE_VALUE};
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_ARGUMENT, .canonical_type = {.value = 1}, .result = {.value = 0},
+         .immediates = &argument_index, .immediate_count = 1, .next = {.value = 1}},
+        {.opcode = IR_OPCODE_CALL, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .symbol = IR_SYMBOL_ID_INVALID, .operands = &call_operand, .operand_count = 1, .next = {.value = 2}},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .next = IR_INSTRUCTION_ID_INVALID},
+    };
+    IrBlock block = {.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 2},
+                     .sealed = true, .terminated = true};
+    IrFunction function = {.canonical_type = {.value = 2}, .state = IR_FUNCTION_LOWERED, .entry = {.value = 0},
+                           .blocks = &block, .block_count = 1, .instructions = instructions, .instruction_count = 3,
+                           .values = &value, .value_count = 1};
+    IrModule module = {.functions = &function, .function_count = 1};
+    IrProgram program = {.modules = &module, .module_count = 1,
+                         .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)}};
+    IrConstructionCounters before = ir_construction_counters();
+    IrValidationResult validation = ir_validate_canonical_module(&program, &module);
+    IrConstructionCounters after = ir_construction_counters();
+    BUSTER_TEST(arguments, validation.error == IR_VALIDATION_NONE);
+    BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_VALIDATION_EXPECT(counter, expected) \
+    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_##counter] - before.values[IR_CONSTRUCTION_##counter] == (expected))
+    IR_VALIDATION_EXPECT(VALIDATION_CALLS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_BLOCKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_INSTRUCTIONS, 3);
+    IR_VALIDATION_EXPECT(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(IrBlockId) * 3);
+    IR_VALIDATION_EXPECT(VALIDATION_FUNCTIONS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_VALUE_BLOCKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_VALUES, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_VALUE_PROVENANCE_CHECKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_BLOCKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_INSTRUCTIONS, 3);
+    IR_VALIDATION_EXPECT(VALIDATION_OPERAND_IDS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_RESULT_RELATIONSHIPS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_OPERATION_CHECKS, 3);
+    IR_VALIDATION_EXPECT(VALIDATION_CALL_CHECKS, 1);
+    IR_VALIDATION_EXPECT(VALIDATION_TERMINATOR_CHECKS, 3);
+#undef IR_VALIDATION_EXPECT
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_bfloat16_representation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    IrProgram program = ir_program_initialize(arena, 1, 3, 0, 0);
+    IrTypeId ieee16 = ir_program_add_type(&program, (IrType){
+                                                        .kind = IR_TYPE_FLOAT,
+                                                        .bit_width = 16,
+                                                        .float_format = IR_FLOAT_FORMAT_IEEE,
+                                                        .layout = {.size = 2, .alignment = 2, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+                                                    });
+    IrTypeId brain16 = ir_program_add_type(&program, (IrType){
+                                                         .kind = IR_TYPE_FLOAT,
+                                                         .bit_width = 16,
+                                                         .float_format = IR_FLOAT_FORMAT_BFLOAT16,
+                                                         .layout = {.size = 2, .alignment = 2, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+                                                     });
+    IrTypeId function_type = ir_program_add_type(&program, (IrType){
+                                                               .kind = IR_TYPE_FUNCTION,
+                                                               .return_type = ieee16,
+                                                               .calling_convention = IR_CALLING_CONVENTION_C,
+                                                               .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true},
+                                                           });
+    IrFunction* function = ir_module_add_function(arena, program.modules, (IrFunction){
+                                                                            .canonical_type = function_type,
+                                                                            .entry = (IrBlockId){.value = 0},
+                                                                            .state = IR_FUNCTION_LOWERED,
+                                                                        });
+    IrBlock* block = function ? ir_function_add_block(arena, function, (IrBlock){
+                                                                      .first_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                                      .last_instruction = IR_INSTRUCTION_ID_INVALID,
+                                                                      .terminated = true,
+                                                                      .sealed = true,
+                                                                  })
+                              : 0;
+    IrValueId source = function ? ir_function_add_value(arena, function, (IrValue){
+                                                                          .canonical_type = ieee16,
+                                                                          .definition = IR_INSTRUCTION_ID_INVALID,
+                                                                          .category = IR_VALUE_VALUE,
+                                                                      })
+                                : IR_VALUE_ID_INVALID;
+    IrValueId converted = function ? ir_function_add_value(arena, function, (IrValue){
+                                                                              .canonical_type = brain16,
+                                                                              .definition = IR_INSTRUCTION_ID_INVALID,
+                                                                              .category = IR_VALUE_VALUE,
+                                                                          })
+                                   : IR_VALUE_ID_INVALID;
+    u64* immediates = arena_allocate(arena, u64, 1);
+    if (immediates)
+    {
+        immediates[0] = 0x3e00;
+    }
+    IrValueId* cast_operands = arena_allocate(arena, IrValueId, 1);
+    if (cast_operands)
+    {
+        cast_operands[0] = source;
+    }
+    IrValueId* return_operands = arena_allocate(arena, IrValueId, 1);
+    if (return_operands)
+    {
+        return_operands[0] = source;
+    }
+    IrInstructionId constant = function ? ir_function_add_instruction(arena, function, (IrInstruction){
+                                                                                         .immediates = immediates,
+                                                                                         .immediate_count = 1,
+                                                                                         .canonical_type = ieee16,
+                                                                                         .result = source,
+                                                                                         .opcode = IR_OPCODE_CONSTANT_FLOAT,
+                                                                                         .next = IR_INSTRUCTION_ID_INVALID,
+                                                                                     },
+                                                                        (IrSourceRange){0})
+                                        : IR_INSTRUCTION_ID_INVALID;
+    IrInstructionId cast = function ? ir_function_add_instruction(arena, function, (IrInstruction){
+                                                                                     .operands = cast_operands,
+                                                                                     .operand_count = 1,
+                                                                                     .canonical_type = brain16,
+                                                                                     .result = converted,
+                                                                                     .opcode = IR_OPCODE_CAST,
+                                                                                     .conversion_operation = IR_CONVERSION_IDENTITY,
+                                                                                     .next = IR_INSTRUCTION_ID_INVALID,
+                                                                                 },
+                                                                    (IrSourceRange){0})
+                                    : IR_INSTRUCTION_ID_INVALID;
+    IrInstructionId returned = function ? ir_function_add_instruction(arena, function, (IrInstruction){
+                                                                                         .operands = return_operands,
+                                                                                         .operand_count = 1,
+                                                                                         .canonical_type = ieee16,
+                                                                                         .result = IR_VALUE_ID_INVALID,
+                                                                                         .opcode = IR_OPCODE_RETURN,
+                                                                                         .next = IR_INSTRUCTION_ID_INVALID,
+                                                                                     },
+                                                                        (IrSourceRange){0})
+                                        : IR_INSTRUCTION_ID_INVALID;
+    if (BUSTER_REQUIRE(arguments, function != 0 && block != 0 && immediates && cast_operands && return_operands &&
+                                  source.value != IR_ID_UNDERLYING_INVALID && converted.value != IR_ID_UNDERLYING_INVALID &&
+                                  constant.value != IR_ID_UNDERLYING_INVALID && cast.value != IR_ID_UNDERLYING_INVALID &&
+                                  returned.value != IR_ID_UNDERLYING_INVALID))
+    {
+        function->values[source.value].definition = constant;
+        function->values[converted.value].definition = cast;
+        function->instructions[constant.value].next = cast;
+        function->instructions[cast.value].next = returned;
+        block->first_instruction = constant;
+        block->last_instruction = returned;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&program, program.modules).error == IR_VALIDATION_OPERATION);
+        function->instructions[cast.value].canonical_type = ieee16;
+        function->values[converted.value].canonical_type = ieee16;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&program, program.modules).error == IR_VALIDATION_NONE);
+        function->instructions[constant.value].immediates[0] = UINT64_C(0x13e00);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&program, program.modules).error != IR_VALIDATION_NONE);
+        function->instructions[constant.value].immediates[0] = 0x3e00;
+    }
+
+    IrProgram global_program = ir_program_initialize(arena, 1, 1, 1, 0);
+    IrTypeId global_type = ir_program_add_type(&global_program, (IrType){
+                                                                    .kind = IR_TYPE_FLOAT,
+                                                                    .bit_width = 16,
+                                                                    .float_format = IR_FLOAT_FORMAT_BFLOAT16,
+                                                                    .layout = {.size = 2, .alignment = 2, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+                                                                });
+    IrSymbolId symbol = ir_program_add_symbol(&global_program, (IrSymbol){
+                                                                   .type = global_type,
+                                                                   .kind = IR_SYMBOL_DATA,
+                                                                   .linkage = IR_LINKAGE_INTERNAL,
+                                                                   .is_definition = true,
+                                                               });
+    u8* global_bytes = arena_allocate(arena, u8, 2);
+    if (global_bytes)
+    {
+        global_bytes[0] = 0xc0;
+        global_bytes[1] = 0x3f;
+    }
+    IrGlobal* global = ir_module_add_global(arena, global_program.modules, (IrGlobal){
+                                                                             .symbol = symbol,
+                                                                             .type = global_type,
+                                                                             .bytes = (ByteSlice){.pointer = global_bytes, .length = 2},
+                                                                             .initializer_bits = 0x3fc0,
+                                                                             .initializer_kind = IR_GLOBAL_INITIALIZER_FLOAT,
+                                                                         });
+    IrType* global_type_value = ir_type_from_id(&global_program.types, global_type);
+    if (BUSTER_REQUIRE(arguments, global != 0 && global_bytes && global_type_value &&
+                                  global_type.value != IR_ID_UNDERLYING_INVALID && symbol.value != IR_ID_UNDERLYING_INVALID))
+    {
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&global_program, global_program.modules).error == IR_VALIDATION_NONE);
+        global->initializer_bits = UINT64_C(0x13fc0);
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&global_program, global_program.modules).error != IR_VALIDATION_NONE);
+        global->initializer_bits = 0x3fc0;
+        global_type_value->bit_width = 32;
+        global_type_value->layout.size = 4;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&global_program, global_program.modules).error != IR_VALIDATION_NONE);
+        global_type_value->bit_width = 16;
+        global_type_value->layout.size = 2;
+        global_type_value->float_format = IR_FLOAT_FORMAT_COUNT;
+        BUSTER_TEST(arguments, ir_validate_canonical_module(&global_program, global_program.modules).error != IR_VALIDATION_NONE);
+        global_type_value->float_format = IR_FLOAT_FORMAT_BFLOAT16;
+    }
+    return result;
+}
+
 UnitTestResult ir_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_promotion_tests(arguments);
@@ -337,6 +559,67 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult construction = ir_test_construction_appends(arguments);
     result.test_count += construction.test_count;
     result.succeeded_test_count += construction.succeeded_test_count;
+    UnitTestResult validation_census = ir_test_validation_census(arguments);
+    result.test_count += validation_census.test_count;
+    result.succeeded_test_count += validation_census.succeeded_test_count;
+
+    IrFieldAccessPiece expected_field_access[][IR_FIELD_ACCESS_PIECE_CAPACITY] = {
+        {{.offset = 0, .size = 1}},
+        {{.offset = 0, .size = 2}},
+        {{.offset = 0, .size = 2}, {.offset = 2, .size = 1}},
+        {{.offset = 0, .size = 4}},
+        {{.offset = 0, .size = 4}, {.offset = 4, .size = 1}},
+        {{.offset = 0, .size = 4}, {.offset = 4, .size = 2}},
+        {{.offset = 0, .size = 4}, {.offset = 4, .size = 2}, {.offset = 6, .size = 1}},
+        {{.offset = 0, .size = 8}},
+        {{.offset = 0, .size = 8}, {.offset = 8, .size = 1}},
+    };
+    u32 expected_field_access_counts[] = {1, 1, 2, 1, 2, 2, 3, 1, 2};
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected_field_access) == IR_FIELD_ACCESS_MAX_SIZE);
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected_field_access) == BUSTER_ARRAY_LENGTH(expected_field_access_counts));
+    for (u32 size = 1; size <= IR_FIELD_ACCESS_MAX_SIZE; size += 1)
+    {
+        IrFieldAccessPiece pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+        for (u32 piece = 0; piece < BUSTER_ARRAY_LENGTH(pieces); piece += 1)
+        {
+            pieces[piece] = (IrFieldAccessPiece){.offset = 0xa5, .size = 0x5a};
+        }
+        u32 piece_count = ir_field_access_pieces(size, pieces);
+        u32 expected_count = expected_field_access_counts[size - 1];
+        BUSTER_TEST(arguments, piece_count == expected_count);
+        BUSTER_TEST(arguments, piece_count <= IR_FIELD_ACCESS_PIECE_CAPACITY);
+        u64 covered = 0;
+        for (u32 piece = 0; piece < BUSTER_ARRAY_LENGTH(pieces); piece += 1)
+        {
+            if (piece < piece_count)
+            {
+                BUSTER_TEST(arguments, pieces[piece].offset == expected_field_access[size - 1][piece].offset);
+                BUSTER_TEST(arguments, pieces[piece].size == expected_field_access[size - 1][piece].size);
+                BUSTER_TEST(arguments, pieces[piece].offset == covered);
+                covered += pieces[piece].size;
+            }
+            else
+            {
+                BUSTER_TEST(arguments, pieces[piece].offset == 0xa5 && pieces[piece].size == 0x5a);
+            }
+        }
+        BUSTER_TEST(arguments, covered == size);
+    }
+    u64 invalid_field_access_sizes[] = {0, IR_FIELD_ACCESS_MAX_SIZE + 1, UINT64_MAX};
+    for (u32 invalid = 0; invalid < BUSTER_ARRAY_LENGTH(invalid_field_access_sizes); invalid += 1)
+    {
+        IrFieldAccessPiece pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+        for (u32 piece = 0; piece < BUSTER_ARRAY_LENGTH(pieces); piece += 1)
+        {
+            pieces[piece] = (IrFieldAccessPiece){.offset = 0xa5, .size = 0x5a};
+        }
+        BUSTER_TEST(arguments, ir_field_access_pieces(invalid_field_access_sizes[invalid], pieces) == 0);
+        for (u32 piece = 0; piece < BUSTER_ARRAY_LENGTH(pieces); piece += 1)
+        {
+            BUSTER_TEST(arguments, pieces[piece].offset == 0xa5 && pieces[piece].size == 0x5a);
+        }
+    }
+    BUSTER_TEST(arguments, ir_field_access_pieces(IR_FIELD_ACCESS_MAX_SIZE, 0) == 0);
 
     UnitTestResult call_validation = ir_test_canonical_call_validation(arguments);
     result.succeeded_test_count += call_validation.succeeded_test_count;
@@ -1135,8 +1418,11 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, valid_f80_global_bytes.error == IR_VALIDATION_NONE);
     IrValidationResult malformed_f80_global_float = ir_test_canonical_float_global(arguments->arena, 80, IR_GLOBAL_INITIALIZER_FLOAT);
     BUSTER_TEST(arguments, malformed_f80_global_float.error == IR_VALIDATION_OPERATION);
-    IrValidationResult malformed_f16_global_float = ir_test_canonical_float_global(arguments->arena, 16, IR_GLOBAL_INITIALIZER_FLOAT);
-    BUSTER_TEST(arguments, malformed_f16_global_float.error == IR_VALIDATION_OPERATION);
+    IrValidationResult valid_f16_global_float = ir_test_canonical_float_global(arguments->arena, 16, IR_GLOBAL_INITIALIZER_FLOAT);
+    BUSTER_TEST(arguments, valid_f16_global_float.error == IR_VALIDATION_NONE);
+    UnitTestResult bfloat16 = ir_test_bfloat16_representation(arguments);
+    result.succeeded_test_count += bfloat16.succeeded_test_count;
+    result.test_count += bfloat16.test_count;
 
     String8 c_source = S8("int choose(int a, int b)\n"
                          "{\n"

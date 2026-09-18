@@ -195,14 +195,26 @@ typedef enum IrInlineAssemblyConstraint
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT ((u64)1 << 8)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE ((u64)1 << 9)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH ((u64)1 << 10)
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER ((u64)1 << 11)
+// A target-neutral physical-register binding refines the generic R class. The
+// frontend validates the target register name; retaining the index here lets
+// ties copy the requirement without adding architecture-specific IR classes.
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER ((u64)1 << 12)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT 16
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK (UINT64_C(0xffffffff) << IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT)
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_SHIFT 48
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK (UINT64_C(0xff) << IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_SHIFT)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK UINT64_C(0xff)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_KNOWN_MASK                                                                                       \
     (IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK | IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT | IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE |       \
-     IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK)
+     IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH | IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER | IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER | \
+     IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK | IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK)
 #define IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint)                                                                          \
     ((u32)(((constraint) & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_MASK) >> IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX_SHIFT))
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint)                                                                 \
+    (((constraint) & IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER) != 0)
+#define IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint)                                                               \
+    ((u32)(((constraint) & IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_MASK) >> IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_SHIFT))
 
 typedef enum IrConversionOperation
 {
@@ -1070,6 +1082,7 @@ BUSTER_F_DECL IrCfgEdge const* ir_function_cfg_edge(IrFunction const* function, 
 // Shared storage-normalization contract for canonical and frontend promotion.
 BUSTER_F_DECL bool ir_local_type_promotable(IrProgram* program, IrTypeId type);
 // The direct builder and reference pass share the conservative call-effect boundary.
+BUSTER_F_DECL bool ir_call_returns_twice(IrProgram* program, IrInstruction const* row);
 BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruction const* row);
 // The input certificate covers only the rows supplied to this call. Promotion
 // consumes that contract and may mutate arena-owned rows and side tables; it

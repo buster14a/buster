@@ -10,7 +10,9 @@ __asm__(".text\n"
 #elif defined(__aarch64__) || defined(_M_ARM64)
 __asm__(".text\n"
         ".globl global_asm_answer\n"
+#if !defined(_WIN32) && !defined(__APPLE__)
         ".type global_asm_answer, %function\n"
+#endif
         "global_asm_answer:\n"
         "mov w0, #42\n"
         "ret\n");
@@ -192,14 +194,95 @@ static int four_tied_output(int a, int b, int c, int d)
     return result0 + result1 + result2 + result3;
 }
 
+static int template_read_write(int value, int increment)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    __asm__ volatile("add %0, %0, %1" : "+r"(value) : "r"(increment) : "cc");
+#else
+    __asm__ volatile("addl %1, %0" : "+r"(value) : "r"(increment) : "cc");
+#endif
+    return value;
+}
+
+static int early_clobber_copy(int input, int live)
+{
+    int output;
+#if defined(__aarch64__) || defined(_M_ARM64)
+    __asm__ volatile("mov %0, %1" : "=&r"(output) : "r"(input), "r"(live));
+#else
+    __asm__ volatile("movl %1, %0" : "=&r"(output) : "r"(input), "r"(live));
+#endif
+    return output + live;
+}
+
+static int multiple_early_clobber_outputs(int left, int right)
+{
+    int first;
+    int second;
+#if defined(__aarch64__) || defined(_M_ARM64)
+    __asm__ volatile("mov %0, %2; mov %1, %3" : "=&r"(first), "=&r"(second) : "r"(left), "r"(right));
+#else
+    __asm__ volatile("movl %2, %0; movl %3, %1" : "=&r"(first), "=&r"(second) : "r"(left), "r"(right));
+#endif
+    return first * 100 + second;
+}
+
+static int explicit_register_clobber_live_values(int left, int right)
+{
+#if defined(__aarch64__) || defined(_M_ARM64)
+    __asm__ volatile("" : : : "x9", "cc");
+#else
+    __asm__ volatile("" : : : "r11", "cc");
+#endif
+    return left * 100 + right;
+}
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+static long long fixed_bound_input(long long input)
+{
+    register long long fixed __asm__("x8") = input;
+    long long output;
+    __asm__ volatile("mov %0, x8" : "=r"(output) : "r"(fixed));
+    return output;
+}
+
+static long long fixed_bound_callee_saved_output(long long input)
+{
+    register long long output __asm__("x19");
+    __asm__ volatile("mov x19, %1" : "=r"(output) : "0"(input));
+    return output;
+}
+
+static int memory_operands(int input)
+{
+    volatile int value = 0;
+    int output;
+    __asm__ volatile("str %w1, %0" : "=m"(value) : "r"(input) : "memory", "cc", "x15");
+    __asm__ volatile("ldr %w0, %1" : "=r"(output) : "m"(value) : "memory");
+    return output;
+}
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+static int memory_register_and_flags_clobbers(int value)
+{
+    __asm__ volatile("incl %0" : "+m"(value) : : "memory", "cc", "r11");
+    return value;
+}
+#endif
+
 int main(void)
 {
     int valid = compiler_barrier(37) == 37 && global_asm_answer() == 42 && numeric_tied_output(53) == 53 && named_tied_output(71) == 71 &&
-                four_tied_output(1, 2, 3, 4) == 10;
+                four_tied_output(1, 2, 3, 4) == 10 && template_read_write(31, 11) == 42 && early_clobber_copy(37, 5) == 42 &&
+                multiple_early_clobber_outputs(7, 13) == 713 && explicit_register_clobber_live_values(17, 19) == 1719;
 #if defined(__x86_64__) || defined(_M_X64)
     outputs_only_fixed_order();
     valid = valid && fixed_tied_output(89) == 89 && two_generic_read_write_outputs() == 12 && generic_before_fixed_read_write_output() == 12 &&
-            fixed_before_generic_read_write_output() == 12 && dynamic_stack_fixed_b(3) == 7 && exact_width_asm_outputs();
+            fixed_before_generic_read_write_output() == 12 && dynamic_stack_fixed_b(3) == 7 && exact_width_asm_outputs() &&
+            memory_register_and_flags_clobbers(41) == 42;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    valid = valid && fixed_bound_input(101) == 101 && fixed_bound_callee_saved_output(211) == 211 && memory_operands(307) == 307;
 #endif
     return valid ? 0 : 1;
 }

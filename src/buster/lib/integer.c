@@ -3,8 +3,8 @@
 
 u64 align_forward(u64 n, u64 a)
 {
-    u64 mask = a - 1;
-    u64 result = (n + mask) & ~mask;
+    u64 result;
+    BUSTER_VALIDATE(align_forward_checked(n, a, &result));
     return result;
 }
 

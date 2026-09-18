@@ -3444,35 +3444,91 @@ UnitTestResult target_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_data_layout_is_valid(linux_x86_layout));
     BUSTER_TEST(arguments, linux_x86_layout.pointer.size == 8 && linux_x86_layout.pointer.alignment == 8);
     BUSTER_TEST(arguments, linux_x86_layout.long_integer.bit_width == 64);
-    BUSTER_TEST(arguments, linux_x86_layout.long_double_type.bit_width == 80);
+    BUSTER_TEST(arguments, linux_x86_layout.long_double_type.size == 16 &&
+                             linux_x86_layout.long_double_type.alignment == 16 &&
+                             linux_x86_layout.long_double_type.bit_width == 80);
     BUSTER_TEST(arguments, linux_x86_layout.endianness == TARGET_ENDIAN_LITTLE);
     BUSTER_TEST(arguments, linux_x86_layout.atomic_min_width == 8 && linux_x86_layout.atomic_max_width == 128);
+    TargetDataLayout android_x86_layout = target_data_layout((Target){
+        .cpu_arch = CPU_ARCH_X86_64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_ANDROID,
+    });
+    BUSTER_TEST(arguments, target_data_layout_is_valid(android_x86_layout));
+    BUSTER_TEST(arguments, android_x86_layout.long_double_type.size == 16 &&
+                             android_x86_layout.long_double_type.alignment == 16 &&
+                             android_x86_layout.long_double_type.bit_width == 128);
     TargetDataLayout windows_x86_layout = target_data_layout((Target){
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
         .os = OPERATING_SYSTEM_WINDOWS,
     });
     BUSTER_TEST(arguments, windows_x86_layout.long_integer.bit_width == 32);
-    BUSTER_TEST(arguments, windows_x86_layout.long_double_type.bit_width == 64);
+    BUSTER_TEST(arguments, windows_x86_layout.long_double_type.size == 8 &&
+                             windows_x86_layout.long_double_type.alignment == 8 &&
+                             windows_x86_layout.long_double_type.bit_width == 64);
     TargetDataLayout macos_x86_layout = target_data_layout((Target){
         .cpu_arch = CPU_ARCH_X86_64,
         .cpu_model = CPU_MODEL_BASELINE,
         .os = OPERATING_SYSTEM_MACOS,
     });
-    BUSTER_TEST(arguments, macos_x86_layout.long_double_type.size == 16 && macos_x86_layout.long_double_type.bit_width == 80);
+    BUSTER_TEST(arguments, macos_x86_layout.long_double_type.size == 16 &&
+                             macos_x86_layout.long_double_type.alignment == 16 &&
+                             macos_x86_layout.long_double_type.bit_width == 80);
     TargetDataLayout macos_arm_layout = target_data_layout((Target){
         .cpu_arch = CPU_ARCH_AARCH64,
         .cpu_model = CPU_MODEL_BASELINE,
         .os = OPERATING_SYSTEM_MACOS,
     });
-    BUSTER_TEST(arguments, macos_arm_layout.long_double_type.size == 8 && macos_arm_layout.long_double_type.bit_width == 64);
+    BUSTER_TEST(arguments, macos_arm_layout.long_double_type.size == 8 &&
+                             macos_arm_layout.long_double_type.alignment == 8 &&
+                             macos_arm_layout.long_double_type.bit_width == 64);
     TargetDataLayout linux_arm_layout = target_data_layout((Target){
         .cpu_arch = CPU_ARCH_AARCH64,
         .cpu_model = CPU_MODEL_BASELINE,
         .os = OPERATING_SYSTEM_LINUX,
     });
+    BUSTER_TEST(arguments, linux_arm_layout.long_double_type.size == 16 &&
+                             linux_arm_layout.long_double_type.alignment == 16 &&
+                             linux_arm_layout.long_double_type.bit_width == 128);
     BUSTER_TEST(arguments, !linux_arm_layout.plain_char_is_signed);
     BUSTER_TEST(arguments, target_data_layout_is_valid(linux_arm_layout));
+    TargetDataLayout android_arm_layout = target_data_layout((Target){
+        .cpu_arch = CPU_ARCH_AARCH64,
+        .cpu_model = CPU_MODEL_BASELINE,
+        .os = OPERATING_SYSTEM_ANDROID,
+    });
+    BUSTER_TEST(arguments, android_arm_layout.long_double_type.size == 16 &&
+                             android_arm_layout.long_double_type.alignment == 16 &&
+                             android_arm_layout.long_double_type.bit_width == 128);
+    BUSTER_TEST(arguments, target_data_layout_is_valid(android_arm_layout));
+
+    // Public cursor extent is independent of register-save area capacity.
+    struct { CpuArch arch; OperatingSystem os; u32 bytes; } va_layouts[] = {
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_LINUX, 24},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_MACOS, 24},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_ANDROID, 24},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_IOS, 24},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_FREESTANDING, 24},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_WINDOWS, 8},
+        {CPU_ARCH_X86_64, OPERATING_SYSTEM_UEFI, 8},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_LINUX, 32},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_ANDROID, 32},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_UEFI, 32},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_MACOS, 8},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_IOS, 8},
+        {CPU_ARCH_AARCH64, OPERATING_SYSTEM_WINDOWS, 8},
+        {CPU_ARCH_WASM64, OPERATING_SYSTEM_FREESTANDING, 8},
+        {CPU_ARCH_BPFEL, OPERATING_SYSTEM_LINUX, 8},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(va_layouts); index += 1)
+    {
+        TargetDataLayout layout = target_data_layout((Target){.cpu_arch = va_layouts[index].arch,
+            .os = va_layouts[index].os, .cpu_model = CPU_MODEL_BASELINE});
+        BUSTER_TEST(arguments, target_data_layout_is_valid(layout));
+        BUSTER_TEST(arguments, layout.va_list.size == va_layouts[index].bytes);
+        BUSTER_TEST(arguments, layout.va_list.bit_width == 8 * va_layouts[index].bytes && layout.va_list.alignment == 8);
+    }
 
     // The MACHINE_INFO brand string: trimmed, buffer-bounded, and non-empty
     // on the hosts whose CI runners report one (x86-64 cpuid, Apple sysctl).

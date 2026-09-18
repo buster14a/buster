@@ -208,6 +208,9 @@ typedef enum TargetEndianness
     TARGET_ENDIAN_COUNT,
 } TargetEndianness;
 
+// System V exposes two 32-bit offsets and two pointers, not a fourth word.
+#define TARGET_X86_64_SYSV_VA_LIST_SIZE 24u
+
 typedef struct TargetTypeLayout TargetTypeLayout;
 struct TargetTypeLayout
 {
@@ -237,6 +240,11 @@ struct TargetDataLayout
     TargetTypeLayout unsigned_long_long_integer;
     TargetTypeLayout integer128;
     TargetTypeLayout unsigned_integer128;
+    // IEEE-754 binary16, the layout behind C's `_Float16`.  Every target
+    // here stores it in two naturally aligned bytes; whether the backend can
+    // compute with it is a separate question the frontend asks elsewhere.
+    TargetTypeLayout float16_type;
+    TargetTypeLayout bfloat16_type;
     TargetTypeLayout float_type;
     TargetTypeLayout double_type;
     TargetTypeLayout long_double_type;
@@ -521,6 +529,7 @@ BUSTER_F_DECL bool target_cpu_feature_names_are_sorted(void);
 BUSTER_F_DECL String8 target_cpu_features_to_string(Arena* arena, Target target);
 BUSTER_F_DECL bool target_uses_llp64_data_model(Target target);
 BUSTER_F_DECL bool target_uses_16_bit_wchar(Target target);
+BUSTER_F_DECL bool target_uses_unsigned_wchar(Target target);
 BUSTER_F_DECL bool target_uses_pe_unwind(Target target);
 BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
 BUSTER_F_DECL bool target_data_layout_is_valid(TargetDataLayout layout);

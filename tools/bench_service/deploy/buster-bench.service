@@ -1,0 +1,46 @@
+[Unit]
+Description=Buster benchmark single-job supervisor (repository reference only)
+Documentation=file:/usr/local/share/doc/buster/bench_service/README.md
+Requires=buster-bench.slice
+After=local-fs.target
+ConditionPathIsDirectory=/opt/buster-bench/installed
+ConditionPathIsDirectory=/var/lib/buster-bench/workspaces
+
+[Service]
+Type=oneshot
+User=buster-bench
+Group=buster-bench
+UMask=0077
+ExecStart=/usr/local/libexec/buster-bench-service worker-run /var/lib/buster-bench/queue /opt/buster-bench/installed /var/lib/buster-bench/workspaces /var/lib/buster-bench/host.lock 2
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ReadOnlyPaths=/opt/buster-bench/installed
+ReadWritePaths=/var/lib/buster-bench
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# This unit is intentionally not enabled by repository automation. The
+# operator must install the fixed binary and authorize only its transient
+# buster-bench.slice scope operation before a live qualification review.

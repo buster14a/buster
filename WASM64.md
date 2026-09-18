@@ -54,8 +54,26 @@ imports from `env` by default. A link name of `module#name` selects an explicit
 import module and name; this keeps versioned host APIs outside the instruction
 backend.
 
-The emitter owns an upward-growing stack above static data in linear memory. The host must not
-replace or resize memory incompatibly while a guest call is active.
+The emitter owns an upward-growing stack above static data in linear memory. The statically
+allocated region is the half-open range from 64 KiB through the static-data end rounded up to a
+16-byte boundary. That aligned end is the stack's inclusive lower bound and initial pointer. The
+exclusive upper bound is exactly 64 KiB later, and the declared memory minimum contains that
+complete half-open stack region without relying on page-rounding slack or extra host memory.
+
+Every fixed frame starts at the caller's pointer, has its object offsets laid out at their canonical
+alignments, and rounds its end to the 16-byte ABI stack alignment. Dynamic allocations align their
+starting address to the IR-requested power-of-two alignment and then advance by the requested byte
+count; a zero-byte allocation is permitted when its aligned starting address remains in bounds.
+Function returns restore the entry pointer, and canonical stack-save/restore operations used by VLA
+scopes may restore only to an address at or above the fixed-frame end and no later than the stack's
+upper bound. This preserves caller frames across nested calls, recursion, repeated exports, and
+normal or early returns.
+
+All layout, alignment, page-count, fixed-frame, and dynamic-allocation additions are checked before
+they can wrap, overlap static data, or cross the exclusive upper bound. A generated allocation may
+end exactly at the upper bound; any larger request deliberately executes WebAssembly `unreachable`.
+The backend does not issue `memory.grow` and does not acquire a runtime allocator dependency. The
+host must not replace or resize memory incompatibly while a guest call is active.
 
 Runtime support for Memory64 is not yet universal. Select a runtime mode that
 enables the proposal and validate the module before instantiation.

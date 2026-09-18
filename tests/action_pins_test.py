@@ -14,6 +14,11 @@ SPEC = importlib.util.spec_from_file_location("action_pins", SCRIPT)
 PINS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PINS)
 PIN = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+UPLOAD_ARTIFACT_V4_SHA = "ea165f8d65b6e75b540449e92b4886f43607fa02"
+UPLOAD_ARTIFACT_V7_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+UPLOAD_ARTIFACT_V4_PIN = "actions/upload-artifact@" + UPLOAD_ARTIFACT_V4_SHA
+UPLOAD_ARTIFACT_V7_PIN = "actions/upload-artifact@" + UPLOAD_ARTIFACT_V7_SHA
+ACTIONLINT_PIN = "github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106"
 
 
 class ActionPinsTest(unittest.TestCase):
@@ -66,7 +71,8 @@ class ActionPinsTest(unittest.TestCase):
 
     def test_scalar_lists_and_empty_mappings_are_allowed(self):
         for value in ("on: [push]", "branches: [main]", "runner: [linux, windows, macos]", "needs: []",
-                      "tags: ['**']", "workflows: [Buster CI]", "permissions: {}", "paths:\n  - '.github/workflows/ci.yml'"):
+                      "branches: ['bench/423-real-source-20260912']", "tags: ['**']", "workflows: [Buster CI]",
+                      "permissions: {}", "paths:\n  - '.github/workflows/ci.yml'"):
             with self.subTest(value=value):
                 self.assertEqual(PINS.check_text(value, "case.yml"), [])
 
@@ -83,6 +89,18 @@ class ActionPinsTest(unittest.TestCase):
         self.assertIn("python3 tools/check_action_pins.py", github)
         self.assertIn("python3 tests/action_pins_test.py", github)
         self.assertNotIn(".forgejo/", github)
+
+    def test_buster_ci_uses_native_node24_artifact_action(self):
+        github = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn(UPLOAD_ARTIFACT_V4_PIN, github)
+        self.assertEqual(github.count(UPLOAD_ARTIFACT_V7_PIN), 8)
+        self.assertEqual(PINS.APPROVED["actions/upload-artifact"],
+                         {UPLOAD_ARTIFACT_V4_SHA, UPLOAD_ARTIFACT_V7_SHA})
+
+    def test_actionlint_is_pinned(self):
+        github = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn(ACTIONLINT_PIN, github)
+        self.assertNotIn("actionlint@v", github)
 
     def test_default_discovery_outside_repository(self):
         with tempfile.TemporaryDirectory() as temporary:

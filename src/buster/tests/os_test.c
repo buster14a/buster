@@ -1,6 +1,7 @@
 #include <buster/tests/os_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/file.h>
+#include <buster/lib/os_internal.h>
 #include <buster/lib/time.h>
 
 // Compile-only GCC/MSVC matrix rows must also enforce the host byte contract.
@@ -161,11 +162,141 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_outer_lane_gang(void* argument)
     state->outer_counts[outer_index] = lane_count();
 }
 
+#if (BUSTER_LINUX || BUSTER_MACOS || (BUSTER_WINDOWS && !defined(__TINYC__))) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool os_test_thread_name_get(Arena* arena, String8* name)
+{
+    bool result = false;
+    *name = (String8){0};
+#if BUSTER_LINUX || BUSTER_MACOS
+    char8 buffer[128] = {0};
+    int status = pthread_getname_np(pthread_self(), buffer, sizeof(buffer));
+    if (status == 0)
+    {
+        u64 length = 0;
+        while (length < sizeof(buffer) && buffer[length])
+        {
+            length += 1;
+        }
+        result = length < sizeof(buffer);
+        if (result)
+        {
+            *name = string_duplicate_arena(arena, (String8){.pointer = buffer, .length = length}, false);
+        }
+    }
+#elif BUSTER_WINDOWS
+    PWSTR description = 0;
+    HRESULT status = GetThreadDescription(GetCurrentThread(), &description);
+    result = SUCCEEDED(status);
+    if (result)
+    {
+        u64 length = 0;
+        while (description && description[length])
+        {
+            length += 1;
+        }
+        *name = string8_from_string16(arena, (String16){.pointer = (char16*)description, .length = length}, false);
+    }
+    if (description)
+    {
+        LocalFree(description);
+    }
+#endif
+    return result;
+}
+#endif
+
 UnitTestResult os_tests(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
 
     UnitTestResult result = {0};
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Symbol lookup accepts bounded String8 names. A readable suffix
+    // and an exact-sized buffer must not become part of the C string.
+    {
+#if BUSTER_WINDOWS
+        OsModuleHandle* module = (OsModuleHandle*)LoadLibraryW(L"kernel32.dll");
+        String8 symbol = S8("GetCurrentProcessId");
+        char8 exact_storage[] = {'G', 'e', 't', 'C', 'u', 'r', 'r', 'e', 'n', 't',
+                                 'P', 'r', 'o', 'c', 'e', 's', 's', 'I', 'd'};
+        OsSymbol* expected = module ? (OsSymbol*)GetProcAddress((HMODULE)module, symbol.pointer) : 0;
+#else
+        OsModuleHandle* module = (OsModuleHandle*)dlopen(0, RTLD_NOW | RTLD_LOCAL);
+        String8 symbol = S8("getpid");
+        char8 exact_storage[] = {'g', 'e', 't', 'p', 'i', 'd'};
+        OsSymbol* expected = module ? (OsSymbol*)dlsym((void*)module, symbol.pointer) : 0;
+#endif
+        if (BUSTER_REQUIRE(arguments, module != 0 && expected != 0))
+        {
+            char8 suffix_storage[64] = {0};
+            BUSTER_CHECK(symbol.length + sizeof("_suffix") <= sizeof(suffix_storage));
+            memcpy(suffix_storage, symbol.pointer, symbol.length);
+            memcpy(suffix_storage + symbol.length, "_suffix", sizeof("_suffix"));
+
+            BUSTER_TEST(arguments, os_dynamic_library_function_load(module, symbol) == expected);
+            BUSTER_TEST(arguments,
+                        os_dynamic_library_function_load(module, (String8){.pointer = suffix_storage, .length = symbol.length}) == expected);
+            BUSTER_TEST(arguments,
+                        os_dynamic_library_function_load(module,
+                                                         (String8){.pointer = exact_storage, .length = sizeof(exact_storage)}) == expected);
+            BUSTER_TEST(arguments, os_dynamic_library_function_load(module, (String8){0}) == 0);
+            BUSTER_TEST(arguments,
+                        os_dynamic_library_function_load(module, S8("buster_os_test_missing_symbol_661")) == 0);
+        }
+        os_dynamic_library_unload(module);
+    }
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS || (BUSTER_WINDOWS && !defined(__TINYC__))) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Thread names use the same bounded contract, including empty and
+    // exact-sized inputs. Restore the runner's original name afterward.
+    {
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+        String8 original_name = {0};
+        if (BUSTER_REQUIRE(arguments, os_test_thread_name_get(arena, &original_name)))
+        {
+#if BUSTER_LINUX
+            enum { OS_TEST_THREAD_NAME_BOUNDARY = 15 };
+#else
+            enum { OS_TEST_THREAD_NAME_BOUNDARY = 63 };
+#endif
+            char8 suffix_storage[] = "worker-suffix";
+            char8 exact_storage[] = {'e', 'x', 'a', 'c', 't', '6', '6', '2'};
+            char8 boundary_storage[OS_TEST_THREAD_NAME_BOUNDARY];
+            for (u64 index = 0; index < sizeof(boundary_storage); index += 1)
+            {
+                boundary_storage[index] = (char8)('a' + index % 26);
+            }
+            String8 names[] = {
+                S8("os-662"),
+                {.pointer = suffix_storage, .length = 6},
+                {0},
+                {.pointer = exact_storage, .length = sizeof(exact_storage)},
+                {.pointer = boundary_storage, .length = sizeof(boundary_storage)},
+            };
+
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+            {
+                os_thread_set_name(names[index]);
+                String8 observed = {0};
+                if (BUSTER_REQUIRE(arguments, os_test_thread_name_get(arena, &observed)))
+                {
+                    BUSTER_STRING_TEST(arguments, observed, names[index]);
+                }
+            }
+
+            os_thread_set_name(original_name);
+            String8 restored = {0};
+            if (BUSTER_REQUIRE(arguments, os_test_thread_name_get(arena, &restored)))
+            {
+                BUSTER_STRING_TEST(arguments, restored, original_name);
+            }
+        }
+        arena_set_position(arena, position);
+    }
+#endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
@@ -397,6 +528,56 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
     }
 
+    // Prefaulting is advisory, and os_commit reports commitment only. Not
+    // asking must issue no request at all; a refused request must leave a
+    // successful commit successful and its bytes usable; and a commit that
+    // really fails must fail without having issued the advisory request whose
+    // outcome could otherwise be mistaken for the reason.
+    {
+        u64 page_size = os_get_page_size();
+        u64 size = 2 * page_size;
+        u8* reservation = (u8*)os_reserve(0, size, (ProtectionFlags){0},
+                                          (MapFlags){.priv = true, .anonymous = true, .no_reserve = true});
+        BUSTER_TEST(arguments, reservation != 0);
+        if (reservation)
+        {
+            OsPrefaultTestCounters before = os_prefault_test_counters();
+            bool quiet = os_commit(reservation, page_size, (ProtectionFlags){.read = true, .write = true}, false);
+            BUSTER_TEST(arguments, quiet);
+            BUSTER_TEST(arguments, os_prefault_test_counters().requests == before.requests);
+
+            os_prefault_test_force_next(OS_PREFAULT_REFUSED);
+            bool refused = os_commit(reservation, size, (ProtectionFlags){.read = true, .write = true}, true);
+            OsPrefaultTestCounters after_refused = os_prefault_test_counters();
+            BUSTER_TEST(arguments, refused);
+            BUSTER_TEST(arguments, after_refused.requests == before.requests + 1);
+            BUSTER_TEST(arguments, after_refused.unpopulated == before.unpopulated + 1);
+            BUSTER_TEST(arguments, after_refused.last == OS_PREFAULT_REFUSED);
+            reservation[0] = 0x3c;
+            reservation[size - 1] = 0xc3;
+            BUSTER_TEST(arguments, reservation[0] == 0x3c && reservation[size - 1] == 0xc3);
+
+            // The override is one shot: the next request reaches the platform.
+            // Whichever of the three documented outcomes this host reports,
+            // the committed range is unchanged by asking.
+            OsPrefaultResult native = os_prefault(reservation, size);
+            BUSTER_TEST(arguments, native == OS_PREFAULT_POPULATED || native == OS_PREFAULT_REFUSED ||
+                                       native == OS_PREFAULT_UNAVAILABLE);
+            BUSTER_TEST(arguments, os_prefault_test_counters().requests == after_refused.requests + 1);
+            BUSTER_TEST(arguments, os_prefault_test_counters().last == native);
+            BUSTER_TEST(arguments, reservation[0] == 0x3c && reservation[size - 1] == 0xc3);
+
+            BUSTER_TEST(arguments, os_unreserve(reservation, size));
+
+            // Committing the range just released fails for a real reason, and
+            // must do so before any prefault request is issued.
+            OsPrefaultTestCounters before_failure = os_prefault_test_counters();
+            bool failed = os_commit(reservation, page_size, (ProtectionFlags){.read = true, .write = true}, true);
+            BUSTER_TEST(arguments, !failed);
+            BUSTER_TEST(arguments, os_prefault_test_counters().requests == before_failure.requests);
+        }
+    }
+
     // Releasing the selected context must clear TLS before its arenas go
     // away. No scratch-backed operation is valid while TLS is empty, so
     // restore the process's main context immediately after observing it.
@@ -572,6 +753,136 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
 #if BUSTER_LINUX || BUSTER_MACOS
+    // A private group with only its exited leader is a normal successful wait.
+    // Darwin reports EPERM when group signalling filters out that zombie; the
+    // waiter must verify that exact state before reaping without losing helpers.
+    {
+        String8 spawn_arguments[] = {S8("/bin/sh"), S8("-c"), S8("exit 0")};
+        ProcessSpawnOptions options = {.use_process_environment = 1, .new_process_group = 1};
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
+            (SliceString8){0}, (SliceString8){0}, options);
+        BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait_result = os_process_wait_sync(arguments->arena, spawn);
+            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, wait_result.platform_status == 0);
+            BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
+            BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
+        }
+    }
+
+    // Every process-group operation uses the same ownership gate. Releasing a
+    // leader must deterministically refuse both signal and query operations,
+    // without testing a reusable PID/PGID in the kernel.
+    BUSTER_TEST(arguments, os_process_group_reservation_release_self_test());
+    // Exhausting all owner-lane recovery campaigns publishes exactly one
+    // cleanup-failure event and ends in an explicit retained reservation.
+    BUSTER_TEST(arguments, os_process_group_recovery_self_test());
+    // Losing the exact child publishes the admission stop exactly once and
+    // prevents every later signal, group query, and numeric-ID operation.
+    BUSTER_TEST(arguments, os_process_group_ownership_loss_self_test());
+    // An inherited writer outside the owned group cannot extend a natural
+    // successful exit or turn it into a false deadline failure. Bytes already
+    // buffered by the owned group are retained before the foreign FD closes.
+    BUSTER_TEST(arguments, os_process_group_escaped_capture_self_test(arguments->arena));
+#if BUSTER_LINUX
+    // /proc stat parsing must use the final command-name parenthesis and fail
+    // closed on mismatched identities or malformed group fields.
+    BUSTER_TEST(arguments, os_linux_process_stat_parse_self_test());
+    // An unrelated PID disappearing between readdir and stat is ordinary
+    // host churn and cannot invalidate a stable target-group proof.
+    BUSTER_TEST(arguments, os_linux_process_group_churn_self_test(arguments->arena));
+#endif
+
+    // A background helper proves it started before the leader exits, then
+    // writes a second sentinel only if it survives process-group cleanup.
+    // This exercises Darwin's kernel snapshot and Linux's stable /proc census.
+    // Inspect files rather than probing a released PID/PGID.
+    {
+        String8 ready_sentinel = buster_test_temporary_path(arguments->arena, S8("buster-process-group-ready"), S8(".txt"));
+        String8 release_sentinel = buster_test_temporary_path(arguments->arena, S8("buster-process-group-release"), S8(".txt"));
+        String8 escaped_sentinel = buster_test_temporary_path(arguments->arena, S8("buster-process-group-escaped"), S8(".txt"));
+        BUSTER_TEST(arguments, os_file_delete(ready_sentinel));
+        BUSTER_TEST(arguments, os_file_delete(release_sentinel));
+        BUSTER_TEST(arguments, os_file_delete(escaped_sentinel));
+        String8 spawn_arguments[] = {
+            S8("/bin/sh"),
+            S8("-c"),
+            S8("(printf ready > \"$1\"; while [ ! -f \"$2\" ]; do sleep 0.001; done; printf escaped > \"$3\") & "
+               "i=0; while [ ! -f \"$1\" ] && [ \"$i\" -lt 1000 ]; do sleep 0.001; i=$((i + 1)); done; [ -f \"$1\" ]"),
+            S8("process-group-helper"),
+            ready_sentinel,
+            release_sentinel,
+            escaped_sentinel,
+        };
+        ProcessSpawnOptions options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = 1,
+            .new_process_group = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
+            (SliceString8){0}, (SliceString8){0}, options);
+        BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait_result = os_process_wait_deadline(arguments->arena, spawn, 3000000);
+            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, wait_result.platform_status == 0);
+            BUSTER_TEST(arguments, !wait_result.timed_out);
+            BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
+            BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
+        }
+
+        OsFileOpenResult ready_open = os_file_open_checked(ready_sentinel, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        bool helper_ready = ready_open.file != 0;
+        if (ready_open.file) { BUSTER_TEST(arguments, os_file_close(ready_open.file)); }
+        BUSTER_TEST(arguments, helper_ready);
+
+        OsFileDescriptor* release_file = os_file_open(release_sentinel, (OpenFlags){.create = 1, .write = 1, .truncate = 1},
+            (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, release_file != 0);
+        if (release_file) { BUSTER_TEST(arguments, os_file_close(release_file)); }
+        poll(0, 0, 300);
+        OsFileOpenResult escaped_open = os_file_open_checked(escaped_sentinel, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        bool helper_escaped = escaped_open.file != 0;
+        if (escaped_open.file) { BUSTER_TEST(arguments, os_file_close(escaped_open.file)); }
+        BUSTER_TEST(arguments, !helper_escaped);
+        if (helper_ready) { BUSTER_TEST(arguments, os_file_delete(ready_sentinel)); }
+        if (release_file) { BUSTER_TEST(arguments, os_file_delete(release_sentinel)); }
+        if (helper_escaped) { BUSTER_TEST(arguments, os_file_delete(escaped_sentinel)); }
+    }
+
+    // A hot inherited writer keeps poll continuously readable. Deadline
+    // enforcement is independent of readability: the owner kills the group,
+    // proves every member quiescent, and drains the captured pipe to EOF.
+    {
+        u64 position = arguments->arena->position;
+        String8 spawn_arguments[] = {
+            S8("/bin/sh"),
+            S8("-c"),
+            S8("while :; do printf 0123456789abcdef0123456789abcdef; done"),
+        };
+        ProcessSpawnOptions options = {
+            .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+            .use_process_environment = 1,
+            .new_process_group = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
+            (SliceString8){0}, (SliceString8){0}, options);
+        BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        if (spawn.handle)
+        {
+            ProcessWaitResult wait_result = os_process_wait_deadline(arguments->arena, spawn, 100000);
+            BUSTER_TEST(arguments, wait_result.result == PROCESS_RESULT_FAILED);
+            BUSTER_TEST(arguments, wait_result.timed_out);
+            BUSTER_TEST(arguments, wait_result.streams[STANDARD_STREAM_OUTPUT].length > 0);
+            BUSTER_TEST(arguments, !wait_result.process_group_reservation_retained);
+            BUSTER_TEST(arguments, !wait_result.process_group_ownership_lost);
+        }
+        arena_set_position(arguments->arena, position);
+    }
+
     // realpath may write a resolved prefix even on failure. Discarding its
     // oversized output allocation must not make those bytes look fresh to
     // arena_allocate_zeroed. Use a fresh mapping so no prior dirty watermark
@@ -595,6 +906,20 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, zeroed);
             BUSTER_TEST(arguments, arena_destroy(path_arena, 1));
         }
+    }
+
+    // Regression for #653: POSIX path helpers must accept bounded slices
+    // without reading past their length and must reject embedded NULs.
+    {
+        Arena* arena = arguments->arena;
+        char8 bounded[] = {'b', 'u', 's', 't', 'e', 'r', '-', '6', '5', '3', '-', 'm', 'i', 's', 's', 'i', 'n', 'g'};
+        BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){bounded, sizeof(bounded)}, true).length);
+        char8 invalid[] = {'a', 0, 'b'};
+        BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){invalid, sizeof(invalid)}, true).length);
+        BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){0}, true).length);
+        os_make_directory((String8){invalid, sizeof(invalid)});
+        os_make_directory((String8){0});
+        BUSTER_TEST(arguments, true);
     }
 
     // Regression: draining captured stdout/stderr sequentially deadlocked when
@@ -712,11 +1037,13 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             u64 timeout_microseconds;
             bool expected_timeout;
             u64 expected_output_length;
+            bool expire_after_ready;
         } deadline_cases[] = {
-            {S8("sleep 30"), false, 100000, true, 0},
-            {S8("printf ok; sleep 30"), true, 100000, true, 2},
-            {S8("printf ok"), true, 30000000, false, 2},
-            {S8("printf ok"), false, 0, false, 0},
+            {S8("sleep 30"), false, 100000, true, 0, false},
+            {S8("printf ok; sleep 30"), true, 100000, true, 2, false},
+            {S8("printf ok"), true, 30000000, false, 2, false},
+            {S8("printf ok"), false, 0, false, 0, false},
+            {S8("printf ok; sleep 30"), true, 30000000, true, 2, true},
         };
 
         for (EACH_ARRAY_INDEX(i, deadline_cases))
@@ -739,6 +1066,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
             {
+                if (deadline_cases[i].expire_after_ready) { os_process_wait_test_expire_deadline_after_ready_once(); }
                 ProcessWaitResult wait_result = os_process_wait_deadline(arena, spawn, deadline_cases[i].timeout_microseconds);
                 BUSTER_TEST(arguments, (wait_result.timed_out != 0) == deadline_cases[i].expected_timeout);
                 BUSTER_TEST(arguments, wait_result.result == (deadline_cases[i].expected_timeout ? PROCESS_RESULT_FAILED : PROCESS_RESULT_SUCCESS));

@@ -1,5 +1,10 @@
 # Independent Unix CI suites
 
+> Historical suite-level design/evidence. The subsequent internal desktop
+> partition and current 23-job completion contract are documented in
+> [Desktop combination shards](ci-combination-shards.md). Historical timings
+> below are not matched before/after evidence for #333.
+
 Related work: [#333](https://github.com/buster14a/buster/issues/333),
 [#335](https://github.com/buster14a/buster/issues/335), and
 [#92](https://github.com/buster14a/buster/issues/92).
@@ -90,13 +95,15 @@ clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -
 "$driver" test_mode_matrix --config Release
 "$driver" test_differential --self-test
 "$driver" build --config Release -t ide
-"$driver" test_differential --ide build/Release/ide --out "$out" --sanitize-oracle
+"$driver" test_differential --ide build/Release/ide --out "$out" --sanitize-oracle --jobs 4
 ```
 
 Do not generate concurrently with another build in the same tree. This local
 sequence is a reproduction of successful execution; the workflow additionally
 retains independent results after an earlier test failure. Combination and
-mobile commands remain in [the CI guide](ci-github-actions.md).
+mobile commands remain in [the CI guide](ci-github-actions.md). To reproduce
+the pre-rollout baseline, give the final command another fresh `--out` directory
+and replace `--jobs 4` with explicit `--jobs 1`.
 
 ## Validation and acceptance
 
@@ -119,9 +126,11 @@ The fifteen-job layout is accounted for rather than hiding its added setup.
 A passed cache-restore step is not independently verified cache-hit evidence.
 
 This adds four schedulable jobs and can expose macOS Intel capacity limits.
-It does not increase concurrency inside a runner or claim lower aggregate cost.
-No matched timing cohorts or hosted candidate validation are supplied by this
-document; those results must be inspected on the submitted PR revision.
+The differential step now requests four case workers inside each native runner,
+bounded by its logical CPU count, `BUSTER_TEST_JOBS`, and single-threaded
+policy. The matched #408 qualification is recorded in the [current performance
+audit](performance-audits/2026-09-15T072154Z.md); complete-job and workflow
+results must still be inspected on the exact submitted PR revision.
 
 ## Native evidence packaging
 
@@ -252,16 +261,11 @@ unexpected member types exist, and neither excluded generated output appears.
 
 ## Remaining bottlenecks
 
-The differential loop is now the largest independent lane. Profile its existing
-per-command evidence before changing it. A follow-up should use bounded native
-case-level concurrency with isolated arenas, evidence and deterministic reports;
-keep both independent oracles and every configuration comparison. The oracles
-already run once per case, not once per configuration. Repeated compilation of
-the unchanged ABI host translation unit inside candidate links is a separate
-work-elimination candidate, requiring full source/flags identity and controls.
-
-Case-level parallelism (#408) is not implemented here; per-case caller-object
-reuse is proposed separately in #412. Evidence packaging is described above
-(#409). Internal combination sharding (#333), analyzer partitioning (#92) and
-full coverage manifests (#335) remain separately tracked; no issue is closed
-by the suite split alone.
+The differential loop remains the largest independent lane. Bounded native
+case-level concurrency now uses isolated arenas, evidence and deterministic
+reports while retaining both independent oracles and every configuration
+comparison. The oracles run once per case, not once per configuration; caller
+object reuse is implemented separately by #412. Evidence packaging is described
+above (#409). Internal combination sharding (#333), analyzer partitioning (#92)
+and full coverage manifests (#335) remain separately tracked; no issue is
+closed by the suite split alone.

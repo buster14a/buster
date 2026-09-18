@@ -4,7 +4,9 @@
 // includes below (AGENTS.md). library_tests runs the table, prints the
 // TEST_MODULE_TIMING lines the test_timing_summary diagnostic consumes,
 // and honors BUSTER_TEST_JOBS. Arena scopes publish TEST_ARENA_V1 and
-// TEST_ARENA_TOP_V1 counters with diagnostics copied before rewind. A descriptor marked table_audit runs only
+// TEST_ARENA_TOP_V1 counters with diagnostics copied before rewind. Opt-in
+// TEST_FIXTURE_TIMING_V1 rows observe the same scopes; see docs/driver-test-timing.md.
+// A descriptor marked table_audit runs only
 // on the canonical tree per platform (BUSTER_TEST_TABLE_AUDITS, default
 // on) — reserve that flag for results that are a pure function of the
 // generated tables and repository source.
@@ -50,6 +52,7 @@
 
 #include <buster/tests/byte_writer_test.h>
 #include <buster/tests/arena_test.h>
+#include <buster/tests/integer_test.h>
 #include <buster/tests/sanitizer_test.h>
 #include <buster/tests/hash_test.h>
 #include <buster/tests/simd_test.h>
@@ -60,6 +63,8 @@
 #include <buster/tests/truetype_test.h>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.h>
 #include <buster/tests/compiler/frontend/c/c_test.h>
+#include <buster/tests/compiler/frontend/c/once_test.h>
+#include <buster/tests/compiler/frontend/c/macro_conditional_test.h>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.h>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.h>
 #include <buster/tests/compiler/assembly/aarch64_control_semantics_test.h>
@@ -86,6 +91,7 @@
 #include <buster/tests/compiler/codegen/machine_select_test.h>
 #include <buster/tests/compiler/codegen/machine_test.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
+#include <buster/tests/compiler/codegen/debug_location_block_start_test_internal.h>
 #include <buster/tests/compiler/codegen/aarch64_stride_test.h>
 #include <buster/tests/compiler/debug/debug_test.h>
 #include <buster/tests/compiler/dwarf/dwarf_test.h>
@@ -105,6 +111,7 @@
 #if BUSTER_UNITY_BUILD
 #include <buster/tests/byte_writer_test.c>
 #include <buster/tests/arena_test.c>
+#include <buster/tests/integer_test.c>
 #include <buster/tests/sanitizer_test.c>
 #include <buster/tests/hash_test.c>
 #include <buster/tests/simd_test.c>
@@ -115,6 +122,8 @@
 #include <buster/tests/truetype_test.c>
 #include <buster/tests/compiler/metamorphic/metamorphic_test.c>
 #include <buster/tests/compiler/frontend/c/c_test.c>
+#include <buster/tests/compiler/frontend/c/once_test.c>
+#include <buster/tests/compiler/frontend/c/macro_conditional_test.c>
 #include <buster/tests/compiler/assembly/aarch64_encoding_test.c>
 #include <buster/tests/compiler/assembly/aarch64_exact_bridge_test.c>
 #include <buster/tests/compiler/assembly/aarch64_control_semantics_test.c>
@@ -192,12 +201,19 @@ BUSTER_GLOBAL_LOCAL bool buster_test_table_audits_enabled(void)
     return !value.length || !string_equal(value, S8("0"));
 }
 
+BUSTER_GLOBAL_LOCAL bool test_fixture_timing_selected(String8 selection, String8 module)
+{
+    return selection.length && module.length &&
+           (string_equal(selection, S8("all")) || string_equal(selection, module));
+}
+
 // Scope-local peaks include temporary allocations discarded inside the body.
 // Saving/restoring the parent's peak makes nested scopes independent of older
 // fixtures while preserving the module maximum. Arena zeroing state is untouched.
 TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* arena, String8 name, bool module)
 {
-    TestArenaScope result = {.name = name, .index = module ? 0 : arguments->memory_fixture_index++, .module = module};
+    TestArenaScope result = {.name = name, .index = module ? 0 : arguments->memory_fixture_index++, .module = module,
+                            .timing = arguments->fixture_timing_report};
     ThreadContext* context = thread_context_selected();
     for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(result.marks); slot += 1)
     {
@@ -216,11 +232,22 @@ TestArenaScope buster_test_arena_begin(UnitTestArguments* arguments, Arena* aren
         arguments->memory_top_retained_bytes = 0;
         arguments->memory_top_peak_bytes = 0;
     }
+    if (result.timing)
+    {
+        result.start = timestamp_take();
+    }
     return result;
 }
 
 void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, bool rewind)
 {
+    // Stop before cleanup/reporting. Enclosing scopes still include nested
+    // scope work and output; these are inclusive wall intervals, not CPU time.
+    TimeDataType end = {0};
+    if (scope.timing)
+    {
+        end = timestamp_take();
+    }
     u64 ends[BUSTER_ARRAY_LENGTH(scope.marks)] = {0};
     u64 peaks[BUSTER_ARRAY_LENGTH(scope.marks)] = {0};
     // Capture every arena before formatting, which itself uses scratch memory.
@@ -273,6 +300,15 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
             S8("TEST_ARENA_TOP_V1 module={S8} fixtures={u64} retained_fixture={S8} retained_bytes={u64} peak_fixture={S8} peak_bytes={u64}\n"),
             arguments->memory_module, arguments->memory_fixture_index, arguments->memory_top_retained_fixture,
             arguments->memory_top_retained_bytes, arguments->memory_top_peak_fixture, arguments->memory_top_peak_bytes);
+    }
+    if (scope.timing)
+    {
+        // One row per existing scope, through the same deterministic output
+        // owner as arena records. Completion does not imply a passing fixture.
+        arguments->show(arguments,
+            S8("TEST_FIXTURE_TIMING_V1 kind={S8} module={S8} fixture={S8} index={u64} duration_ns={u64} measurement=inclusive-wall status=completed\n"),
+            scope.module ? S8("module") : S8("fixture"), arguments->memory_module, scope.name, scope.index,
+            timestamp_ns_between(scope.start, end));
     }
     // Exclude reporting's scratch allocations from enclosing observations.
     // dirty_position still records every discarded byte for correct zeroing.
@@ -365,6 +401,7 @@ typedef enum TestId
 {
     TEST_ID_BYTE_WRITER,
     TEST_ID_ARENA,
+    TEST_ID_INTEGER,
     TEST_ID_SANITIZER,
     TEST_ID_HASH,
     TEST_ID_SIMD,
@@ -374,6 +411,8 @@ typedef enum TestId
     TEST_ID_TARGET,
     TEST_ID_TRUETYPE,
     TEST_ID_C_FRONTEND,
+    TEST_ID_C_ONCE,
+    TEST_ID_C_MACRO_CONDITIONAL,
     TEST_ID_METAMORPHIC,
     TEST_ID_AARCH64_ENCODING,
     TEST_ID_AARCH64_EXACT_BRIDGE,
@@ -423,6 +462,7 @@ typedef enum TestId
 BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_BYTE_WRITER] = {S8_INITIALIZER("byte_writer_tests"), &byte_writer_tests},
     [TEST_ID_ARENA] = {S8_INITIALIZER("arena_tests"), &arena_tests},
+    [TEST_ID_INTEGER] = {S8_INITIALIZER("integer_tests"), &integer_tests},
     [TEST_ID_SANITIZER] = {S8_INITIALIZER("sanitizer_tests"), &sanitizer_tests},
     [TEST_ID_HASH] = {S8_INITIALIZER("hash_tests"), &hash_tests},
     [TEST_ID_SIMD] = {S8_INITIALIZER("simd_tests"), &simd_tests},
@@ -433,6 +473,8 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_TRUETYPE] = {S8_INITIALIZER("truetype_tests"), &truetype_tests},
     [TEST_ID_METAMORPHIC] = {S8_INITIALIZER("metamorphic_tests"), &metamorphic_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_C_FRONTEND] = {S8_INITIALIZER("c_frontend_tests"), &c_frontend_tests},
+    [TEST_ID_C_ONCE] = {S8_INITIALIZER("c_once_tests"), &c_once_tests, true},
+    [TEST_ID_C_MACRO_CONDITIONAL] = {S8_INITIALIZER("c_macro_conditional_tests"), &c_macro_conditional_tests, true},
     [TEST_ID_AARCH64_ENCODING] = {S8_INITIALIZER("aarch64_encoding_tests"), &aarch64_encoding_tests},
     [TEST_ID_AARCH64_EXACT_BRIDGE] = {S8_INITIALIZER("aarch64_exact_bridge_tests"), &aarch64_exact_bridge_tests},
     [TEST_ID_AARCH64_CONTROL_SEMANTICS] = {S8_INITIALIZER("aarch64_control_semantics_tests"), &aarch64_control_semantics_tests},
@@ -460,7 +502,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_LLVM_BITCODE] = {S8_INITIALIZER("llvm_bitcode_tests"), &llvm_bitcode_tests},
     [TEST_ID_MACHINE_SELECTION] = {S8_INITIALIZER("machine_selection_tests"), &machine_selection_tests},
     [TEST_ID_MACHINE] = {S8_INITIALIZER("machine_tests"), &machine_tests},
-    [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests},
+    [TEST_ID_CODEGEN] = {S8_INITIALIZER("codegen_tests"), &codegen_tests_with_block_start_oracle},
     [TEST_ID_AARCH64_STRIDE] = {S8_INITIALIZER("aarch64_stride_tests"), &aarch64_stride_tests},
     [TEST_ID_DEBUG_MODEL] = {S8_INITIALIZER("debug_model_tests"), &debug_model_tests},
     [TEST_ID_DWARF] = {S8_INITIALIZER("dwarf_tests"), &dwarf_tests},
@@ -588,6 +630,60 @@ BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
     return passed;
 }
 
+// Diagnostic-only clocks must not change assertion totals, arena ownership or
+// failure output. This harness check has no duration threshold or sleep.
+BUSTER_GLOBAL_LOCAL bool test_fixture_timing_self_test(void)
+{
+    bool passed = !test_fixture_timing_selected((String8){0}, S8("compiler_driver_tests")) &&
+                  !test_fixture_timing_selected(S8("0"), S8("compiler_driver_tests")) &&
+                  !test_fixture_timing_selected(S8("compiler_driver_tests"), S8("other")) &&
+                  !test_fixture_timing_selected(S8("all"), (String8){0}) &&
+                  test_fixture_timing_selected(S8("compiler_driver_tests"), S8("compiler_driver_tests")) &&
+                  test_fixture_timing_selected(S8("all"), S8("other"));
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
+    Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
+    BUSTER_CHECK(arena != 0 && output != 0);
+    TestParallelArguments arguments = {
+        .base = {.arena = arena, .show = &test_parallel_show, .memory_module = S8("timing_self_test")},
+        .output_arena = output,
+    };
+    UnitTestResult result = {0};
+    TestArenaScope quiet = buster_test_arena_begin(&arguments.base, arena, S8("quiet"), false);
+    buster_test_arena_end(&arguments.base, quiet, true);
+    passed = passed && !quiet.timing && arena_buffer_size(output) == 0;
+
+    arguments.base.fixture_timing_report = true;
+    TestArenaScope module = buster_test_arena_begin(&arguments.base, arena, S8("body"), true);
+    TestArenaScope first = buster_test_arena_begin(&arguments.base, arena, S8("repeated"), false);
+    arena_allocate_bytes(arena, 17, 1);
+    buster_test_arena_end(&arguments.base, first, true);
+    passed = passed && arena->position == first.marks[0].start;
+    TestArenaScope second = buster_test_arena_begin(&arguments.base, arena, S8("repeated"), false);
+    String8 diagnostic = string_format(arena, S8("timed failure survives rewind"));
+    BUSTER_TEST_RAW(&arguments.base, false, diagnostic);
+    // A scope snapshots enablement; changing the next scope's policy must not
+    // lose an already-started interval or expose an uninitialized timestamp.
+    arguments.base.fixture_timing_report = false;
+    buster_test_arena_end(&arguments.base, second, true);
+    buster_test_arena_end(&arguments.base, module, true);
+    memset(arena_allocate(arena, u8, 256), 0xa5, 256);
+    String8 text = {(char8*)arena_buffer_start(output), arena_buffer_size(output)};
+    passed = passed && module.timing && first.timing && second.timing && first.index == 0 && second.index == 1 &&
+             arguments.base.memory_fixture_index == 2 && result.test_count == 1 && result.succeeded_test_count == 0;
+    passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=fixture module=timing_self_test fixture=repeated index=0 duration_ns=")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=fixture module=timing_self_test fixture=repeated index=1 duration_ns=")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("TEST_FIXTURE_TIMING_V1 kind=module module=timing_self_test fixture=body index=0 duration_ns=")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("measurement=inclusive-wall status=completed\n")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("timed failure survives rewind failed at")) != BUSTER_STRING_NO_MATCH;
+    passed = passed && string_first_sequence(text, S8("status=pass")) == BUSTER_STRING_NO_MATCH;
+    quiet = buster_test_arena_begin(&arguments.base, arena, S8("quiet_again"), false);
+    buster_test_arena_end(&arguments.base, quiet, true);
+    passed = passed && !quiet.timing && arena_buffer_size(output) == text.length;
+    passed = arena_destroy(arena, 1) && passed;
+    passed = arena_destroy(output, 1) && passed;
+    return passed;
+}
+
 BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
 {
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
@@ -647,7 +743,8 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
         Arena* output_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64)});
         BUSTER_CHECK(arena != 0 && output_arena != 0);
         TestParallelArguments arguments = {
-            .base = {.arena = arena, .show = &test_parallel_show, .memory_module = descriptor.name, .memory_report = state->memory_report},
+            .base = {.arena = arena, .show = &test_parallel_show, .memory_module = descriptor.name, .memory_report = state->memory_report,
+                     .fixture_timing_report = test_fixture_timing_selected(os_get_environment_variable(S8("BUSTER_TEST_FIXTURE_TIMING")), descriptor.name)},
             .output_arena = output_arena,
         };
         TestArenaScope module_scope = buster_test_arena_begin(&arguments.base, arena, S8("body"), true);
@@ -994,6 +1091,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
 
         arguments->memory_module = descriptor.name;
         arguments->memory_fixture_index = 0;
+        arguments->fixture_timing_report = test_fixture_timing_selected(os_get_environment_variable(S8("BUSTER_TEST_FIXTURE_TIMING")), descriptor.name);
         TestArenaScope module_scope = buster_test_arena_begin(arguments, arguments->arena, S8("body"), true);
         if (timing_enabled)
         {
@@ -1208,6 +1306,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
     BUSTER_VALIDATE(test_arena_self_test());
     BUSTER_VALIDATE(test_require_self_test());
+    BUSTER_CHECK(test_fixture_timing_self_test());
 
     bool timing_enabled = program_state != 0 && program_flag_get(PROGRAM_FLAG_VERBOSE);
     arguments->memory_report = program_state != 0 && (timing_enabled || program_flag_get(PROGRAM_FLAG_CI));

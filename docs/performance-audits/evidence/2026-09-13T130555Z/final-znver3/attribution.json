@@ -1,0 +1,409 @@
+{
+  "callgrind": "docs/performance-audits/evidence/2026-09-13T130555Z/final-znver3/unity.callgrind.gz",
+  "event": "Ir",
+  "validator_inclusive_ir": 472211973,
+  "parsed_validator_ir": 472211973,
+  "source_ranges": [
+    {
+      "family": "ownership",
+      "first_line": 4475,
+      "last_line": 4533,
+      "exclusive_source_ir": 270992,
+      "direct_child_ir": 28793021,
+      "inclusive_source_ir": 29064013,
+      "validator_share": 0.061548657513603534
+    },
+    {
+      "family": "conversion_legality_helper",
+      "first_line": 4534,
+      "last_line": 4622,
+      "exclusive_source_ir": 3202989,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 3202989,
+      "validator_share": 0.006782947453981647
+    },
+    {
+      "family": "globals_and_relocations",
+      "first_line": 4623,
+      "last_line": 4725,
+      "exclusive_source_ir": 11649427,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 11649427,
+      "validator_share": 0.02466991026506649
+    },
+    {
+      "family": "values_and_value_provenance",
+      "first_line": 4726,
+      "last_line": 4811,
+      "exclusive_source_ir": 41762212,
+      "direct_child_ir": 126370599,
+      "inclusive_source_ir": 168132811,
+      "validator_share": 0.356053680578743
+    },
+    {
+      "family": "block_parameters_and_edge_provenance",
+      "first_line": 4812,
+      "last_line": 4889,
+      "exclusive_source_ir": 3036080,
+      "direct_child_ir": 11593846,
+      "inclusive_source_ir": 14629926,
+      "validator_share": 0.030981692198643173
+    },
+    {
+      "family": "bit_field_helper",
+      "first_line": 4890,
+      "last_line": 4911,
+      "exclusive_source_ir": 0,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 0,
+      "validator_share": 0.0
+    },
+    {
+      "family": "opcode_operation_relationships",
+      "first_line": 4912,
+      "last_line": 5556,
+      "exclusive_source_ir": 47360675,
+      "direct_child_ir": 9945072,
+      "inclusive_source_ir": 57305747,
+      "validator_share": 0.121355980526991
+    },
+    {
+      "family": "instruction_chain_ids_results_terminators",
+      "first_line": 5557,
+      "last_line": 5629,
+      "exclusive_source_ir": 78968465,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 78968465,
+      "validator_share": 0.16723096726732087
+    },
+    {
+      "family": "block_structure",
+      "first_line": 5630,
+      "last_line": 5658,
+      "exclusive_source_ir": 1965046,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 1965046,
+      "validator_share": 0.004161364201580716
+    },
+    {
+      "family": "aliases",
+      "first_line": 5659,
+      "last_line": 5685,
+      "exclusive_source_ir": 0,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 0,
+      "validator_share": 0.0
+    },
+    {
+      "family": "initializers",
+      "first_line": 5686,
+      "last_line": 5704,
+      "exclusive_source_ir": 0,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 0,
+      "validator_share": 0.0
+    },
+    {
+      "family": "module_traversal",
+      "first_line": 5705,
+      "last_line": 5760,
+      "exclusive_source_ir": 292410,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 292410,
+      "validator_share": 0.0006192346164844067
+    }
+  ],
+  "overlapping_drill_down_do_not_sum": [
+    {
+      "detail": "global_relocation_pair_loop",
+      "ranges": [
+        [
+          4696,
+          4704
+        ]
+      ],
+      "exclusive_source_ir": 10956522,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 10956522,
+      "validator_share": 0.023202550181843865
+    },
+    {
+      "detail": "value_provenance",
+      "ranges": [
+        [
+          4779,
+          4798
+        ]
+      ],
+      "exclusive_source_ir": 17259015,
+      "direct_child_ir": 125690350,
+      "inclusive_source_ir": 142949365,
+      "validator_share": 0.30272287272139964
+    },
+    {
+      "detail": "parameter_provenance_call_sites",
+      "ranges": [
+        [
+          4832,
+          4835
+        ],
+        [
+          4871,
+          4873
+        ]
+      ],
+      "exclusive_source_ir": 209538,
+      "direct_child_ir": 11593846,
+      "inclusive_source_ir": 11803384,
+      "validator_share": 0.024995943929613153
+    },
+    {
+      "detail": "call_and_signature_relationships",
+      "ranges": [
+        [
+          5145,
+          5178
+        ]
+      ],
+      "exclusive_source_ir": 2310109,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 2310109,
+      "validator_share": 0.004892101708738334
+    },
+    {
+      "detail": "conversion_legality",
+      "ranges": [
+        [
+          4534,
+          4622
+        ],
+        [
+          5286,
+          5317
+        ]
+      ],
+      "exclusive_source_ir": 6793190,
+      "direct_child_ir": 4557330,
+      "inclusive_source_ir": 11350520,
+      "validator_share": 0.024036916997019896
+    },
+    {
+      "detail": "instruction_provenance_including_cast",
+      "ranges": [
+        [
+          5179,
+          5207
+        ],
+        [
+          5286,
+          5317
+        ],
+        [
+          5441,
+          5457
+        ],
+        [
+          5486,
+          5523
+        ]
+      ],
+      "exclusive_source_ir": 6700221,
+      "direct_child_ir": 6284250,
+      "inclusive_source_ir": 12984471,
+      "validator_share": 0.027497123627570536
+    },
+    {
+      "detail": "control_opcode_relationships",
+      "ranges": [
+        [
+          5467,
+          5485
+        ],
+        [
+          5524,
+          5550
+        ]
+      ],
+      "exclusive_source_ir": 2118302,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 2118302,
+      "validator_share": 0.004485913363319147
+    },
+    {
+      "detail": "instruction_header_type_and_storage",
+      "ranges": [
+        [
+          5557,
+          5578
+        ]
+      ],
+      "exclusive_source_ir": 33028638,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 33028638,
+      "validator_share": 0.06994451620988441
+    },
+    {
+      "detail": "operand_ids",
+      "ranges": [
+        [
+          5579,
+          5586
+        ]
+      ],
+      "exclusive_source_ir": 9820888,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 9820888,
+      "validator_share": 0.02079762598480323
+    },
+    {
+      "detail": "target_ids",
+      "ranges": [
+        [
+          5587,
+          5594
+        ]
+      ],
+      "exclusive_source_ir": 2850201,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 2850201,
+      "validator_share": 0.006035850768231156
+    },
+    {
+      "detail": "result_definition_and_type",
+      "ranges": [
+        [
+          5595,
+          5605
+        ]
+      ],
+      "exclusive_source_ir": 17162286,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 17162286,
+      "validator_share": 0.036344453299154277
+    },
+    {
+      "detail": "terminator_and_chain_advance",
+      "ranges": [
+        [
+          5611,
+          5627
+        ]
+      ],
+      "exclusive_source_ir": 16106452,
+      "direct_child_ir": 0,
+      "inclusive_source_ir": 16106452,
+      "validator_share": 0.034108521005247784
+    }
+  ],
+  "unattributed_ir": 107001139,
+  "unattributed_share": 0.2265955653775852,
+  "unattributed_breakdown": {
+    "line_zero_ir": 73700387,
+    "ir_c_out_of_range_inlined_helpers_ir": 25227378,
+    "other_source_files_ir": 8073374
+  },
+  "top_direct_children": [
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4781,
+      "function": "ir_label_metadata_transfer_valid",
+      "ir": 69310901
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4782,
+      "function": "ir_label_metadata_shape_valid",
+      "ir": 56379449
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4522,
+      "function": "ir_function_instruction_owners",
+      "ir": 28792987
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4873,
+      "function": "ir_label_block_parameter_provenance_valid",
+      "ir": 11593846
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4983,
+      "function": "ir_types_differ_only_in_volatile",
+      "ir": 2512598
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 5295,
+      "function": "ir_value_label_metadata",
+      "ir": 2278665
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 5296,
+      "function": "ir_value_label_metadata",
+      "ir": 2278665
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4998,
+      "function": "ir_types_differ_only_in_volatile",
+      "ir": 1148224
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 5199,
+      "function": "ir_value_label_metadata",
+      "ir": 689595
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 5200,
+      "function": "ir_value_label_metadata",
+      "ir": 689595
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4731,
+      "function": "__memset_avx2_unaligned_erms",
+      "ir": 483326
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 5185,
+      "function": "ir_value_label_metadata",
+      "ir": 347730
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4729,
+      "function": "scratch_begin",
+      "ir": 139287
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4806,
+      "function": "scratch_end",
+      "ir": 57636
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/arena.h",
+      "line": 178,
+      "function": "align_forward",
+      "ir": 33628
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4509,
+      "function": "scratch_begin",
+      "ir": 22
+    },
+    {
+      "file": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c",
+      "line": 4529,
+      "function": "scratch_end",
+      "ir": 12
+    }
+  ]
+}

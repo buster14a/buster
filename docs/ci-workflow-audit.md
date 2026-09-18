@@ -1,5 +1,10 @@
 # GitHub workflow audit — 2026-09-07
 
+> Historical suite-level design/evidence. The subsequent internal desktop
+> partition and current 23-job completion contract are documented in
+> [Desktop combination shards](ci-combination-shards.md). Historical timings
+> below are not matched before/after evidence for #333.
+
 Base: `66bf321936ccb2b4f0df42cb6f65ed197f8652b5`. The three workflow blobs
 are unchanged from the measured revision `9834a4253c61934a8a253641a84741a25d3717e3`.
 This change concerns the public repository's GitHub workflows, **not** the
@@ -100,7 +105,7 @@ the trusted TCC bootstrap:
 - iOS: `BUSTER_IOS_ARCH=arm64 ./ios/test_ci.sh --all` (use `x86_64` on Intel).
 - Android: start with `bash ./android/start_emulator_ci.sh start`, run `./android/test_ci.sh --all`, and always call `bash ./android/start_emulator_ci.sh stop`, preserving the first failure.
 - Lifecycle: `bash tests/mobile_ci_scripts_test.sh` with coreutils and modern Bash available on macOS.
-- Workflows: `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/*.yml`.
+- Workflows: `go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 .github/workflows/*.yml`.
 
 To reproduce the hosted bootstrap on Unix, run `mkdir -p build && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build && ./build/build test_all_combinations_ci --verbose=1`.
 For the hosted mode gate, keep the second Clang-built driver outside `build/`

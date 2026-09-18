@@ -39,7 +39,8 @@
 // fallback does use ordinary functions, because there the call is already the
 // cheapest thing about it.
 
-// Translation only needs F/BW loads, stores, byte splats and equality masks.
+// The production translation kernel only needs F/BW loads, stores, byte
+// splats and equality masks.
 // Preserve that existing host tier without enabling VBMI/VBMI2 consumers on
 // it. The full-vocabulary flag stays unchanged; `ide cc` defines the feature
 // macros from its selected target, not from the machine running the compiler.
@@ -281,6 +282,26 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_equal_byte(left, right) simd512_equal_byte_fallback((left), (right))
 #endif
 
+// These dword forms need no VBMI/VBMI2 instruction. Keep them on the exact
+// F/BW path wherever the vector representation is active; the fallback is
+// reserved for targets where Simd512 has the scalar struct representation.
+#if BUSTER_SIMD_512_BASE && defined(__BUSTER__)
+#define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
+#define simd512_splat_word(value) __builtin_buster_simd_splat_word(value)
+#define simd512_less_word(left, right) __builtin_buster_simd_less_word((left), (right))
+#define simd512_compress_word(mask, value) __builtin_buster_simd_compress_word((mask), (value))
+#elif BUSTER_SIMD_512_BASE
+#define simd512_equal_word(left, right) ((Mask64)_mm512_cmpeq_epi32_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_splat_word(value) ((Simd512)_mm512_set1_epi32((int)(u32)(value)))
+#define simd512_less_word(left, right) ((Mask64)_mm512_cmplt_epu32_mask((__m512i)(left), (__m512i)(right)))
+#define simd512_compress_word(mask, value) ((Simd512)_mm512_maskz_compress_epi32((__mmask16)(mask), (__m512i)(value)))
+#else
+#define simd512_equal_word(left, right) simd512_equal_word_fallback((left), (right))
+#define simd512_splat_word(value) simd512_splat_word_fallback(value)
+#define simd512_less_word(left, right) simd512_less_word_fallback((left), (right))
+#define simd512_compress_word(mask, value) simd512_compress_word_fallback((mask), (value))
+#endif
+
 #if BUSTER_SIMD_512 && defined(__BUSTER__)
 
 #define simd512_load_masked(address, mask) __builtin_buster_simd_load_masked((address), (mask))
@@ -294,10 +315,6 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_widen_byte(value, quarter) __builtin_buster_simd_widen_byte((value), (quarter))
 #define simd512_shift_left_word(value, count) __builtin_buster_simd_shift_left_word((value), (count))
 #define simd512_ternary_word(a, b, c, table) __builtin_buster_simd_ternary_word((a), (b), (c), (table))
-#define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
-#define simd512_splat_word(value) __builtin_buster_simd_splat_word(value)
-#define simd512_less_word(left, right) __builtin_buster_simd_less_word((left), (right))
-#define simd512_compress_word(mask, value) __builtin_buster_simd_compress_word((mask), (value))
 
 #elif BUSTER_SIMD_512
 
@@ -314,10 +331,6 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_widen_byte(value, quarter) ((Simd512)_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32((__m512i)(value), (quarter))))
 #define simd512_shift_left_word(value, count) ((Simd512)_mm512_slli_epi32((__m512i)(value), (count)))
 #define simd512_ternary_word(a, b, c, table) ((Simd512)_mm512_ternarylogic_epi32((__m512i)(a), (__m512i)(b), (__m512i)(c), (table)))
-#define simd512_equal_word(left, right) ((Mask64)_mm512_cmpeq_epi32_mask((__m512i)(left), (__m512i)(right)))
-#define simd512_splat_word(value) ((Simd512)_mm512_set1_epi32((int)(u32)(value)))
-#define simd512_less_word(left, right) ((Mask64)_mm512_cmplt_epu32_mask((__m512i)(left), (__m512i)(right)))
-#define simd512_compress_word(mask, value) ((Simd512)_mm512_maskz_compress_epi32((__mmask16)(mask), (__m512i)(value)))
 
 #else
 
@@ -332,10 +345,6 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 simd_mask64_first_set_fallback(Mask64
 #define simd512_widen_byte(value, quarter) simd512_widen_byte_fallback((value), (quarter))
 #define simd512_shift_left_word(value, count) simd512_shift_left_word_fallback((value), (count))
 #define simd512_ternary_word(a, b, c, table) simd512_ternary_word_fallback((a), (b), (c), (table))
-#define simd512_equal_word(left, right) simd512_equal_word_fallback((left), (right))
-#define simd512_splat_word(value) simd512_splat_word_fallback(value)
-#define simd512_less_word(left, right) simd512_less_word_fallback((left), (right))
-#define simd512_compress_word(mask, value) simd512_compress_word_fallback((mask), (value))
 
 // Only private lvalues are passed here. Character access preserves the
 // representation of both the scalar struct and the F/BW-only vector; no
@@ -477,6 +486,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL void simd512_compress_store_byte_fallback
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL Simd512 simd512_widen_byte_fallback(Simd512 value, u32 quarter)
 {
     Simd512 result = simd512_splat_fallback(0);
+    // vpmovzxbd selects a 128-bit quarter with the low two immediate bits.
+    // Keep malformed fallback calls inside `value` and match that decoding;
+    // valid quarter values 0 through 3 are unchanged.
+    quarter &= 3;
     for (u32 lane = 0; lane < 16; lane += 1)
     {
         BUSTER_SIMD_FALLBACK_BYTES(result)[lane * 4] = BUSTER_SIMD_FALLBACK_BYTES(value)[quarter * 16 + lane];

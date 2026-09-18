@@ -13,9 +13,48 @@
   `--workload macros --workload aggregate-abi`; custom sets require `--no-guard`
   and preserve the default CI corpus. Their counts/hashes and full job-capacity
   cross product are covered by the native harness tests.
+  `check-workload` provides a separate, non-timing preflight for the pinned
+  cJSON 1.7.19, Lua 5.4.8 and SQLite 3.53.4 descriptors: it hashes the complete
+  staged tree plus compiler and oracle evidence, but always reports
+  `admitted=false` and requires fresh admission. The branch-only real-source
+  workflow may additionally emit a hosted functional receipt for each fresh
+  passing oracle after parsed closure verification, separate object and
+  compile-link operations, and an exact runtime transcript. That receipt covers
+  only its one direct-SSA/non-PIC/fast cell; it is not timing, dedicated-host,
+  A/A or A/B performance admission.
   This does not replace the canonical self-host/correctness gates below.
   The same optional allocation observer can emit a [per-site census](../allocation-census.md)
   with separate zeroing, alignment and OS request totals for offline analysis.
+- Native-backend retirement has a separate maintainer-approved
+  [performance contract](../native-retirement-performance-contract.md). Its
+  tighter budgets, immutable #508 binding, dedicated-host admission and
+  simultaneous uncertainty rules apply only to the #36/#512 acceptance run;
+  they do not silently replace the native harness's ordinary CI guard. Before
+  any timing verdict, validate the complete immutable binding record with
+  `python3 tools/native_retirement_performance_binding.py <record.json>
+  --evidence-root <bundle> --repository-root <immutable-checkout>
+  --trusted-execution-receipt-sha256 <independently-obtained-sha256>`; the
+  evidence-root form joins the exact #508 declaration, manifest, inputs,
+  dependencies, environment, rows, independent validator report and
+  versioned canonical performance-row artifact. It recomputes unique row
+  identities, eligibility and the round-1/round-2/pooled statistical family,
+  then checks structured #437 service/profile/A-A/lease receipts and #510
+  publication/download/replay receipts. `--repository-root` is an immutable
+  checkout used to verify commit-to-tree and source/build/harness identities;
+  without it the result is explicitly downgraded and cannot prove those
+  relations. The trusted execution-receipt digest must come out of band
+  from the authenticated admitted control service for the exact job and attempt;
+  never derive it from the result bundle being validated. This validation does
+  not itself accept a performance result.
+  A run without the evidence root is reported as `proof=structural-only`.
+  The binding streams schema-2 result inputs through the existing #615 verifier
+  with predeclared 16,777,216-record partitions, then replays #619 through the
+  native `tools/throughput/retirement_stats.h` adapter (`bench_throughput
+  retirement-replay`). One scope-free family member is one C call emitting
+  both rounds and pooled bounds; structural workflow completion is not a
+  verdict.
+  The acceptance service must use the server-authoritative supervisor lease
+  protocol; the existing cooperative throughput lock is not a substitute.
 
 - **`test_self_host` is the most trustworthy and complete compiler benchmark.**
   It exercises the full self-hosting IDE pipeline, including the trusted
@@ -260,6 +299,31 @@
   escape for method testing. `--skip-build` reuses the existing Release binary
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
+- **`.github/workflows/zen5-audit.yml` runs the stage-1 measurement on the
+  dedicated Ryzen 9700X GitHub runner** (`runs-on: [buster-zen5,
+  ryzen-9700x]`, the host `benchpress`), which is where CPU-heavy measurement
+  belongs rather than a developer laptop or a shared hosted VM. It bootstraps
+  the driver with the runner's TCC through `./build.sh`, builds the Release
+  `ide` without `--ci` so the binary stays profilable, runs `test_self_host`
+  for the `STEP_INSTRUCTIONS`/throughput rows and the fixed point, then times
+  the stage-1 command pinned to one CPU (`-g`, `-g0`, `-c`, `-E`; wall, user,
+  peak RSS, `perf stat` core and memory groups), records a frame-pointer
+  cycle profile with flat/inclusive/line/annotate reports, and runs
+  `tools/cache_miss_survey.py --dwarf` and `tools/branch_miss_survey.py
+  --cross-check`. Everything lands in one `zen5-audit-<run>-<attempt>`
+  artifact, with `perf.data` and the zstd-compressed binary beside it so the
+  capture can be queried offline. It is `workflow_dispatch` only (plus a push
+  of the file itself on an `audit/**` branch) and gates nothing:
+
+  ```sh
+  gh workflow run zen5-audit.yml --ref <branch>
+  gh run download <run-id> -D <directory>
+  ```
+
+  `perf_event_paranoid` is 2 on that host, so every counter is `:u`; the
+  runner serializes jobs but takes no dedicated-host lease, so a paired A/B
+  still belongs to the throughput harness. `2026-09-17T191324Z` is the first
+  audit recorded from it and carries the reference numbers.
 - **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.** It is
   the CI critical path, so it is the configuration most worth profiling. Record
   it exactly like any other build; there is no sanitizer-specific obstacle:
@@ -492,9 +556,12 @@ data exports, 2N data imports, N function imports and N unrelated globals.
 Shape 1 has one data object, N aliases, N+1 data imports and one function
 import. N is 4, 128, 256, 512, 1,024, 2,048 or 4,096. Construction and the
 system-linker reference are outside the one-warmup/seven-sample driver timer.
-The AArch64 reference compiles the same C as PIC and links a PIE, so its
-alias identity comes directly from the DSO, independently of system-linker
-COPY-slot allocation. Buster still links and executes the non-PIC object.
+On both architectures the reference compiles the same C as PIC and links a
+PIE, so its alias identity comes directly from the DSO, independently of
+system-linker COPY-slot allocation. Relinking the x86-64 `-fPIE` object with
+`-no-pie` does not provide that under GCC: its direct imported-data references
+give each strong alias a separate COPY slot (GitHub #594). Buster still links
+and executes the host-compiled `-fPIE` or non-PIC object.
 The timed invocation reads the object and DSOs, links and writes its image;
 `retained` measures the invocation arena after that work. Both native images
 execute afterward, verifying shared addresses and writes visible through the

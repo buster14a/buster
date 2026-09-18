@@ -2789,7 +2789,9 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_target_triple(Target target)
         case OPERATING_SYSTEM_WINDOWS:
             return aarch64 ? S8("aarch64-pc-windows-msvc") : S8("x86_64-pc-windows-msvc");
         case OPERATING_SYSTEM_UEFI:
-            return aarch64 ? S8("aarch64-unknown-windows") : S8("x86_64-unknown-windows");
+            // The invocation boundary rejects AArch64 UEFI bitcode. Do not
+            // publish a Windows triple for the distinct native AAPCS64 ABI.
+            return aarch64 ? (String8){0} : S8("x86_64-unknown-windows");
         case OPERATING_SYSTEM_FREESTANDING:
             return aarch64 ? S8("aarch64-unknown-none") : S8("x86_64-unknown-none");
         case OPERATING_SYSTEM_COUNT:
@@ -2815,11 +2817,15 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_llvm_data_layout(Target target)
         }
         return S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
     case CPU_ARCH_AARCH64:
+        if (target.os == OPERATING_SYSTEM_UEFI)
+        {
+            return (String8){0};
+        }
         if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
         {
             return S8("e-m:o-i64:64-i128:128-n32:64-S128-Fn32");
         }
-        if (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI)
+        if (target.os == OPERATING_SYSTEM_WINDOWS)
         {
             return S8("e-m:w-p:64:64-i32:32-i64:64-i128:128-n32:64-S128-Fn32");
         }
@@ -3821,11 +3827,19 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
     {
         result.error = COMPILER_DRIVER_ERROR_GPU;
         result.diagnostic = pipeline.diagnostic.length ? pipeline.diagnostic : S8("GPU pipeline failed without a diagnostic");
+        if (invocation.save_gpu_temporaries && pipeline.temporary_directory.length)
+        {
+            result.diagnostic = string_format(arena, S8("{S8}\nGPU temporary files: {S8}"), result.diagnostic, pipeline.temporary_directory);
+        }
         return result;
     }
     if (pipeline.log.length)
     {
         compiler_driver_warning_append_text(warnings, pipeline.log);
+    }
+    if (invocation.save_gpu_temporaries && pipeline.temporary_directory.length)
+    {
+        compiler_driver_warning_append_text(warnings, string_format(arena, S8("GPU temporary files: {S8}\n"), pipeline.temporary_directory));
     }
     if (pipeline.artifact.format != GPU_OUTPUT_NONE)
     {
@@ -3971,6 +3985,15 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     }
     if (invocation.emit_llvm_bitcode)
     {
+        // COFF is an object format, not permission to substitute the Windows
+        // variadic convention for native AArch64 UEFI's LP64/AAPCS64 contract.
+        // Refuse before reading inputs or creating/truncating any output.
+        if (invocation.target.cpu_arch == CPU_ARCH_AARCH64 && invocation.target.os == OPERATING_SYSTEM_UEFI)
+        {
+            result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+            result.diagnostic = S8("AArch64 UEFI LLVM bitcode output is unsupported: native UEFI requires LP64/AAPCS64");
+            goto finish;
+        }
         if (invocation.library_count || invocation.library_path_count || invocation.framework_count || invocation.framework_path_count ||
             invocation.linker_argument_count)
         {

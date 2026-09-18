@@ -1,6 +1,8 @@
 // File content ownership and transfer policy: file_write_checked preserves
-// transfer/close failures; file_read owns padded arena reads; file_map_read and
-// file_map_unmap own optional mappings; file_copy streams between descriptors.
+// transfer/close failures; file_read owns padded arena and normalized APK asset
+// reads; file_map_read and file_map_unmap own optional mappings; file_copy_checked
+// streams into a staging file beside its destination and publishes it with
+// os_file_replace.
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
 #include <buster/lib/system_headers.h>
@@ -12,6 +14,42 @@
 #include <android/asset_manager.h>
 AAssetManager* buster_android_asset_manager = 0;
 String8 buster_android_internal_data_path = {0};
+
+// APK assets are a rooted namespace rather than a host filesystem. Normalize
+// safe relative segments before lookup because AAssetManager does not resolve
+// the `..` produced by a quoted include in a nested source file. Never permit a
+// relative asset path to escape that root.
+BUSTER_GLOBAL_LOCAL String8 file_android_asset_path(Arena* arena, String8 path)
+{
+    char8* bytes = arena_allocate(arena, char8, path.length + 1);
+    u64 length = 0;
+    bool valid = path.length && path.pointer[0] != '/' && path.pointer[0] != '\\';
+    for (u64 offset = 0; valid && offset < path.length;)
+    {
+        while (offset < path.length && (path.pointer[offset] == '/' || path.pointer[offset] == '\\')) { offset += 1; }
+        u64 end = offset;
+        while (end < path.length && path.pointer[end] != '/' && path.pointer[end] != '\\' && path.pointer[end] != 0) { end += 1; }
+        valid = end == path.length || path.pointer[end] != 0;
+        String8 segment = string_slice(path, offset, end);
+        if (string_equal(segment, S8("..")))
+        {
+            valid = length != 0;
+            while (length && bytes[length - 1] != '/') { length -= 1; }
+            if (length) { length -= 1; }
+        }
+        else if (segment.length && !string_equal(segment, S8(".")))
+        {
+            if (length) { bytes[length++] = '/'; }
+            memcpy(bytes + length, segment.pointer, segment.length);
+            length += segment.length;
+        }
+        offset = end;
+    }
+    valid &= length != 0;
+    bytes[length] = 0;
+    String8 result = valid ? (String8){.pointer = bytes, .length = length} : (String8){0};
+    return result;
+}
 #endif
 
 #if BUSTER_IOS
@@ -51,6 +89,23 @@ bool file_write(String8 path, ByteSlice content)
     return !file_write_checked(path, content, (OpenPermissions){.read = 1, .write = 1}).error.v;
 }
 
+BUSTER_GLOBAL_LOCAL FileIdentity file_identity_from_stats(FileStats stats)
+{
+    FileIdentity result = {
+        .device = stats.device,
+        .index = stats.index,
+        .valid = stats.valid,
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void file_map_read_fallback(Arena* arena, String8 path, FileReadOptions options, FileMapRead* result)
+{
+    FileReadResult read = file_read_checked(arena, path, options);
+    result->bytes = read.bytes;
+    result->identity = read.identity;
+}
+
 FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
 {
     FileMapRead result = {0};
@@ -60,7 +115,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     // only way to satisfy a caller that did not demand a mapping.
     if (!options.map_required)
     {
-        result.bytes = file_read(arena, path, options);
+        file_map_read_fallback(arena, path, options, &result);
     }
 #else
     // Padding and alignment requests cannot be served by a raw mapping.
@@ -72,7 +127,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     {
         if (!options.map_required)
         {
-            result.bytes = file_read(arena, path, options);
+            file_map_read_fallback(arena, path, options, &result);
         }
     }
     else
@@ -82,8 +137,9 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
         OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
         if (file)
         {
-            u64 file_size = os_file_get_size(file);
-            if (file_size && file_size != UINT64_MAX)
+            FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1, .identity = 1});
+            u64 file_size = stats.size;
+            if (stats.valid && file_size)
             {
                 HANDLE mapping = CreateFileMappingW((HANDLE)file, 0, PAGE_READONLY, (DWORD)(file_size >> 32), (DWORD)file_size, 0);
                 if (mapping)
@@ -95,6 +151,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
                         result.mapped_pointer = mapped;
                         result.mapped_size = file_size;
                         result.mapped_handle = mapping;
+                        result.identity = file_identity_from_stats(stats);
                     }
                     else
                     {
@@ -107,7 +164,9 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     }
 #elif BUSTER_LINUX || BUSTER_MACOS
     {
-        char* path_buffer = (char*)arena_allocate_bytes(arena, path.length + 1, 1);
+        u64 path_buffer_size;
+        BUSTER_VALIDATE(u64_add_checked(path.length, 1, &path_buffer_size));
+        char* path_buffer = (char*)arena_allocate_bytes(arena, path_buffer_size, 1);
         memcpy(path_buffer, path.pointer, path.length);
         path_buffer[path.length] = 0;
 
@@ -123,6 +182,11 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
                     result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
                     result.mapped_pointer = mapped;
                     result.mapped_size = (u64)file_stats.st_size;
+                    result.identity = (FileIdentity){
+                        .device = (u64)file_stats.st_dev,
+                        .index = (u64)file_stats.st_ino,
+                        .valid = true,
+                    };
                 }
             }
             close(file_descriptor);
@@ -132,7 +196,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
 
         if (!result.bytes.pointer && !options.map_required)
         {
-            result.bytes = file_read(arena, path, options);
+            file_map_read_fallback(arena, path, options, &result);
         }
     }
 #endif
@@ -183,11 +247,8 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
     // The app has no test files on disk; relative paths resolve to APK assets.
     if (buster_android_asset_manager && path.length && path.pointer[0] != '/')
     {
-        char* asset_path = (char*)arena_allocate_bytes(arena, path.length + 1, 1);
-        memcpy(asset_path, path.pointer, path.length);
-        asset_path[path.length] = 0;
-
-        AAsset* asset = AAssetManager_open(buster_android_asset_manager, asset_path, AASSET_MODE_BUFFER);
+        String8 asset_path = file_android_asset_path(arena, path);
+        AAsset* asset = asset_path.length ? AAssetManager_open(buster_android_asset_manager, (char*)asset_path.pointer, AASSET_MODE_BUFFER) : 0;
         if (asset)
         {
             u64 file_size = (u64)AAsset_getLength64(asset);
@@ -240,10 +301,11 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
         result.error = opened.error;
         if (opened.file)
         {
-            FileStats stats = os_file_get_stats(opened.file, (FileStatsOptions){.size = 1});
+            FileStats stats = os_file_get_stats(opened.file, (FileStatsOptions){.size = 1, .identity = 1});
             result.error = stats.error;
             if (stats.valid)
             {
+                result.identity = file_identity_from_stats(stats);
                 u64 reported_size = stats.size;
                 u64 allocation_alignment = options.start_alignment;
                 u64 file_size;
@@ -311,6 +373,7 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
     if (result.status != OS_FILE_READ_OK)
     {
         result.bytes = (ByteSlice){0};
+        result.identity = (FileIdentity){0};
         arena_set_position(arena, read_mark);
     }
     return result;
@@ -321,31 +384,126 @@ ByteSlice file_read(Arena* arena, String8 path, FileReadOptions options)
     return file_read_checked(arena, path, options).bytes;
 }
 
-bool file_copy(CopyFileArguments arguments)
+// A fixed stack buffer bounds copy memory independently of the source size.
+#define FILE_COPY_BUFFER_SIZE BUSTER_KB(64)
+
+// Until the outcome is decided the first failure is the result. After a
+// failure or refusal, later failures are cleanup and never replace it.
+BUSTER_GLOBAL_LOCAL void file_copy_record(FileCopyResult* result, OsError error)
 {
-    bool result = false;
-    // Copying a path onto itself would truncate the source before reading it.
-    if (!string_equal(arguments.original_path, arguments.new_path))
+    if (result->status == FILE_COPY_FAILED && !result->error.v)
     {
-        OsFileDescriptor* source = os_file_open(arguments.original_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-        if (source)
+        result->error = error;
+    }
+    else if (!result->cleanup_error.v)
+    {
+        result->cleanup_error = error;
+    }
+}
+
+FileCopyResult file_copy_checked(CopyFileArguments arguments)
+{
+    FileCopyResult result = {0};
+    // Other aliases are judged by identity below. Nothing here opens the
+    // destination's file destructively, so identity decides policy, not safety.
+    if (string_equal(arguments.original_path, arguments.new_path))
+    {
+        result.status = FILE_COPY_SAME_FILE;
+    }
+    else
+    {
+        OsFileOpenResult source = os_file_open_checked(arguments.original_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        result.error = source.error;
+        if (source.file)
         {
-            OsFileDescriptor* destination =
-                os_file_open(arguments.new_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
-            if (destination)
+            // The source stays open while the destination is inspected, so an
+            // equal identity cannot come from a recycled inode or file index.
+            FileStats source_stats = os_file_get_stats(source.file, (FileStatsOptions){.identity = 1});
+            FileStats target = {.error = source_stats.error};
+            if (source_stats.valid)
             {
-                u8 buffer[BUSTER_KB(64)];
-                u64 count = 0;
-                while ((result = os_file_read_attempt(source, (ByteSlice){buffer, sizeof(buffer)}, &count)) && count)
-                {
-                    result = os_file_write_attempt(destination, (ByteSlice){buffer, count});
-                    if (!result) break;
-                }
-                result = os_file_close(destination) && result;
+                target = os_file_replacement_target_stats(arguments.new_path);
             }
-            result = os_file_close(source) && result;
+            result.error = target.error;
+            bool replaces = target.valid && target.kind == OS_FILE_KIND_REGULAR;
+            bool stages = false;
+            if (replaces && target.device == source_stats.device && target.index == source_stats.index)
+            {
+                result.status = FILE_COPY_SAME_FILE;
+            }
+            else if (target.valid && !replaces && target.kind != OS_FILE_KIND_MISSING)
+            {
+                result.status = FILE_COPY_UNSUPPORTED_DESTINATION;
+            }
+#if BUSTER_WINDOWS
+            else if (replaces && !(target.permissions & 0222))
+            {
+                // A POSIX writer's open refuses a read-only file; refuse the
+                // attribute here rather than depend on MoveFileExW's handling.
+                result.error.v = (u32)ERROR_ACCESS_DENIED;
+            }
+#endif
+            else
+            {
+                stages = target.valid;
+            }
+
+            TemporalArena scratch = scratch_begin(0, 0);
+            OsFileStagingResult staging = {0};
+            if (stages)
+            {
+                staging = os_file_staging_create(scratch.arena, arguments.new_path, (OpenPermissions){.read = 1, .write = 1});
+                result.error = staging.error;
+            }
+            bool staged = staging.file != 0;
+            if (staged)
+            {
+#if !BUSTER_WINDOWS
+                if (replaces)
+                {
+                    result.error = os_file_set_permissions(staging.file, target.permissions);
+                }
+#endif
+                u8 buffer[FILE_COPY_BUFFER_SIZE];
+                bool copying = !result.error.v;
+                while (copying)
+                {
+                    OsFileReadResult read = os_file_read_exact(source.file, (ByteSlice){buffer, sizeof(buffer)});
+                    if (read.status == OS_FILE_READ_ERROR)
+                    {
+                        result.error = read.error;
+                    }
+                    else
+                    {
+                        result.error = os_file_write_checked(staging.file, (ByteSlice){buffer, read.transferred}).error;
+                    }
+                    copying = !result.error.v && read.status == OS_FILE_READ_OK;
+                }
+                file_copy_record(&result, os_file_close_checked(staging.file));
+            }
+            // Closing the source before publication leaves the rename as the
+            // last fallible step.
+            file_copy_record(&result, os_file_close_checked(source.file));
+            if (staged && !result.error.v)
+            {
+                result.error = os_file_replace(staging.path, arguments.new_path);
+                if (!result.error.v)
+                {
+                    result.status = FILE_COPY_PUBLISHED;
+                }
+            }
+            if (staged && result.status != FILE_COPY_PUBLISHED)
+            {
+                file_copy_record(&result, os_file_delete_checked(staging.path));
+            }
+            scratch_end(scratch);
         }
     }
 
     return result;
+}
+
+bool file_copy(CopyFileArguments arguments)
+{
+    return file_copy_checked(arguments).status == FILE_COPY_PUBLISHED;
 }

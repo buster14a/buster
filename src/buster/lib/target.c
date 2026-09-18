@@ -199,6 +199,16 @@ bool target_uses_16_bit_wchar(Target target)
     return target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI;
 }
 
+// Keep predefines, character literals, and string element types on the same
+// target ABI. Darwin retains signed int; Windows/UEFI use unsigned short.
+// The hosted AArch64 Linux and Android ABIs use unsigned int.
+bool target_uses_unsigned_wchar(Target target)
+{
+    return target_uses_16_bit_wchar(target) ||
+           (target.cpu_arch == CPU_ARCH_AARCH64 &&
+            (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID));
+}
+
 bool target_uses_pe_unwind(Target target)
 {
     return (target.os == OPERATING_SYSTEM_WINDOWS || target.os == OPERATING_SYSTEM_UEFI) &&
@@ -216,9 +226,11 @@ TargetDataLayout target_data_layout(Target target)
     u32 long_size = llp64 ? 4 : 8;
     bool double_long_double = llp64 || wasm64 || bpfel || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
     u32 long_double_size = double_long_double ? 8 : 16;
-    u32 long_double_bits = double_long_double ? 64 : target.cpu_arch == CPU_ARCH_X86_64 ? 80 : 128;
+    bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
+    u32 long_double_bits = double_long_double ? 64 : x87_long_double ? 80 : 128;
     bool aarch64_pointer_list = target.cpu_arch == CPU_ARCH_AARCH64 && (apple || windows);
-    u32 va_list_size = llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 : 32;
+    u32 va_list_size = llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
+                       target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
 
     TargetDataLayout layout = {
         .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
@@ -235,6 +247,8 @@ TargetDataLayout target_data_layout(Target target)
         .unsigned_long_long_integer = {.size = 8, .alignment = 8, .bit_width = 64},
         .integer128 = {.size = 16, .alignment = 16, .bit_width = 128},
         .unsigned_integer128 = {.size = 16, .alignment = 16, .bit_width = 128},
+        .float16_type = {.size = 2, .alignment = 2, .bit_width = 16},
+        .bfloat16_type = {.size = 2, .alignment = 2, .bit_width = 16},
         .float_type = {.size = 4, .alignment = 4, .bit_width = 32},
         .double_type = {.size = 8, .alignment = 8, .bit_width = 64},
         .long_double_type = {.size = long_double_size, .alignment = long_double_size, .bit_width = long_double_bits},
@@ -274,6 +288,8 @@ bool target_data_layout_is_valid(TargetDataLayout layout)
         layout.unsigned_long_long_integer,
         layout.integer128,
         layout.unsigned_integer128,
+        layout.float16_type,
+        layout.bfloat16_type,
         layout.float_type,
         layout.double_type,
         layout.long_double_type,

@@ -105,6 +105,8 @@ enum
     PDB_LF_ENUM = 0x1507,
     PDB_LF_ALIAS = 0x150a,
     PDB_LF_MEMBER = 0x150d,
+    PDB_LF_NESTTYPE = 0x1510,
+    PDB_LF_ONEMETHOD = 0x1511,
 };
 
 u32 pdb_read_u32(ByteSlice bytes, u64 offset)
@@ -481,7 +483,11 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_symbol_scopes(Arena* arena, ByteSlice symbo
             u16 length = 0;
             u16 kind = 0;
             valid = pdb_read_u16_checked(symbols, offset, &length) && pdb_read_u16_checked(symbols, offset + 2, &kind) && length >= 2;
-            u64 size = (2 + (u64)length + 3) & ~(u64)3;
+            // Producers may either include record padding in `length` (as
+            // Buster does) or pack records and leave alignment to the C13
+            // subsection (as MSVC does). In both cases the next record begins
+            // after the encoded length field and its declared payload.
+            u64 size = 2 + (u64)length;
             valid = valid && size <= symbols.length - offset;
             if (valid)
             {
@@ -567,6 +573,29 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_field_list(PdbTypeModule* module, ByteSlice
                 // A continuation is the final member, not an untyped suffix.
                 valid = record.length - cursor == 8 && pdb_type_index_map(module, record, cursor + 4);
                 cursor += 8;
+            }
+            else if (valid && leaf == PDB_LF_NESTTYPE)
+            {
+                // LF_NESTTYPE is {leaf, padding, type index, name}. The
+                // padding word is reserved rather than a field attribute.
+                valid = record.length - cursor >= 8 && pdb_type_index_map(module, record, cursor + 4);
+                if (valid)
+                {
+                    cursor = pdb_skip_name(record, cursor + 8);
+                }
+            }
+            else if (valid && leaf == PDB_LF_ONEMETHOD)
+            {
+                u16 attributes = 0;
+                valid = record.length - cursor >= 8 && pdb_read_u16_checked(record, cursor + 2, &attributes) &&
+                        pdb_type_index_map(module, record, cursor + 4);
+                u16 method_property = (attributes >> 2) & 7;
+                u64 name_offset = method_property == 4 || method_property == 6 ? cursor + 12 : cursor + 8;
+                valid = valid && name_offset <= record.length;
+                if (valid)
+                {
+                    cursor = pdb_skip_name(record, name_offset);
+                }
             }
             else
             {
@@ -672,8 +701,7 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_symbol_types(ByteSlice symbols, PdbTypeModu
             return false;
         }
         u64 record_size = 2 + length;
-        u64 aligned = (record_size + 3) & ~UINT64_C(3);
-        if (aligned > symbols.length - offset)
+        if (record_size > symbols.length - offset)
         {
             return false;
         }
@@ -700,7 +728,7 @@ BUSTER_GLOBAL_LOCAL bool pdb_rewrite_symbol_types(ByteSlice symbols, PdbTypeModu
                 return false;
             }
         }
-        offset += aligned;
+        offset += record_size;
     }
     return offset == symbols.length;
 }

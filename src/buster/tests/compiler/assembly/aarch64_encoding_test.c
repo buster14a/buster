@@ -323,6 +323,41 @@ BUSTER_GLOBAL_LOCAL bool aarch64_scalar_test_decode_logical_immediate(u8 width, 
     return true;
 }
 
+// Pinned decoded values for the generated counted u16 blob readers. Every
+// generated AArch64 blob instantiates one shared reader template, so these
+// cases pin the boundary values of that template on the two blobs that carry
+// all of them: the forms blob from the generated header and the coverage
+// include's blob. 0x3412 is the mixed-byte case; its byte-swapped reading
+// 0x1234 decodes at a different offset of the same blob, so a reversed
+// composition cannot satisfy this table.
+typedef struct A64GeneratedBlobReaderCase A64GeneratedBlobReaderCase;
+struct A64GeneratedBlobReaderCase
+{
+    u32 blob;
+    u64 offset;
+    u16 value;
+};
+
+static A64GeneratedBlobReaderCase const a64_generated_blob_reader_cases[] = {
+    {BUSTER_AARCH64_GENERATED_BLOB_FORMS, 42, UINT16_C(0x0000)},
+    {BUSTER_AARCH64_GENERATED_BLOB_FORMS, 71, UINT16_C(0x00ff)},
+    {BUSTER_AARCH64_GENERATED_BLOB_FORMS, 18039, UINT16_C(0x7fff)},
+    {BUSTER_AARCH64_GENERATED_BLOB_FORMS, 2361, UINT16_C(0x8000)},
+    {BUSTER_AARCH64_GENERATED_BLOB_FORMS, 70, UINT16_C(0xffff)},
+    {BUSTER_AARCH64_GENERATED_BLOB_FORMS, 390676, UINT16_C(0x3412)},
+    {BUSTER_AARCH64_GENERATED_BLOB_FORMS, 49897, UINT16_C(0x1234)},
+    {BUSTER_AARCH64_GENERATED_BLOB_COVERAGE, 19, UINT16_C(0x0000)},
+    {BUSTER_AARCH64_GENERATED_BLOB_COVERAGE, 7160, UINT16_C(0x00ff)},
+    {BUSTER_AARCH64_GENERATED_BLOB_COVERAGE, 164033, UINT16_C(0x7fff)},
+    {BUSTER_AARCH64_GENERATED_BLOB_COVERAGE, 3603, UINT16_C(0x8000)},
+    {BUSTER_AARCH64_GENERATED_BLOB_COVERAGE, 23666, UINT16_C(0xffff)},
+    {BUSTER_AARCH64_GENERATED_BLOB_COVERAGE, 147510, UINT16_C(0x3412)},
+};
+
+// Bounded sweep width per blob: enough offsets to cross several packed records
+// without walking megabytes of pinned metadata in a sanitized Debug run.
+#define A64_GENERATED_BLOB_SWEEP_LIMIT 1024u
+
 UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1077,7 +1112,10 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_target(fixed_m1_target));
     Target generic_m1_arch = fixed_m1_target;
     generic_m1_arch.cpu_model = CPU_MODEL_A64_GENERIC;
-    BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_target(generic_m1_arch));
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_target(generic_m1_arch));
+    Target baseline_m1_arch = fixed_m1_target;
+    baseline_m1_arch.cpu_model = CPU_MODEL_BASELINE;
+    BUSTER_TEST(arguments, buster_aarch64_arm_m1_fixed_target(baseline_m1_arch));
     Target x86_m1_arch = fixed_m1_target;
     x86_m1_arch.cpu_arch = CPU_ARCH_X86_64;
     BUSTER_TEST(arguments, !buster_aarch64_arm_m1_fixed_target(x86_m1_arch));
@@ -2706,6 +2744,58 @@ UnitTestResult aarch64_encoding_tests(UnitTestArguments* arguments)
                                               memcmp(partial_count_bytes, partial_count_bytes_saved, sizeof(partial_count_bytes)) == 0;
     }
     BUSTER_TEST(arguments, scalar_count_pointer_alias_rejected);
+
+    // Generated counted u16 blob readers. The generator emits one reader
+    // template for every blob, so sweep all of them: the u16 reader must
+    // decompose into exactly the two counted byte reads it spans, keeping the
+    // low byte at `offset` and the high byte at `offset + 1`, and it must
+    // return zero for any window the explicit byte count excludes. Composing
+    // the two bytes in a type narrower than u16 loses the high byte, which the
+    // pinned values below reject.
+    BusterAarch64GeneratedBlobProbe blob_probe = {0};
+    bool generated_blob_readers_ok = true;
+    buster_aarch64_metadata_test_reset_packed_access_counter();
+    for (u32 blob_index = 0; blob_index < BUSTER_AARCH64_GENERATED_BLOB_COUNT; blob_index += 1)
+    {
+        BUSTER_TEST(arguments, buster_aarch64_metadata_test_generated_blob_probe(blob_index, 0, &blob_probe));
+        u64 byte_count = blob_probe.byte_count;
+        u64 sweep_end = byte_count > 1u ? byte_count - 1u : 0;
+        if (sweep_end > A64_GENERATED_BLOB_SWEEP_LIMIT)
+        {
+            sweep_end = A64_GENERATED_BLOB_SWEEP_LIMIT;
+        }
+        generated_blob_readers_ok = generated_blob_readers_ok && byte_count > 1u;
+        for (u64 offset = 0; offset < sweep_end; offset += 1)
+        {
+            generated_blob_readers_ok = generated_blob_readers_ok &&
+                                        buster_aarch64_metadata_test_generated_blob_probe(blob_index, offset, &blob_probe) &&
+                                        blob_probe.byte_count == byte_count && (u8)blob_probe.value == blob_probe.low &&
+                                        (u8)(blob_probe.value >> 8) == blob_probe.high && blob_probe.truncated == 0 &&
+                                        blob_probe.past_end == 0;
+        }
+        // The final byte has no second byte inside the explicit count, so the
+        // counted reader refuses the pair instead of reading past the blob.
+        generated_blob_readers_ok = generated_blob_readers_ok &&
+                                    buster_aarch64_metadata_test_generated_blob_probe(blob_index, byte_count - 1u, &blob_probe) &&
+                                    blob_probe.value == 0;
+    }
+    BUSTER_TEST(arguments, generated_blob_readers_ok);
+    BUSTER_TEST(arguments, !buster_aarch64_metadata_test_generated_blob_probe(BUSTER_AARCH64_GENERATED_BLOB_COUNT, 0, &blob_probe));
+    // The probe reaches the generated readers directly; only the packed
+    // metadata accessors note an access, so the sweep leaves the counter at
+    // zero. The positive control above proves the counter is live.
+    BUSTER_TEST(arguments, buster_aarch64_metadata_test_packed_access_count() == 0);
+
+    bool generated_blob_values_ok = true;
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(a64_generated_blob_reader_cases); case_index += 1)
+    {
+        A64GeneratedBlobReaderCase const reader_case = a64_generated_blob_reader_cases[case_index];
+        generated_blob_values_ok = generated_blob_values_ok &&
+                                   buster_aarch64_metadata_test_generated_blob_probe(reader_case.blob, reader_case.offset, &blob_probe) &&
+                                   blob_probe.value == reader_case.value && (u8)blob_probe.value == blob_probe.low &&
+                                   (u8)(blob_probe.value >> 8) == blob_probe.high && blob_probe.truncated == 0 && blob_probe.past_end == 0;
+    }
+    BUSTER_TEST(arguments, generated_blob_values_ok);
 
     return result;
 }

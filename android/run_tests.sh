@@ -11,7 +11,14 @@ apk=$2
 package=$3
 activity=$4
 test_args=$5
-timeout_seconds=${BUSTER_ANDROID_TEST_TIMEOUT_SECONDS:-60}
+# This watchdog bounds the complete suite, not each adb operation. Debug
+# compiler-driver fixtures can exceed one minute while still making progress.
+# A terminal result still ends monitoring immediately; missing results fail.
+timeout_seconds=${BUSTER_ANDROID_TEST_TIMEOUT_SECONDS:-180}
+# A payload that merely fits its deadline today crosses it on a slower runner or
+# after new tests are added. Report the remaining margin as a percentage of the
+# deadline so thinning headroom is visible before it becomes a red lane.
+headroom_warning_percent=${BUSTER_ANDROID_TEST_HEADROOM_WARNING_PERCENT:-25}
 adb_wait_timeout_seconds=${BUSTER_ANDROID_ADB_WAIT_TIMEOUT_SECONDS:-60}
 adb_command_timeout_seconds=${BUSTER_ANDROID_ADB_COMMAND_TIMEOUT_SECONDS:-30}
 adb_install_timeout_seconds=${BUSTER_ANDROID_ADB_INSTALL_TIMEOUT_SECONDS:-60}
@@ -28,6 +35,12 @@ for timeout_value in \
         exit 1
     fi
 done
+
+if [[ ! $headroom_warning_percent =~ ^(0|[1-9][0-9]?|100)$ ]]; then
+    echo "error: Android headroom warning percent must be 0-100; got '$headroom_warning_percent'" >&2
+    exit 1
+fi
+headroom_warning_seconds=$((timeout_seconds * headroom_warning_percent / 100))
 
 if ! command -v timeout >/dev/null 2>&1; then
     echo "error: timeout command is required for Android test log monitoring" >&2
@@ -134,6 +147,8 @@ validate_device_before_install() {
 monitor_reader_pid=
 monitor_producer_pid=
 monitor_fd=
+# Bound the reported payload tail; the full stream is already in the job log.
+monitor_last_line_characters=200
 terminate_monitor_producer() {
     local force=${1:-0}
     local pid=${monitor_producer_pid:-}
@@ -158,8 +173,12 @@ terminate_monitor_producer() {
 
 monitor_logcat_reader() {
     local line
+    local last_line=
+    local line_count=0
     while IFS= read -r -u "$monitor_fd" line; do
         printf '%s\n' "$line"
+        line_count=$((line_count + 1))
+        last_line=$line
         if [[ $line =~ BUSTER_ANDROID_TEST_RESULT:([0-9]+)$ ]]; then
             terminate_monitor_producer
             if [[ ${BASH_REMATCH[1]} == 0 ]]; then
@@ -168,6 +187,11 @@ monitor_logcat_reader() {
             return 11
         fi
     done
+    # A deadline or a stopped payload leaves no terminal marker. Say how far the
+    # payload actually got here, so a timeout is legible without reading the
+    # whole log: a truncated tail, never an anchored record a payload could forge.
+    printf 'Android payload emitted %s log line(s) before the monitor ended; last line: %s\n' \
+        "$line_count" "${last_line:0:$monitor_last_line_characters}"
     return 0
 }
 
@@ -195,14 +219,17 @@ cleanup_monitor() {
     trap - EXIT INT TERM
     stop_monitor
     adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >/dev/null 2>&1 || true
+    printf 'ANDROID_PAYLOAD_RESULT config=%s phase=%s status=%s\n' "${BUSTER_ANDROID_TEST_CONFIG:-standalone}" "$test_phase" "$status"
     exit "$status"
 }
+test_phase=wait-device
 trap cleanup_monitor EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 wait_for_device_ready
 validate_device_before_install
+test_phase=install
 adb_with_timeout "$adb_command_timeout_seconds" uninstall "$package" >/dev/null 2>&1 || true
 if ! adb_with_timeout "$adb_install_timeout_seconds" install -r "$apk"; then
     echo "adb install -r failed; uninstalling ${package} and retrying" >&2
@@ -215,6 +242,7 @@ adb_with_timeout "$adb_command_timeout_seconds" logcat -c
 # Keep the log producer and its reader as separately owned processes. A
 # background pipeline only exposes its last (reader) process through $!, so the
 # timeout/adb producer can survive after the reader sees a terminal marker.
+monitor_started=$SECONDS
 coproc buster_android_logcat {
     exec timeout --kill-after=1s "${timeout_seconds}s" "$adb" "${adb_serial_args[@]}" logcat -v time -s buster:I '*:S'
 }
@@ -228,6 +256,7 @@ monitor_reader_pid=$!
 # Do not use `am start -W` here: on some emulator builds the wait-for-launch
 # shell command can lose its adb connection even though the activity started and
 # is still producing the logcat test result we actually care about.
+test_phase=launch
 if adb_with_timeout "$adb_command_timeout_seconds" shell "am start -n $(android_shell_quote "$activity") --es buster_args $(android_shell_quote "$test_args")"; then
     start_status=0
 else
@@ -240,6 +269,8 @@ if [[ $start_status -ne 0 ]]; then
     exit "$start_status"
 fi
 
+test_phase=monitor
+printf 'ANDROID_MONITOR_START config=%s timeout_seconds=%s\n' "${BUSTER_ANDROID_TEST_CONFIG:-standalone}" "$timeout_seconds"
 if wait "$monitor_reader_pid"; then
     monitor_reader_status=0
 else
@@ -256,6 +287,19 @@ monitor_producer_pid=
 exec {monitor_fd}<&-
 monitor_fd=
 
+monitor_elapsed_seconds=$((SECONDS - monitor_started))
+if (( monitor_elapsed_seconds < timeout_seconds )); then
+    monitor_headroom_seconds=$((timeout_seconds - monitor_elapsed_seconds))
+else
+    monitor_headroom_seconds=0
+fi
+monitor_headroom_warning=no
+if [[ $monitor_reader_status -eq 10 ]] && (( monitor_headroom_seconds < headroom_warning_seconds )); then
+    monitor_headroom_warning=yes
+fi
+
+printf 'ANDROID_MONITOR_RESULT config=%s reader_status=%s producer_status=%s timeout_seconds=%s elapsed_seconds=%s headroom_seconds=%s headroom_warning=%s\n' "${BUSTER_ANDROID_TEST_CONFIG:-standalone}" "$monitor_reader_status" "$monitor_producer_status" "$timeout_seconds" "$monitor_elapsed_seconds" "$monitor_headroom_seconds" "$monitor_headroom_warning"
+
 if [[ $monitor_reader_status -eq 10 || $monitor_reader_status -eq 11 ]]; then
     status=$monitor_reader_status
 elif [[ $monitor_producer_status -ne 0 ]]; then
@@ -270,6 +314,13 @@ adb_with_timeout "$adb_command_timeout_seconds" shell am force-stop "$package" >
 case "$status" in
     10)
         echo "Android compiler tests passed"
+        if [[ $monitor_headroom_warning == yes ]]; then
+            # Not a failure: the payload passed. Record the thin margin so a
+            # deadline that is about to be crossed is visible on a green run.
+            printf 'warning: Android %s payload used %ss of its %ss deadline; %ss of headroom remain (warning margin %ss at %s%%)\n' \
+                "${BUSTER_ANDROID_TEST_CONFIG:-standalone}" "$monitor_elapsed_seconds" "$timeout_seconds" \
+                "$monitor_headroom_seconds" "$headroom_warning_seconds" "$headroom_warning_percent" >&2
+        fi
         ;;
     11)
         echo "Android compiler tests failed" >&2
@@ -278,6 +329,7 @@ case "$status" in
         ;;
     124|137)
         echo "Android compiler tests timed out after ${timeout_seconds}s" >&2
+        echo "error: the Android ${BUSTER_ANDROID_TEST_CONFIG:-standalone} payload exhausted its own deadline; emulator cleanup has not run yet and is not this failure" >&2
         print_adb_diagnostics
         exit 1
         ;;

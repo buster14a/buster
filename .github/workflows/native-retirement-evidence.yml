@@ -1,0 +1,477 @@
+name: Native retirement evidence
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/native-retirement-evidence.yml
+      - docs/native-retirement-dependencies-v1.json
+      - docs/native-retirement-support-v1.tsv
+      - docs/native-retirement-census.md
+      - docs/native-retirement-supported-gaps-v1.tsv
+      - docs/native-retirement-applicability-v1.tsv
+      - docs/performance-audits/evidence/2026-09-12-retirement/**
+      - tools/native_retirement_materializer.py
+      - tools/native_retirement_materializer_test.py
+      - tools/native_retirement_external.py
+      - tools/native_retirement_sdks.py
+      - tools/native_retirement_sdks_test.py
+      - tools/native_retirement_reference.py
+      - tools/native-retirement-mingw/**
+      - docs/native-retirement-sdks-v1.json
+      - tools/native_retirement_external_test.py
+      - tools/native_retirement_census.c
+      - tools/native_retirement_contract.py
+  workflow_dispatch:
+
+
+concurrency:
+  group: retirement-evidence-with-strict-v3-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # PRs validate GitHub's exact integration commit. A manual run validates the
+  # exact revision selected in the workflow-dispatch UI.
+  BUSTER_RETIREMENT_CANDIDATE: ${{ github.sha }}
+
+jobs:
+  census:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Frozen compiler pair and complete census
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out evidence validation scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
+          path: validation
+          persist-credentials: false
+      - name: Check out candidate implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
+          path: candidate
+          persist-credentials: false
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: candidate/external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: candidate/external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: candidate/external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: candidate/external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: candidate/external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: candidate/external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: candidate/external/musl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bootstrap candidate build driver
+        working-directory: candidate
+        run: |
+          test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"
+          python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)"
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer.py materialize \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)" \
+            --output "$(pwd)/evidence/dependency-materialized"
+          test -s evidence/dependency-materialized/dependencies.tsv
+          test -s evidence/dependency-materialized/dependency-manifest.json
+          printf 'candidate_commit=%s\ncandidate_tree=%s\n' \
+            "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')" > evidence-candidate.txt
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/candidate-build"
+      - name: Build candidate with hosted Clang exception
+        working-directory: candidate
+        run: |
+          "$RUNNER_TEMP/candidate-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/candidate-build" build --config Release -t ide
+      - name: Validate census harness
+        working-directory: candidate
+        run: '"$RUNNER_TEMP/candidate-build" native_retirement_census --self-test'
+      - name: Freeze manifest before execution
+        id: frozen_manifest
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --manifest-only --out evidence/manifest
+      - name: Execute complete assigned shard 0
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --shard-index 0 --shard-count 4
+          --resource-include "$(clang -print-resource-dir)/include"
+          --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
+          --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
+          --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
+          --out evidence/census-integrated-0
+      - name: Execute complete assigned shard 1
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --shard-index 1 --shard-count 4
+          --resource-include "$(clang -print-resource-dir)/include"
+          --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
+          --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
+          --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
+          --out evidence/census-integrated-1
+      - name: Execute complete assigned shard 2
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --shard-index 2 --shard-count 4
+          --resource-include "$(clang -print-resource-dir)/include"
+          --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
+          --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
+          --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
+          --out evidence/census-integrated-2
+      - name: Execute complete assigned shard 3
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          "$RUNNER_TEMP/candidate-build" native_retirement_census
+          --ide build/Release/ide
+          --compiler-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --baseline-ide build/Release/ide
+          --baseline-revision "$BUSTER_RETIREMENT_CANDIDATE"
+          --shard-index 3 --shard-count 4
+          --resource-include "$(clang -print-resource-dir)/include"
+          --project-include "$(pwd)/evidence/dependency-materialized/dependencies/project-include"
+          --dependency-manifest "$(pwd)/docs/native-retirement-dependencies-v1.json"
+          --dependency-receipt "$(pwd)/evidence/dependency-materialized/dependency-manifest.json"
+          --out evidence/census-integrated-3
+      - name: Compile independent controls for unsupported direct-reference operations
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: >-
+          python3 ../validation/tools/native_retirement_reference.py
+          evidence/census-integrated-0 evidence/census-integrated-1
+          evidence/census-integrated-2 evidence/census-integrated-3 --clang clang
+      - name: Independently validate every census shard and row
+        if: ${{ !cancelled() && steps.frozen_manifest.outcome == 'success' }}
+        working-directory: candidate
+        run: |
+          python3 ../validation/tools/native_retirement_contract.py validate-shards \
+            evidence/census-integrated-0 \
+            evidence/census-integrated-1 \
+            evidence/census-integrated-2 \
+            evidence/census-integrated-3 \
+            --out evidence/census-validation-v2.json \
+            --reference-supplements \
+            --require-clean-candidate \
+            --require-clean-acceptance
+      - name: Retain raw evidence and build recipes
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-retirement-${{ env.BUSTER_RETIREMENT_CANDIDATE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            candidate/evidence/
+            candidate/evidence-candidate.txt
+            candidate/build/CMakeCache.txt
+            candidate/build/compile_commands.json
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 6
+          # Preserve ledger-declared tracked dotfiles under evidence without
+          # uploading checkout/.git metadata or unrelated hidden files.
+          include-hidden-files: true
+
+  strict_differential:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Strict MIR differential (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64 native
+            runner: ubuntu-26.04
+            slug: linux-x86_64
+            platform: unix
+            python: python3
+            sanitizer: required
+            sanitizer_reason: available
+          - name: Linux AArch64 native
+            runner: ubuntu-26.04-arm
+            slug: linux-aarch64
+            platform: unix
+            python: python3
+            sanitizer: required
+            sanitizer_reason: available
+          - name: macOS x86-64 native
+            runner: macos-26-intel
+            slug: macos-x86_64
+            platform: unix
+            python: python3
+            sanitizer: required
+            sanitizer_reason: available
+          - name: macOS AArch64 native
+            runner: macos-26
+            slug: macos-aarch64
+            platform: unix
+            python: python3
+            sanitizer: required
+            sanitizer_reason: available
+          - name: Windows x86-64 native
+            runner: windows-2025
+            slug: windows-x86_64
+            platform: windows
+            python: python
+            vs_arch: amd64
+            vs_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+            clang_arch: x86_64
+            sanitizer: required
+            sanitizer_reason: available-after-resource-runtime-path
+          - name: Windows AArch64 native
+            runner: windows-11-arm
+            slug: windows-aarch64
+            platform: windows
+            python: python
+            vs_arch: arm64
+            vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
+            clang_arch: aarch64
+            sanitizer: not-run
+            sanitizer_reason: runner-llvm-package-omits-aarch64-asan-runtime
+    steps:
+      - name: Check out exact implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
+          persist-credentials: false
+      - name: Build and freeze hosted Clang compiler
+        id: strict_build_unix
+        if: ${{ matrix.platform == 'unix' }}
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/strict-build"
+          "$RUNNER_TEMP/strict-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/strict-build" build --config Release -t ide
+          mkdir -p evidence/strict-binary
+          cp build/Release/ide evidence/strict-binary/ide
+          chmod 555 evidence/strict-binary/ide
+          printf 'candidate_commit=%s\ncandidate_tree=%s\nrunner=%s\noracle_sanitizer=%s\noracle_sanitizer_reason=%s\n' \
+            "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')" "${{ matrix.runner }}" \
+            "${{ matrix.sanitizer }}" "${{ matrix.sanitizer_reason }}" \
+            > evidence/strict-binary/source.txt
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum evidence/strict-binary/ide > evidence/strict-binary/sha256.txt
+          else
+            shasum -a 256 evidence/strict-binary/ide > evidence/strict-binary/sha256.txt
+          fi
+          cp build/CMakeCache.txt build/compile_commands.json evidence/strict-binary/
+      - name: Validate differential harness
+        id: strict_self_test_unix
+        if: ${{ matrix.platform == 'unix' }}
+        shell: bash
+        run: '"$RUNNER_TEMP/strict-build" test_differential --self-test'
+      - name: Execute every strict configuration with sanitizer enabled
+        id: strict_execute_unix
+        if: ${{ matrix.platform == 'unix' }}
+        shell: bash
+        run: >-
+          "$RUNNER_TEMP/strict-build" test_differential
+          --ide "$PWD/evidence/strict-binary/ide" --cc clang
+          --strict-mir --sanitize-oracle --out evidence/strict-differential
+      - name: Build and execute strict Windows acceptance
+        id: strict_windows
+        if: ${{ matrix.platform == 'windows' }}
+        shell: powershell
+        env:
+          VS_ARCH: ${{ matrix.vs_arch }}
+          VS_COMPONENT: ${{ matrix.vs_component }}
+          CLANG_ARCH: ${{ matrix.clang_arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          $ClangVersion = (& clang --version) -join "`n"
+          Write-Output $ClangVersion
+          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") { throw "clang does not default to a ${env:CLANG_ARCH} target" }
+          $Commit = (git rev-parse HEAD).Trim()
+          if ($Commit -ne $env:BUSTER_RETIREMENT_CANDIDATE) { throw "candidate checkout identity mismatch" }
+          $Tree = (git rev-parse 'HEAD^{tree}').Trim()
+          $Driver = Join-Path $env:RUNNER_TEMP 'strict-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force -Path 'evidence\strict-binary' | Out-Null
+          Copy-Item 'build\Release\ide.exe' 'evidence\strict-binary\ide.exe'
+          @(
+            "candidate_commit=$Commit"
+            "candidate_tree=$Tree"
+            "runner=${{ matrix.runner }}"
+            "oracle_sanitizer=${{ matrix.sanitizer }}"
+            "oracle_sanitizer_reason=${{ matrix.sanitizer_reason }}"
+          ) |
+            Set-Content -Encoding ascii 'evidence\strict-binary\source.txt'
+          $Digest = (Get-FileHash -Algorithm SHA256 'evidence\strict-binary\ide.exe').Hash.ToLowerInvariant()
+          "$Digest  evidence/strict-binary/ide.exe" | Set-Content -Encoding ascii 'evidence\strict-binary\sha256.txt'
+          Copy-Item 'build\CMakeCache.txt', 'build\compile_commands.json' 'evidence\strict-binary\'
+          & $Driver test_differential --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
+          $DifferentialArgs = @(
+            'test_differential'
+            '--ide', "$PWD\evidence\strict-binary\ide.exe"
+            '--cc', 'clang.exe'
+            '--strict-mir'
+            '--out', 'evidence\strict-differential'
+          )
+          foreach ($LibraryPath in $LibraryPaths) {
+            $DifferentialArgs += @('--library-path', $LibraryPath)
+          }
+          if ('${{ matrix.sanitizer }}' -eq 'required') {
+            $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $RuntimeDlls = @(
+              Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-${{ matrix.clang_arch }}.dll' -File -Recurse |
+                Sort-Object FullName
+            )
+            if ($RuntimeDlls.Count -ne 1) {
+              throw "Expected exactly one matching Clang sanitizer runtime under ${ResourceDir}; found $($RuntimeDlls.Count)"
+            }
+            $RuntimeDll = $RuntimeDlls[0].FullName
+            $RuntimeDir = Split-Path -Parent $RuntimeDll
+            "oracle_sanitizer_runtime=$RuntimeDll" | Add-Content -Encoding ascii 'evidence\strict-binary\source.txt'
+            $env:PATH = "$RuntimeDir;$env:PATH"
+            $DifferentialArgs += '--sanitize-oracle'
+          }
+          & $Driver @DifferentialArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record strict outcome before packaging
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'strict_windows' || 'strict_build_unix strict_self_test_unix strict_execute_unix' }}
+          BUSTER_CI_RUNNER: ${{ matrix.runner }}
+          BUSTER_CI_REPRO: Check out ${{ env.BUSTER_RETIREMENT_CANDIDATE }} and run build.c test_differential with --strict-mir on an immutable Clang-built compiler on ${{ matrix.runner }}; oracle sanitizer status is ${{ matrix.sanitizer }} (${{ matrix.sanitizer_reason }}).
+        run: '"${{ matrix.python }}" tools/ci_summary.py'
+      - name: Bundle and verify full strict evidence
+        id: strict_bundle
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cp "$RUNNER_TEMP/buster-ci/result.json" "$RUNNER_TEMP/buster-ci/summary.md" evidence/
+          "${{ matrix.python }}" tools/ci_pack_evidence.py --source evidence --output "$RUNNER_TEMP/strict-upload"
+      - name: Retain strict evidence
+        if: ${{ !cancelled() && steps.strict_bundle.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: strict-retirement-${{ env.BUSTER_RETIREMENT_CANDIDATE }}-${{ matrix.slug }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/strict-upload/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Retain raw strict evidence after packaging failure
+        if: ${{ !cancelled() && steps.strict_bundle.outcome != 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: strict-retirement-${{ env.BUSTER_RETIREMENT_CANDIDATE }}-${{ matrix.slug }}-raw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
+
+  complete:
+    if: ${{ always() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Native retirement acceptance complete
+    runs-on: ubuntu-26.04
+    needs: [census, strict_differential]
+    env:
+      CENSUS_RESULT: ${{ needs.census.result }}
+      STRICT_RESULT: ${{ needs.strict_differential.result }}
+    steps:
+      - name: Require census and every native strict result
+        shell: bash
+        run: |
+          # Backticks delimit literal Markdown code in the summary.
+          # shellcheck disable=SC2016
+          printf '## Native retirement candidate `%s`\n\n' "$BUSTER_RETIREMENT_CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
+          printf '| Gate | Result |\n|---|---|\n| Census | %s |\n| Six-host strict native differential | %s |\n' \
+            "$CENSUS_RESULT" "$STRICT_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$CENSUS_RESULT" == success && "$STRICT_RESULT" == success ]]
