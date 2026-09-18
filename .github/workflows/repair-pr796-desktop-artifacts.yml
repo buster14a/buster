@@ -40,4 +40,6 @@ jobs:
           git add .github/workflows/ci.yml
           git rm .github/workflows/repair-pr796-desktop-artifacts.yml
           git commit -m 'fix(ci): sanitize desktop artifacts'
+          echo "REPAIR_COMMIT=$(git rev-parse HEAD)"
+          echo "REPAIR_TREE=$(git rev-parse HEAD^{tree})"
           git push origin HEAD:"${GITHUB_REF_NAME}"
