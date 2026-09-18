@@ -3762,6 +3762,43 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_abi_part_is_float(IrAbiClass abi_clas
     return abi_class == IR_ABI_CLASS_FLOAT || abi_class == IR_ABI_CLASS_VECTOR;
 }
 
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_type_is_ieee_binary16(IrType* type)
+{
+    return type && type->kind == IR_TYPE_FLOAT && type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE;
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_store_binary16_vector_low(CodegenBuffer* buffer, u32 vector_register, s64 displacement)
+{
+    String8 features[] = {S8("sse2")};
+    BusterX86MetadataFeatureInput feature_input = {.names = features, .count = BUSTER_ARRAY_LENGTH(features)};
+    BusterX86MetadataPhysicalOperand move_to_integer[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+        codegen_canonical_x64_metadata_vector(vector_register, 32),
+    };
+    BusterX86MetadataPhysicalOperand store_low[2] = {
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 16, displacement),
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 16),
+    };
+    return codegen_canonical_x64_metadata_emit_features(buffer, S8("MOVD"), move_to_integer, BUSTER_ARRAY_LENGTH(move_to_integer), feature_input) &&
+           codegen_canonical_x64_metadata_emit(buffer, S8("MOV"), store_low, BUSTER_ARRAY_LENGTH(store_low));
+}
+
+BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_load_binary16_vector_low(CodegenBuffer* buffer, u32 vector_register, s64 displacement)
+{
+    String8 features[] = {S8("sse2")};
+    BusterX86MetadataFeatureInput feature_input = {.names = features, .count = BUSTER_ARRAY_LENGTH(features)};
+    BusterX86MetadataPhysicalOperand load_low[2] = {
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, 16, displacement),
+    };
+    BusterX86MetadataPhysicalOperand move_to_vector[2] = {
+        codegen_canonical_x64_metadata_vector(vector_register, 32),
+        codegen_canonical_x64_metadata_gpr(X64_REGISTER_RAX, 32),
+    };
+    return codegen_canonical_x64_metadata_emit(buffer, S8("MOVZX"), load_low, BUSTER_ARRAY_LENGTH(load_low)) &&
+           codegen_canonical_x64_metadata_emit_features(buffer, S8("MOVD"), move_to_vector, BUSTER_ARRAY_LENGTH(move_to_vector), feature_input);
+}
+
 // Whether a Win64 argument rides the positional XMM register the way a scalar
 // float does. A single-lane float vector has the same shape as its element on
 // this convention (clang's de-facto ABI; see the Win64 vector branch of
@@ -3769,7 +3806,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_canonical_abi_part_is_float(IrAbiClass abi_clas
 // and function entries.
 BUSTER_GLOBAL_LOCAL bool codegen_canonical_x64_windows_float_argument(IrProgram* program, IrType* type, u16* bit_width)
 {
-    if (type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
+    if (type && type->kind == IR_TYPE_FLOAT &&
+        (codegen_canonical_type_is_ieee_binary16(type) || type->bit_width == 32 || type->bit_width == 64))
     {
         *bit_width = (u16)type->bit_width;
         return true;
@@ -12769,24 +12807,34 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_type && argument_type->kind == IR_TYPE_FLOAT)
                         {
-                            if (argument_type->bit_width != 32 && argument_type->bit_width != 64)
+                            bool binary16_argument = codegen_canonical_type_is_ieee_binary16(argument_type);
+                            if (!binary16_argument && argument_type->bit_width != 32 && argument_type->bit_width != 64)
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
                             }
                             if (float_register_index < 8)
                             {
-                                BusterX86MetadataPhysicalOperand float_store_operands[2] = {
-                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)argument_type->bit_width,
-                                                                          result_displacement),
-                                    codegen_canonical_x64_metadata_vector(float_register_index, (u16)argument_type->bit_width),
-                                };
-                                String8 float_features[] = {S8("sse"), S8("sse2")};
-                                if (!codegen_canonical_x64_metadata_emit_features(
+                                bool stored = false;
+                                if (binary16_argument)
+                                {
+                                    stored = codegen_canonical_x64_store_binary16_vector_low(&buffer, float_register_index, result_displacement);
+                                }
+                                else
+                                {
+                                    BusterX86MetadataPhysicalOperand float_store_operands[2] = {
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)argument_type->bit_width,
+                                                                              result_displacement),
+                                        codegen_canonical_x64_metadata_vector(float_register_index, (u16)argument_type->bit_width),
+                                    };
+                                    String8 float_features[] = {S8("sse"), S8("sse2")};
+                                    stored = codegen_canonical_x64_metadata_emit_features(
                                         &buffer, argument_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_store_operands,
                                         BUSTER_ARRAY_LENGTH(float_store_operands),
                                         (BusterX86MetadataFeatureInput){.names = float_features,
-                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)});
+                                }
+                                if (!stored)
                                 {
                                     result.error = buffer.error;
                                     return result;
@@ -12817,17 +12865,26 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (result.abi == CODEGEN_ABI_X86_64_WINDOWS && register_index < register_count &&
                             codegen_canonical_x64_windows_float_argument(program, argument_type, &windows_float_width))
                         {
-                            BusterX86MetadataPhysicalOperand float_store_operands[2] = {
-                                codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, windows_float_width,
-                                                                      result_displacement),
-                                codegen_canonical_x64_metadata_vector(register_index, windows_float_width),
-                            };
-                            String8 float_features[] = {S8("sse"), S8("sse2")};
-                            if (!codegen_canonical_x64_metadata_emit_features(
+                            bool stored = false;
+                            if (windows_float_width == 16)
+                            {
+                                stored = codegen_canonical_x64_store_binary16_vector_low(&buffer, register_index, result_displacement);
+                            }
+                            else
+                            {
+                                BusterX86MetadataPhysicalOperand float_store_operands[2] = {
+                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, windows_float_width,
+                                                                          result_displacement),
+                                    codegen_canonical_x64_metadata_vector(register_index, windows_float_width),
+                                };
+                                String8 float_features[] = {S8("sse"), S8("sse2")};
+                                stored = codegen_canonical_x64_metadata_emit_features(
                                     &buffer, windows_float_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_store_operands,
                                     BUSTER_ARRAY_LENGTH(float_store_operands),
                                     (BusterX86MetadataFeatureInput){.names = float_features,
-                                                                     .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                                                                     .count = BUSTER_ARRAY_LENGTH(float_features)});
+                            }
+                            if (!stored)
                             {
                                 result.error = buffer.error;
                                 return result;
@@ -16190,23 +16247,33 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             if (result.abi == CODEGEN_ABI_X86_64_SYSTEM_V && argument_type->kind == IR_TYPE_FLOAT)
                             {
                                 u8 float_register = call_argument->float_register;
-                                if (float_register >= 8 || (argument_type->bit_width != 32 && argument_type->bit_width != 64))
+                                bool binary16_argument = codegen_canonical_type_is_ieee_binary16(argument_type);
+                                if (float_register >= 8 || (!binary16_argument && argument_type->bit_width != 32 && argument_type->bit_width != 64))
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
-                                BusterX86MetadataPhysicalOperand float_load_operands[2] = {
-                                    codegen_canonical_x64_metadata_vector(float_register, (u16)argument_type->bit_width),
-                                    codegen_canonical_x64_metadata_memory(
-                                        X64_REGISTER_RBP, (u16)argument_type->bit_width,
-                                        c_x64_frame_displacement(&emitter, value_offsets[argument.value])),
-                                };
-                                String8 float_features[] = {S8("sse"), S8("sse2")};
-                                if (!codegen_canonical_x64_metadata_emit_features(
+                                s32 argument_displacement = c_x64_frame_displacement(&emitter, value_offsets[argument.value]);
+                                bool loaded = false;
+                                if (binary16_argument)
+                                {
+                                    loaded = codegen_canonical_x64_load_binary16_vector_low(&buffer, float_register, argument_displacement);
+                                }
+                                else
+                                {
+                                    BusterX86MetadataPhysicalOperand float_load_operands[2] = {
+                                        codegen_canonical_x64_metadata_vector(float_register, (u16)argument_type->bit_width),
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)argument_type->bit_width,
+                                                                              argument_displacement),
+                                    };
+                                    String8 float_features[] = {S8("sse"), S8("sse2")};
+                                    loaded = codegen_canonical_x64_metadata_emit_features(
                                         &buffer, argument_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_load_operands,
                                         BUSTER_ARRAY_LENGTH(float_load_operands),
                                         (BusterX86MetadataFeatureInput){.names = float_features,
-                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)});
+                                }
+                                if (!loaded)
                                 {
                                     result.error = buffer.error;
                                     return result;
@@ -16287,18 +16354,26 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
-                                BusterX86MetadataPhysicalOperand float_load_operands[2] = {
-                                    codegen_canonical_x64_metadata_vector(register_index, windows_float_width),
-                                    codegen_canonical_x64_metadata_memory(
-                                        X64_REGISTER_RBP, windows_float_width,
-                                        c_x64_frame_displacement(&emitter, value_offsets[argument.value])),
-                                };
-                                String8 float_features[] = {S8("sse"), S8("sse2")};
-                                if (!codegen_canonical_x64_metadata_emit_features(
+                                s32 argument_displacement = c_x64_frame_displacement(&emitter, value_offsets[argument.value]);
+                                bool loaded = false;
+                                if (windows_float_width == 16)
+                                {
+                                    loaded = codegen_canonical_x64_load_binary16_vector_low(&buffer, register_index, argument_displacement);
+                                }
+                                else
+                                {
+                                    BusterX86MetadataPhysicalOperand float_load_operands[2] = {
+                                        codegen_canonical_x64_metadata_vector(register_index, windows_float_width),
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, windows_float_width, argument_displacement),
+                                    };
+                                    String8 float_features[] = {S8("sse"), S8("sse2")};
+                                    loaded = codegen_canonical_x64_metadata_emit_features(
                                         &buffer, windows_float_width == 32 ? S8("MOVSS") : S8("MOVSD"), float_load_operands,
                                         BUSTER_ARRAY_LENGTH(float_load_operands),
                                         (BusterX86MetadataFeatureInput){.names = float_features,
-                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)});
+                                }
+                                if (!loaded)
                                 {
                                     result.error = buffer.error;
                                     return result;
@@ -16558,22 +16633,32 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             IrType* return_type = call_return_type;
                             if (return_type && return_type->kind == IR_TYPE_FLOAT)
                             {
-                                if (return_type->bit_width != 32 && return_type->bit_width != 64)
+                                bool binary16_return = codegen_canonical_type_is_ieee_binary16(return_type);
+                                if (!binary16_return && return_type->bit_width != 32 && return_type->bit_width != 64)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
-                                BusterX86MetadataPhysicalOperand return_float_store_operands[2] = {
-                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)return_type->bit_width,
-                                                                          result_displacement),
-                                    codegen_canonical_x64_metadata_vector(0, (u16)return_type->bit_width),
-                                };
-                                String8 return_float_features[] = {S8("sse"), S8("sse2")};
-                                if (!codegen_canonical_x64_metadata_emit_features(
+                                bool stored = false;
+                                if (binary16_return)
+                                {
+                                    stored = codegen_canonical_x64_store_binary16_vector_low(&buffer, 0, result_displacement);
+                                }
+                                else
+                                {
+                                    BusterX86MetadataPhysicalOperand return_float_store_operands[2] = {
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, (u16)return_type->bit_width,
+                                                                              result_displacement),
+                                        codegen_canonical_x64_metadata_vector(0, (u16)return_type->bit_width),
+                                    };
+                                    String8 return_float_features[] = {S8("sse"), S8("sse2")};
+                                    stored = codegen_canonical_x64_metadata_emit_features(
                                         &buffer, return_type->bit_width == 32 ? S8("MOVSS") : S8("MOVSD"), return_float_store_operands,
                                         BUSTER_ARRAY_LENGTH(return_float_store_operands),
                                         (BusterX86MetadataFeatureInput){.names = return_float_features,
-                                                                         .count = BUSTER_ARRAY_LENGTH(return_float_features)}))
+                                                                         .count = BUSTER_ARRAY_LENGTH(return_float_features)});
+                                }
+                                if (!stored)
                                 {
                                     result.error = buffer.error;
                                     return result;
@@ -19228,22 +19313,33 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             if (return_type && return_type->kind == IR_TYPE_FLOAT)
                             {
-                                if (return_type->bit_width != 32 && return_type->bit_width != 64)
+                                bool binary16_return = codegen_canonical_type_is_ieee_binary16(return_type);
+                                if (!binary16_return && return_type->bit_width != 32 && return_type->bit_width != 64)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
                                 }
-                                u16 float_width = (u16)return_type->bit_width;
-                                BusterX86MetadataPhysicalOperand float_load_operands[2] = {
-                                    codegen_canonical_x64_metadata_vector(0, float_width),
-                                    codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, float_width,
-                                                                            c_x64_frame_displacement(&emitter, value_offsets[return_value.value])),
-                                };
-                                String8 float_features[] = {return_type->bit_width == 32 ? S8("sse") : S8("sse2")};
-                                if (!codegen_canonical_x64_metadata_emit_features(
+                                s32 return_displacement = c_x64_frame_displacement(&emitter, value_offsets[return_value.value]);
+                                bool loaded = false;
+                                if (binary16_return)
+                                {
+                                    loaded = codegen_canonical_x64_load_binary16_vector_low(&buffer, 0, return_displacement);
+                                }
+                                else
+                                {
+                                    u16 float_width = (u16)return_type->bit_width;
+                                    BusterX86MetadataPhysicalOperand float_load_operands[2] = {
+                                        codegen_canonical_x64_metadata_vector(0, float_width),
+                                        codegen_canonical_x64_metadata_memory(X64_REGISTER_RBP, float_width, return_displacement),
+                                    };
+                                    String8 float_features[] = {return_type->bit_width == 32 ? S8("sse") : S8("sse2")};
+                                    loaded = codegen_canonical_x64_metadata_emit_features(
                                         &buffer, return_type->bit_width == 32 ? S8("MOVSS") : S8("MOVQ"), float_load_operands,
                                         BUSTER_ARRAY_LENGTH(float_load_operands),
-                                        (BusterX86MetadataFeatureInput){.names = float_features, .count = BUSTER_ARRAY_LENGTH(float_features)}))
+                                        (BusterX86MetadataFeatureInput){.names = float_features,
+                                                                         .count = BUSTER_ARRAY_LENGTH(float_features)});
+                                }
+                                if (!loaded)
                                 {
                                     result.error = buffer.error;
                                     return result;
@@ -19438,14 +19534,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (argument_type->kind == IR_TYPE_FLOAT && !aarch64_windows_variadic)
                         {
-                            if (argument_type->bit_width != 32 && argument_type->bit_width != 64)
+                            if (!codegen_canonical_type_is_ieee_binary16(argument_type) && argument_type->bit_width != 32 && argument_type->bit_width != 64)
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
                             }
                             if (float_register_index < 8)
                             {
-                                u32 scale = argument_type->bit_width == 32 ? 4 : 8;
+                                u32 scale = argument_type->bit_width / 8;
                                 if (!codegen_canonical_a64_frame_float_memory_operation(&buffer, float_register_index, result_offset, scale, true))
                                 {
                                     result.error = CODEGEN_ERROR_CAPACITY;
@@ -21087,7 +21183,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             if (argument_type->kind == IR_TYPE_FLOAT && !windows_variadic_call)
                             {
                                 u8 float_register = argument_float_register[argument_index - 1];
-                                if (float_register >= 8 || (argument_type->bit_width != 32 && argument_type->bit_width != 64))
+                                if (float_register >= 8 ||
+                                    (!codegen_canonical_type_is_ieee_binary16(argument_type) && argument_type->bit_width != 32 && argument_type->bit_width != 64))
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
@@ -21183,7 +21280,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             if (return_type && return_type->kind == IR_TYPE_FLOAT)
                             {
-                                if (return_type->bit_width != 32 && return_type->bit_width != 64)
+                                if (!codegen_canonical_type_is_ieee_binary16(return_type) && return_type->bit_width != 32 && return_type->bit_width != 64)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
@@ -22276,7 +22373,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else if (return_type && return_type->kind == IR_TYPE_FLOAT)
                             {
-                                if (return_type->bit_width != 32 && return_type->bit_width != 64)
+                                if (!codegen_canonical_type_is_ieee_binary16(return_type) && return_type->bit_width != 32 && return_type->bit_width != 64)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;

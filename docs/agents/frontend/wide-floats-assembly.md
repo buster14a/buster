@@ -33,17 +33,22 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   through that pair; the byte strings in `c_test_float16_type` were taken
   from clang 18 compiling the same spellings.
 
-  **Code generation does not implement binary16 yet.** No backend has its
-  arithmetic, its conversions, or its ABI position, so a function that needs
-  a half value at run time is refused by the existing structured codegen
-  diagnostic (`codegen.unsupported-abi`, `codegen.unsupported-instruction`)
-  rather than emitted. What does reach an object today is everything the
-  frontend settles on its own: layout, `sizeof`/`_Alignof`, type
-  compatibility, folded constants and static initializers. That is enough for
-  the LLVM FP16 resource headers, whose `static __inline__` intrinsic bodies
-  are analyzed and then dropped unused. Lifting the restriction is
-  backend-owned work: binary16 loads/stores, f16↔f32 conversion, and the SSE
-  or NEON argument class.
+  **Native code generation implements the binary16 runtime vocabulary.**
+  Scalar arguments and results use the ABI's real floating position: the low
+  sixteen bits of an XMM register on System V and Win64 x86-64, and the H/V
+  register position on AArch64. The direct emitter and the MIR value-shape
+  tables agree on that classification, so `none`, `mir-stack`, `fast` and
+  `quality` compile the same signatures without machine fallback. Baseline
+  targets need no F16C or AVX512-FP16 feature. Lowering widens each half through
+  `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
+  through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Comparisons and
+  truth conversion widen exactly, negation flips the binary16 sign bit without
+  quieting a NaN, and vector arithmetic/comparisons scalarize through the same
+  per-lane operations. Hosted links therefore need the compiler-runtime/libgcc
+  builtins, just as complex multiply/divide links do. The Wasm, eBPF and LLVM
+  bitcode backends retain their own structured ABI/instruction checks; this is
+  a native x86-64/AArch64 contract, not a claim that those formats gained a
+  binary16 ABI.
 - **`__bf16` has a distinct bfloat16 representation.** Its own
   `C_TYPE_BFLOAT16`, `TargetDataLayout.bfloat16_type` (two naturally aligned
   bytes), and `IrType.float_format` discriminating `IR_FLOAT_FORMAT_BFLOAT16`
@@ -51,9 +56,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   identity conversion between the two formats is invalid. Scalar constants
   round once from the binary64 carrier through
   `c_ir_bfloat16_bits_from_f64`, and integer-to-bfloat16 conversion uses
-  precision 8. No backend implements 16-bit float runtime operations, so a
-  `__bf16` value needed at run time is refused by the structured codegen
-  diagnostic, as binary16 is. Mixed `_Float16`/`__bf16` arithmetic selects
+  precision 8. No backend implements bfloat16 runtime operations, so a
+  `__bf16` value needed at run time is still refused by the structured codegen
+  diagnostic; unlike binary16, it has no compiler-runtime lowering. Mixed
+  `_Float16`/`__bf16` arithmetic selects
   `_Float16`: bfloat16 carries the lower conversion rank
   (`c_ir_float_conversion_rank` ranks it below binary16 despite equal storage
   width), so the usual arithmetic conversions convert `__bf16` to `_Float16`

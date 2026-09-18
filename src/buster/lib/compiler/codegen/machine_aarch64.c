@@ -274,7 +274,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_64_bit(IrProgram* program, IrTypeId
 // permits for every float passing site.
 BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_float_scalar(IrType* type)
 {
-    return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64);
+    return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT &&
+           ((type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE) || type->bit_width == 32 || type->bit_width == 64);
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId type_id, Target target, IrAbiUse use, MachineA64ValueShape* shape)
