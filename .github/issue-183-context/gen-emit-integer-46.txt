@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 46/111
+line: 18201
+
+018131:         CIrCallEmissionTask task = tasks[--task_count];
+018132:         CIrPreparedCall* call = builder->prepared_calls + task.call_index;
+018133:         if (task.finish)
+018134:         {
+018135:             emission_order[emission_count++] = task.call_index;
+018136:             continue;
+018137:         }
+018138:         tasks[task_count++] = (CIrCallEmissionTask){
+018139:             .call_index = task.call_index,
+018140:             .finish = true,
+018141:         };
+018142:         for (u32 child = call->last_child_index; child != UINT32_MAX; child = builder->prepared_calls[child].previous_sibling_index)
+018143:         {
+018144:             tasks[task_count++] = (CIrCallEmissionTask){
+018145:                 .call_index = child,
+018146:             };
+018147:         }
+018148:     }
+018149:     BUSTER_CHECK(emission_count == remaining);
+018150:     *emission_order_out = emission_order;
+018151:     *emission_count_out = emission_count;
+018152:     return true;
+018153: }
+018154: 
+018155: // The one vector type the 512-bit vocabulary speaks in: 64 bytes of u8. Every
+018156: // builtin that returns a vector returns this, and `Simd512` in
+018157: // <buster/lib/simd.h> is declared to match, so no conversion ever appears at a
+018158: // call site. The layout matches what the `vector_size` attribute produces for
+018159: // the same spelling, so the two are the same IR type and not two that happen to
+018160: // agree.
+018161: // __builtin_popcount is one instruction where the target has POPCNT and the
+018162: // classic SWAR sequence where it does not, decided here rather than in the
+018163: // backends: an IR expansion is the same handful of ordinary instructions every
+018164: // backend already emits, and it keeps AArch64 from needing a NEON round trip
+018165: // for a scalar operation the compiler itself barely uses.
+018166: BUSTER_C_INTERNAL IrValueId c_ir_emit_population_count(CIntegerIrBuilder* builder, IrValueId operand, IrTypeId type, CToken token, IrSourceRange source)
+018167: {
+018168:     IrType* integer = ir_type_from_id(&builder->program->types, type);
+018169:     if (!integer || integer->kind != IR_TYPE_INTEGER)
+018170:     {
+018171:         return IR_VALUE_ID_INVALID;
+018172:     }
+018173:     if (target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_POPCNT))
+018174:     {
+018175:         IrValueId result = c_ir_add_result(builder, type);
+018176:         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, type);
+018177:         instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+018178:         instruction.operands[0] = operand;
+018179:         instruction.operand_count = 1;
+018180:         instruction.unary_operation = IR_UNARY_INTEGER_POPULATION_COUNT;
+018181:         instruction.result = result;
+018182:         builder->function->values[result.value].definition = c_ir_append_instruction(builder, instruction, source);
+018183:         return result;
+018184:     }
+018185:     // The classic SWAR sequence: subtract the odd bits to make two-bit sums,
+018186:     // add the pairs into four-bit sums, fold to bytes, then let one multiply
+018187:     // gather every byte sum into the top byte.
+018188:     u32 width = integer->bit_width;
+018189:     u64 mask = width >= 64 ? UINT64_MAX : (((u64)1 << width) - 1);
+018190:     IrValueId one = c_ir_emit_integer_value_typed(builder, 1, false, token, type);
+018191:     IrValueId odd_bits = c_ir_emit_integer_value_typed(builder, UINT64_C(0x5555555555555555) & mask, false, token, type);
+018192:     IrValueId shifted = c_ir_emit_binary_value(builder, operand, one, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+018193:     IrValueId high = c_ir_emit_binary_value(builder, shifted, odd_bits, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+018194:     IrValueId value = c_ir_emit_binary_value(builder, operand, high, type, IR_BINARY_INTEGER_SUBTRACT, source);
+018195:     IrValueId two = c_ir_emit_integer_value_typed(builder, 2, false, token, type);
+018196:     IrValueId pair_bits = c_ir_emit_integer_value_typed(builder, UINT64_C(0x3333333333333333) & mask, false, token, type);
+018197:     shifted = c_ir_emit_binary_value(builder, value, two, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+018198:     high = c_ir_emit_binary_value(builder, shifted, pair_bits, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+018199:     IrValueId low = c_ir_emit_binary_value(builder, value, pair_bits, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+018200:     value = c_ir_emit_binary_value(builder, low, high, type, IR_BINARY_INTEGER_ADD, source);
+018201:     IrValueId four = c_ir_emit_integer_value_typed(builder, 4, false, token, type);
+018202:     IrValueId nibble_mask = c_ir_emit_integer_value_typed(builder, UINT64_C(0x0f0f0f0f0f0f0f0f) & mask, false, token, type);
+018203:     shifted = c_ir_emit_binary_value(builder, value, four, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+018204:     IrValueId summed = c_ir_emit_binary_value(builder, value, shifted, type, IR_BINARY_INTEGER_ADD, source);
+018205:     value = c_ir_emit_binary_value(builder, summed, nibble_mask, type, IR_BINARY_INTEGER_BITWISE_AND, source);
+018206:     IrValueId ones = c_ir_emit_integer_value_typed(builder, UINT64_C(0x0101010101010101) & mask, false, token, type);
+018207:     IrValueId gathered = c_ir_emit_binary_value(builder, value, ones, type, IR_BINARY_INTEGER_MULTIPLY, source);
+018208:     IrValueId top = c_ir_emit_integer_value_typed(builder, width - 8, false, token, type);
+018209:     return c_ir_emit_binary_value(builder, gathered, top, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+018210: }
+018211: 
+018212: BUSTER_C_INTERNAL IrTypeId c_ir_simd_vector_type(CIntegerIrBuilder* builder)
+018213: {
+018214:     IrTypeId element = builder->scalar_types[C_TYPE_UNSIGNED_CHAR];
+018215:     IrType* element_type = ir_type_from_id(&builder->program->types, element);
+018216:     if (!element_type || element_type->kind != IR_TYPE_INTEGER || element_type->bit_width != 8)
+018217:     {
+018218:         return IR_TYPE_ID_INVALID;
+018219:     }
+018220:     for (u32 type_index = 0; type_index < builder->program->types.count; type_index += 1)
+018221:     {
+018222:         IrType* candidate = builder->program->types.types + type_index;
+018223:         if (candidate->kind == IR_TYPE_VECTOR && candidate->element_type.value == element.value && candidate->element_count == 64 &&
+018224:             candidate->layout.size == 64)
+018225:         {
+018226:             return candidate->id;
+018227:         }
+018228:     }
+018229:     return ir_program_add_type(builder->program, (IrType){
+018230:                                                      .name = S8("GNU vector"),
+018231:                                                      .element_type = element,
+018232:                                                      .return_type = IR_TYPE_ID_INVALID,
+018233:                                                      .layout =
+018234:                                                          {
+018235:                                                              .size = 64,
+018236:                                                              .alignment = 64,
+018237:                                                              .resolved = true,
+018238:                                                          },
+018239:                                                      .kind = IR_TYPE_VECTOR,
+018240:                                                      .element_count = 64,
+018241:                                                      .bit_width = 512,
+018242:                                                  });
+018243: }
+018244: 
+018245: BUSTER_C_INTERNAL IrTypeId c_ir_simd_result_type(CIntegerIrBuilder* builder, IrSimdOperation operation)
+018246: {
+018247:     IrSimdShape shape = ir_simd_operation_shape(operation);
+018248:     IrTypeId result = IR_TYPE_ID_INVALID;
+018249:     if (shape.semantic_class == IR_VECTOR_SEMANTICS_EXACT_X86_512)
+018250:     {
+018251:         result = !shape.has_result ? builder->void_type : shape.predicate_result ? builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG] :
+018252:                  c_ir_simd_vector_type(builder);
+018253:     }
+018254:     return result;
+018255: }
+018256: 
+018257: // Arguments get exactly the conversions C would already have applied at a call
+018258: // with this prototype: arrays decay, integers convert. A vector argument is
+018259: // checked and never converted — a silent lane reinterpretation is the one
+018260: // thing an explicit SIMD kernel must not get.
+018261: BUSTER_C_INTERNAL IrValueId c_ir_simd_coerce_argument(CIntegerIrBuilder* builder, IrValueId value, CIrSimdArgument kind, IrSourceRange source)
+018262: {
+018263:     if (value.value < builder->function->value_count)
+018264:     {
+018265:         IrTypeId type_id = builder->function->values[value.value].canonical_type;
+018266:         IrType* type = ir_type_from_id(&builder->program->types, type_id);
+018267:         if (type)
+018268:         {
+018269:             switch (kind)
+018270:             {
+018271:             case C_IR_SIMD_ARGUMENT_ADDRESS:
+018272:             {
+018273:                 if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+018274:                 {
+018275:                     IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type->element_type);
+018276:                     value = c_ir_decay_array(builder, value, pointer_type, source);
+018277:                     type = value.value < builder->function->value_count ? ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type) : 0;
+018278:                 }
+018279:                 return type && type->kind == IR_TYPE_POINTER ? value : IR_VALUE_ID_INVALID;
+018280:             }
+018281:             case C_IR_SIMD_ARGUMENT_MASK:
+018282:                 return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
+018283:                            ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_LONG_LONG], source)
+018284:                            : IR_VALUE_ID_INVALID;
+018285:             case C_IR_SIMD_ARGUMENT_BYTE:
+018286:                 return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
+018287:                            ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_CHAR], source)
+018288:                            : IR_VALUE_ID_INVALID;
+018289:             case C_IR_SIMD_ARGUMENT_WORD:
+018290:                 return type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM
+018291:                            ? c_ir_emit_cast(builder, value, builder->scalar_types[C_TYPE_UNSIGNED_INT], source)
+018292:                            : IR_VALUE_ID_INVALID;
+018293:             case C_IR_SIMD_ARGUMENT_VECTOR:
+018294:                 return type->kind == IR_TYPE_VECTOR && type->layout.resolved && type->layout.size == 64 ? value : IR_VALUE_ID_INVALID;
+018295:             case C_IR_SIMD_ARGUMENT_IMMEDIATE:
+018296:                 break;
+018297:             }
+018298:         }
+018299:     }
+018300: 
+018301:     return IR_VALUE_ID_INVALID;
+018302: }
+018303: 
+018304: // A call whose parentheses hold a lazily evaluated operand had the calls in
+018305: // that operand left unprepared (c_ir_prepare_calls_discover), so the child
+018306: // expression about to be lowered has to prepare them itself, inside whichever
+018307: // block ends up running. That only happens with preparation off; the enclosing
+018308: // pass resumes owning it when the child finishes.
+018309: BUSTER_C_INTERNAL void c_ir_prepared_call_suspend_preparation(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+018310: {
+018311:     frame->as.prepared_call.state->previous_preparing_calls = builder->preparing_calls;
+018312:     if (builder->prepared_calls[frame->as.prepared_call.call_index].deferred_calls)
+018313:     {
+018314:         builder->preparing_calls = false;
+018315:     }
+018316: }
+018317: 
+018318: BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+018319:                                                                                     CIrPreparedCallContinuation continuation, u32 start, u32 end,
+018320:                                                                                     bool va_list_operand)
+018321: {
+018322:     frame->as.prepared_call.state->continuation = (u32)continuation;
+018323:     frame->stage = C_IR_LOWER_STAGE_CHILD;
+018324:     c_ir_prepared_call_suspend_preparation(builder, frame);
+018325:     if (va_list_operand)
+018326:     {
+018327:         frame->as.prepared_call.state->previous_va_list_operand = builder->va_list_builtin_operand;
+018328:         builder->va_list_builtin_operand = true;
+018329:     }
+018330:     if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+018331:                                             .kind = C_IR_LOWER_FRAME_EXPRESSION,

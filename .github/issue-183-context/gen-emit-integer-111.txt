@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 111/111
+line: 38363
+
+038293:                                           .as.assignment_statement = statement_state,
+038294:                                       });
+038295:                 state->task_count = task_count;
+038296:                 return false;
+038297:             }
+038298:         }
+038299:         if (split)
+038300:         {
+038301:             continue;
+038302:         }
+038303:         IrBlock* block = &builder->function->blocks[builder->current_block.value];
+038304:         if (block->terminated)
+038305:         {
+038306:             continue;
+038307:         }
+038308:         CScopeId cleanup_scope = C_SCOPE_ID_INVALID;
+038309:         u32 cleanup_token = UINT32_MAX;
+038310:         bool cleanup_state = c_ir_has_cleanup_state(builder);
+038311:         if (cleanup_state && task.continuation.value != IR_ID_UNDERLYING_INVALID)
+038312:         {
+038313:             if (!c_ir_cleanup_target_for_task(builder, task, tasks, task_count, task.continuation, &cleanup_scope, &cleanup_token))
+038314:             {
+038315:                 return false;
+038316:             }
+038317:         }
+038318:         else if (cleanup_state && statement_expression_mode)
+038319:         {
+038320:             CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+038321:                                                                                             : C_SCOPE_ID_INVALID;
+038322:             cleanup_token = task.end;
+038323:             cleanup_scope = c_parse_scope_for_token(&builder->parse, root, cleanup_token);
+038324:         }
+038325:         if (cleanup_state && !c_ir_emit_cleanup_calls(builder, tasks, task_count, cleanup_scope, cleanup_token, declaration_source))
+038326:         {
+038327:             return false;
+038328:         }
+038329:         block = &builder->function->blocks[builder->current_block.value];
+038330:         if (task.restore_before_continuation && task.has_stack_checkpoint && !c_ir_emit_stack_restore(builder, task.stack_checkpoint, declaration_source))
+038331:         {
+038332:             return false;
+038333:         }
+038334:         if (task.continuation.value != IR_ID_UNDERLYING_INVALID)
+038335:         {
+038336:             if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.continuation, 1, declaration_source))
+038337:             {
+038338:                 return false;
+038339:             }
+038340:         }
+038341:         else if (statement_expression_mode)
+038342:         {
+038343:             // This is the end of the nested GNU statement expression, not
+038344:             // the end of its enclosing function.  The enclosing function's
+038345:             // return type is irrelevant here: glibc assert expands to a
+038346:             // statement expression, and in a void function successful
+038347:             // assertions must continue with the following statement.
+038348:             return true;
+038349:         }
+038350:         else if (builder->returns_void)
+038351:         {
+038352:             if (!c_ir_terminate(builder, IR_OPCODE_RETURN, 0, 0, 0, 0, declaration_source))
+038353:             {
+038354:                 return false;
+038355:             }
+038356:         }
+038357:         else if (builder->returns_zero_at_end)
+038358:         {
+038359:             // C 5.1.2.2.3 gives `main` alone a defined fall-off: reaching the
+038360:             // closing brace returns 0. It is one function per program, so the
+038361:             // flag is decided once with the signature rather than by matching
+038362:             // a name here.
+038363:             IrValueId zero = c_ir_emit_integer_value_at(builder, 0, false, declaration_source, builder->return_type);
+038364:             if (zero.value == IR_ID_UNDERLYING_INVALID || !c_ir_terminate(builder, IR_OPCODE_RETURN, &zero, 1, 0, 0, declaration_source))
+038365:             {
+038366:                 return false;
+038367:             }
+038368:         }
+038369:         else
+038370:         {
+038371:             // Only the root body task has no continuation, so this is the end
+038372:             // of a non-void function's body. Reaching the closing brace is
+038373:             // undefined only if the caller uses the value (C 6.9.1p12), so
+038374:             // this is not a refusal: terminate with unreachable, which is what
+038375:             // Clang and GCC emit. sbase's dc ends `regname` with a call to its
+038376:             // own non-noreturn error(), and the bc its tests drive is
+038377:             // yacc-generated with the same shape.
+038378:             IrSourceRange unreachable_source = declaration_source;
+038379:             IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
+038380:             c_ir_append_instruction(builder, unreachable, unreachable_source);
+038381:             block->terminated = true;
+038382:         }
+038383:     }
+038384:     return true;
+038385: }
+038386: 
+038387: BUSTER_C_INTERNAL void c_ir_lower_body_step(CIntegerIrBuilder* builder)
+038388: {
+038389:     CIrLowerMachine* machine = &builder->lower_machine;
+038390:     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+038391:     CIrLowerFrame* frame = machine->frames + machine->frame_count - 1;
+038392:     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_BODY && frame->as.body.state);
+038393:     CIrLowerBodyState* state = frame->as.body.state;
+038394:     bool stepping = true;
+038395:     while (stepping)
+038396:     {
+038397:         bool success = c_ir_lower_body_advance(builder, state);
+038398:         if (!state->yielded)
+038399:         {
+038400:             c_ir_lower_frame_finish(builder, success, state->result);
+038401:             stepping = false;
+038402:         }
+038403:         else if (machine->failed)
+038404:         {
+038405:             stepping = false;
+038406:         }
+038407:         else
+038408:         {
+038409:             // Run the yielded child now, off the dispatch loop, when its kind
+038410:             // is in the acyclic direct-run set; a completion loops the
+038411:             // statement walk here without a dispatch round trip, and a
+038412:             // suspension resumes through the loop unchanged.
+038413:             u32 yield_mark = machine->frame_count - 1;
+038414:             switch (machine->frames[yield_mark].kind)
+038415:             {
+038416:                 case C_IR_LOWER_FRAME_EXPRESSION:
+038417:                     c_ir_lower_expression_step(builder);
+038418:                     break;
+038419:                 case C_IR_LOWER_FRAME_BODY_ASSIGNMENT_STATEMENT:
+038420:                     c_ir_lower_assignment_statement_step(builder);
+038421:                     break;
+038422:                 case C_IR_LOWER_FRAME_CONDITION:
+038423:                     c_ir_lower_condition_step(builder);
+038424:                     break;
+038425:                 case C_IR_LOWER_FRAME_COMPOUND_LITERAL:
+038426:                     c_ir_lower_compound_literal_step(builder, machine->frames + yield_mark);
+038427:                     break;
+038428:                 default:
+038429:                     break;
+038430:             }
+038431:             stepping = machine->frame_count == yield_mark && !machine->failed;
+038432:         }
+038433:     }
+038434: }
+038435: 
+038436: BUSTER_C_INTERNAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode,
+038437:                                          IrValueId* statement_expression_result)
+038438: {
+038439:     TemporalArena temporary = arena_begin_temporal(builder->temporary_arena);
+038440:     CIrLowerMachine* machine = &builder->lower_machine;
+038441:     bool outermost = machine->run_depth == 0;
+038442:     if (outermost)
+038443:     {
+038444:         machine->root_frame_mark = machine->frame_count;
+038445:         machine->scratch_mark = builder->scratch_arena->position;
+038446:         machine->child_result = (CIrLowerFrameResult){
+038447:             .value = IR_VALUE_ID_INVALID,
+038448:         };
+038449:         machine->failed = false;
+038450:     }
+038451:     u32 request_mark = machine->frame_count;
+038452:     bool pushed = c_ir_lower_body_frame_push(builder, declaration, statement_expression_mode);
+038453:     CIrLowerFrameResult lowered = {0};
+038454:     if (pushed)
+038455:     {
+038456:         lowered = c_ir_lower_dispatch_run(builder, request_mark, outermost);
+038457:     }
+038458:     else if (outermost)
+038459:     {
+038460:         c_ir_lower_machine_unwind(builder);
+038461:     }
+038462:     scratch_end(temporary);
+038463:     if (statement_expression_result)
+038464:     {
+038465:         *statement_expression_result = lowered.value;
+038466:     }
+038467:     return lowered.success;
+038468: }
+038469: 
+038470: BUSTER_C_INTERNAL bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out)
+038471: {
+038472:     // A declarator split out of a comma-separated list owns only its own
+038473:     // segment; scanning the whole declaration would hand it the initializer of
+038474:     // an earlier declarator.
+038475:     u32 start = declaration.declarator_count ? declaration.declarator_start : declaration.token_start;
+038476:     u32 end = declaration.declarator_count ? declaration.declarator_start + declaration.declarator_count
+038477:                                            : declaration.token_start + declaration.token_count;
+038478:     u32 depth = 0;
+038479:     for (u32 index = start; index < end; index += 1)
+038480:     {
+038481:         CToken token = preprocess.tokens[index];
+038482:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+038483:             c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+038484:         {
+038485:             depth += 1;
+038486:             continue;
+038487:         }
+038488:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+038489:             c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+038490:         {
+038491:             if (depth)
+038492:             {
+038493:                 depth -= 1;

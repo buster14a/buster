@@ -1,0 +1,286 @@
+path: src/buster/lib/compiler/frontend/c/c_parse.c
+needle: C_ENTITY_ENUMERATOR
+occurrence: 5/6
+line: 13947
+
+013827:                                S8("GNU __auto_type requires an automatic object declaration"));
+013828:             return false;
+013829:         }
+013830:         if (auto_info.conflicting_specifier)
+013831:         {
+013832:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+013833:                                S8("GNU __auto_type cannot be combined with another type specifier"));
+013834:             return false;
+013835:         }
+013836:         if (auto_info.invalid_declarator || auto_info.name_index >= end)
+013837:         {
+013838:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+013839:                                S8("GNU __auto_type requires a plain identifier as declarator"));
+013840:             return false;
+013841:         }
+013842:         if (!auto_info.has_initializer || auto_info.initializer_start >= auto_info.initializer_end)
+013843:         {
+013844:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+013845:                                S8("GNU __auto_type requires an initialized data declaration"));
+013846:             return false;
+013847:         }
+013848:         u32 diagnostic_checkpoint = result->diagnostic_count;
+013849:         c_parse_bind_auto_initializer_identifiers(arena, result, preprocess, scope, auto_info.initializer_start, auto_info.initializer_end);
+013850:         CTypeId inferred = C_TYPE_ID_INVALID;
+013851:         if (!c_parse_auto_initializer_type(machine, arena, preprocess, result, scope, auto_info.initializer_start, auto_info.initializer_end, &inferred))
+013852:         {
+013853:             if (result->diagnostic_count == diagnostic_checkpoint)
+013854:             {
+013855:                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+013856:                                    S8("could not infer the type of the GNU __auto_type initializer"));
+013857:             }
+013858:             return false;
+013859:         }
+013860:         if (auto_info.qualifiers.is_restrict && inferred.value < result->type_count && result->types[inferred.value].kind != C_TYPE_POINTER)
+013861:         {
+013862:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[auto_info.auto_index]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+013863:                                S8("restrict-qualified GNU __auto_type must infer a pointer type"));
+013864:             return false;
+013865:         }
+013866:         if (auto_info.qualifiers.is_const || auto_info.qualifiers.is_volatile || auto_info.qualifiers.is_restrict || auto_info.qualifiers.is_atomic)
+013867:         {
+013868:             inferred = c_parse_add_qualified_type(result, inferred, auto_info.qualifiers);
+013869:         }
+013870:         auto_type = inferred;
+013871:     }
+013872:     if (is_thread_local && !is_static_storage && !is_extern)
+013873:     {
+013874:         u32 token_index = start;
+013875:         while (token_index < end && !(preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
+013876:                                       c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[token_index], C_PARSE_THREAD_LOCAL_KEYWORDS)))
+013877:         {
+013878:             token_index += 1;
+013879:         }
+013880:         c_parse_diagnostic(result, token_index < end ? c_preprocess_token_location(&preprocess, preprocess.tokens[token_index]) : c_preprocess_token_location(&preprocess, preprocess.tokens[start]),
+013881:                            C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+013882:                            S8("block-scope thread-local declarations require static or extern"));
+013883:         return false;
+013884:     }
+013885:     u32 enum_member_start = result->enum_member_count;
+013886:     u32 declarator_start = start;
+013887:     CTypeId base = is_auto_type ? C_TYPE_ID_INVALID : c_parse_scalar_type_in_scope(machine, result, preprocess, scope, start, end, &declarator_start);
+013888:     if (is_auto_type)
+013889:     {
+013890:         declarator_start = auto_info.name_index;
+013891:     }
+013892:     // A tag definition's suffix attribute list --
+013893:     // `struct S { ... } __attribute__((__packed__));` at block scope, which
+013894:     // is how clang's own xmmintrin.h wraps its unaligned-load structs inside
+013895:     // every _mm_loadh_pi-shaped intrinsic -- sits past the closing brace, so
+013896:     // the specifier parse above stops before it.  Left in place, the
+013897:     // declarator walk below would read `__attribute__` as the declarator
+013898:     // name and its parenthesized list as a function suffix.  The aggregate
+013899:     // parser already read the list's layout facts off the definition, and
+013900:     // the declaration-level scans read (start, declarator_start), so moving
+013901:     // declarator_start past the list keeps those scans' range intact for an
+013902:     // `aligned` that must reach every declarator.
+013903:     declarator_start = c_parse_skip_attributes(preprocess, declarator_start, end);
+013904:     if (base.value == C_ID_UNDERLYING_INVALID)
+013905:     {
+013906:         if (!is_auto_type)
+013907:         {
+013908:             return false;
+013909:         }
+013910:     }
+013911:     u32 alignment_start = 0;
+013912:     u32 alignment_count = 0;
+013913:     if (!c_parse_alignment_specifiers(machine, result, preprocess, start, declarator_start, &alignment_start, &alignment_count))
+013914:     {
+013915:         return false;
+013916:     }
+013917:     if (alignment_count && is_register)
+013918:     {
+013919:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+013920:                            S8("alignment specifier cannot be applied to a register object"));
+013921:         alignment_count = 0;
+013922:     }
+013923:     // A block-scope typedef splits the run the file-scope path does: the
+013924:     // `_Alignas` records are the ones C forbids on a typedef, and the GNU
+013925:     // `aligned` ones stay for the type every declarator of the list names.
+013926:     else if (alignment_count && is_typedef && c_parse_typedef_alignment_run(result, preprocess, alignment_start, &alignment_count))
+013927:     {
+013928:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+013929:                            S8("alignment specifier cannot be applied to a typedef"));
+013930:     }
+013931:     CCleanupAttributeInfo declaration_cleanup = {0};
+013932:     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
+013933:     for (u32 member_index = enum_member_start; member_index < result->enum_member_count; member_index += 1)
+013934:     {
+013935:         CEnumMember* member = &result->enum_members[member_index];
+013936:         CEntityId entity = {
+013937:             .value = result->entity_count,
+013938:         };
+013939:         BUSTER_VALIDATE(result->entity_count < result->entity_capacity);
+013940:         result->entities[result->entity_count++] = (CEntity){
+013941:             .name = member->name,
+013942:             .location = member->location,
+013943:             .type = base,
+013944:             .scope = scope,
+013945:             .next_in_scope = C_ENTITY_ID_INVALID,
+013946:             .declaration_index = declaration_index,
+013947:             .kind = C_ENTITY_ENUMERATOR,
+013948:             .is_definition = true,
+013949:             .constant_is_negative = member->is_negative,
+013950:             .constant_value = member->value,
+013951:         };
+013952:         c_parse_scope_add_entity(result, scope, entity, member->symbol);
+013953:     }
+013954:     u32 segment_start = declarator_start;
+013955:     while (segment_start < end)
+013956:     {
+013957:         u32 segment_end = segment_start;
+013958:         u32 depth = 0;
+013959:         for (; segment_end < end; segment_end += 1)
+013960:         {
+013961:             CToken token = preprocess.tokens[segment_end];
+013962:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+013963:                 c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+013964:             {
+013965:                 depth += 1;
+013966:             }
+013967:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+013968:                      c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+013969:             {
+013970:                 if (depth)
+013971:                 {
+013972:                     depth -= 1;
+013973:                 }
+013974:             }
+013975:             else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+013976:             {
+013977:                 break;
+013978:             }
+013979:         }
+013980:         u32 suffix_end = segment_end;
+013981:         u32 suffix_depth = 0;
+013982:         for (u32 suffix_index = segment_start; suffix_index < segment_end; suffix_index += 1)
+013983:         {
+013984:             CToken token = preprocess.tokens[suffix_index];
+013985:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+013986:             {
+013987:                 suffix_depth += 1;
+013988:             }
+013989:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+013990:             {
+013991:                 if (suffix_depth)
+013992:                 {
+013993:                     suffix_depth -= 1;
+013994:                 }
+013995:             }
+013996:             else if (!suffix_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+013997:             {
+013998:                 suffix_end = suffix_index;
+013999:                 break;
+014000:             }
+014001:         }
+014002:         // A GNU `aligned` attribute may follow the declarator rather than the
+014003:         // specifiers (`char scratch[64] __attribute__((aligned(8)));`). The
+014004:         // records it appends have to end up in one contiguous run with the
+014005:         // specifier-level ones, which the shared declaration-level scan
+014006:         // appended before this loop and before any other declarator's, so the
+014007:         // specifier records are copied in behind these when both exist. The
+014008:         // aggregate is a maximum, so the order inside the run does not matter.
+014009:         u32 segment_alignment_start = 0;
+014010:         u32 segment_alignment_count = 0;
+014011:         c_parse_layout_attributes(result, preprocess, segment_start, suffix_end, 0, &segment_alignment_start, &segment_alignment_count);
+014012:         for (u32 copy_index = 0; segment_alignment_count && copy_index < alignment_count; copy_index += 1)
+014013:         {
+014014:             if (result->alignment_count >= result->alignment_capacity)
+014015:             {
+014016:                 break;
+014017:             }
+014018:             result->alignments[result->alignment_count++] = result->alignments[alignment_start + copy_index];
+014019:             segment_alignment_count += 1;
+014020:         }
+014021:         CCleanupAttributeInfo cleanup = declaration_cleanup;
+014022:         CCleanupAttributeInfo segment_cleanup = {0};
+014023:         c_parse_cleanup_attribute_scan(preprocess, segment_start, suffix_end, true, &segment_cleanup);
+014024:         if (segment_cleanup.count)
+014025:         {
+014026:             if (!cleanup.count)
+014027:             {
+014028:                 cleanup = segment_cleanup;
+014029:             }
+014030:             else
+014031:             {
+014032:                 cleanup.count += segment_cleanup.count;
+014033:                 cleanup.malformed = true;
+014034:                 cleanup.last_end = segment_cleanup.last_end;
+014035:             }
+014036:         }
+014037:         // The specifiers are walked once, before this loop, so the attribute
+014038:         // skip that follows them covers the first declarator alone.  A
+014039:         // declarator after a comma may carry a list of its own --
+014040:         // `int a = 1, __attribute__((aligned(8))) b = 2;` -- and reading that
+014041:         // list as the declarator fails the whole declaration.  The layout scan
+014042:         // above already read it, and its range is this segment's, so the
+014043:         // attribute lands on the declarator that wrote it.  Only a segment
+014044:         // that did not start the list pays the scan; the first one begins
+014045:         // exactly where the specifier walk left off, past its own list.
+014046:         u32 index = segment_start == declarator_start ? segment_start : c_parse_skip_attributes(preprocess, segment_start, suffix_end);
+014047:         u32 derived_start = result->type_count;
+014048:         CTypeId type = is_auto_type ? auto_type : c_parse_pointer_chain(result, preprocess, base, &index, suffix_end);
+014049:         CToken name = {0};
+014050:         u32 name_index = UINT32_MAX;
+014051:         bool parenthesized = !is_auto_type && index < suffix_end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS);
+014052:         if (parenthesized)
+014053:         {
+014054:             u32 close = index + 1;
+014055:             u32 parenthesis_depth = 1;
+014056:             while (close < suffix_end && parenthesis_depth)
+014057:             {
+014058:                 if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+014059:                 {
+014060:                     parenthesis_depth += 1;
+014061:                 }
+014062:                 else if (c_token_is_punctuator(&preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+014063:                 {
+014064:                     parenthesis_depth -= 1;
+014065:                     if (!parenthesis_depth)
+014066:                     {
+014067:                         break;
+014068:                     }
+014069:                 }
+014070:                 close += 1;
+014071:             }
+014072:             u32 parenthesized_name = 0;
+014073:             if (parenthesis_depth || close <= index + 1)
+014074:             {
+014075:                 return false;
+014076:             }
+014077:             // The parenthesized frame requires the declarator to end exactly
+014078:             // at the range it is given and knows nothing about a trailing
+014079:             // attribute list, so the child is handed the range trimmed of one
+014080:             // (`void (*fp)(int) __attribute__((aligned(64))) = 0;`).  The
+014081:             // segment's layout scan above already read the list off the
+014082:             // untrimmed range, and `index` still resumes at suffix_end below,
+014083:             // so the trimmed tokens need no second pass.  The trim stays
+014084:             // inside suffix_end, itself bounded by the top-level comma, so a
+014085:             // sibling declarator's own list is never taken for this one's.
+014086:             u32 group_end = c_parse_trailing_attribute_start(preprocess, index, suffix_end);
+014087:             if (c_parse_parenthesized_declarator_name(preprocess, index, group_end, &parenthesized_name))
+014088:             {
+014089:                 // The name may be a group deeper than this one:
+014090:                 // `void (*(*x)(void *, const char *))(void)` declares a
+014091:                 // pointer to a function returning a function pointer, which is
+014092:                 // how SQLite's Unix VFS holds dlsym.
+014093:                 name_index = parenthesized_name;
+014094:             }
+014095:             else if (preprocess.tokens[close - 1].kind == C_TOKEN_IDENTIFIER)
+014096:             {
+014097:                 name_index = close - 1;
+014098:             }
+014099:             else
+014100:             {
+014101:                 return false;
+014102:             }
+014103:             name = preprocess.tokens[name_index];
+014104:             type = c_parse_parenthesized_declaration_type(machine, result, preprocess, type, index, name_index, group_end, true);
+014105:             index = suffix_end;
+014106:         }
+014107:         else

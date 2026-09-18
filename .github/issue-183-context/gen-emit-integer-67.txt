@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 67/111
+line: 19808
+
+019738:                 instruction.result = result;
+019739:                 IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+019740:                 builder->function->values[result.value].definition = id;
+019741:             }
+019742:             selected->result = result;
+019743:             selected->argument_count = 1;
+019744:             selected->emitted = true;
+019745:             remaining -= 1;
+019746:             continue;
+019747:         }
+019748:         if (selected->builtin_strlen)
+019749:         {
+019750:             u32 argument_start = selected->open_index + 1;
+019751:             u32 argument_end = selected->close_index;
+019752:             while (argument_start < argument_end && c_token_is_punctuator(&builder->preprocess.tokens[argument_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+019753:                    c_ir_matching_delimiter_cached(builder, argument_start, argument_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
+019754:                        argument_end - 1)
+019755:             {
+019756:                 argument_start += 1;
+019757:                 argument_end -= 1;
+019758:             }
+019759:             u64 length = 0;
+019760:             bool valid = false;
+019761:             if (argument_start < argument_end && builder->preprocess.tokens[argument_start].kind == C_TOKEN_STRING_LITERAL)
+019762:             {
+019763:                 CIrDecodedString decoded = {0};
+019764:                 valid =
+019765:                     c_ir_tokens_are_string_literals(builder->preprocess, argument_start, argument_end) &&
+019766:                     c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, argument_start, argument_end, &decoded) &&
+019767:                     decoded.element_width == 1;
+019768:                 length = decoded.element_count;
+019769:             }
+019770:             else if (argument_end == argument_start + 1 && builder->preprocess.tokens[argument_start].kind == C_TOKEN_IDENTIFIER &&
+019771:                      (string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__func__")) ||
+019772:                       string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__FUNCTION__")) ||
+019773:                       string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__PRETTY_FUNCTION__"))))
+019774:             {
+019775:                 length = builder->function->name.length;
+019776:                 valid = true;
+019777:             }
+019778:             if (!valid)
+019779:             {
+019780:                 IrValueId argument = IR_VALUE_ID_INVALID;
+019781:                 u32 declaration_index = c_ir_find_function(builder, S8("strlen"));
+019782:                 if (argument_start >= argument_end)
+019783:                 {
+019784:                     return false;
+019785:                 }
+019786:                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_STRLEN)
+019787:                 {
+019788:                     if (!child_success)
+019789:                     {
+019790:                         return C_IR_PREPARED_CALL_STEP_FAILED;
+019791:                     }
+019792:                     argument = child_value;
+019793:                 }
+019794:                 else
+019795:                 {
+019796:                     return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_STRLEN, argument_start, argument_end, false);
+019797:                 }
+019798:                 selected->result = c_ir_emit_call_values(builder, token, declaration_index, &argument, 1);
+019799:                 if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+019800:                 {
+019801:                     return false;
+019802:                 }
+019803:                 selected->argument_count = 1;
+019804:                 selected->emitted = true;
+019805:                 remaining -= 1;
+019806:                 continue;
+019807:             }
+019808:             selected->result = c_ir_emit_integer_value_typed(builder, length, false, token, builder->size_type);
+019809:             selected->argument_count = 1;
+019810:             selected->emitted = true;
+019811:             remaining -= 1;
+019812:             continue;
+019813:         }
+019814:         // `__builtin_alloca(n)` is the same stack allocation a variable-length
+019815:         // array makes, minus the array: the storage lives until the function
+019816:         // returns, so nothing releases it at the end of the enclosing block.
+019817:         if (selected->builtin_alloca)
+019818:         {
+019819:             u32 size_start = selected->open_index + 1;
+019820:             u32 size_end = selected->close_index;
+019821:             IrValueId size = IR_VALUE_ID_INVALID;
+019822:             if (size_start >= size_end)
+019823:             {
+019824:                 return false;
+019825:             }
+019826:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ALLOCA)
+019827:             {
+019828:                 if (!child_success)
+019829:                 {
+019830:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+019831:                 }
+019832:                 size = child_value;
+019833:             }
+019834:             else
+019835:             {
+019836:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ALLOCA, size_start, size_end, false);
+019837:             }
+019838:             size = c_ir_emit_cast(builder, size, builder->size_type, c_ir_token_source_range(builder, token));
+019839:             IrTypeId storage_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+019840:             IrValueId storage = storage_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_add_result(builder, storage_type) : IR_VALUE_ID_INVALID;
+019841:             if (size.value == IR_ID_UNDERLYING_INVALID || storage.value == IR_ID_UNDERLYING_INVALID)
+019842:             {
+019843:                 return false;
+019844:             }
+019845:             IrSourceRange allocation_source = c_ir_token_source_range(builder, token);
+019846:             IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, storage_type);
+019847:             allocation.operands = arena_allocate(builder->arena, IrValueId, 1);
+019848:             allocation.operands[0] = size;
+019849:             allocation.operand_count = 1;
+019850:             allocation.immediates = arena_allocate(builder->arena, u64, 1);
+019851:             // GNU promises alloca storage suitably aligned for any object.
+019852:             allocation.immediates[0] = 16;
+019853:             allocation.immediate_count = 1;
+019854:             allocation.result = storage;
+019855:             builder->function->values[storage.value].definition = c_ir_append_instruction(builder, allocation, allocation_source);
+019856:             selected->result = storage;
+019857:             selected->argument_count = 1;
+019858:             selected->emitted = true;
+019859:             remaining -= 1;
+019860:             continue;
+019861:         }
+019862:         // `__builtin_complex(re, im)` composes a complex value out of two
+019863:         // real parts. Both arguments have to be lowered before the value can
+019864:         // be built, so the real half is stashed on the frame across the second
+019865:         // request the way __builtin___clear_cache stashes its address.
+019866:         if (selected->builtin_complex)
+019867:         {
+019868:             u32 starts[2] = {0};
+019869:             u32 ends[2] = {0};
+019870:             u32 argument_count = 0;
+019871:             if (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) || argument_count != 2)
+019872:             {
+019873:                 builder->failure_message = S8("__builtin_complex takes two real floating-point arguments");
+019874:                 builder->failure_token_index = selected->token_index;
+019875:                 return false;
+019876:             }
+019877:             IrValueId real_part = IR_VALUE_ID_INVALID;
+019878:             IrValueId imaginary_part = IR_VALUE_ID_INVALID;
+019879:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_IMAGINARY)
+019880:             {
+019881:                 if (!child_success)
+019882:                 {
+019883:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+019884:                 }
+019885:                 real_part = frame->as.prepared_call.state->first;
+019886:                 imaginary_part = child_value;
+019887:             }
+019888:             else if (continuation == C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_REAL)
+019889:             {
+019890:                 if (!child_success)
+019891:                 {
+019892:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+019893:                 }
+019894:                 frame->as.prepared_call.state->first = child_value;
+019895:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_IMAGINARY, starts[1], ends[1], false);
+019896:             }
+019897:             else
+019898:             {
+019899:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_REAL, starts[0], ends[0], false);
+019900:             }
+019901:             if (real_part.value >= builder->function->value_count || imaginary_part.value >= builder->function->value_count)
+019902:             {
+019903:                 return false;
+019904:             }
+019905:             IrSourceRange complex_source = c_ir_token_source_range(builder, token);
+019906:             IrTypeId element = c_ir_usual_arithmetic_type(builder, builder->function->values[real_part.value].canonical_type,
+019907:                                                           builder->function->values[imaginary_part.value].canonical_type);
+019908:             IrType* element_type = ir_type_from_id(&builder->program->types, element);
+019909:             IrTypeId complex_type = element_type && element_type->kind == IR_TYPE_FLOAT ? c_ir_complex_type_for_element(builder, element) : IR_TYPE_ID_INVALID;
+019910:             if (complex_type.value == IR_ID_UNDERLYING_INVALID)
+019911:             {
+019912:                 builder->failure_message = S8("__builtin_complex takes two real floating-point arguments");
+019913:                 builder->failure_token_index = selected->token_index;
+019914:                 return false;
+019915:             }
+019916:             real_part = c_ir_emit_cast(builder, real_part, element, complex_source);
+019917:             imaginary_part = c_ir_emit_cast(builder, imaginary_part, element, complex_source);
+019918:             if (real_part.value == IR_ID_UNDERLYING_INVALID || imaginary_part.value == IR_ID_UNDERLYING_INVALID)
+019919:             {
+019920:                 return false;
+019921:             }
+019922:             selected->result = c_ir_complex_compose(builder, complex_type, real_part, imaginary_part, complex_source);
+019923:             if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+019924:             {
+019925:                 return false;
+019926:             }
+019927:             selected->argument_count = argument_count;
+019928:             selected->emitted = true;
+019929:             remaining -= 1;
+019930:             continue;
+019931:         }
+019932:         // `__builtin_frame_address(0)` answers the current frame's stack
+019933:         // pointer. That is an address inside the frame rather than the frame
+019934:         // base GCC documents, which is what its callers actually use it for:
+019935:         // QuickJS compares one against another to measure recursion depth.
+019936:         // A non-zero level asks for a caller's frame, which needs a frame
+019937:         // pointer chain this backend does not promise, so it is refused
+019938:         // instead of answered approximately.

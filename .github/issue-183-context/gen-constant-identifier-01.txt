@@ -1,0 +1,246 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_constant_identifier
+occurrence: 1/5
+line: 41684
+
+041604:         result->value_field = current_field;
+041605:         result->value_offset = current_offset;
+041606:         result->value_start = cursor + 1;
+041607:         result->selected = selected;
+041608:         result->selected_end = selected_end;
+041609:         result->has_designator = true;
+041610:         return true;
+041611:     }
+041612:     IrType* type = ir_type_from_id(&builder->program->types, frame->type);
+041613:     if (!type || selected >= c_ir_constant_initializer_slot_count(builder, type))
+041614:     {
+041615:         return c_ir_constant_initializer_fail(builder, S8("initializer has more elements than the aggregate can hold"), frame->cursor);
+041616:     }
+041617:     // The positional element: one projection row answers the member's type,
+041618:     // offset and field; an array element is the element type at `selected`
+041619:     // and needs no row.
+041620:     bool array_like = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR;
+041621:     CIrInitializerSlot slot = {0};
+041622:     bool slot_found = array_like || c_ir_constant_initializer_member_slot(builder, type, selected, &slot);
+041623:     IrTypeId child_type = array_like ? type->element_type : slot_found ? slot.type : IR_TYPE_ID_INVALID;
+041624:     IrType* child = ir_type_from_id(&builder->program->types, child_type);
+041625:     if (!child)
+041626:     {
+041627:         return c_ir_constant_initializer_fail(builder, S8("could not resolve the aggregate initializer element type"), frame->cursor);
+041628:     }
+041629:     u64 child_offset = array_like ? selected : slot_found ? slot.offset : UINT64_MAX;
+041630:     if (child_offset == UINT64_MAX || (array_like && child->layout.size && child_offset > UINT64_MAX / child->layout.size))
+041631:     {
+041632:         return c_ir_constant_initializer_fail(builder, S8("aggregate initializer offset overflows the target object"), frame->cursor);
+041633:     }
+041634:     u64 scaled_offset = array_like ? child_offset * child->layout.size : child_offset;
+041635:     if (scaled_offset > UINT64_MAX - frame->offset)
+041636:     {
+041637:         return c_ir_constant_initializer_fail(builder, S8("aggregate initializer offset overflows the target object"), frame->cursor);
+041638:     }
+041639:     result->value_type = child_type;
+041640:     result->value_field = array_like ? 0 : type->fields + slot.field_index;
+041641:     result->value_offset = frame->offset + scaled_offset;
+041642:     result->value_start = frame->cursor;
+041643:     result->selected = selected;
+041644:     result->selected_end = selected;
+041645:     result->ranges = range_work;
+041646:     result->range_count = 0;
+041647:     result->has_designator = false;
+041648:     return true;
+041649: }
+041650: 
+041651: BUSTER_C_INTERNAL bool c_ir_constant_initializer_bytes(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId root_type, u8* bytes, u64 byte_count,
+041652:                                                          IrGlobalRelocation* relocations, u32* relocation_count, u32 relocation_capacity);
+041653: 
+041654: // The scalar leaves of an aggregate initializer, classified before they are
+041655: // folded.  Almost every leaf of a large table is one number -- the generated
+041656: // instruction metadata is arrays of small integer records -- and the general
+041657: // folder (c_ir_constant_initializer_bytes_legacy) prices each at a task
+041658: // array, a compound-literal probe, a query frame, the shunting-yard
+041659: // evaluator, a cast and a byte loop.  A leaf whose tokens are exactly a
+041660: // number, a signed number, a character constant or an identifier naming an
+041661: // integer constant, landing in an integer, boolean, enum or float member
+041662: // that is not a bit-field, is folded here
+041663: // instead: the same literal routines and typing rules the evaluator uses
+041664: // (c_ir_integer_literal_type, c_ir_float_literal_value,
+041665: // c_ir_decode_character_value), the evaluator's unary `+`/`-`
+041666: // (c_ir_constant_apply_unary) and its cast (c_ir_constant_cast), then one
+041667: // little-endian store of the member's size.  The class is one byte decided
+041668: // from the token kinds and the member's kind alone; an arm that cannot
+041669: // reproduce the evaluator's answer -- a literal no type holds, a 128-bit
+041670: // operand, an imaginary suffix -- declines, and the leaf takes the general
+041671: // folder, so every refusal and its message stay exactly what they were.
+041672: // A big-endian target keeps the byte loop: only the little-endian store is
+041673: // written here.
+041674: typedef enum CIrInitializerLeafClass
+041675: {
+041676:     C_IR_INITIALIZER_LEAF_OTHER,
+041677:     C_IR_INITIALIZER_LEAF_INTEGER_TO_INTEGER,
+041678:     C_IR_INITIALIZER_LEAF_INTEGER_TO_FLOAT,
+041679:     C_IR_INITIALIZER_LEAF_FLOAT_TO_FLOAT,
+041680:     C_IR_INITIALIZER_LEAF_CHARACTER_TO_INTEGER,
+041681:     C_IR_INITIALIZER_LEAF_IDENTIFIER_TO_INTEGER,
+041682: } CIrInitializerLeafClass;
+041683: 
+041684: BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 token_index, CIrConstantValue* result);
+041685: 
+041686: BUSTER_C_INTERNAL u8 c_ir_constant_initializer_leaf_class(CIntegerIrBuilder* builder, IrType* child, u32 start, u32 end)
+041687: {
+041688:     u8 leaf_class = C_IR_INITIALIZER_LEAF_OTHER;
+041689:     CToken* tokens = builder->preprocess.tokens;
+041690:     u32 count = end - start;
+041691:     bool signed_prefix =
+041692:         count == 2 && (c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_MINUS));
+041693:     if ((count == 1 || signed_prefix) && builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE)
+041694:     {
+041695:         CToken literal = tokens[end - 1];
+041696:         u64 size = child->layout.size;
+041697:         // The sizes one u64 of bits fills: a wider member takes the general
+041698:         // evaluator and the two-limb byte writer.
+041699:         bool integer_child = (child->kind == IR_TYPE_INTEGER || child->kind == IR_TYPE_BOOLEAN || child->kind == IR_TYPE_ENUM) &&
+041700:                              (size == 1 || size == 2 || size == 4 || size == 8);
+041701:         // binary16, f32 and f64: the x87 element has its own folder ahead of
+041702:         // the general one, and any other width is stored through the general
+041703:         // folder's own conversion.
+041704:         bool float_child = child->kind == IR_TYPE_FLOAT && ((child->bit_width == 16 && size == 2) || (child->bit_width == 32 && size == 4) ||
+041705:                                                             (child->bit_width == 64 && size == 8));
+041706:         if (literal.kind == C_TOKEN_PREPROCESSING_NUMBER)
+041707:         {
+041708:             bool floating = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, literal));
+041709:             if (integer_child && !floating)
+041710:             {
+041711:                 leaf_class = C_IR_INITIALIZER_LEAF_INTEGER_TO_INTEGER;
+041712:             }
+041713:             else if (float_child)
+041714:             {
+041715:                 leaf_class = floating ? C_IR_INITIALIZER_LEAF_FLOAT_TO_FLOAT : C_IR_INITIALIZER_LEAF_INTEGER_TO_FLOAT;
+041716:             }
+041717:         }
+041718:         else if (literal.kind == C_TOKEN_CHARACTER_LITERAL && integer_child)
+041719:         {
+041720:             leaf_class = C_IR_INITIALIZER_LEAF_CHARACTER_TO_INTEGER;
+041721:         }
+041722:         else if (literal.kind == C_TOKEN_IDENTIFIER && integer_child)
+041723:         {
+041724:             leaf_class = C_IR_INITIALIZER_LEAF_IDENTIFIER_TO_INTEGER;
+041725:         }
+041726:     }
+041727:     return leaf_class;
+041728: }
+041729: 
+041730: // `size` bytes of `bits`, least significant first: what
+041731: // c_ir_constant_store_unit_bits writes for a little-endian target and a
+041732: // member no wider than the bits.  Spelled per size so the stores merge.
+041733: BUSTER_C_INTERNAL void c_ir_constant_store_little_endian(u8* bytes, u64 size, u64 bits)
+041734: {
+041735:     switch (size)
+041736:     {
+041737:     case 1:
+041738:         bytes[0] = (u8)bits;
+041739:         break;
+041740:     case 2:
+041741:         bytes[0] = (u8)bits;
+041742:         bytes[1] = (u8)(bits >> 8);
+041743:         break;
+041744:     case 4:
+041745:         bytes[0] = (u8)bits;
+041746:         bytes[1] = (u8)(bits >> 8);
+041747:         bytes[2] = (u8)(bits >> 16);
+041748:         bytes[3] = (u8)(bits >> 24);
+041749:         break;
+041750:     case 8:
+041751:         bytes[0] = (u8)bits;
+041752:         bytes[1] = (u8)(bits >> 8);
+041753:         bytes[2] = (u8)(bits >> 16);
+041754:         bytes[3] = (u8)(bits >> 24);
+041755:         bytes[4] = (u8)(bits >> 32);
+041756:         bytes[5] = (u8)(bits >> 40);
+041757:         bytes[6] = (u8)(bits >> 48);
+041758:         bytes[7] = (u8)(bits >> 56);
+041759:         break;
+041760:     default:
+041761:         BUSTER_TODO();
+041762:     }
+041763: }
+041764: 
+041765: // The evaluator's unary `+`/`-` on an integer constant of `*type`
+041766: // (c_ir_constant_apply_unary): a boolean or narrow operand is promoted to
+041767: // int first -- no literal type is that narrow, but the rule is kept so the
+041768: // arm and the evaluator cannot disagree -- and the result is masked to the
+041769: // operand's width.  False for the 128-bit operand, whose wide negate stays
+041770: // with the evaluator.
+041771: BUSTER_C_INTERNAL bool c_ir_constant_initializer_leaf_unary(CIntegerIrBuilder* builder, IrType** type, u64* integer, bool negative)
+041772: {
+041773:     IrType* operand = *type;
+041774:     if (operand->kind == IR_TYPE_BOOLEAN || (operand->kind == IR_TYPE_INTEGER && operand->bit_width < 32))
+041775:     {
+041776:         operand = ir_type_from_id(&builder->program->types, builder->s32_type);
+041777:     }
+041778:     bool applied = operand && !(operand->kind == IR_TYPE_INTEGER && operand->bit_width == 128);
+041779:     if (applied)
+041780:     {
+041781:         u64 value = negative ? 0 - *integer : *integer;
+041782:         *integer = value & c_ir_integer_type_mask(operand);
+041783:         *type = operand;
+041784:     }
+041785:     return applied;
+041786: }
+041787: 
+041788: // An integer constant of `literal_type` stored into the integer member
+041789: // `child`: c_ir_constant_cast replays a signed source's sign bit before the
+041790: // target mask. A boolean tests nonzero before that narrowing.
+041791: BUSTER_C_INTERNAL void c_ir_constant_initializer_store_integer_leaf(IrType* child, IrType* literal_type, u64 integer, u8* bytes)
+041792: {
+041793:     u64 value = literal_type->is_signed ? (u64)c_ir_integer_signed_value(integer, literal_type) : integer;
+041794:     u64 converted = child->kind == IR_TYPE_BOOLEAN ? value != 0 : value & c_ir_integer_type_mask(child);
+041795:     c_ir_constant_store_little_endian(bytes, child->layout.size, converted);
+041796: }
+041797: 
+041798: // A floating value stored into the binary16, f32 or f64 member `child`: the
+041799: // cast rounds at the member's own precision (c_ir_constant_cast), and the
+041800: // folder writes that value's bits.
+041801: BUSTER_C_INTERNAL void c_ir_constant_initializer_store_float_leaf(IrType* child, f64 floating, u8* bytes)
+041802: {
+041803:     u64 bits = 0;
+041804:     if (child->bit_width == 16)
+041805:     {
+041806:         bits = child->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_bits_from_f64(floating) : c_ir_float16_bits_from_f64(floating);
+041807:     }
+041808:     else if (child->bit_width == 32)
+041809:     {
+041810:         f32 narrowed = (f32)(f64)(f32)floating;
+041811:         u32 narrowed_bits = 0;
+041812:         memcpy(&narrowed_bits, &narrowed, sizeof(narrowed_bits));
+041813:         bits = narrowed_bits;
+041814:     }
+041815:     else
+041816:     {
+041817:         memcpy(&bits, &floating, sizeof(bits));
+041818:     }
+041819:     c_ir_constant_store_little_endian(bytes, child->layout.size, bits);
+041820: }
+041821: 
+041822: // The INTEGER_TO_INTEGER and INTEGER_TO_FLOAT arms: an integer literal,
+041823: // typed by c_ir_integer_literal_type exactly as the evaluator types it.
+041824: BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_integer_leaf(CIntegerIrBuilder* builder, u8 leaf_class, IrType* child, u32 start, u32 end,
+041825:                                                                     u8* bytes)
+041826: {
+041827:     CToken* tokens = builder->preprocess.tokens;
+041828:     bool signed_prefix = end - start == 2;
+041829:     bool negative = signed_prefix && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_MINUS);
+041830:     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, tokens[end - 1]);
+041831:     u64 integer = 0;
+041832:     bool folded = c_conditional_number(spelling, &integer);
+041833:     IrType* literal_type = folded ? ir_type_from_id(&builder->program->types, c_ir_integer_literal_type(builder, spelling, integer)) : 0;
+041834:     folded = literal_type != 0;
+041835:     if (folded && signed_prefix)
+041836:     {
+041837:         folded = c_ir_constant_initializer_leaf_unary(builder, &literal_type, &integer, negative);
+041838:     }
+041839:     if (folded)
+041840:     {
+041841:         if (leaf_class == C_IR_INITIALIZER_LEAF_INTEGER_TO_INTEGER)
+041842:         {
+041843:             c_ir_constant_initializer_store_integer_leaf(child, literal_type, integer, bytes);
+041844:         }

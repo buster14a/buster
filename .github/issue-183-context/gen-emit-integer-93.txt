@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 93/111
+line: 27513
+
+027443:             IrTypeId operand_type = builder->preprocess.tokens[operand_start].kind != C_TOKEN_IDENTIFIER ? IR_TYPE_ID_INVALID
+027444:                                     : parenthesized ? c_ir_group_type_name(builder, index + 1, operand_end)
+027445:                                                     : c_ir_type_name(builder, operand_start, operand_end);
+027446:             IrType* operand = ir_type_from_id(&builder->program->types, operand_type);
+027447:             u64 value = 0;
+027448:             u32 literal_alignment = 0;
+027449:             if (operand && operand->layout.resolved)
+027450:             {
+027451:                 value = is_sizeof ? c_ir_sizeof_operand_size(operand) : c_ir_sizeof_operand_alignment(operand);
+027452:             }
+027453:             else if (!is_sizeof && !builder->sizeof_operand_constraint.length &&
+027454:                      c_ir_sizeof_expression(builder, operand_start, operand_end, &value, &literal_alignment))
+027455:             {
+027456:                 // `_Alignof` takes a type name, but GNU's `__alignof__` also
+027457:                 // takes an expression -- libc-test's tls_align_dso.c fills its
+027458:                 // table with `__alignof__(x)` over four objects -- and so does
+027459:                 // the compound literal the extent scan above claimed for both
+027460:                 // words. The alignment of the operand's own type is the
+027461:                 // answer in each case, so the sizeof resolver settles it and
+027462:                 // only its second answer is read.
+027463:                 value = literal_alignment;
+027464:             }
+027465:             else if (is_sizeof && !builder->sizeof_operand_constraint.length &&
+027466:                      c_ir_sizeof_expression(builder, operand_start, operand_end, &value, 0))
+027467:             {
+027468:             }
+027469:             else
+027470:             {
+027471:                 // Both words take an expression operand: `sizeof v` writes one
+027472:                 // without parentheses, and GNU's `__alignof__ (v)` is a second
+027473:                 // spelling of `_Alignof` that accepts one where the standard
+027474:                 // word takes only a type name -- libc-test's tls_align_dso.c
+027475:                 // fills its table with `__alignof__(x)` over four objects, and
+027476:                 // the alignment of an object's *type* is what GCC answers for
+027477:                 // one whose declaration asked for no more.
+027478:                 //
+027479:                 // The prediction guesses int for an operand it cannot type; an
+027480:                 // unmapped array object is such an operand, and a guess for one
+027481:                 // silently misfolds the answer, so it fails here instead.  A
+027482:                 // member chain the resolver proved wrong -- a
+027483:                 // resolved aggregate with no member of that name -- is not a
+027484:                 // shape to guess either: it is the diagnostic the walkers
+027485:                 // recorded, and predicting int for it is what made every
+027486:                 // autoconf AC_CHECK_MEMBER fallback probe answer yes.
+027487:                 if (builder->sizeof_operand_constraint.length)
+027488:                 {
+027489:                     builder->failure_message = builder->sizeof_operand_constraint;
+027490:                     builder->failure_token_index = builder->sizeof_operand_constraint_token != UINT32_MAX
+027491:                                                        ? builder->sizeof_operand_constraint_token : operand_start;
+027492:                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027493:                     return;
+027494:                 }
+027495:                 if (c_ir_sizeof_operand_is_parenthesized_type_name(builder, operand_start, operand_end))
+027496:                 {
+027497:                     builder->failure_message = S8("a parenthesized type name is not an expression; the type form takes exactly one pair of parentheses");
+027498:                     builder->failure_token_index = operand_start;
+027499:                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027500:                     return;
+027501:                 }
+027502:                 IrTypeId expression_type = c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
+027503:                                                ? IR_TYPE_ID_INVALID
+027504:                                                : c_ir_predict_expression_type(builder, operand_start, operand_end);
+027505:                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
+027506:                 if (!expression || !expression->layout.resolved)
+027507:                 {
+027508:                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027509:                     return;
+027510:                 }
+027511:                 value = is_sizeof ? expression->layout.size : c_ir_sizeof_operand_alignment(expression);
+027512:             }
+027513:             values[value_count++] = c_ir_emit_integer_value_typed(builder, value, false, token, builder->size_type);
+027514:             expect_operand = false;
+027515:             index = consumed_index;
+027516:             continue;
+027517:         }
+027518:         if (expect_operand && (c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS)) &&
+027519:             index + 1 < end &&
+027520:             (builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER ||
+027521:              (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_STAR) && index + 2 < end &&
+027522:               builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)))
+027523:         {
+027524:             bool dereference = c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_STAR);
+027525:             u32 operand_index = index + (dereference ? 2 : 1);
+027526:             CEntityId entity = c_ir_identifier_entity(builder, operand_index);
+027527:             CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+027528:             IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
+027529:             if (dereference && place.value < builder->function->value_count)
+027530:             {
+027531:                 IrTypeId pointer_type = builder->function->values[place.value].canonical_type;
+027532:                 IrValueId pointer = c_ir_emit_load_place(builder, place, pointer_type, source);
+027533:                 place = c_ir_emit_dereference_place(builder, pointer, source);
+027534:             }
+027535:             if (place.value >= builder->function->value_count)
+027536:             {
+027537:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027538:                 return;
+027539:             }
+027540:             IrTypeId type = builder->function->values[place.value].canonical_type;
+027541:             IrType* place_type = ir_type_from_id(&builder->program->types, type);
+027542:             IrValueId previous = place_type && place_type->is_atomic ? place : c_ir_emit_load_place(builder, place, type, source);
+027543:             IrValueId value = c_ir_emit_increment(builder, place, type, previous, token, true);
+027544:             if (value.value == IR_ID_UNDERLYING_INVALID)
+027545:             {
+027546:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027547:                 return;
+027548:             }
+027549:             values[value_count++] = value;
+027550:             expect_operand = false;
+027551:             index = operand_index;
+027552:             continue;
+027553:         }
+027554:         // glibc's assert macro prefixes its GNU statement expression with
+027555:         // `__extension__`.  This marker suppresses pedantic diagnostics but
+027556:         // contributes no expression value, so leave operand state unchanged
+027557:         // and let the following statement-expression wrapper lower normally.
+027558:         if (expect_operand && token.kind == C_TOKEN_IDENTIFIER &&
+027559:             string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__extension__")))
+027560:         {
+027561:             continue;
+027562:         }
+027563:         CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, index);
+027564:         // A call keys on the first token of its callee, so the call this
+027565:         // range is the callee of is found here as well -- its argument list
+027566:         // closes past the end of the range.  That call is not an operand of
+027567:         // its own callee; the place machine draws the same line for a call
+027568:         // that is the base of a postfix chain.
+027569:         if (prepared_call && prepared_call->close_index >= end)
+027570:         {
+027571:             prepared_call = 0;
+027572:         }
+027573:         // Consuming only the inner call of a chain would strand the walk at
+027574:         // the outer argument list, so hop to the outermost chained call this
+027575:         // range still contains and consume its result instead.
+027576:         if (prepared_call)
+027577:         {
+027578:             prepared_call = c_ir_prepared_call_chained(builder, prepared_call, end);
+027579:         }
+027580:         if (prepared_call)
+027581:         {
+027582:             if (!expect_operand)
+027583:             {
+027584:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027585:                 return;
+027586:             }
+027587:             builder->failure_token_index = prepared_call->open_index;
+027588:             IrValueId value = prepared_call->emitted ? prepared_call->result : IR_VALUE_ID_INVALID;
+027589:             if (value.value == IR_ID_UNDERLYING_INVALID)
+027590:             {
+027591:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027592:                 return;
+027593:             }
+027594:             values[value_count++] = value;
+027595:             expect_operand = false;
+027596:             index = prepared_call->close_index;
+027597:             continue;
+027598:         }
+027599:         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+027600:         {
+027601:             if (!expect_operand)
+027602:             {
+027603:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027604:                 return;
+027605:             }
+027606:             IrValueId value = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, token);
+027607:             if (value.value == IR_ID_UNDERLYING_INVALID)
+027608:             {
+027609:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027610:                 return;
+027611:             }
+027612:             values[value_count++] = value;
+027613:             expect_operand = false;
+027614:             continue;
+027615:         }
+027616:         if (token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL)
+027617:         {
+027618:             if (!expect_operand)
+027619:             {
+027620:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027621:                 return;
+027622:             }
+027623:             u32 literal_end = index + 1;
+027624:             if (token.kind == C_TOKEN_STRING_LITERAL)
+027625:             {
+027626:                 while (literal_end < end && builder->preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+027627:                 {
+027628:                     literal_end += 1;
+027629:                 }
+027630:             }
+027631:             IrValueId value = token.kind == C_TOKEN_CHARACTER_LITERAL ? c_ir_emit_character(builder, token)
+027632:                                                                       : c_ir_emit_string_range_typed(builder, index, literal_end, IR_TYPE_ID_INVALID);
+027633:             if (value.value == IR_ID_UNDERLYING_INVALID)
+027634:             {
+027635:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027636:                 return;
+027637:             }
+027638:             values[value_count++] = value;
+027639:             expect_operand = false;
+027640:             index = literal_end - 1;
+027641:             continue;
+027642:         }
+027643:         if (token.kind == C_TOKEN_IDENTIFIER)

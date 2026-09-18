@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 34/111
+line: 14816
+
+014746:     if (!c_ir_signature_call_supported(builder, signature, target->name))
+014747:     {
+014748:         return IR_VALUE_ID_INVALID;
+014749:     }
+014750:     if (!c_ir_signature_accepts_arity(signature, argument_count))
+014751:     {
+014752:         if (!builder->failure_message.length)
+014753:         {
+014754:             builder->failure_message = c_ir_call_arity_message(builder, target->name, signature, argument_count);
+014755:         }
+014756:         return IR_VALUE_ID_INVALID;
+014757:     }
+014758:     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+014759:     {
+014760:         if (c_ir_value_contains_label_provenance(builder, arguments[argument_index]))
+014761:         {
+014762:             builder->failure_message = S8("a label address may not escape through a function call");
+014763:             return IR_VALUE_ID_INVALID;
+014764:         }
+014765:     }
+014766:     // A call that supplies its own parameters carries them on the reference:
+014767:     // the symbol's `()` type describes no call, and the backends read the
+014768:     // argument placement off the type the reference names.
+014769:     IrTypeId callee_type = target->canonical_type;
+014770:     if (signature.is_unprototyped && argument_count > signature.parameter_count)
+014771:     {
+014772:         callee_type = c_ir_unprototyped_call_type(builder, signature.return_type, arguments, argument_count);
+014773:         if (callee_type.value == IR_ID_UNDERLYING_INVALID)
+014774:         {
+014775:             return IR_VALUE_ID_INVALID;
+014776:         }
+014777:     }
+014778:     IrValueId reference_result = c_ir_add_result(builder, callee_type);
+014779:     IrSourceRange reference_source = c_ir_token_source_range(builder, token);
+014780:     IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, callee_type);
+014781:     reference.symbol = target->symbol;
+014782:     reference.result = reference_result;
+014783:     IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
+014784:     builder->function->values[reference_result.value].definition = reference_id;
+014785: 
+014786:     // The declaration's attribute is the general answer -- glibc marks exit,
+014787:     // abort and longjmp with it -- and the three names remain because a
+014788:     // platform's headers may declare the assertion helpers without one.
+014789:     bool noreturn = signature.is_noreturn || string_equal(target->name, S8("abort")) || string_equal(target->name, S8("__assert_fail")) ||
+014790:                     string_equal(target->name, S8("__assert_perror_fail"));
+014791:     bool terminates = noreturn && !c_ir_lowering_resumes_after_call(builder);
+014792:     // A void call still needs an expression-machine placeholder. Emit it
+014793:     // before a terminating call so UNREACHABLE follows the call immediately;
+014794:     // ordinary and expression-nested calls materialize it afterwards.
+014795:     IrValueId result = signature.returns_void ? (terminates ? c_ir_emit_integer_value(builder, 0, false, token) : IR_VALUE_ID_INVALID)
+014796:                                               : c_ir_add_result(builder, signature.return_type);
+014797:     IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
+014798:     operands[0] = reference_result;
+014799:     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+014800:     {
+014801:         operands[argument_index + 1] = arguments[argument_index];
+014802:     }
+014803:     IrSourceRange call_source = reference_source;
+014804:     IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, signature.return_type);
+014805:     call.operands = operands;
+014806:     call.operand_count = argument_count + 1;
+014807:     call.symbol = target->symbol;
+014808:     call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
+014809:     IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+014810:     if (!signature.returns_void)
+014811:     {
+014812:         builder->function->values[result.value].definition = call_id;
+014813:     }
+014814:     else if (!terminates)
+014815:     {
+014816:         result = c_ir_emit_integer_value(builder, 0, false, token);
+014817:     }
+014818:     c_ir_end_control_flow_after_call(builder, noreturn, call_source);
+014819:     return result;
+014820: }
+014821: 
+014822: BUSTER_C_INTERNAL IrValueId c_ir_emit_call_values(CIntegerIrBuilder* builder, CToken token, u32 declaration_index, IrValueId* arguments, u32 argument_count)
+014823: {
+014824:     if (declaration_index == UINT32_MAX || !builder->declaration_functions[declaration_index])
+014825:     {
+014826:         return IR_VALUE_ID_INVALID;
+014827:     }
+014828:     return c_ir_emit_call_target(builder, token, builder->declaration_functions[declaration_index], builder->signatures[declaration_index], arguments,
+014829:                                  argument_count);
+014830: }
+014831: 
+014832: // Emit one compiler-runtime call whose ABI is fixed by the compiler rather
+014833: // than by a source declaration. These imports are used only when the target
+014834: // cannot implement an admitted operation inline; the canonical IR still owns
+014835: // the call, its arguments and the external symbol identity.
+014836: BUSTER_C_INTERNAL bool c_ir_emit_runtime_call_source(CIntegerIrBuilder* builder, IrSourceRange source, String8 link_name, IrTypeId return_type,
+014837:                                                       IrTypeId* parameter_types, IrValueId* arguments, u32 argument_count,
+014838:                                                       IrValueId* result_out)
+014839: {
+014840:     IrTypeId function_type = IR_TYPE_ID_INVALID;
+014841:     IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
+014842:     bool emitted = true;
+014843:     for (u32 argument_index = 0; emitted && argument_index < argument_count; argument_index += 1)
+014844:     {
+014845:         if (arguments[argument_index].value >= builder->function->value_count ||
+014846:             builder->function->values[arguments[argument_index].value].canonical_type.value != parameter_types[argument_index].value)
+014847:         {
+014848:             builder->failure_message = S8("a compiler runtime call argument has an incompatible canonical type");
+014849:             emitted = false;
+014850:         }
+014851:     }
+014852:     for (u32 symbol_index = 0; emitted && symbol.value == IR_ID_UNDERLYING_INVALID && symbol_index < builder->program->symbols.count; symbol_index += 1)
+014853:     {
+014854:         IrSymbol* candidate = builder->program->symbols.symbols + symbol_index;
+014855:         if (string_equal(candidate->link_name, link_name))
+014856:         {
+014857:             if (candidate->kind != IR_SYMBOL_FUNCTION)
+014858:             {
+014859:                 builder->failure_message = S8("a compiler runtime symbol conflicts with a non-function declaration");
+014860:                 emitted = false;
+014861:             }
+014862:             else
+014863:             {
+014864:                 symbol = candidate->id;
+014865:                 function_type = candidate->type;
+014866:             }
+014867:         }
+014868:     }
+014869:     if (emitted && symbol.value != IR_ID_UNDERLYING_INVALID)
+014870:     {
+014871:         IrType* existing = ir_type_from_id(&builder->program->types, function_type);
+014872:         bool matches = existing && existing->kind == IR_TYPE_FUNCTION && existing->calling_convention == IR_CALLING_CONVENTION_C &&
+014873:                        !existing->is_variadic && !existing->is_unprototyped && existing->return_type.value == return_type.value &&
+014874:                        existing->parameter_count == argument_count;
+014875:         for (u32 parameter_index = 0; matches && parameter_index < argument_count; parameter_index += 1)
+014876:         {
+014877:             matches = existing->parameter_types[parameter_index].value == parameter_types[parameter_index].value;
+014878:         }
+014879:         if (!matches)
+014880:         {
+014881:             builder->failure_message = S8("a compiler runtime symbol has an incompatible declaration");
+014882:             emitted = false;
+014883:         }
+014884:     }
+014885:     if (emitted && symbol.value == IR_ID_UNDERLYING_INVALID)
+014886:     {
+014887:         IrTypeId* imported_parameters = arena_allocate(builder->arena, IrTypeId, argument_count ? argument_count : 1);
+014888:         for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+014889:         {
+014890:             imported_parameters[argument_index] = parameter_types[argument_index];
+014891:         }
+014892:         function_type = ir_program_add_type(builder->program, (IrType){
+014893:             .name = S8("C compiler runtime function"),
+014894:             .parameter_types = imported_parameters,
+014895:             .element_type = IR_TYPE_ID_INVALID,
+014896:             .return_type = return_type,
+014897:             .layout = {
+014898:                 .size = builder->program->data_layout.pointer.size,
+014899:                 .alignment = builder->program->data_layout.pointer.alignment,
+014900:                 .resolved = true,
+014901:             },
+014902:             .kind = IR_TYPE_FUNCTION,
+014903:             .calling_convention = IR_CALLING_CONVENTION_C,
+014904:             .parameter_count = argument_count,
+014905:         });
+014906:         symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+014907:             .name = link_name,
+014908:             .link_name = link_name,
+014909:             .source = source,
+014910:             .type = function_type,
+014911:             .kind = IR_SYMBOL_FUNCTION,
+014912:             .linkage = IR_LINKAGE_IMPORT,
+014913:         });
+014914:     }
+014915:     emitted = emitted && symbol.value != IR_ID_UNDERLYING_INVALID && function_type.value != IR_ID_UNDERLYING_INVALID;
+014916:     IrValueId reference_result = IR_VALUE_ID_INVALID;
+014917:     IrInstructionId reference_id = IR_INSTRUCTION_ID_INVALID;
+014918:     if (emitted)
+014919:     {
+014920:         reference_result = c_ir_add_result(builder, function_type);
+014921:         IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, function_type);
+014922:         reference.symbol = symbol;
+014923:         reference.result = reference_result;
+014924:         reference_id = c_ir_append_instruction(builder, reference, source);
+014925:         emitted = reference_result.value != IR_ID_UNDERLYING_INVALID && reference_id.value != IR_ID_UNDERLYING_INVALID;
+014926:     }
+014927:     IrValueId result = IR_VALUE_ID_INVALID;
+014928:     bool returns_void = false;
+014929:     IrInstructionId call_id = IR_INSTRUCTION_ID_INVALID;
+014930:     if (emitted)
+014931:     {
+014932:         builder->function->values[reference_result.value].definition = reference_id;
+014933:         IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
+014934:         operands[0] = reference_result;
+014935:         for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+014936:         {
+014937:             operands[argument_index + 1] = arguments[argument_index];
+014938:         }
+014939:         IrType* returned = ir_type_from_id(&builder->program->types, return_type);
+014940:         returns_void = returned && returned->kind == IR_TYPE_VOID;
+014941:         result = returns_void ? IR_VALUE_ID_INVALID : c_ir_add_result(builder, return_type);
+014942:         IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, return_type);
+014943:         call.operands = operands;
+014944:         call.operand_count = argument_count + 1;
+014945:         call.symbol = symbol;
+014946:         call.result = result;

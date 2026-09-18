@@ -1,0 +1,276 @@
+path: src/buster/lib/compiler/frontend/c/c_source.c
+needle: c_conditional_number(
+occurrence: 3/5
+line: 6381
+
+006291: 
+006292: BUSTER_C_INTERNAL bool c_preprocess_pragma_macro_name(char8 const* base, CToken* tokens, u32 token_count, String8* name_out)
+006293: {
+006294:     if (token_count == 4 && tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_is_punctuator(&tokens[1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+006295:         tokens[2].kind == C_TOKEN_STRING_LITERAL && tokens[2].length >= 2 && c_token_is_punctuator(&tokens[3], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+006296:     {
+006297:         String8 spelling = c_token_spelling(base, tokens[2]);
+006298:         *name_out = (String8){
+006299:             .pointer = spelling.pointer + 1,
+006300:             .length = spelling.length - 2,
+006301:         };
+006302:         return true;
+006303:     }
+006304:     return false;
+006305: }
+006306: 
+006307: BUSTER_C_INTERNAL void c_macro_push_definition(CPreprocessPragmaContext context, String8 name)
+006308: {
+006309:     CMacro* macro = c_macro_find(*context.first_macro, c_symbol_intern(context.symbols, name));
+006310:     CMacroPushMacro* entry = arena_allocate(context.arena, CMacroPushMacro, 1);
+006311:     *entry = (CMacroPushMacro){
+006312:         .previous = *context.macro_push_stack,
+006313:         .macro = macro,
+006314:         .name = string_duplicate_arena(context.arena, name, false),
+006315:         .definition = macro ? macro->definition : (CMacroDefinition){0},
+006316:     };
+006317:     if (macro && macro->definition.replacement_count)
+006318:     {
+006319:         entry->definition.replacement = arena_allocate(context.arena, CToken, macro->definition.replacement_count);
+006320:         memcpy(entry->definition.replacement, macro->definition.replacement,
+006321:                sizeof(*entry->definition.replacement) * macro->definition.replacement_count);
+006322:         if (macro->definition.replacement_space)
+006323:         {
+006324:             entry->definition.replacement_space = arena_allocate(context.arena, u8, macro->definition.replacement_count);
+006325:             memcpy(entry->definition.replacement_space, macro->definition.replacement_space,
+006326:                    sizeof(*entry->definition.replacement_space) * macro->definition.replacement_count);
+006327:         }
+006328:         entry->definition.parameter_index = arena_allocate(context.arena, u32, macro->definition.replacement_count);
+006329:         memcpy(entry->definition.parameter_index, macro->definition.parameter_index,
+006330:                sizeof(*entry->definition.parameter_index) * macro->definition.replacement_count);
+006331:     }
+006332:     if (macro && macro->definition.parameter_count)
+006333:     {
+006334:         entry->definition.parameters = arena_allocate(context.arena, String8, macro->definition.parameter_count);
+006335:         memcpy(entry->definition.parameters, macro->definition.parameters,
+006336:                sizeof(*entry->definition.parameters) * macro->definition.parameter_count);
+006337:         entry->definition.parameter_use_count = arena_allocate(context.arena, u32, macro->definition.parameter_count);
+006338:         memcpy(entry->definition.parameter_use_count, macro->definition.parameter_use_count,
+006339:                sizeof(*entry->definition.parameter_use_count) * macro->definition.parameter_count);
+006340:     }
+006341:     *context.macro_push_stack = entry;
+006342: }
+006343: 
+006344: BUSTER_C_INTERNAL void c_macro_clear_definition(CMacro* macro)
+006345: {
+006346:     if (!macro)
+006347:     {
+006348:         return;
+006349:     }
+006350:     macro->definition = (CMacroDefinition){0};
+006351: }
+006352: 
+006353: BUSTER_C_INTERNAL void c_macro_pop_definition(CPreprocessPragmaContext context, String8 name)
+006354: {
+006355:     CMacroPushMacro** cursor = context.macro_push_stack;
+006356:     while (*cursor && !string_equal((*cursor)->name, name))
+006357:     {
+006358:         cursor = &(*cursor)->previous;
+006359:     }
+006360:     if (!(!*cursor))
+006361:     {
+006362:         CMacroPushMacro* entry = *cursor;
+006363:         *cursor = entry->previous;
+006364:         if (!entry->macro)
+006365:         {
+006366:             c_macro_clear_definition(c_macro_find(*context.first_macro, c_symbol_intern(context.symbols, name)));
+006367:             return;
+006368:         }
+006369:         CMacro* macro = entry->macro;
+006370:         macro->definition = entry->definition;
+006371:         macro->disabled = false;
+006372:     }
+006373: }
+006374: 
+006375: // The bound is UINT16_MAX because CToken carries the alignment in a u16, and
+006376: // no ABI has a structure alignment that large to begin with.
+006377: BUSTER_C_INTERNAL bool c_preprocess_pragma_pack_value(char8 const* base, CToken token, u16* value_out)
+006378: {
+006379:     u64 value = 0;
+006380:     bool valid =
+006381:         token.kind == C_TOKEN_PREPROCESSING_NUMBER && c_conditional_number(c_token_spelling(base, token), &value) && value <= UINT16_MAX && value && !(value & (value - 1));
+006382:     if (valid)
+006383:     {
+006384:         *value_out = (u16)value;
+006385:     }
+006386:     return valid;
+006387: }
+006388: 
+006389: BUSTER_C_INTERNAL void c_preprocess_pragma_pack(CPreprocessPragmaContext context, char8 const* base, CToken* tokens, u32 token_count)
+006390: {
+006391:     if (token_count < 3 || tokens[0].kind != C_TOKEN_IDENTIFIER || !c_token_spelling_equal(base, tokens[0], S8("pack")) ||
+006392:         !c_token_is_punctuator(&tokens[1], C_PUNCTUATOR_LEFT_PARENTHESIS) || !c_token_is_punctuator(&tokens[token_count - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+006393:     {
+006394:         return;
+006395:     }
+006396:     CToken* arguments = tokens + 2;
+006397:     u32 argument_count = token_count - 3;
+006398:     if (!argument_count)
+006399:     {
+006400:         *context.pack_alignment = 0;
+006401:         return;
+006402:     }
+006403:     bool push = argument_count >= 1 && arguments[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, arguments[0], S8("push"));
+006404:     bool pop = argument_count >= 1 && arguments[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, arguments[0], S8("pop"));
+006405:     u32 value_index = UINT32_MAX;
+006406:     if (push)
+006407:     {
+006408:         if (argument_count == 1)
+006409:         {
+006410:             value_index = UINT32_MAX;
+006411:         }
+006412:         else if (argument_count == 3 && c_token_is_punctuator(&arguments[1], C_PUNCTUATOR_COMMA))
+006413:         {
+006414:             value_index = 2;
+006415:         }
+006416:         else if (argument_count == 5 && c_token_is_punctuator(&arguments[1], C_PUNCTUATOR_COMMA) && arguments[2].kind == C_TOKEN_IDENTIFIER &&
+006417:                  c_token_is_punctuator(&arguments[3], C_PUNCTUATOR_COMMA))
+006418:         {
+006419:             value_index = 4;
+006420:         }
+006421:         else
+006422:         {
+006423:             return;
+006424:         }
+006425:         u16 value = 0;
+006426:         bool valid_value = value_index != UINT32_MAX && c_preprocess_pragma_pack_value(base, arguments[value_index], &value);
+006427:         if (value_index != UINT32_MAX && !valid_value)
+006428:         {
+006429:             return;
+006430:         }
+006431:         CPragmaPackStack* entry = arena_allocate(context.arena, CPragmaPackStack, 1);
+006432:         *entry = (CPragmaPackStack){
+006433:             .previous = *context.pack_stack,
+006434:             .alignment = *context.pack_alignment,
+006435:         };
+006436:         *context.pack_stack = entry;
+006437:         if (valid_value)
+006438:         {
+006439:             *context.pack_alignment = value;
+006440:         }
+006441:         return;
+006442:     }
+006443:     if (pop)
+006444:     {
+006445:         if (argument_count != 1 &&
+006446:             !(argument_count == 3 && c_token_is_punctuator(&arguments[1], C_PUNCTUATOR_COMMA) && arguments[2].kind == C_TOKEN_IDENTIFIER))
+006447:         {
+006448:             return;
+006449:         }
+006450:         if (*context.pack_stack)
+006451:         {
+006452:             *context.pack_alignment = (*context.pack_stack)->alignment;
+006453:             *context.pack_stack = (*context.pack_stack)->previous;
+006454:         }
+006455:         return;
+006456:     }
+006457:     if (argument_count == 1)
+006458:     {
+006459:         u16 value = 0;
+006460:         if (c_preprocess_pragma_pack_value(base, arguments[0], &value))
+006461:         {
+006462:             *context.pack_alignment = value;
+006463:         }
+006464:     }
+006465: }
+006466: 
+006467: BUSTER_C_INTERNAL void c_preprocess_handle_pragma(CPreprocessPragmaContext context, char8 const* base, CToken* tokens, u32 token_count)
+006468: {
+006469:     if (token_count)
+006470:     {
+006471:         if (token_count == 1 && tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("once")))
+006472:         {
+006473:             CIncludeFileEntry* entry = 0;
+006474:             CIncludeFileStatus status =
+006475:                 c_include_file_entry(context.include_files, context.current_identity, context.current_path, &entry);
+006476:             if (status == C_INCLUDE_FILE_OK)
+006477:             {
+006478:                 entry->once = true;
+006479:             }
+006480:             else
+006481:             {
+006482:                 c_include_file_diagnostic(context.arena, context.preprocess, context.current_location, status, context.current_path);
+006483:             }
+006484:             return;
+006485:         }
+006486:         if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("push_macro")))
+006487:         {
+006488:             String8 name = {0};
+006489:             if (c_preprocess_pragma_macro_name(base, tokens, token_count, &name))
+006490:             {
+006491:                 c_macro_push_definition(context, name);
+006492:             }
+006493:             return;
+006494:         }
+006495:         if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("pop_macro")))
+006496:         {
+006497:             String8 name = {0};
+006498:             if (c_preprocess_pragma_macro_name(base, tokens, token_count, &name))
+006499:             {
+006500:                 c_macro_pop_definition(context, name);
+006501:             }
+006502:             return;
+006503:         }
+006504:         if (tokens[0].kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, tokens[0], S8("pack")))
+006505:         {
+006506:             c_preprocess_pragma_pack(context, base, tokens, token_count);
+006507:         }
+006508:         // GCC/Clang/MSVC diagnostic, visibility, system-header, warning,
+006509:         // comment, region, and OpenMP pragmas are compatibility no-ops. Unknown
+006510:         // pragma bodies are intentionally ignored as well.
+006511:     }
+006512: }
+006513: 
+006514: BUSTER_C_INTERNAL void c_preprocess_pragma_marker(CPreprocessPragmaContext context, char8 const* base, CToken marker)
+006515: {
+006516:     if (!marker.length)
+006517:     {
+006518:         return;
+006519:     }
+006520:     // The marker relex is standalone: its tokens' offsets are relative to its
+006521:     // own translated copy, so the handler reads them through that base.
+006522:     CLexResult lex = c_lex(context.arena, c_token_spelling(base, marker));
+006523:     u32 token_count = 0;
+006524:     while (token_count < lex.token_count && lex.tokens[token_count].kind != C_TOKEN_NEWLINE && lex.tokens[token_count].kind != C_TOKEN_END_OF_FILE)
+006525:     {
+006526:         token_count += 1;
+006527:     }
+006528:     c_preprocess_handle_pragma(context, lex.spelling_base, lex.tokens, token_count);
+006529: }
+006530: 
+006531: // Materialize an expanded line into the output stream. Foreign tokens (their
+006532: // location is a macro-invocation stamp, not a function of their spelling
+006533: // offset) get their spellings copied to fresh space offsets under an
+006534: // expansion source-map entry; one invocation's tokens share one stamped
+006535: // location, so runs of equal locations share one entry.
+006536: BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaContext context, CSpellingSpace* space, CSourceMap* map,
+006537:                                                             CPpStampTable const* stamps, CPreprocessTokenNode* first_line, u64 line_output_count,
+006538:                                                             CTokenStream* token_stream, u64* output_count)
+006539: {
+006540:     CTokenShape* shapes = 0;
+006541:     CToken* tokens = c_token_stream_reserve(token_stream, line_output_count, &shapes);
+006542:     u64 count = 0;
+006543:     u64 foreign_length = 0;
+006544:     for (CPreprocessTokenNode* node = first_line; node; node = node->next)
+006545:     {
+006546:         foreign_length += node->token.foreign ? c_token_length(space->base, node->token.token) : 0;
+006547:     }
+006548:     char8* copy = foreign_length ? c_space_allocate(space, foreign_length) : 0;
+006549:     bool run_open = false;
+006550:     // Every stamp of a line is pushed from a distinct token, so two tokens
+006551:     // carry one location exactly when they carry one stamp.
+006552:     u32 run_stamp = 0;
+006553:     // The pack alignment can only change where a pragma marker fires, so the
+006554:     // sample is taken at the line's first token and again at the first token
+006555:     // after each marker, instead of asking the recorder once per token.
+006556:     bool pack_pending = true;
+006557:     for (CPreprocessTokenNode* node = first_line; node; node = node->next)
+006558:     {
+006559:         if (node->token.token.kind == C_TOKEN_PRAGMA)
+006560:         {
+006561:             context.current_location = c_pp_stamp_location(stamps, node->token.stamp);

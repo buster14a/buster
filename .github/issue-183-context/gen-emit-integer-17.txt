@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 17/111
+line: 7059
+
+006989:     // accesses instead.
+006990:     IrTypeId access_type = type;
+006991:     if (extract && (field->access_size || boolean))
+006992:     {
+006993:         access_type = c_ir_unsigned_type_of_size(builder, ir_field_access_size(&builder->program->types, field));
+006994:         if (access_type.value == IR_ID_UNDERLYING_INVALID)
+006995:         {
+006996:             return c_ir_emit_split_bit_field_load(builder, place, field, type, field->access_size, source);
+006997:         }
+006998:     }
+006999:     IrValueId value = c_ir_emit_load_place_raw(builder, place, access_type, source);
+007000:     if (extract)
+007001:     {
+007002:         CToken token = {0};
+007003:         // The extraction runs in the promoted type, never in a narrower one:
+007004:         // the machine backends model shifts at 32 and 64 bits only, so a
+007005:         // 16-bit `shl`/`sar` pair executes at 32 bits and the sign bit of a
+007006:         // `short a : 9` never reaches the top. Promoting here is also what C
+007007:         // does with the value, and the result narrows back on the way out.
+007008:         // The memory load removes object qualifiers. Extraction and its
+007009:         // constants must use that same value type, including volatile fields.
+007010:         IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
+007011:         IrTypeId extract_type = result_type;
+007012:         IrType* extract_type_value = ir_type_from_id(&builder->program->types, extract_type);
+007013:         if (value_type->bit_width < 32)
+007014:         {
+007015:             extract_type = value_type->is_signed ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
+007016:             extract_type_value = ir_type_from_id(&builder->program->types, extract_type);
+007017:         }
+007018:         if (extract_type_value && extract_type.value != access_type.value)
+007019:         {
+007020:             value = c_ir_emit_cast(builder, value, extract_type, source);
+007021:         }
+007022:         if (!extract_type_value || value.value == IR_ID_UNDERLYING_INVALID)
+007023:         {
+007024:             return IR_VALUE_ID_INVALID;
+007025:         }
+007026:         IrValueId shift = c_ir_emit_integer_value_typed(builder, field->bit_offset, false, token, extract_type);
+007027:         value = c_ir_emit_binary_value(builder, value, shift, extract_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+007028:         u64 mask = field->bit_width == 64 ? UINT64_MAX : ((u64)1 << field->bit_width) - 1;
+007029:         IrValueId mask_value = c_ir_emit_integer_value_typed(builder, mask, false, token, extract_type);
+007030:         value = c_ir_emit_binary_value(builder, value, mask_value, extract_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+007031:         if (value_type->is_signed && field->bit_width < extract_type_value->bit_width)
+007032:         {
+007033:             u32 sign_shift = extract_type_value->bit_width - field->bit_width;
+007034:             IrValueId sign_shift_value = c_ir_emit_integer_value_typed(builder, sign_shift, false, token, extract_type);
+007035:             value = c_ir_emit_binary_value(builder, value, sign_shift_value, extract_type, IR_BINARY_SHIFT_LEFT, source);
+007036:             value = c_ir_emit_binary_value(builder, value, sign_shift_value, extract_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
+007037:         }
+007038:         if (extract_type.value != result_type.value)
+007039:         {
+007040:             value = c_ir_emit_cast(builder, value, result_type, source);
+007041:         }
+007042:         c_ir_mark_unsigned_bit_field_value(builder, value, field);
+007043:     }
+007044: 
+007045:     return value;
+007046: }
+007047: 
+007048: // An assignment expression names the stored field value. Keep its promotion
+007049: // fact without rereading memory (in particular, without a second volatile load).
+007050: BUSTER_C_INTERNAL IrValueId c_ir_bit_field_assignment_value(CIntegerIrBuilder* builder, IrValueId place, IrValueId value, IrSourceRange source)
+007051: {
+007052:     IrField* field = c_ir_bit_field_from_place(builder, place);
+007053:     IrValueId result = value;
+007054:     if (c_ir_unsigned_bit_field_promotes_to_int(builder, field))
+007055:     {
+007056:         result = c_ir_emit_cast(builder, value, field->type, source);
+007057:         if (result.value != IR_ID_UNDERLYING_INVALID)
+007058:         {
+007059:             IrValueId mask = c_ir_emit_integer_value_typed(builder, ((u64)1 << field->bit_width) - 1, false, (CToken){0}, field->type);
+007060:             result = c_ir_emit_binary_value(builder, result, mask, field->type, IR_BINARY_INTEGER_BITWISE_AND, source);
+007061:             c_ir_mark_unsigned_bit_field_value(builder, result, field);
+007062:         }
+007063:     }
+007064:     return result;
+007065: }
+007066: 
+007067: BUSTER_C_INTERNAL bool c_ir_place_may_have_static_storage(CIntegerIrBuilder* builder, IrValueId place)
+007068: {
+007069:     u32 value = place.value;
+007070:     u32 steps = builder->function->value_count + 1;
+007071:     while (value < builder->function->value_count && steps)
+007072:     {
+007073:         steps -= 1;
+007074:         IrValue* current = builder->function->values + value;
+007075:         IrInstructionId definition = current->definition;
+007076:         if (definition.value >= builder->function->instruction_count)
+007077:         {
+007078:             return true;
+007079:         }
+007080:         IrInstruction* instruction = builder->function->instructions + definition.value;
+007081:         if (instruction->opcode == IR_OPCODE_GLOBAL)
+007082:         {
+007083:             return true;
+007084:         }
+007085:         if (instruction->opcode == IR_OPCODE_LOCAL)
+007086:         {
+007087:             return false;
+007088:         }
+007089:         if ((instruction->opcode == IR_OPCODE_FIELD || instruction->opcode == IR_OPCODE_INDEX || instruction->opcode == IR_OPCODE_DEREFERENCE ||
+007090:              instruction->opcode == IR_OPCODE_ADDRESS_OF || instruction->opcode == IR_OPCODE_CAST) &&
+007091:             instruction->operand_count >= 1 && instruction->operands)
+007092:         {
+007093:             value = instruction->operands[0].value;
+007094:             continue;
+007095:         }
+007096:         return true;
+007097:     }
+007098:     return true;
+007099: }
+007100: 
+007101: BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source);
+007102: BUSTER_C_INTERNAL IrValueId c_ir_decay_array_value_if_needed(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source);
+007103: 
+007104: BUSTER_C_INTERNAL IrValueId c_ir_emit_cast_instruction(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrConversionOperation operation,
+007105:                                                          IrSourceRange source)
+007106: {
+007107:     if (value.value < builder->function->value_count && c_ir_value_contains_label_provenance(builder, value))
+007108:     {
+007109:         IrType* source_value = ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type);
+007110:         IrType* destination_value = ir_type_from_id(&builder->program->types, target_type);
+007111:         bool original_void_pointer = source_value && destination_value && source_value->kind == IR_TYPE_POINTER && destination_value->kind == IR_TYPE_POINTER &&
+007112:                                      source_value->element_type.value == destination_value->element_type.value &&
+007113:                                      source_value->element_type.value < builder->program->types.count &&
+007114:                                      ir_type_from_id(&builder->program->types, source_value->element_type)->kind == IR_TYPE_VOID &&
+007115:                                      source_value->id.value == destination_value->id.value;
+007116:         if (!original_void_pointer)
+007117:         {
+007118:             builder->failure_message = S8("a label-provenance value may only be used with its original void pointer type");
+007119:             return IR_VALUE_ID_INVALID;
+007120:         }
+007121:     }
+007122:     IrValueId result = c_ir_add_result(builder, target_type);
+007123:     if (value.value < builder->function->value_count)
+007124:     {
+007125:         // A pointer reinterpretation takes the target type's own
+007126:         // qualification, and IR types carry no const: the flag clears, so
+007127:         // `((char *)formatted)[size-1] = '\0'` -- CPython casting away the
+007128:         // const its own accessor returned -- stores where the reference
+007129:         // compilers store.  The cost is one diagnostic, not a miscompile: a
+007130:         // cast that *adds* const is no longer refused as a store target,
+007131:         // which is the same laxity the reference compilers only warn about
+007132:         // under -Wcast-qual.  Stores through const lvalues keep their
+007133:         // refusal -- those places read their entity's own C type.
+007134:         builder->function->values[result.value].points_to_read_only =
+007135:             operation != IR_CONVERSION_POINTER_REINTERPRET && builder->function->values[value.value].points_to_read_only;
+007136:         c_ir_copy_label_provenance(builder, result, value);
+007137:     }
+007138:     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
+007139:     operands[0] = value;
+007140:     IrSourceRange cast_source = source;
+007141:     IrInstruction cast = c_ir_instruction_initialize(IR_OPCODE_CAST, target_type);
+007142:     cast.operands = operands;
+007143:     cast.operand_count = 1;
+007144:     cast.conversion_operation = (u8)operation;
+007145:     cast.result = result;
+007146:     IrInstructionId id = c_ir_append_instruction(builder, cast, cast_source);
+007147:     builder->function->values[result.value].definition = id;
+007148:     return result;
+007149: }
+007150: 
+007151: BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source);
+007152: BUSTER_C_INTERNAL bool c_ir_apply_complex_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
+007153:                                                       u32 first, u32 operand_count, IrSourceRange source);
+007154: BUSTER_C_INTERNAL IrType* c_ir_complex_type_of(CIntegerIrBuilder* builder, IrTypeId type_id);
+007155: BUSTER_C_INTERNAL IrType* c_ir_value_complex_type(CIntegerIrBuilder* builder, IrValueId value);
+007156: BUSTER_C_INTERNAL bool c_ir_complex_split(CIntegerIrBuilder* builder, IrValueId value, IrValueId* real, IrValueId* imaginary, IrSourceRange source);
+007157: BUSTER_C_INTERNAL IrValueId c_ir_complex_zero(CIntegerIrBuilder* builder, IrTypeId element_type, IrSourceRange source);
+007158: BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type_id, IrSourceRange source);
+007159: BUSTER_C_INTERNAL IrTypeId c_ir_complex_type_for_element(CIntegerIrBuilder* builder, IrTypeId element);
+007160: BUSTER_C_INTERNAL IrTypeId c_ir_float_literal_type(CIntegerIrBuilder* builder, String8 spelling);
+007161: BUSTER_C_INTERNAL IrValueId c_ir_complex_compose(CIntegerIrBuilder* builder, IrTypeId complex_type, IrValueId real, IrValueId imaginary,
+007162:                                                    IrSourceRange source);
+007163: BUSTER_C_INTERNAL IrBlockId c_ir_block_create(CIntegerIrBuilder* builder);
+007164: BUSTER_C_INTERNAL bool c_ir_switch_block(CIntegerIrBuilder* builder, IrBlockId block);
+007165: BUSTER_C_INTERNAL bool c_ir_terminate(CIntegerIrBuilder* builder, IrOpcode opcode, IrValueId* operands, u32 operand_count, IrBlockId* targets,
+007166:                                         u32 target_count, IrSourceRange source);
+007167: BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source);
+007168: BUSTER_C_INTERNAL IrValueId c_ir_emit_dereference_place(CIntegerIrBuilder* builder, IrValueId pointer, IrSourceRange source);
+007169: BUSTER_C_INTERNAL IrTypeId c_ir_complex_result_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
+007170: BUSTER_C_INTERNAL bool c_ir_complex_part_operator(CIntegerIrBuilder* builder, CToken token, CConditionalOperator* operation);
+007171: BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_part_operator(CIntegerIrBuilder* builder, IrValueId value, bool imaginary, IrSourceRange source);
+007172: 
+007173: // An integer converted to a pointer (6.3.2.3p5, and the null pointer constant
+007174: // with it) reaches pointer width first, sign-extending when the operand is
+007175: // signed: `(void *)-1` is the all-ones pointer, not the low half of one. Every
+007176: // backend lowers INTEGER_TO_POINTER as a plain register copy -- and so does
+007177: // LLVM's inttoptr, which zero-extends -- so the widening is its own
+007178: // instruction here rather than a rule each of the five has to repeat.
+007179: // ir_canonical_conversion_valid holds every producer to it.
+007180: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_to_pointer(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
+007181: {
+007182:     if (value.value >= builder->function->value_count)
+007183:     {
+007184:         return IR_VALUE_ID_INVALID;
+007185:     }
+007186:     IrType* source_value = ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type);
+007187:     if (!source_value || source_value->kind != IR_TYPE_INTEGER)
+007188:     {
+007189:         return IR_VALUE_ID_INVALID;

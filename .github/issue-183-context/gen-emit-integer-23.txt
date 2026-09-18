@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 23/111
+line: 8355
+
+008285:         (index_type->kind == IR_TYPE_ARRAY || index_type->kind == IR_TYPE_VECTOR || index_type->kind == IR_TYPE_POINTER))
+008286:     {
+008287:         IrValueId subscripted = index;
+008288:         index = base;
+008289:         base = subscripted;
+008290:         index_type = base_type;
+008291:         base_type = ir_type_from_id(&builder->program->types, builder->function->values[base.value].canonical_type);
+008292:         // The subscript is an rvalue, and the operand that arrives in the base
+008293:         // position need not be one: the place path hands a place through for
+008294:         // the *base*, where a place is what INDEX wants, and the swap moves
+008295:         // that place into the index position where it is not. `z[b] = 5` then
+008296:         // recorded the index operand as the place of `z` rather than the value
+008297:         // in it -- a shape the canonical emitter loads through and the machine
+008298:         // selectors both refuse, and one that emits an invalid getelementptr
+008299:         // through the bitcode writer (#813). The read spelling never reached
+008300:         // this because its caller has already loaded.
+008301:         if (builder->function->values[index.value].category == IR_VALUE_PLACE)
+008302:         {
+008303:             index = c_ir_emit_load_place(builder, index, builder->function->values[index.value].canonical_type, source);
+008304:             if (index.value == IR_ID_UNDERLYING_INVALID)
+008305:             {
+008306:                 return IR_VALUE_ID_INVALID;
+008307:             }
+008308:             index_type = ir_type_from_id(&builder->program->types, builder->function->values[index.value].canonical_type);
+008309:         }
+008310:     }
+008311:     if (base_type && base_type->kind == IR_TYPE_POINTER && c_ir_value_contains_label_provenance(builder, base))
+008312:     {
+008313:         builder->failure_message = S8("a label-provenance value may not be used as an addressable place");
+008314:         return IR_VALUE_ID_INVALID;
+008315:     }
+008316:     if (index_type && index_type->kind == IR_TYPE_BOOLEAN)
+008317:     {
+008318:         index = c_ir_emit_cast(builder, index, builder->s32_type, source);
+008319:         if (index.value == IR_ID_UNDERLYING_INVALID)
+008320:         {
+008321:             return IR_VALUE_ID_INVALID;
+008322:         }
+008323:         index_type = ir_type_from_id(&builder->program->types, builder->function->values[index.value].canonical_type);
+008324:     }
+008325:     if (!base_type || (base_type->kind != IR_TYPE_ARRAY && base_type->kind != IR_TYPE_VECTOR && base_type->kind != IR_TYPE_POINTER) || !index_type ||
+008326:         index_type->kind != IR_TYPE_INTEGER)
+008327:     {
+008328:         return IR_VALUE_ID_INVALID;
+008329:     }
+008330:     IrTypeId element_type = base_type->element_type;
+008331:     IrValueId place = ir_function_add_value(builder->arena, builder->function,
+008332:                                             (IrValue){
+008333:                                                 .canonical_type = element_type,
+008334:                                                 .definition = IR_INSTRUCTION_ID_INVALID,
+008335:                                                 .category = IR_VALUE_PLACE,
+008336:                                                 .is_read_only = base_type->kind == IR_TYPE_POINTER ? builder->function->values[base.value].points_to_read_only
+008337:                                                                                                    : builder->function->values[base.value].is_read_only,
+008338:                                                 .is_volatile = (ir_type_from_id(&builder->program->types, element_type) &&
+008339:                                                                 ir_type_from_id(&builder->program->types, element_type)->is_volatile) ||
+008340:                                                                (base_type->kind != IR_TYPE_POINTER && builder->function->values[base.value].is_volatile),
+008341:                                             });
+008342:     IrSourceRange instruction_source = source;
+008343:     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_INDEX, element_type);
+008344:     instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
+008345:     instruction.operands[0] = base;
+008346:     instruction.operands[1] = index;
+008347:     instruction.operand_count = 2;
+008348:     instruction.result = place;
+008349:     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+008350:     builder->function->values[place.value].definition = id;
+008351:     c_ir_label_metadata_copy_for_place(builder, place);
+008352:     return place;
+008353: }
+008354: 
+008355: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value(CIntegerIrBuilder* builder, u64 magnitude, bool is_negative, CToken token);
+008356: 
+008357: BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId element_type, IrSourceRange source)
+008358: {
+008359:     if (place.value >= builder->function->value_count || builder->function->values[place.value].category != IR_VALUE_PLACE ||
+008360:         builder->function->values[place.value].canonical_type.value != element_type.value || c_ir_bit_field_from_place(builder, place))
+008361:     {
+008362:         return IR_VALUE_ID_INVALID;
+008363:     }
+008364:     if (c_ir_value_contains_label_provenance(builder, place))
+008365:     {
+008366:         IrValueId root = place;
+008367:         u64 offset = 0;
+008368:         u64 size = 0;
+008369:         bool exact = false;
+008370:         if (!c_ir_label_place_location(builder, place, &root, &offset, &size, &exact))
+008371:         {
+008372:             builder->failure_message = S8("a label-containing object may not escape through an address-taking expression");
+008373:             return IR_VALUE_ID_INVALID;
+008374:         }
+008375:         IrType* root_type = root.value < builder->function->value_count ? c_ir_value_type(builder, builder->function->values + root.value) : 0;
+008376:         if (root_type && (root_type->kind == IR_TYPE_ARRAY || root_type->kind == IR_TYPE_STRUCT || root_type->kind == IR_TYPE_UNION))
+008377:         {
+008378:             builder->failure_message = S8("a label-containing aggregate may not escape through an address-taking expression");
+008379:             return IR_VALUE_ID_INVALID;
+008380:         }
+008381:         // A scalar label pointer may be passed by address as an ordinary C
+008382:         // object, but the frontend cannot prove mutations through an escaped
+008383:         // alias.  Forget the label identity before publishing the address so
+008384:         // any later computed goto is rejected instead of dispatching through
+008385:         // stale metadata.
+008386:         c_ir_label_metadata_clear(builder, root);
+008387:         IrValueLabelMetadata* root_entry = ir_value_label_metadata_ensure(builder->arena, builder->function, root);
+008388:         if (root_entry)
+008389:         {
+008390:             root_entry->has_non_label_provenance = true;
+008391:         }
+008392:     }
+008393:     IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, element_type);
+008394:     IrValueId result = c_ir_add_result(builder, pointer_type);
+008395:     builder->function->values[result.value].points_to_read_only = builder->function->values[place.value].is_read_only;
+008396:     IrSourceRange instruction_source = source;
+008397:     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ADDRESS_OF, pointer_type);
+008398:     instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+008399:     instruction.operands[0] = place;
+008400:     instruction.operand_count = 1;
+008401:     instruction.result = result;
+008402:     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+008403:     builder->function->values[result.value].definition = id;
+008404:     return result;
+008405: }
+008406: 
+008407: BUSTER_C_INTERNAL IrValueId c_ir_vla_flat_pointer(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+008408: {
+008409:     CIrVlaValue shape = c_ir_vla_value(builder, value);
+008410:     IrValueId result = value;
+008411:     if (shape.counts && !shape.slot)
+008412:     {
+008413:         // Unevaluated type prediction may retain a pointer/array shell which
+008414:         // concrete VLA lowering flattens. Normalize that shell at a consumer;
+008415:         // the saved shape remains the authority for element size and stride.
+008416:         IrTypeId pointer = c_ir_add_pointer_type(builder->program, builder->pointer_types, shape.element_type);
+008417:         result = c_ir_emit_cast(builder, value, pointer, source);
+008418:         if (result.value != value.value)
+008419:         {
+008420:             c_ir_vla_value_set(builder, result, shape);
+008421:         }
+008422:     }
+008423:     return result;
+008424: }
+008425: 
+008426: BUSTER_C_INTERNAL IrValueId c_ir_emit_index_place(CIntegerIrBuilder* builder, IrValueId base, IrValueId index, IrSourceRange source)
+008427: {
+008428:     CIrVlaValue shape = c_ir_vla_value(builder, base);
+008429:     CIrVlaValue reversed = c_ir_vla_value(builder, index);
+008430:     if (!shape.counts && reversed.counts && !reversed.slot)
+008431:     {
+008432:         IrValueId swap = base;
+008433:         base = index;
+008434:         index = swap;
+008435:         shape = reversed;
+008436:     }
+008437:     bool dynamic = shape.counts && !shape.slot;
+008438:     u32 dimension = shape.dimension + (u32)shape.array_lvalue;
+008439:     base = dynamic ? c_ir_vla_flat_pointer(builder, base, source) : base;
+008440:     if (dynamic && index.value < builder->function->value_count)
+008441:     {
+008442:         IrType* index_type = ir_type_from_id(&builder->program->types, builder->function->values[index.value].canonical_type);
+008443:         if (index_type && (index_type->kind == IR_TYPE_INTEGER || index_type->kind == IR_TYPE_BOOLEAN))
+008444:         {
+008445:             index = c_ir_emit_cast(builder, index, builder->ptrdiff_type, source);
+008446:             for (u32 suffix = dimension; suffix < shape.dimension_count; suffix += 1)
+008447:             {
+008448:                 IrValueId count = c_ir_emit_cast(builder, shape.counts[suffix], builder->ptrdiff_type, source);
+008449:                 index = c_ir_emit_binary_value(builder, index, count, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
+008450:             }
+008451:         }
+008452:     }
+008453:     IrValueId result = c_ir_emit_index_place_raw(builder, base, index, source);
+008454:     if (dynamic && dimension < shape.dimension_count && result.value != IR_ID_UNDERLYING_INVALID)
+008455:     {
+008456:         IrTypeId type = builder->function->values[result.value].canonical_type;
+008457:         result = c_ir_emit_address_of_place(builder, result, type, source);
+008458:         shape.dimension = dimension;
+008459:         shape.array_lvalue = true;
+008460:         shape.rvalue = false;
+008461:         c_ir_vla_value_set(builder, result, shape);
+008462:     }
+008463:     return result;
+008464: }
+008465: 
+008466: // Materialize a distinct pointer rvalue without reading the array object.
+008467: // The witness is frontend shape, never the ADDRESS_OF opcode alone.
+008468: BUSTER_C_INTERNAL IrValueId c_ir_vla_address(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+008469: {
+008470:     CIrVlaValue shape = c_ir_vla_value(builder, value);
+008471:     IrValueId result = IR_VALUE_ID_INVALID;
+008472:     if (shape.counts && shape.array_lvalue && !shape.slot)
+008473:     {
+008474:         IrValueId place = c_ir_emit_dereference_place(builder, value, source);
+008475:         if (place.value != IR_ID_UNDERLYING_INVALID)
+008476:         {
+008477:             IrTypeId type = builder->function->values[place.value].canonical_type;
+008478:             result = c_ir_emit_address_of_place(builder, place, type, source);
+008479:             shape.array_lvalue = false;
+008480:             shape.rvalue = true;
+008481:             c_ir_vla_value_set(builder, result, shape);
+008482:         }
+008483:     }
+008484:     return result;
+008485: }

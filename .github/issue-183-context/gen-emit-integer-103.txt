@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 103/111
+line: 30030
+
+029960:             {
+029961:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029962:             }
+029963:             return;
+029964:         }
+029965:         if (!c_ir_expression_has_root_logical(builder, frame->as.logical.start, frame->as.logical.end))
+029966:         {
+029967:             frame->stage = (u8)C_IR_LOWER_STAGE_LOGICAL_CORE;
+029968:             // Run the core now, off the dispatch loop; a suspension resumes
+029969:             // through the loop, and a completion is the LOGICAL_CORE resume
+029970:             // above, inlined: this frame only forwards the core's result.
+029971:             u32 mark = machine->frame_count;
+029972:             if (!c_ir_lower_expression_core_frame_push(builder, frame->as.logical.start, frame->as.logical.end))
+029973:             {
+029974:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029975:                 return;
+029976:             }
+029977:             c_ir_lower_expression_core_step(builder);
+029978:             if (machine->frame_count != mark || machine->failed)
+029979:             {
+029980:                 return;
+029981:             }
+029982:             if (!machine->child_result.success && !builder->failure_message.length)
+029983:             {
+029984:                 builder->failure_message = S8("could not lower logical expression core");
+029985:             }
+029986:             c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
+029987:             return;
+029988:         }
+029989:         frame->as.logical.source =
+029990:             c_ir_token_source_range(builder, builder->preprocess.tokens[frame->as.logical.start]);
+029991:         frame->as.logical.type = builder->bool_type;
+029992:         frame->as.logical.place = c_ir_emit_temporary(builder, builder->bool_type, frame->as.logical.source);
+029993:         frame->as.logical.true_block = c_ir_block_create(builder);
+029994:         frame->as.logical.false_block = c_ir_block_create(builder);
+029995:         frame->as.logical.merge_block = c_ir_block_create(builder);
+029996:         if (frame->as.logical.place.value == IR_ID_UNDERLYING_INVALID ||
+029997:             frame->as.logical.true_block.value == IR_ID_UNDERLYING_INVALID || frame->as.logical.false_block.value == IR_ID_UNDERLYING_INVALID ||
+029998:             frame->as.logical.merge_block.value == IR_ID_UNDERLYING_INVALID)
+029999:         {
+030000:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+030001:             return;
+030002:         }
+030003:         frame->stage = (u8)C_IR_LOWER_STAGE_LOGICAL_CONDITION;
+030004:         if (!c_ir_lower_condition_frame_push(builder, frame->as.logical.start, frame->as.logical.end, frame->as.logical.true_block,
+030005:                                              frame->as.logical.false_block, frame->as.logical.source))
+030006:         {
+030007:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+030008:         }
+030009:         return;
+030010:     }
+030011:     BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_LOGICAL_CONDITION);
+030012:     IrValueId place = frame->as.logical.place;
+030013:     IrBlockId true_block = frame->as.logical.true_block;
+030014:     IrBlockId false_block = frame->as.logical.false_block;
+030015:     IrBlockId merge_block = frame->as.logical.merge_block;
+030016:     IrSourceRange source = frame->as.logical.source;
+030017:     if (!machine->child_result.success || !c_ir_switch_block(builder, true_block))
+030018:     {
+030019:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+030020:         return;
+030021:     }
+030022:     IrValueId one = c_ir_emit_integer_value(builder, 1, false, (CToken){0});
+030023:     one = c_ir_truth_value(builder, one, source);
+030024:     if (!c_ir_emit_store_place(builder, place, builder->bool_type, one, source) || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &merge_block, 1, source) ||
+030025:         !c_ir_switch_block(builder, false_block))
+030026:     {
+030027:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+030028:         return;
+030029:     }
+030030:     IrValueId zero = c_ir_emit_integer_value(builder, 0, false, (CToken){0});
+030031:     zero = c_ir_truth_value(builder, zero, source);
+030032:     if (!c_ir_emit_store_place(builder, place, builder->bool_type, zero, source) || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &merge_block, 1, source) ||
+030033:         !c_ir_switch_block(builder, merge_block))
+030034:     {
+030035:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+030036:         return;
+030037:     }
+030038:     IrValueId value = c_ir_emit_load_place(builder, place, builder->bool_type, source);
+030039:     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+030040: }
+030041: 
+030042: BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+030043:                                                u32* expression_end)
+030044: {
+030045:     while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+030046:            !c_ir_group_is_statement_expression(builder, start, end))
+030047:     {
+030048:         u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+030049:         if (close != end - 1)
+030050:         {
+030051:             break;
+030052:         }
+030053:         start += 1;
+030054:         end -= 1;
+030055:     }
+030056:     u32 found_question = UINT32_MAX;
+030057:     u32 nested_questions = 0;
+030058:     bool root_assignment = false;
+030059:     for (u32 index = start; index < end; index += 1)
+030060:     {
+030061:         u32 punctuator = builder->preprocess.tokens[index].punctuator;
+030062:         CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+030063:         if (scan == C_IR_GROUP_SCAN_SKIPPED)
+030064:         {
+030065:             continue;
+030066:         }
+030067:         if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+030068:         {
+030069:             return false;
+030070:         }
+030071:         if (punctuator == C_PUNCTUATOR_RIGHT_PARENTHESIS || punctuator == C_PUNCTUATOR_RIGHT_BRACKET || punctuator == C_PUNCTUATOR_RIGHT_BRACE)
+030072:         {
+030073:             return false;
+030074:         }
+030075:         if (punctuator == C_PUNCTUATOR_QUESTION)
+030076:         {
+030077:             // `lhs = condition ? true_value : false_value` has a
+030078:             // conditional operator in the assignment's right operand, not
+030079:             // at the root of the expression.  Treating it as a root
+030080:             // conditional loses the assignment completion (the Lua
+030081:             // luaV_fastgeti macro relies on this exact precedence).
+030082:             if (root_assignment)
+030083:             {
+030084:                 return false;
+030085:             }
+030086:             if (found_question == UINT32_MAX)
+030087:             {
+030088:                 found_question = index;
+030089:             }
+030090:             else
+030091:             {
+030092:                 nested_questions += 1;
+030093:             }
+030094:         }
+030095:         else if (found_question != UINT32_MAX && punctuator == C_PUNCTUATOR_COLON)
+030096:         {
+030097:             if (nested_questions)
+030098:             {
+030099:                 nested_questions -= 1;
+030100:             }
+030101:             else
+030102:             {
+030103:                 if (found_question == start || found_question + 1 == index || index + 1 == end)
+030104:                 {
+030105:                     return false;
+030106:                 }
+030107:                 *expression_start = start;
+030108:                 *question = found_question;
+030109:                 *colon = index;
+030110:                 *expression_end = end;
+030111:                 return true;
+030112:             }
+030113:         }
+030114:         else if (found_question == UINT32_MAX && c_ir_assignment_operator(builder->preprocess.tokens[index]))
+030115:         {
+030116:             root_assignment = true;
+030117:         }
+030118:     }
+030119:     return false;
+030120: }
+030121: 
+030122: BUSTER_C_INTERNAL void c_ir_expression_core_range(CIntegerIrBuilder* builder, u32* start_in_out, u32* end_in_out)
+030123: {
+030124:     u32 start = *start_in_out;
+030125:     u32 end = *end_in_out;
+030126:     bool narrowed = true;
+030127:     while (narrowed)
+030128:     {
+030129:         narrowed = false;
+030130:         while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+030131:                !c_ir_group_is_statement_expression(builder, start, end) &&
+030132:                c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+030133:         {
+030134:             start += 1;
+030135:             end -= 1;
+030136:             narrowed = true;
+030137:         }
+030138:         u32 last_comma = UINT32_MAX;
+030139:         u32 conditional_depth = 0;
+030140:         for (u32 index = start; index < end; index += 1)
+030141:         {
+030142:             u32 punctuator = builder->preprocess.tokens[index].punctuator;
+030143:             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+030144:             if (scan == C_IR_GROUP_SCAN_SKIPPED)
+030145:             {
+030146:                 continue;
+030147:             }
+030148:             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+030149:             {
+030150:                 break;
+030151:             }
+030152:             if (punctuator == C_PUNCTUATOR_QUESTION)
+030153:             {
+030154:                 conditional_depth += 1;
+030155:             }
+030156:             else if (punctuator == C_PUNCTUATOR_COLON && conditional_depth)
+030157:             {
+030158:                 conditional_depth -= 1;
+030159:             }
+030160:             else if (punctuator == C_PUNCTUATOR_COMMA && !conditional_depth)

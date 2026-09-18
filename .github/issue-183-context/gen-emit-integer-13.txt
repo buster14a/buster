@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 13/111
+line: 6942
+
+006872:         {
+006873:             return IR_VALUE_ID_INVALID;
+006874:         }
+006875:         IrValueId shift = c_ir_emit_integer_value_typed(builder, 64 - field->bit_width, false, token, signed_type);
+006876:         assembled = c_ir_emit_cast(builder, assembled, signed_type, source);
+006877:         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SHIFT_LEFT, source);
+006878:         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
+006879:     }
+006880:     IrValueId result = c_ir_emit_cast(builder, assembled, type, source);
+006881:     c_ir_mark_unsigned_bit_field_value(builder, result, field);
+006882:     return result;
+006883: }
+006884: 
+006885: // The write half of the same split: every piece keeps the bits that are not
+006886: // the field's and takes the field's from the value. A piece the field fills
+006887: // completely needs no read at all.
+006888: BUSTER_C_INTERNAL bool c_ir_emit_split_bit_field_store(CIntegerIrBuilder* builder, IrValueId place, IrField* field, IrValueId value, u64 access_size,
+006889:                                                        IrSourceRange source)
+006890: {
+006891:     IrFieldAccessPiece pieces[IR_FIELD_ACCESS_PIECE_CAPACITY];
+006892:     u32 piece_count = ir_field_access_pieces(access_size, pieces);
+006893:     IrTypeId wide_type = c_ir_unsigned_type_of_size(builder, 8);
+006894:     IrValueId wide = piece_count && wide_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, value, wide_type, source) : IR_VALUE_ID_INVALID;
+006895:     IrValueId address = wide.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_storage_address(builder, place, source) : IR_VALUE_ID_INVALID;
+006896:     if (address.value == IR_ID_UNDERLYING_INVALID)
+006897:     {
+006898:         return false;
+006899:     }
+006900:     CToken token = {0};
+006901:     for (u32 index = 0; index < piece_count; index += 1)
+006902:     {
+006903:         u32 low = 0;
+006904:         u32 high = 0;
+006905:         c_ir_bit_field_piece_bits(field, pieces[index], &low, &high);
+006906:         if (low >= high)
+006907:         {
+006908:             continue;
+006909:         }
+006910:         u32 piece_low = (u32)pieces[index].offset * 8;
+006911:         u32 piece_bits = (u32)pieces[index].size * 8;
+006912:         IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
+006913:         IrValueId piece_place =
+006914:             piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+006915:                                                          : IR_VALUE_ID_INVALID;
+006916:         if (piece_place.value == IR_ID_UNDERLYING_INVALID)
+006917:         {
+006918:             return false;
+006919:         }
+006920:         IrValueId part = wide;
+006921:         if (low > field->bit_offset)
+006922:         {
+006923:             IrValueId shift = c_ir_emit_integer_value_typed(builder, low - field->bit_offset, false, token, wide_type);
+006924:             part = c_ir_emit_binary_value(builder, part, shift, wide_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+006925:         }
+006926:         u64 value_mask = high - low == 64 ? UINT64_MAX : ((u64)1 << (high - low)) - 1;
+006927:         IrValueId mask_value = c_ir_emit_integer_value_typed(builder, value_mask, false, token, wide_type);
+006928:         part = c_ir_emit_binary_value(builder, part, mask_value, wide_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+006929:         if (low > piece_low)
+006930:         {
+006931:             IrValueId shift = c_ir_emit_integer_value_typed(builder, low - piece_low, false, token, wide_type);
+006932:             part = c_ir_emit_binary_value(builder, part, shift, wide_type, IR_BINARY_SHIFT_LEFT, source);
+006933:         }
+006934:         part = c_ir_emit_cast(builder, part, piece_type, source);
+006935:         if (part.value == IR_ID_UNDERLYING_INVALID)
+006936:         {
+006937:             return false;
+006938:         }
+006939:         if (high - low != piece_bits)
+006940:         {
+006941:             u64 storage_mask = ((high - low == 64 ? UINT64_MAX : ((u64)1 << (high - low)) - 1) << (low - piece_low));
+006942:             IrValueId clear = c_ir_emit_integer_value_typed(builder, ~storage_mask, false, token, piece_type);
+006943:             IrValueId current = c_ir_emit_load_place_raw(builder, piece_place, piece_type, source);
+006944:             current = current.value != IR_ID_UNDERLYING_INVALID
+006945:                           ? c_ir_emit_binary_value(builder, current, clear, piece_type, IR_BINARY_INTEGER_BITWISE_AND, source)
+006946:                           : IR_VALUE_ID_INVALID;
+006947:             part = current.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_binary_value(builder, current, part, piece_type, IR_BINARY_INTEGER_BITWISE_OR, source)
+006948:                                                              : IR_VALUE_ID_INVALID;
+006949:             if (part.value == IR_ID_UNDERLYING_INVALID)
+006950:             {
+006951:                 return false;
+006952:             }
+006953:         }
+006954:         if (!c_ir_emit_store_place(builder, piece_place, piece_type, part, source))
+006955:         {
+006956:             return false;
+006957:         }
+006958:     }
+006959:     return true;
+006960: }
+006961: 
+006962: BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source)
+006963: {
+006964:     // C 6.3.2.1p4: a function designator is converted to a pointer to the
+006965:     // function; there is nothing to load out of one. The place reaches here
+006966:     // when the name resolves to an entity rather than to a call — a
+006967:     // block-scope `extern void sighandler(int);` declares such a name, and
+006968:     // sbase's make then stores it in a `struct sigaction`.
+006969:     IrType* designated_type = ir_type_from_id(&builder->program->types, type);
+006970:     if (designated_type && designated_type->kind == IR_TYPE_FUNCTION)
+006971:     {
+006972:         return c_ir_emit_address_of_place(builder, place, type, source);
+006973:     }
+006974:     IrField* field = c_ir_bit_field_from_place(builder, place);
+006975:     IrType* value_type = ir_type_from_id(&builder->program->types, type);
+006976:     // A `_Bool` bit-field's bits are extracted like any other's. Its declared
+006977:     // type is not an integer, so the extraction used to be skipped and the
+006978:     // whole `_Bool` unit came back -- every neighbouring field's bits with it,
+006979:     // normalized to one, which is why a `_Bool` that happened to be the only
+006980:     // set bit still read correctly. The unit it is read through has to be an
+006981:     // integer of the same width for the shift to see the raw byte.
+006982:     bool boolean = value_type && value_type->kind == IR_TYPE_BOOLEAN;
+006983:     bool extract =
+006984:         field && value_type && (value_type->kind == IR_TYPE_INTEGER || boolean) && field->bit_width && field->bit_width <= value_type->bit_width;
+006985:     // A packed bit-field the aggregate left no room for a declared-type unit
+006986:     // of is read through the narrower one its layout recorded; every other
+006987:     // field reads its own type. A span that is no integer's width -- five
+006988:     // bytes for `long long b : 40` -- has no such unit and takes several
+006989:     // accesses instead.
+006990:     IrTypeId access_type = type;
+006991:     if (extract && (field->access_size || boolean))
+006992:     {
+006993:         access_type = c_ir_unsigned_type_of_size(builder, ir_field_access_size(&builder->program->types, field));
+006994:         if (access_type.value == IR_ID_UNDERLYING_INVALID)
+006995:         {
+006996:             return c_ir_emit_split_bit_field_load(builder, place, field, type, field->access_size, source);
+006997:         }
+006998:     }
+006999:     IrValueId value = c_ir_emit_load_place_raw(builder, place, access_type, source);
+007000:     if (extract)
+007001:     {
+007002:         CToken token = {0};
+007003:         // The extraction runs in the promoted type, never in a narrower one:
+007004:         // the machine backends model shifts at 32 and 64 bits only, so a
+007005:         // 16-bit `shl`/`sar` pair executes at 32 bits and the sign bit of a
+007006:         // `short a : 9` never reaches the top. Promoting here is also what C
+007007:         // does with the value, and the result narrows back on the way out.
+007008:         // The memory load removes object qualifiers. Extraction and its
+007009:         // constants must use that same value type, including volatile fields.
+007010:         IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
+007011:         IrTypeId extract_type = result_type;
+007012:         IrType* extract_type_value = ir_type_from_id(&builder->program->types, extract_type);
+007013:         if (value_type->bit_width < 32)
+007014:         {
+007015:             extract_type = value_type->is_signed ? builder->s32_type : builder->scalar_types[C_TYPE_UNSIGNED_INT];
+007016:             extract_type_value = ir_type_from_id(&builder->program->types, extract_type);
+007017:         }
+007018:         if (extract_type_value && extract_type.value != access_type.value)
+007019:         {
+007020:             value = c_ir_emit_cast(builder, value, extract_type, source);
+007021:         }
+007022:         if (!extract_type_value || value.value == IR_ID_UNDERLYING_INVALID)
+007023:         {
+007024:             return IR_VALUE_ID_INVALID;
+007025:         }
+007026:         IrValueId shift = c_ir_emit_integer_value_typed(builder, field->bit_offset, false, token, extract_type);
+007027:         value = c_ir_emit_binary_value(builder, value, shift, extract_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+007028:         u64 mask = field->bit_width == 64 ? UINT64_MAX : ((u64)1 << field->bit_width) - 1;
+007029:         IrValueId mask_value = c_ir_emit_integer_value_typed(builder, mask, false, token, extract_type);
+007030:         value = c_ir_emit_binary_value(builder, value, mask_value, extract_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+007031:         if (value_type->is_signed && field->bit_width < extract_type_value->bit_width)
+007032:         {
+007033:             u32 sign_shift = extract_type_value->bit_width - field->bit_width;
+007034:             IrValueId sign_shift_value = c_ir_emit_integer_value_typed(builder, sign_shift, false, token, extract_type);
+007035:             value = c_ir_emit_binary_value(builder, value, sign_shift_value, extract_type, IR_BINARY_SHIFT_LEFT, source);
+007036:             value = c_ir_emit_binary_value(builder, value, sign_shift_value, extract_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
+007037:         }
+007038:         if (extract_type.value != result_type.value)
+007039:         {
+007040:             value = c_ir_emit_cast(builder, value, result_type, source);
+007041:         }
+007042:         c_ir_mark_unsigned_bit_field_value(builder, value, field);
+007043:     }
+007044: 
+007045:     return value;
+007046: }
+007047: 
+007048: // An assignment expression names the stored field value. Keep its promotion
+007049: // fact without rereading memory (in particular, without a second volatile load).
+007050: BUSTER_C_INTERNAL IrValueId c_ir_bit_field_assignment_value(CIntegerIrBuilder* builder, IrValueId place, IrValueId value, IrSourceRange source)
+007051: {
+007052:     IrField* field = c_ir_bit_field_from_place(builder, place);
+007053:     IrValueId result = value;
+007054:     if (c_ir_unsigned_bit_field_promotes_to_int(builder, field))
+007055:     {
+007056:         result = c_ir_emit_cast(builder, value, field->type, source);
+007057:         if (result.value != IR_ID_UNDERLYING_INVALID)
+007058:         {
+007059:             IrValueId mask = c_ir_emit_integer_value_typed(builder, ((u64)1 << field->bit_width) - 1, false, (CToken){0}, field->type);
+007060:             result = c_ir_emit_binary_value(builder, result, mask, field->type, IR_BINARY_INTEGER_BITWISE_AND, source);
+007061:             c_ir_mark_unsigned_bit_field_value(builder, result, field);
+007062:         }
+007063:     }
+007064:     return result;
+007065: }
+007066: 
+007067: BUSTER_C_INTERNAL bool c_ir_place_may_have_static_storage(CIntegerIrBuilder* builder, IrValueId place)
+007068: {
+007069:     u32 value = place.value;
+007070:     u32 steps = builder->function->value_count + 1;
+007071:     while (value < builder->function->value_count && steps)
+007072:     {

@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 106/111
+line: 32493
+
+032423:             *scope_out = c_parse_scope_for_token(&builder->parse, root, task.start);
+032424:             return true;
+032425:         }
+032426:         if (task.continuation.value != block.value && task.block.value != block.value)
+032427:         {
+032428:             continue;
+032429:         }
+032430:         *token_out = task.end;
+032431:         *scope_out = c_parse_scope_for_token(&builder->parse, root, task.end);
+032432:         return true;
+032433:     }
+032434:     *scope_out = C_SCOPE_ID_INVALID;
+032435:     *token_out = UINT32_MAX;
+032436:     return false;
+032437: }
+032438: 
+032439: BUSTER_C_INTERNAL void c_ir_body_task_set_loop_cleanup_targets(CIntegerIrBuilder* builder, CIrBodyTask* task, u32 break_token, u32 continue_token)
+032440: {
+032441:     CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+032442:                                                                                      : C_SCOPE_ID_INVALID;
+032443:     task->break_scope = c_parse_scope_for_token(&builder->parse, root, break_token);
+032444:     task->continue_scope = c_parse_scope_for_token(&builder->parse, root, continue_token);
+032445:     task->break_token = break_token;
+032446:     task->continue_token = continue_token;
+032447: }
+032448: 
+032449: BUSTER_C_INTERNAL bool c_ir_cleanup_target_for_task(CIntegerIrBuilder* builder, CIrBodyTask task, CIrBodyTask* tasks, u32 task_count,
+032450:                                                        IrBlockId block, CScopeId* scope_out, u32* token_out)
+032451: {
+032452:     if (block.value == task.break_block.value && task.break_block.value != IR_ID_UNDERLYING_INVALID)
+032453:     {
+032454:         *scope_out = task.break_scope;
+032455:         *token_out = task.break_token;
+032456:         return true;
+032457:     }
+032458:     if (block.value == task.continue_block.value && task.continue_block.value != IR_ID_UNDERLYING_INVALID)
+032459:     {
+032460:         *scope_out = task.continue_scope;
+032461:         *token_out = task.continue_token;
+032462:         return true;
+032463:     }
+032464:     if (block.value == task.continuation.value && task.continuation.value != IR_ID_UNDERLYING_INVALID)
+032465:     {
+032466:         CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+032467:                                                                                           : C_SCOPE_ID_INVALID;
+032468:         *token_out = task.end;
+032469:         *scope_out = c_parse_scope_for_token(&builder->parse, root, task.end);
+032470:         return true;
+032471:     }
+032472:     return c_ir_cleanup_target_for_block(builder, tasks, task_count, block, scope_out, token_out);
+032473: }
+032474: 
+032475: BUSTER_C_INTERNAL bool c_ir_activate_cleanup(CIntegerIrBuilder* builder, CEntityId entity_id, IrSourceRange source)
+032476: {
+032477:     if (entity_id.value >= builder->parse.entity_count || !builder->cleanup_flags || !builder->cleanup_entity_entries ||
+032478:         !builder->parse.entities[entity_id.value].has_cleanup)
+032479:     {
+032480:         return true;
+032481:     }
+032482:     u32 cleanup_entry = builder->cleanup_entity_entries[entity_id.value];
+032483:     if (cleanup_entry < builder->cleanup_flag_base || cleanup_entry - builder->cleanup_flag_base >= builder->cleanup_flag_count)
+032484:     {
+032485:         return true;
+032486:     }
+032487:     IrValueId flag = builder->cleanup_flags[cleanup_entry - builder->cleanup_flag_base];
+032488:     if (flag.value == IR_ID_UNDERLYING_INVALID)
+032489:     {
+032490:         return false;
+032491:     }
+032492:     CToken token = c_ir_space_name_token(builder, builder->parse.entities[entity_id.value].name);
+032493:     IrValueId value = c_ir_emit_integer_value_typed(builder, 1, false, token, builder->bool_type);
+032494:     return value.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, flag, builder->bool_type, value, source);
+032495: }
+032496: 
+032497: BUSTER_C_INTERNAL bool c_ir_has_cleanup_state(CIntegerIrBuilder* builder)
+032498: {
+032499:     return builder->cleanup_flag_count != 0;
+032500: }
+032501: 
+032502: BUSTER_C_INTERNAL bool c_ir_cleanup_target_has_calls(CIntegerIrBuilder* builder, CScopeId target_scope, u32 target_token)
+032503: {
+032504:     if (builder->cleanup_entities && builder->cleanup_flags)
+032505:     {
+032506:         for (u32 cleanup_index = builder->cleanup_flag_count; cleanup_index != 0; cleanup_index -= 1)
+032507:         {
+032508:             u32 entry_index = builder->cleanup_flag_base + cleanup_index - 1;
+032509:             CEntityId entity_id = builder->cleanup_entities[entry_index];
+032510:             CEntity* entity = entity_id.value < builder->parse.entity_count ? &builder->parse.entities[entity_id.value] : 0;
+032511:             if (entity && entity->has_cleanup && builder->cleanup_flags[cleanup_index - 1].value != IR_ID_UNDERLYING_INVALID &&
+032512:                 c_ir_cleanup_is_outside_target(&builder->parse, entity, target_scope, target_token) && c_ir_find_local_by_entity(builder, entity_id))
+032513:             {
+032514:                 return true;
+032515:             }
+032516:         }
+032517:     }
+032518: 
+032519:     return false;
+032520: }
+032521: 
+032522: BUSTER_C_INTERNAL bool c_ir_emit_cleanup_calls(CIntegerIrBuilder* builder, CIrBodyTask* tasks, u32 task_count, CScopeId target_scope,
+032523:                                                   u32 target_token, IrSourceRange source)
+032524: {
+032525:     for (u32 cleanup_index = builder->cleanup_flag_count; cleanup_index != 0; cleanup_index -= 1)
+032526:     {
+032527:         u32 entry_index = builder->cleanup_flag_base + cleanup_index - 1;
+032528:         CEntityId entity_id = builder->cleanup_entities[entry_index];
+032529:         CEntity* entity = entity_id.value < builder->parse.entity_count ? &builder->parse.entities[entity_id.value] : 0;
+032530:         if (!entity || !entity->has_cleanup || builder->cleanup_flags[cleanup_index - 1].value == IR_ID_UNDERLYING_INVALID ||
+032531:             !c_ir_cleanup_is_outside_target(&builder->parse, entity, target_scope, target_token))
+032532:         {
+032533:             continue;
+032534:         }
+032535:         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity_id);
+032536:         if (!local)
+032537:         {
+032538:             continue;
+032539:         }
+032540:         IrFunction* callback_function = 0;
+032541:         CIrSignature callback_signature = {0};
+032542:         bool callback_resolved = c_ir_cleanup_function_target(builder, entity->cleanup_function, &callback_function, &callback_signature);
+032543:         IrTypeId variable_type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+032544:         if (!callback_resolved || variable_type.value == IR_ID_UNDERLYING_INVALID || callback_signature.parameter_count != 1)
+032545:         {
+032546:             return false;
+032547:         }
+032548:         CToken callback_token = c_ir_space_name_token(builder, entity->name);
+032549:         IrValueId flag = builder->cleanup_flags[cleanup_index - 1];
+032550:         IrValueId active = c_ir_emit_load_place_raw(builder, flag, builder->bool_type, source);
+032551:         active = active.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_truth_value(builder, active, source);
+032552:         IrBlockId call_block = c_ir_block_create(builder);
+032553:         IrBlockId next_block = c_ir_block_create(builder);
+032554:         if (active.value == IR_ID_UNDERLYING_INVALID || call_block.value == IR_ID_UNDERLYING_INVALID || next_block.value == IR_ID_UNDERLYING_INVALID)
+032555:         {
+032556:             return false;
+032557:         }
+032558:         IrBlockId targets[2] = {call_block, next_block};
+032559:         if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &active, 1, targets, 2, source) || !c_ir_switch_block(builder, call_block))
+032560:         {
+032561:             return false;
+032562:         }
+032563:         IrValueId address = c_ir_emit_address_of_place(builder, local->place, variable_type, source);
+032564:         IrValueId arguments[1] = {address};
+032565:         arguments[0] = c_ir_emit_cast(builder, arguments[0], callback_signature.parameter_types[0], source);
+032566:         if (address.value == IR_ID_UNDERLYING_INVALID || arguments[0].value == IR_ID_UNDERLYING_INVALID ||
+032567:             c_ir_emit_call_target(builder, callback_token, callback_function, callback_signature, arguments, BUSTER_ARRAY_LENGTH(arguments)).value ==
+032568:                 IR_ID_UNDERLYING_INVALID)
+032569:         {
+032570:             return false;
+032571:         }
+032572:         IrValueId inactive = c_ir_emit_integer_value_typed(builder, 0, false, callback_token, builder->bool_type);
+032573:         if (inactive.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store_place(builder, flag, builder->bool_type, inactive, source) ||
+032574:             !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &next_block, 1, source) || !c_ir_switch_block(builder, next_block))
+032575:         {
+032576:             return false;
+032577:         }
+032578:     }
+032579:     BUSTER_UNUSED(tasks);
+032580:     BUSTER_UNUSED(task_count);
+032581:     return true;
+032582: }
+032583: 
+032584: BUSTER_C_INTERNAL bool c_ir_emit_computed_goto_cleanup_dispatch(CIntegerIrBuilder* builder, IrValueId target, IrBlockId* targets, u32 target_count,
+032585:                                                                   CIrLabel* labels, u32 label_count, CScopeId root_scope, IrSourceRange source)
+032586: {
+032587:     if (!target_count || (!c_ir_is_computed_goto_target(builder, target) && !c_ir_is_computed_goto_storage_target(builder, target)))
+032588:     {
+032589:         if (!builder->failure_message.length)
+032590:         {
+032591:             builder->failure_message = S8("computed goto requires a function-local void pointer label value");
+032592:         }
+032593:         return false;
+032594:     }
+032595:     IrType* target_type = ir_type_from_id(&builder->program->types, builder->function->values[target.value].canonical_type);
+032596:     IrBlockId* cleanup_blocks = arena_allocate(builder->arena, IrBlockId, target_count);
+032597:     bool needs_dispatch = ir_value_label_metadata(builder->function, target).has_non_label_provenance || !c_ir_is_computed_goto_target(builder, target);
+032598:     for (u32 target_index = 0; target_index < target_count; target_index += 1)
+032599:     {
+032600:         CIrLabel* label = 0;
+032601:         for (u32 label_index = 0; label_index < label_count; label_index += 1)
+032602:         {
+032603:             if (labels[label_index].block.value == targets[target_index].value)
+032604:             {
+032605:                 label = labels + label_index;
+032606:                 break;
+032607:             }
+032608:         }
+032609:         if (!label)
+032610:         {
+032611:             builder->failure_message = S8("computed goto target does not belong to this function");
+032612:             return false;
+032613:         }
+032614:         CScopeId target_scope = c_parse_scope_for_token(&builder->parse, root_scope, label->token_index);
+032615:         if (c_ir_cleanup_target_has_calls(builder, target_scope, label->token_index))
+032616:         {
+032617:             cleanup_blocks[target_index] = c_ir_block_create(builder);
+032618:             if (cleanup_blocks[target_index].value == IR_ID_UNDERLYING_INVALID)
+032619:             {
+032620:                 return false;
+032621:             }
+032622:             needs_dispatch = true;
+032623:         }

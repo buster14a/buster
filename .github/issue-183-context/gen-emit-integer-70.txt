@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 70/111
+line: 20075
+
+020005:         }
+020006:         if (selected->builtin_clear_cache)
+020007:         {
+020008:             u32 argument_start = selected->open_index + 1;
+020009:             u32 separator = selected->close_index;
+020010:             u32 parentheses = 0;
+020011:             for (u32 index = argument_start; index < selected->close_index; index += 1)
+020012:             {
+020013:                 CToken current = builder->preprocess.tokens[index];
+020014:                 if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
+020015:                 {
+020016:                     parentheses += 1;
+020017:                 }
+020018:                 else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+020019:                 {
+020020:                     parentheses -= 1;
+020021:                 }
+020022:                 else if (!parentheses && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
+020023:                 {
+020024:                     separator = index;
+020025:                     break;
+020026:                 }
+020027:             }
+020028:             IrValueId first = IR_VALUE_ID_INVALID;
+020029:             IrValueId second = IR_VALUE_ID_INVALID;
+020030:             if (separator == argument_start || separator + 1 >= selected->close_index)
+020031:             {
+020032:                 return false;
+020033:             }
+020034:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND)
+020035:             {
+020036:                 if (!child_success)
+020037:                 {
+020038:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+020039:                 }
+020040:                 first = frame->as.prepared_call.state->first;
+020041:                 second = child_value;
+020042:             }
+020043:             else if (continuation == C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST)
+020044:             {
+020045:                 if (!child_success)
+020046:                 {
+020047:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+020048:                 }
+020049:                 frame->as.prepared_call.state->first = child_value;
+020050:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_SECOND, separator + 1,
+020051:                                                              selected->close_index, false);
+020052:             }
+020053:             else
+020054:             {
+020055:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CLEAR_FIRST, argument_start, separator, false);
+020056:             }
+020057:             bool windows_runtime = builder->target.cpu_arch == CPU_ARCH_AARCH64 && builder->target.os == OPERATING_SYSTEM_WINDOWS;
+020058:             if (windows_runtime)
+020059:             {
+020060:                 if (!c_ir_emit_clear_cache_runtime_call(builder, token, first, second))
+020061:                 {
+020062:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+020063:                 }
+020064:             }
+020065:             else
+020066:             {
+020067:                 IrSourceRange clear_source = c_ir_token_source_range(builder, token);
+020068:                 IrInstruction clear = c_ir_instruction_initialize(IR_OPCODE_CLEAR_INSTRUCTION_CACHE, builder->void_type);
+020069:                 clear.operands = arena_allocate(builder->arena, IrValueId, 2);
+020070:                 clear.operands[0] = first;
+020071:                 clear.operands[1] = second;
+020072:                 clear.operand_count = 2;
+020073:                 c_ir_append_instruction(builder, clear, clear_source);
+020074:             }
+020075:             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+020076:             selected->argument_count = 2;
+020077:             selected->emitted = true;
+020078:             remaining -= 1;
+020079:             continue;
+020080:         }
+020081:         if (selected->builtin_prefetch)
+020082:         {
+020083:             u32 argument_start = selected->open_index + 1;
+020084:             u32 first_end = selected->close_index;
+020085:             u32 parentheses = 0;
+020086:             for (u32 index = argument_start; index < selected->close_index; index += 1)
+020087:             {
+020088:                 CToken current = builder->preprocess.tokens[index];
+020089:                 if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS))
+020090:                 {
+020091:                     parentheses += 1;
+020092:                 }
+020093:                 else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) && parentheses)
+020094:                 {
+020095:                     parentheses -= 1;
+020096:                 }
+020097:                 else if (!parentheses && c_token_is_punctuator(&current, C_PUNCTUATOR_COMMA))
+020098:                 {
+020099:                     first_end = index;
+020100:                     break;
+020101:                 }
+020102:             }
+020103:             IrValueId address = IR_VALUE_ID_INVALID;
+020104:             if (first_end == argument_start)
+020105:             {
+020106:                 return false;
+020107:             }
+020108:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_PREFETCH)
+020109:             {
+020110:                 if (!child_success)
+020111:                 {
+020112:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+020113:                 }
+020114:                 address = child_value;
+020115:             }
+020116:             else
+020117:             {
+020118:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_PREFETCH, argument_start, first_end, false);
+020119:             }
+020120:             (void)address;
+020121:             // The read/write and locality arguments are required to be integer
+020122:             // constants, so discarding them cannot lose a side effect.
+020123:             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+020124:             selected->argument_count = 1;
+020125:             selected->emitted = true;
+020126:             remaining -= 1;
+020127:             continue;
+020128:         }
+020129:         if (selected->builtin_unreachable)
+020130:         {
+020131:             if (selected->close_index != selected->open_index + 1)
+020132:             {
+020133:                 return false;
+020134:             }
+020135:             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+020136:             IrSourceRange unreachable_source = c_ir_token_source_range(builder, token);
+020137:             IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
+020138:             c_ir_append_instruction(builder, unreachable, unreachable_source);
+020139:             builder->function->blocks[builder->current_block.value].terminated = true;
+020140:             selected->emitted = true;
+020141:             remaining -= 1;
+020142:             continue;
+020143:         }
+020144:         if (selected->builtin_va_start || selected->builtin_va_copy || selected->builtin_va_end)
+020145:         {
+020146:             CIrPreparedCallStepResult step = c_ir_emit_va_list_call_step(builder, frame, continuation, child_success, child_value);
+020147:             if (step != C_IR_PREPARED_CALL_STEP_FINISHED)
+020148:             {
+020149:                 return step;
+020150:             }
+020151:             selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+020152:             selected->emitted = true;
+020153:             remaining -= 1;
+020154:             continue;
+020155:         }
+020156:         if (selected->builtin_va_arg)
+020157:         {
+020158:             u32 argument_start = selected->open_index + 1;
+020159:             u32 separator = c_ir_va_arg_type_separator(builder, argument_start, selected->close_index);
+020160:             IrValueId list = IR_VALUE_ID_INVALID;
+020161:             IrTypeId result_type = separator < selected->close_index ? c_ir_type_name(builder, separator + 1, selected->close_index) : IR_TYPE_ID_INVALID;
+020162:             if (separator == argument_start || separator >= selected->close_index || result_type.value == IR_ID_UNDERLYING_INVALID)
+020163:             {
+020164:                 return false;
+020165:             }
+020166:             // Reading a wide value back is the mirror of passing one, and it
+020167:             // admits the same two shapes for the same reason.  System V
+020168:             // classifies an X87/X87_UP pair into memory, so the caller left
+020169:             // the value in a sixteen-aligned overflow slot and never in the
+020170:             // register save area; an aggregate whose classification carries
+020171:             // no x87 class at all is copied by the ordinary eightbyte path.
+020172:             // That second arm stops at the two eightbytes the emitter's
+020173:             // va_arg copies -- `long double _Complex` is the shape past it --
+020174:             // so a wide value it cannot read back is named here rather than
+020175:             // reaching code generation.  Every other wide-float shape still
+020176:             // has no lowering at all.
+020177:             IrType* wide_result_type = ir_type_from_id(&builder->program->types, result_type);
+020178:             bool wide_va_arg_supported =
+020179:                 c_ir_type_is_f80_x87_shape(builder->program, builder->wide_float_cache, result_type, builder->target) ||
+020180:                 (c_ir_type_is_f80_opaque_aggregate(builder->program, builder->wide_float_cache, result_type, builder->target) &&
+020181:                  wide_result_type && wide_result_type->layout.resolved && wide_result_type->layout.size <= 16);
+020182:             if (!wide_va_arg_supported && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, result_type))
+020183:             {
+020184:                 builder->failure_message = S8("C IR lowering does not yet support wide floating-point va_arg");
+020185:                 builder->failure_token_index = selected->token_index;
+020186:                 return C_IR_PREPARED_CALL_STEP_FAILED;
+020187:             }
+020188:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_ARG)
+020189:             {
+020190:                 if (!child_success)
+020191:                 {
+020192:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+020193:                 }
+020194:                 list = child_value;
+020195:             }
+020196:             else
+020197:             {
+020198:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_ARG, argument_start, separator, true);
+020199:             }
+020200:             if (!c_ir_va_list_operand_valid(builder, list))
+020201:             {
+020202:                 builder->failure_message = S8("va_arg requires a va_list operand");
+020203:                 builder->failure_token_index = selected->token_index;
+020204:                 return C_IR_PREPARED_CALL_STEP_FAILED;
+020205:             }

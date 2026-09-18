@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 32/111
+line: 14447
+
+014377: // storage and must not put an undefined symbol in the object file: DoomGeneric's
+014378: // i_sound.c declares `use_libsamplerate` at the top of I_BindSoundVariables and
+014379: // only binds it under #ifdef FEATURE_SOUND, so in a build without sound the
+014380: // declaration stands alone -- and an undefined symbol emitted for it fails at
+014381: // link or load time against a definition that only the SDL backend has.
+014382: BUSTER_C_INTERNAL bool c_ir_body_mentions_name_outside(CIntegerIrBuilder* builder, String8 name, u32 declaration_start, u32 declaration_end)
+014383: {
+014384:     u32 body_end = builder->body_token_start + builder->body_token_count;
+014385:     for (u32 index = builder->body_token_start; index < body_end; index += 1)
+014386:     {
+014387:         if (index >= declaration_start && index < declaration_end)
+014388:         {
+014389:             continue;
+014390:         }
+014391:         CToken token = builder->preprocess.tokens[index];
+014392:         if (token.kind == C_TOKEN_IDENTIFIER && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), name))
+014393:         {
+014394:             return true;
+014395:         }
+014396:     }
+014397:     return false;
+014398: }
+014399: 
+014400: BUSTER_C_INTERNAL bool c_ir_lower_compound_literal_frame_push(CIntegerIrBuilder* builder, IrTypeId type, u32 open, u32 close)
+014401: {
+014402:     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+014403:                                               .kind = C_IR_LOWER_FRAME_COMPOUND_LITERAL,
+014404:                                               .as.compound_literal_machine =
+014405:                                                   {
+014406:                                                       .type = type,
+014407:                                                       .open = open,
+014408:                                                       .close = close,
+014409:                                                   },
+014410:                                           });
+014411: }
+014412: 
+014413: BUSTER_C_INTERNAL void c_ir_lower_statement_expression_step(CIntegerIrBuilder* builder)
+014414: {
+014415:     CIrLowerMachine* machine = &builder->lower_machine;
+014416:     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+014417:     CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+014418:     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_STATEMENT_EXPRESSION);
+014419:     if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+014420:     {
+014421:         if (!machine->child_result.success)
+014422:         {
+014423:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+014424:             return;
+014425:         }
+014426:         frame->as.statement_expression.value = machine->child_result.value;
+014427:         if (frame->as.statement_expression.tail_index)
+014428:         {
+014429:             frame->as.statement_expression.tail_index -= 1;
+014430:             u32 tail_index = frame->as.statement_expression.tail_index;
+014431:             CDeclaration declaration = {
+014432:                 .name = S8("statement expression"),
+014433:                 .location = c_ir_token_location(builder, builder->preprocess.tokens[frame->as.statement_expression.tail_opens[tail_index]]),
+014434:                 .body_start = frame->as.statement_expression.tail_starts[tail_index],
+014435:                 .body_token_count = frame->as.statement_expression.tail_ends[tail_index] - frame->as.statement_expression.tail_starts[tail_index],
+014436:                 .kind = C_DECLARATION_FUNCTION,
+014437:             };
+014438:             if (!c_ir_lower_body_frame_push(builder, declaration, true))
+014439:             {
+014440:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+014441:             }
+014442:             return;
+014443:         }
+014444:         IrValueId value = frame->as.statement_expression.value;
+014445:         if (value.value == IR_ID_UNDERLYING_INVALID)
+014446:         {
+014447:             value = c_ir_emit_integer_value(builder, 0, false, builder->preprocess.tokens[frame->as.statement_expression.leaf_open]);
+014448:         }
+014449:         c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+014450:         return;
+014451:     }
+014452:     u32 open = frame->as.statement_expression.open;
+014453:     u32 close = frame->as.statement_expression.close;
+014454:     if (open >= close || !c_token_is_punctuator(&builder->preprocess.tokens[open], C_PUNCTUATOR_LEFT_BRACE) ||
+014455:         !c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_RIGHT_BRACE))
+014456:     {
+014457:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+014458:         return;
+014459:     }
+014460:     // Empty statement-expression wrappers do not introduce declarations or
+014461:     // control-flow state. Descend through them iteratively so generated GNU C
+014462:     // with deeply nested `({ ({ ... }); })` expressions cannot consume the C
+014463:     // call stack merely to re-enter body lowering.
+014464:     while (open + 4 < close)
+014465:     {
+014466:         u32 nested_start = open + 1;
+014467:         u32 nested_end = close;
+014468:         if (c_token_is_punctuator(&builder->preprocess.tokens[nested_end - 1], C_PUNCTUATOR_SEMICOLON))
+014469:         {
+014470:             nested_end -= 1;
+014471:         }
+014472:         if (nested_start + 3 >= nested_end || !c_token_is_punctuator(&builder->preprocess.tokens[nested_start], C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+014473:             !c_token_is_punctuator(&builder->preprocess.tokens[nested_start + 1], C_PUNCTUATOR_LEFT_BRACE) ||
+014474:             !c_token_is_punctuator(&builder->preprocess.tokens[nested_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+014475:             c_ir_matching_delimiter_cached(builder, nested_start, nested_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) != nested_end - 1)
+014476:         {
+014477:             break;
+014478:         }
+014479:         u32 nested_close = c_ir_matching_delimiter_cached(builder, nested_start + 1, nested_end - 1, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+014480:         if (nested_close != nested_end - 2)
+014481:         {
+014482:             break;
+014483:         }
+014484:         open = nested_start + 1;
+014485:         close = nested_close;
+014486:     }
+014487:     u32 tail_capacity = (close - open) / 4 + 1;
+014488:     frame->as.statement_expression.tail_starts = arena_allocate(builder->scratch_arena, u32, tail_capacity);
+014489:     frame->as.statement_expression.tail_ends = arena_allocate(builder->scratch_arena, u32, tail_capacity);
+014490:     frame->as.statement_expression.tail_opens = arena_allocate(builder->scratch_arena, u32, tail_capacity);
+014491:     frame->as.statement_expression.tail_count = 0;
+014492:     while (open + 4 < close && c_token_is_punctuator(&builder->preprocess.tokens[open + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+014493:            c_token_is_punctuator(&builder->preprocess.tokens[open + 2], C_PUNCTUATOR_LEFT_BRACE))
+014494:     {
+014495:         u32 nested_close = c_ir_matching_delimiter_cached(builder, open + 2, close, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+014496:         if (nested_close == UINT32_MAX || nested_close + 1 >= close ||
+014497:             !c_token_is_punctuator(&builder->preprocess.tokens[nested_close + 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+014498:             c_ir_matching_delimiter_cached(builder, open + 1, close, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) != nested_close + 1)
+014499:         {
+014500:             break;
+014501:         }
+014502:         u32 tail_start = nested_close + 2;
+014503:         if (tail_start < close && c_token_is_punctuator(&builder->preprocess.tokens[tail_start], C_PUNCTUATOR_SEMICOLON))
+014504:         {
+014505:             tail_start += 1;
+014506:         }
+014507:         if (tail_start >= close)
+014508:         {
+014509:             break;
+014510:         }
+014511:         if (frame->as.statement_expression.tail_count >= tail_capacity)
+014512:         {
+014513:             builder->failure_message = S8("C statement-expression nesting exceeds the lowering frame capacity");
+014514:             builder->failure_token_index = open;
+014515:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+014516:             return;
+014517:         }
+014518:         u32 tail_index = frame->as.statement_expression.tail_count++;
+014519:         frame->as.statement_expression.tail_starts[tail_index] = tail_start;
+014520:         frame->as.statement_expression.tail_ends[tail_index] = close;
+014521:         frame->as.statement_expression.tail_opens[tail_index] = open;
+014522:         open += 2;
+014523:         close = nested_close;
+014524:     }
+014525:     frame->as.statement_expression.tail_index = frame->as.statement_expression.tail_count;
+014526:     frame->as.statement_expression.leaf_open = open;
+014527:     CDeclaration declaration = {
+014528:         .name = S8("statement expression"),
+014529:         .location = c_ir_token_location(builder, builder->preprocess.tokens[open]),
+014530:         .body_start = open + 1,
+014531:         .body_token_count = close - open - 1,
+014532:         .kind = C_DECLARATION_FUNCTION,
+014533:     };
+014534:     frame->stage = (u8)C_IR_LOWER_STAGE_CHILD;
+014535:     if (!c_ir_lower_body_frame_push(builder, declaration, true))
+014536:     {
+014537:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+014538:     }
+014539: }
+014540: 
+014541: BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source);
+014542: 
+014543: BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
+014544: 
+014545: BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
+014546: 
+014547: BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
+014548: 
+014549: BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global);
+014550: BUSTER_C_INTERNAL bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out);
+014551: 
+014552: BUSTER_C_INTERNAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal* initializer)
+014553: {
+014554:     if (!type || !initializer)
+014555:     {
+014556:         return false;
+014557:     }
+014558:     if (type->kind == IR_TYPE_POINTER)
+014559:     {
+014560:         return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO;
+014561:     }
+014562:     if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+014563:     {
+014564:         return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && initializer->relocation_count == 0;
+014565:     }
+014566:     return initializer->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO || initializer->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER ||
+014567:            initializer->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT;
+014568: }
+014569: 
+014570: BUSTER_C_INTERNAL bool c_ir_report_unsupported_signature(CIntegerIrBuilder* builder, String8 name)
+014571: {
+014572:     if (!name.length)
+014573:     {
+014574:         name = S8("<function pointer>");
+014575:     }
+014576:     if (!builder->failure_message.length)
+014577:     {

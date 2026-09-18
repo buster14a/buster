@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 94/111
+line: 27659
+
+027589:             if (value.value == IR_ID_UNDERLYING_INVALID)
+027590:             {
+027591:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027592:                 return;
+027593:             }
+027594:             values[value_count++] = value;
+027595:             expect_operand = false;
+027596:             index = prepared_call->close_index;
+027597:             continue;
+027598:         }
+027599:         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+027600:         {
+027601:             if (!expect_operand)
+027602:             {
+027603:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027604:                 return;
+027605:             }
+027606:             IrValueId value = c_number_is_float(c_token_spelling(builder->preprocess.spelling_base, token)) ? c_ir_emit_float(builder, token) : c_ir_emit_integer(builder, token);
+027607:             if (value.value == IR_ID_UNDERLYING_INVALID)
+027608:             {
+027609:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027610:                 return;
+027611:             }
+027612:             values[value_count++] = value;
+027613:             expect_operand = false;
+027614:             continue;
+027615:         }
+027616:         if (token.kind == C_TOKEN_CHARACTER_LITERAL || token.kind == C_TOKEN_STRING_LITERAL)
+027617:         {
+027618:             if (!expect_operand)
+027619:             {
+027620:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027621:                 return;
+027622:             }
+027623:             u32 literal_end = index + 1;
+027624:             if (token.kind == C_TOKEN_STRING_LITERAL)
+027625:             {
+027626:                 while (literal_end < end && builder->preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+027627:                 {
+027628:                     literal_end += 1;
+027629:                 }
+027630:             }
+027631:             IrValueId value = token.kind == C_TOKEN_CHARACTER_LITERAL ? c_ir_emit_character(builder, token)
+027632:                                                                       : c_ir_emit_string_range_typed(builder, index, literal_end, IR_TYPE_ID_INVALID);
+027633:             if (value.value == IR_ID_UNDERLYING_INVALID)
+027634:             {
+027635:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027636:                 return;
+027637:             }
+027638:             values[value_count++] = value;
+027639:             expect_operand = false;
+027640:             index = literal_end - 1;
+027641:             continue;
+027642:         }
+027643:         if (token.kind == C_TOKEN_IDENTIFIER)
+027644:         {
+027645:             if (!expect_operand)
+027646:             {
+027647:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027648:                 return;
+027649:             }
+027650:             // The arms below advance `index` past what they consumed -- a
+027651:             // failed call leaves it on the closing parenthesis -- so the
+027652:             // failure report keeps the identifier's own token index.
+027653:             u32 identifier_index = index;
+027654:             IrValueId value = IR_VALUE_ID_INVALID;
+027655:             IrValueId value_place = IR_VALUE_ID_INVALID;
+027656:             if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) &&
+027657:                 (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("false"))))
+027658:             {
+027659:                 value = c_ir_emit_integer_value_typed(builder, string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")), false, token, builder->bool_type);
+027660:             }
+027661:             else if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("nullptr")))
+027662:             {
+027663:                 value = c_ir_emit_nullptr(builder, token);
+027664:             }
+027665:             else if (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__func__")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__FUNCTION__")) ||
+027666:                      string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__PRETTY_FUNCTION__")))
+027667:             {
+027668:                 value = c_ir_emit_function_name(builder, token);
+027669:             }
+027670:             else if (index + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+027671:             {
+027672:                 u32 close = index + 2;
+027673:                 u32 depth = 1;
+027674:                 while (close < end && depth)
+027675:                 {
+027676:                     if (c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_LEFT_PARENTHESIS))
+027677:                     {
+027678:                         depth += 1;
+027679:                     }
+027680:                     else if (c_token_is_punctuator(&builder->preprocess.tokens[close], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+027681:                     {
+027682:                         depth -= 1;
+027683:                     }
+027684:                     close += 1;
+027685:                 }
+027686:                 if (depth)
+027687:                 {
+027688:                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027689:                     return;
+027690:                 }
+027691:                 CIrPreparedCall* chained_call = c_ir_prepared_call_find(builder, index);
+027692:                 if (chained_call && chained_call->close_index < end)
+027693:                 {
+027694:                     chained_call = c_ir_prepared_call_chained(builder, chained_call, end);
+027695:                 }
+027696:                 value = chained_call && chained_call->emitted ? chained_call->result : IR_VALUE_ID_INVALID;
+027697:                 index = chained_call && chained_call->emitted ? chained_call->close_index : close - 1;
+027698:             }
+027699:             else
+027700:             {
+027701:                 CEntityId entity = c_ir_identifier_entity(builder, index);
+027702:                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+027703:                 if (!local && entity.value == C_ID_UNDERLYING_INVALID)
+027704:                 {
+027705:                     local = c_ir_find_local_by_name(builder, token);
+027706:                 }
+027707:                 u32 place_end = index + 1;
+027708:                 if (local && local->is_variable_length_array)
+027709:                 {
+027710:                     u32 dimension = 0;
+027711:                     while (dimension < local->vla_dimension_count && place_end < end &&
+027712:                            c_token_is_punctuator(&builder->preprocess.tokens[place_end], C_PUNCTUATOR_LEFT_BRACKET))
+027713:                     {
+027714:                         u32 close = c_ir_matching_delimiter_cached(builder, place_end, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+027715:                         if (close >= end)
+027716:                         {
+027717:                             break;
+027718:                         }
+027719:                         place_end = close + 1;
+027720:                         dimension += 1;
+027721:                     }
+027722:                 }
+027723:                 while (place_end + 1 < end &&
+027724:                        (c_token_is_punctuator(&builder->preprocess.tokens[place_end], C_PUNCTUATOR_DOT) ||
+027725:                         c_token_is_punctuator(&builder->preprocess.tokens[place_end], C_PUNCTUATOR_ARROW)) &&
+027726:                        builder->preprocess.tokens[place_end + 1].kind == C_TOKEN_IDENTIFIER)
+027727:                 {
+027728:                     place_end += 2;
+027729:                 }
+027730:                 if (place_end > index + 1)
+027731:                 {
+027732:                     c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count,
+027733:                                               operation_count, place_end, expect_operand);
+027734:                     state->pending_start = index;
+027735:                     state->pending_end = place_end;
+027736:                     frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_IDENTIFIER_PLACE;
+027737:                     // Run the place now, off the dispatch loop (the resume
+027738:                     // arm above, inlined); a suspension resumes through the
+027739:                     // loop unchanged.
+027740:                     u32 place_mark = machine->frame_count;
+027741:                     if (!c_ir_lower_place_frame_push(builder, index, place_end))
+027742:                     {
+027743:                         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027744:                         return;
+027745:                     }
+027746:                     c_ir_lower_place_step(builder, machine->frames + machine->frame_count - 1);
+027747:                     if (machine->frame_count != place_mark || machine->failed)
+027748:                     {
+027749:                         return;
+027750:                     }
+027751:                     if (!machine->child_result.success)
+027752:                     {
+027753:                         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027754:                         return;
+027755:                     }
+027756:                     if (!c_ir_lower_expression_core_consume_place(builder, frame, state, values, &value_count, &index))
+027757:                     {
+027758:                         return;
+027759:                     }
+027760:                     expect_operand = false;
+027761:                     frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+027762:                     goto c_ir_expression_core_loop;
+027763:                 }
+027764:                 else if (local)
+027765:                 {
+027766:                     if (index + 2 < end &&
+027767:                         (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_DOT) ||
+027768:                          c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_ARROW)) &&
+027769:                         builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)
+027770:                     {
+027771:                         IrValueId place = c_ir_emit_field_place(builder, local, builder->preprocess.tokens[index + 1], builder->preprocess.tokens[index + 2]);
+027772:                         if (place.value != IR_ID_UNDERLYING_INVALID)
+027773:                         {
+027774:                             value_place = place;
+027775:                             IrTypeId field_type = builder->function->values[place.value].canonical_type;
+027776:                             IrType* field = ir_type_from_id(&builder->program->types, field_type);
+027777:                             value = field && (field->kind == IR_TYPE_ARRAY || (field->is_atomic && c_ir_postfix_update_at(builder, index + 2, end)))
+027778:                                         ? place
+027779:                                         : c_ir_emit_expression_place_value(builder, place, field_type, source);
+027780:                             index += 2;
+027781:                         }
+027782:                     }
+027783:                     else
+027784:                     {
+027785:                         IrType* local_type = ir_type_from_id(&builder->program->types, local->type);
+027786:                         bool address_va_list = local_type && local_type->kind == IR_TYPE_VA_LIST &&
+027787:                                                (builder->va_list_builtin_operand || c_ir_va_list_parameter_decays(builder->target));
+027788:                         value = local_type && (local_type->kind == IR_TYPE_ARRAY || (local_type->is_atomic && c_ir_postfix_update_at(builder, index, end)))
+027789:                                     ? local->place

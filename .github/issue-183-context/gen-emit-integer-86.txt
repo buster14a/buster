@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 86/111
+line: 24033
+
+023963:         u32 operand_count;
+023964:         CIrZeroTaskKind kind;
+023965:     };
+023966:     IrType* root = ir_type_from_id(&builder->program->types, root_type);
+023967:     if (!root || !root->layout.resolved || root->layout.size > (UINT32_MAX - 64) / 8)
+023968:     {
+023969:         builder->failure_message = !root                    ? S8("cannot zero-initialize an unresolved IR type")
+023970:                                    : !root->layout.resolved ? S8("cannot zero-initialize an aggregate with unresolved layout")
+023971:                                                             : S8("aggregate is too large to zero-initialize");
+023972:         return IR_VALUE_ID_INVALID;
+023973:     }
+023974:     u32 capacity = (u32)(root->layout.size * 8 + 64);
+023975:     CIrZeroTask* tasks = arena_allocate(builder->temporary_arena, CIrZeroTask, capacity);
+023976:     IrValueId result = IR_VALUE_ID_INVALID;
+023977:     u32 task_count = 1;
+023978:     tasks[0] = (CIrZeroTask){
+023979:         .output = &result,
+023980:         .type = root_type,
+023981:     };
+023982:     while (task_count)
+023983:     {
+023984:         CIrZeroTask task = tasks[--task_count];
+023985:         IrType* type = ir_type_from_id(&builder->program->types, task.type);
+023986:         if (!type)
+023987:         {
+023988:             builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize unresolved IR type {u32}"), task.type.value);
+023989:             return IR_VALUE_ID_INVALID;
+023990:         }
+023991:         if (task.kind == C_IR_ZERO_TASK_COMPLETE)
+023992:         {
+023993:             if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && task.operand_count > UINT16_MAX)
+023994:             {
+023995:                 builder->failure_message = string_format(builder->arena, S8("aggregate has too many fields to lower ({u32})"), task.operand_count);
+023996:                 return IR_VALUE_ID_INVALID;
+023997:             }
+023998:             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+023999:             IrValueId aggregate = c_ir_emit_initializer_capture(builder, task.type, task.operands, task.fields, task.operand_count, instruction_source);
+024000:             if (aggregate.value == IR_ID_UNDERLYING_INVALID)
+024001:             {
+024002:                 return IR_VALUE_ID_INVALID;
+024003:             }
+024004:             *task.output = aggregate;
+024005:             continue;
+024006:         }
+024007:         bool aggregate = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+024008:         if (!aggregate)
+024009:         {
+024010:             IrValueId zero = IR_VALUE_ID_INVALID;
+024011:             if (type->kind == IR_TYPE_FLOAT)
+024012:             {
+024013:                 if (type->bit_width == 80)
+024014:                 {
+024015:                     // The f80 constant carries the semantic ten bytes as two
+024016:                     // integer immediates; do not route synthetic zero through
+024017:                     // a host f64 literal or a generic floating conversion.
+024018:                     zero = c_ir_emit_f80_constant_bits(builder, c_ir_token_source_range(builder, token), S8("0.0L"), 0, 0);
+024019:                 }
+024020:                 else
+024021:                 {
+024022:                     CToken zero_token = {
+024023:                         .offset = C_SPELLING_FLOAT_ZERO,
+024024:                         .length = type->bit_width == 32 ? 4u : 3u,
+024025:                         .kind = C_TOKEN_PREPROCESSING_NUMBER,
+024026:                     };
+024027:                     zero = c_ir_emit_float(builder, zero_token);
+024028:                     zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+024029:                 }
+024030:             }
+024031:             else if (type->kind == IR_TYPE_INTEGER)
+024032:             {
+024033:                 zero = c_ir_emit_integer_value_typed(builder, 0, false, token, task.type);
+024034:             }
+024035:             else if (type->kind == IR_TYPE_POINTER)
+024036:             {
+024037:                 zero = c_ir_emit_integer_value(builder, 0, false, token);
+024038:                 zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+024039:             }
+024040:             else if (type->kind == IR_TYPE_BOOLEAN)
+024041:             {
+024042:                 zero = c_ir_emit_integer_value(builder, 0, false, token);
+024043:                 zero = c_ir_truth_value(builder, zero, c_ir_token_source_range(builder, token));
+024044:             }
+024045:             if (zero.value == IR_ID_UNDERLYING_INVALID)
+024046:             {
+024047:                 builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize IR type kind {u32}"), (u32)type->kind);
+024048:                 return zero;
+024049:             }
+024050:             *task.output = zero;
+024051:             continue;
+024052:         }
+024053:         u64 child_count_u64 = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count
+024054:                               : type->kind == IR_TYPE_UNION                                 ? (type->field_count ? 1 : 0)
+024055:                                                                                             : type->field_count;
+024056:         if (child_count_u64 > UINT32_MAX || child_count_u64 > capacity - task_count - 1)
+024057:         {
+024058:             builder->failure_message =
+024059:                 string_format(builder->arena, S8("aggregate zero-initializer exceeds its task capacity ({u64} children)"), child_count_u64);
+024060:             return IR_VALUE_ID_INVALID;
+024061:         }
+024062:         u32 child_count = (u32)child_count_u64;
+024063:         IrValueId* operands = arena_allocate(builder->arena, IrValueId, child_count);
+024064:         u64* fields = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? 0 : arena_allocate(builder->arena, u64, child_count);
+024065:         tasks[task_count++] = (CIrZeroTask){
+024066:             .output = task.output,
+024067:             .operands = operands,
+024068:             .fields = fields,
+024069:             .type = task.type,
+024070:             .operand_count = child_count,
+024071:             .kind = C_IR_ZERO_TASK_COMPLETE,
+024072:         };
+024073:         for (u32 child_index = child_count; child_index; child_index -= 1)
+024074:         {
+024075:             u32 index = child_index - 1;
+024076:             IrTypeId child_type = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type : type->fields[index].type;
+024077:             if (fields)
+024078:             {
+024079:                 fields[index] = index;
+024080:             }
+024081:             tasks[task_count++] = (CIrZeroTask){
+024082:                 .output = &operands[index],
+024083:                 .type = child_type,
+024084:             };
+024085:         }
+024086:     }
+024087:     return result;
+024088: }
+024089: 
+024090: BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out);
+024091: 
+024092: // A designator is a chain, not one step: C11 6.7.9p6 lets `.member`, `[index]`
+024093: // and any mix of them follow one another before the `=`. musl's mutex,
+024094: // barrier and rlimit initializers all write one -- `._m_type` is
+024095: // `__u.__i[0]` after the header's macros -- so the walk below accepts both
+024096: // step kinds and stops at the first token that is neither. It returns the
+024097: // index of the token after the last step, which the caller checks is the `=`.
+024098: BUSTER_C_INTERNAL u32 c_ir_designator_chain_end(CIntegerIrBuilder* builder, u32 start, u32 end)
+024099: {
+024100:     u32 index = start;
+024101:     while (index < end)
+024102:     {
+024103:         if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_DOT) && index + 1 < end &&
+024104:             builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+024105:         {
+024106:             index += 2;
+024107:             continue;
+024108:         }
+024109:         if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACKET))
+024110:         {
+024111:             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+024112:             if (close >= end || close == index + 1)
+024113:             {
+024114:                 break;
+024115:             }
+024116:             index = close + 1;
+024117:             continue;
+024118:         }
+024119:         break;
+024120:     }
+024121: 
+024122:     return index;
+024123: }
+024124: 
+024125: BUSTER_C_INTERNAL bool c_ir_array_designator_has_range(CIntegerIrBuilder* builder, u32 start, u32 close)
+024126: {
+024127:     for (u32 index = start + 1; index < close; index += 1)
+024128:     {
+024129:         if (c_token_is_punctuator(&builder->preprocess.tokens[index], C_PUNCTUATOR_ELLIPSIS))
+024130:         {
+024131:             return true;
+024132:         }
+024133:     }
+024134:     return false;
+024135: }
+024136: 
+024137: BUSTER_C_INTERNAL bool c_ir_string_array_element_compatible(CIntegerIrBuilder* builder, IrTypeId element_type, CIrDecodedString decoded);
+024138: 
+024139: // Unnamed bit-fields are padding, while anonymous structs/unions still consume
+024140: // an initializer. Keep the cursor in field indices so each padding field is
+024141: // skipped once as a positional initializer advances.
+024142: BUSTER_C_INTERNAL u32 c_ir_initializer_next_field_index(IrType* type, u32 index)
+024143: {
+024144:     while (index < type->field_count && type->fields[index].is_bit_field && !type->fields[index].name.length)
+024145:     {
+024146:         index += 1;
+024147:     }
+024148:     return index;
+024149: }
+024150: 
+024151: BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+024152: {
+024153:     CIrLowerMachine* machine = &builder->lower_machine;
+024154:     if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+024155:     {
+024156:         bool stored = machine->child_result.success &&
+024157:                       c_ir_emit_store_place(builder, frame->as.nested_compound_literal.state->child_place,
+024158:                                             frame->as.nested_compound_literal.state->child_type, machine->child_result.value,
+024159:                                             frame->as.nested_compound_literal.state->source);
+024160:         if (!stored)
+024161:         {
+024162:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+024163:             return;

@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 63/111
+line: 19424
+
+019354:                     // Canonical pointer RMW takes an integer byte offset,
+019355:                     // including GNU's unscaled offset, never a pointer value.
+019356:                     value = c_ir_emit_cast(builder, value, builder->ptrdiff_type, source);
+019357:                     if (value.value == IR_ID_UNDERLYING_INVALID)
+019358:                     {
+019359:                         return false;
+019360:                     }
+019361:                     if (!selected->builtin_atomic_gnu)
+019362:                     {
+019363:                         IrType* value_type = ir_type_from_id(&builder->program->types, value_type_id);
+019364:                         IrType* element = value_type ? ir_type_from_id(&builder->program->types, value_type->element_type) : 0;
+019365:                         if (!value_type || !element || !element->layout.resolved || !element->layout.size)
+019366:                         {
+019367:                             return false;
+019368:                         }
+019369:                         IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, token, builder->ptrdiff_type);
+019370:                         value = c_ir_emit_binary_value(builder, value, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
+019371:                     }
+019372:                 }
+019373:                 else if (!selected->builtin_atomic_generic)
+019374:                 {
+019375:                     value = c_ir_emit_cast(builder, value, value_type_id, source);
+019376:                 }
+019377:                 if (value.value == IR_ID_UNDERLYING_INVALID)
+019378:                 {
+019379:                     return false;
+019380:                 }
+019381:                 if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_STORE || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_INIT)
+019382:                 {
+019383:                     if (order == IR_MEMORY_ORDER_CONSUME || order == IR_MEMORY_ORDER_ACQUIRE || order == IR_MEMORY_ORDER_ACQUIRE_RELEASE)
+019384:                     {
+019385:                         return false;
+019386:                     }
+019387:                     if (selected->builtin_atomic_generic)
+019388:                     {
+019389:                         IrValueId operation_place =
+019390:                             c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, generic_bits_type, source);
+019391:                         IrValueId operation_value =
+019392:                             c_ir_atomic_aggregate_bits_value(builder, value, value_type_id, generic_bits_type, true, source);
+019393:                         if (operation_place.value == IR_ID_UNDERLYING_INVALID ||
+019394:                             operation_value.value == IR_ID_UNDERLYING_INVALID)
+019395:                         {
+019396:                             return false;
+019397:                         }
+019398:                         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_STORE, builder->void_type);
+019399:                         instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
+019400:                         instruction.operands[0] = operation_place;
+019401:                         instruction.operands[1] = operation_value;
+019402:                         instruction.operand_count = 2;
+019403:                         instruction.memory_order = (u8)order;
+019404:                         c_ir_append_instruction(builder, instruction, source);
+019405:                     }
+019406:                     else if (wide_atomic_runtime)
+019407:                     {
+019408:                         if (!c_ir_emit_wide_atomic_runtime_store(builder, place, atomic_type, value, source, order))
+019409:                         {
+019410:                             return false;
+019411:                         }
+019412:                     }
+019413:                     else
+019414:                     {
+019415:                         IrSourceRange instruction_source = source;
+019416:                         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_STORE, builder->void_type);
+019417:                         instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
+019418:                         instruction.operands[0] = place;
+019419:                         instruction.operands[1] = value;
+019420:                         instruction.operand_count = 2;
+019421:                         instruction.memory_order = (u8)order;
+019422:                         c_ir_append_instruction(builder, instruction, instruction_source);
+019423:                     }
+019424:                     selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+019425:                 }
+019426:                 else
+019427:                 {
+019428:                     IrAtomicOperation operation = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_ADD        ? IR_ATOMIC_ADD
+019429:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT ? IR_ATOMIC_SUBTRACT
+019430:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_AND      ? IR_ATOMIC_BITWISE_AND
+019431:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_OR       ? IR_ATOMIC_BITWISE_OR
+019432:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_XOR      ? IR_ATOMIC_BITWISE_XOR
+019433:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_NAND     ? IR_ATOMIC_BITWISE_NAND
+019434:                                                                                                                    : IR_ATOMIC_EXCHANGE;
+019435:                     IrTypeId operation_type = value_type_id;
+019436:                     IrValueId operation_place = place;
+019437:                     IrValueId operation_value = value;
+019438:                     if (representation_value)
+019439:                     {
+019440:                         if ((selected->builtin_atomic_generic && operation != IR_ATOMIC_EXCHANGE) ||
+019441:                             (!selected->builtin_atomic_generic &&
+019442:                              (selected->builtin_atomic_gnu || operation != IR_ATOMIC_EXCHANGE ||
+019443:                               !c_ir_atomic_aggregate_access_representable(builder, atomic_type))))
+019444:                         {
+019445:                             builder->failure_message = S8("C IR lowering does not support this atomic aggregate read-modify-write");
+019446:                             return false;
+019447:                         }
+019448:                         operation_type = selected->builtin_atomic_generic
+019449:                                              ? generic_bits_type
+019450:                                              : (atomic_width == 16 ? c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_INT128)
+019451:                                                                    : c_ir_unsigned_type_of_size(builder, atomic_width));
+019452:                         operation_place = c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, operation_type, source);
+019453:                         operation_value = c_ir_atomic_aggregate_bits_value(builder, value, value_type_id, operation_type, true, source);
+019454:                         if (operation_place.value == IR_ID_UNDERLYING_INVALID || operation_value.value == IR_ID_UNDERLYING_INVALID)
+019455:                         {
+019456:                             return false;
+019457:                         }
+019458:                     }
+019459:                     if (wide_atomic_runtime && !aggregate_value)
+019460:                     {
+019461:                         operation_type = wide_atomic_runtime_type;
+019462:                         operation_value = c_ir_emit_cast(builder, value, operation_type, source);
+019463:                         if (operation_value.value == IR_ID_UNDERLYING_INVALID)
+019464:                         {
+019465:                             return false;
+019466:                         }
+019467:                     }
+019468:                     IrValueId previous = IR_VALUE_ID_INVALID;
+019469:                     if (wide_atomic_runtime)
+019470:                     {
+019471:                         String8 runtime_name = operation == IR_ATOMIC_ADD          ? S8("__atomic_fetch_add_16")
+019472:                                                : operation == IR_ATOMIC_SUBTRACT ? S8("__atomic_fetch_sub_16")
+019473:                                                : operation == IR_ATOMIC_BITWISE_AND ? S8("__atomic_fetch_and_16")
+019474:                                                : operation == IR_ATOMIC_BITWISE_OR  ? S8("__atomic_fetch_or_16")
+019475:                                                : operation == IR_ATOMIC_BITWISE_XOR ? S8("__atomic_fetch_xor_16")
+019476:                                                : operation == IR_ATOMIC_BITWISE_NAND ? S8("__atomic_fetch_nand_16")
+019477:                                                                                       : S8("__atomic_exchange_16");
+019478:                         IrTypeId runtime_type = IR_TYPE_ID_INVALID;
+019479:                         IrTypeId runtime_pointer_type = IR_TYPE_ID_INVALID;
+019480:                         IrValueId address = IR_VALUE_ID_INVALID;
+019481:                         bool runtime_arguments = c_ir_wide_atomic_runtime_arguments(builder, place, atomic_type, source,
+019482:                                                                                      &runtime_type, &runtime_pointer_type, &address);
+019483:                         IrValueId order_value = c_ir_emit_integer_value_typed(builder, (u64)order, false, token, builder->s32_type);
+019484:                         IrTypeId parameter_types[3] = {runtime_pointer_type, runtime_type, builder->s32_type};
+019485:                         IrValueId arguments[3] = {address, operation_value, order_value};
+019486:                         if (!runtime_arguments || runtime_type.value != operation_type.value ||
+019487:                             runtime_pointer_type.value != wide_atomic_runtime_pointer_type.value ||
+019488:                             address.value == IR_ID_UNDERLYING_INVALID || order_value.value == IR_ID_UNDERLYING_INVALID ||
+019489:                             !c_ir_emit_runtime_call(builder, token, runtime_name, runtime_type,
+019490:                                                     parameter_types, arguments, BUSTER_ARRAY_LENGTH(arguments), &previous))
+019491:                         {
+019492:                             return false;
+019493:                         }
+019494:                     }
+019495:                     else
+019496:                     {
+019497:                         previous = c_ir_add_result(builder, operation_type);
+019498:                         IrSourceRange instruction_source = source;
+019499:                         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE, operation_type);
+019500:                         instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
+019501:                         instruction.operands[0] = operation_place;
+019502:                         instruction.operands[1] = operation_value;
+019503:                         instruction.operand_count = 2;
+019504:                         instruction.memory_order = (u8)order;
+019505:                         instruction.atomic_operation = (u8)operation;
+019506:                         instruction.result = previous;
+019507:                         IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+019508:                         builder->function->values[previous.value].definition = id;
+019509:                     }
+019510:                     selected->result = representation_value
+019511:                                            ? c_ir_atomic_aggregate_bits_value(builder, previous, value_type_id, operation_type, false, source)
+019512:                                            : c_ir_emit_cast(builder, previous, value_type_id, source);
+019513:                     if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+019514:                     {
+019515:                         return false;
+019516:                     }
+019517:                     if (selected->builtin_atomic_generic)
+019518:                     {
+019519:                         if (!c_ir_emit_store_place(builder, generic_exchange_result_place, value_type_id,
+019520:                                                    selected->result, source))
+019521:                         {
+019522:                             return false;
+019523:                         }
+019524:                         selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+019525:                     }
+019526:                     if (selected->builtin_atomic_new_value)
+019527:                     {
+019528:                         // `__atomic_add_fetch` and its four siblings answer the
+019529:                         // updated value. The instruction answers the previous
+019530:                         // one, so the operation is applied again to it -- which
+019531:                         // is what the reference compilers emit too, and is
+019532:                         // correct without a second atomic access because the
+019533:                         // operation is a pure function of the two operands.
+019534:                         IrTypeId recompute_type = pointer_value ? builder->ptrdiff_type : value_type_id;
+019535:                         IrValueId recompute_values[2] = {
+019536:                             pointer_value ? c_ir_emit_cast(builder, previous, recompute_type, source) : previous,
+019537:                             pointer_value ? c_ir_emit_cast(builder, operand_value, recompute_type, source) : operand_value,
+019538:                         };
+019539:                         if (recompute_values[0].value == IR_ID_UNDERLYING_INVALID ||
+019540:                             recompute_values[1].value == IR_ID_UNDERLYING_INVALID)
+019541:                         {
+019542:                             return false;
+019543:                         }
+019544:                         if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_NAND)
+019545:                         {
+019546:                             IrValueId combined = c_ir_emit_binary_value(builder, recompute_values[0], recompute_values[1],
+019547:                                                                         recompute_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+019548:                             IrValueId inverted = combined.value != IR_ID_UNDERLYING_INVALID
+019549:                                                      ? c_ir_add_result(builder, recompute_type)
+019550:                                                      : IR_VALUE_ID_INVALID;
+019551:                             if (inverted.value == IR_ID_UNDERLYING_INVALID)
+019552:                             {
+019553:                                 return false;
+019554:                             }

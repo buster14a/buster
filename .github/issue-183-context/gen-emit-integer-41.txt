@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 41/111
+line: 16187
+
+016117:     IrType* target_complex = c_ir_complex_type_of(builder, target_type);
+016118:     if (source_complex)
+016119:     {
+016120:         IrValueId real = IR_VALUE_ID_INVALID;
+016121:         IrValueId imaginary = IR_VALUE_ID_INVALID;
+016122:         if (!c_ir_complex_split(builder, value, &real, &imaginary, source))
+016123:         {
+016124:             return IR_VALUE_ID_INVALID;
+016125:         }
+016126:         if (!target_complex)
+016127:         {
+016128:             return c_ir_emit_cast(builder, real, target_type, source);
+016129:         }
+016130:         IrTypeId target_element = target_complex->element_type;
+016131:         real = c_ir_emit_cast(builder, real, target_element, source);
+016132:         imaginary = c_ir_emit_cast(builder, imaginary, target_element, source);
+016133:         return c_ir_complex_compose(builder, target_type, real, imaginary, source);
+016134:     }
+016135:     if (!target_complex)
+016136:     {
+016137:         return IR_VALUE_ID_INVALID;
+016138:     }
+016139:     IrTypeId target_element = target_complex->element_type;
+016140:     IrValueId real = c_ir_emit_cast(builder, value, target_element, source);
+016141:     IrValueId imaginary = c_ir_complex_zero(builder, target_element, source);
+016142:     return c_ir_complex_compose(builder, target_type, real, imaginary, source);
+016143: }
+016144: 
+016145: // The result type of an arithmetic operation with at least one complex
+016146: // operand: complex, over the usual arithmetic type of the two corresponding
+016147: // real types (C11 6.3.1.8p1).
+016148: BUSTER_C_INTERNAL IrTypeId c_ir_complex_result_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type)
+016149: {
+016150:     IrType* left = ir_type_from_id(&builder->program->types, left_type);
+016151:     IrType* right = ir_type_from_id(&builder->program->types, right_type);
+016152:     if (!left || !right || (!left->is_complex && !right->is_complex))
+016153:     {
+016154:         return IR_TYPE_ID_INVALID;
+016155:     }
+016156:     IrTypeId left_real = left->is_complex ? left->element_type : left_type;
+016157:     IrTypeId right_real = right->is_complex ? right->element_type : right_type;
+016158:     IrTypeId element = c_ir_usual_arithmetic_type(builder, left_real, right_real);
+016159:     return c_ir_complex_type_for_element(builder, element);
+016160: }
+016161: 
+016162: // `__real__ E` and `__imag__ E` as values. GNU allows either on a real
+016163: // operand too: `__real__ x` is `x` and `__imag__ x` is a positive zero of
+016164: // x's type, which is what Clang emits, and it is what makes the operators
+016165: // usable in code that is generic over real and complex.
+016166: BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_part_operator(CIntegerIrBuilder* builder, IrValueId value, bool imaginary, IrSourceRange source)
+016167: {
+016168:     IrType* complex_type = c_ir_value_complex_type(builder, value);
+016169:     if (!complex_type)
+016170:     {
+016171:         if (value.value >= builder->function->value_count)
+016172:         {
+016173:             return IR_VALUE_ID_INVALID;
+016174:         }
+016175:         IrTypeId type_id = builder->function->values[value.value].canonical_type;
+016176:         IrType* type = ir_type_from_id(&builder->program->types, type_id);
+016177:         if (!type || (type->kind != IR_TYPE_FLOAT && type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN))
+016178:         {
+016179:             builder->failure_message = S8("__real__ and __imag__ require an arithmetic operand");
+016180:             return IR_VALUE_ID_INVALID;
+016181:         }
+016182:         if (!imaginary)
+016183:         {
+016184:             return value;
+016185:         }
+016186:         return type->kind == IR_TYPE_FLOAT ? c_ir_complex_zero(builder, type_id, source)
+016187:                                            : c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, type_id);
+016188:     }
+016189:     IrTypeId element = complex_type->element_type;
+016190:     IrValueId place = c_ir_complex_operand_place(builder, value, source);
+016191:     if (place.value == IR_ID_UNDERLYING_INVALID)
+016192:     {
+016193:         return IR_VALUE_ID_INVALID;
+016194:     }
+016195:     return c_ir_complex_part(builder, place, element, imaginary ? 1u : 0u, source);
+016196: }
+016197: 
+016198: // `+ - * /`, unary `-`, GNU unary `~` (conjugation) and `== !=` where at
+016199: // least one operand is complex. Everything else -- the remaining bitwise and
+016200: // the relational operators, `%` -- has no complex form in C and is refused
+016201: // here rather than silently applied to the real half.
+016202: BUSTER_C_INTERNAL bool c_ir_apply_complex_operation(CIntegerIrBuilder* builder, CConditionalOperator operation, IrValueId* values, u32* value_count,
+016203:                                                       u32 first, u32 operand_count, IrSourceRange source)
+016204: {
+016205:     IrTypeId left_type = builder->function->values[values[first].value].canonical_type;
+016206:     IrTypeId right_type = operand_count == 2 ? builder->function->values[values[first + 1].value].canonical_type : left_type;
+016207:     IrTypeId result_type = c_ir_complex_result_type(builder, left_type, right_type);
+016208:     IrType* result_complex = c_ir_complex_type_of(builder, result_type);
+016209:     if (!result_complex)
+016210:     {
+016211:         builder->failure_message = S8("unsupported complex operand type");
+016212:         return false;
+016213:     }
+016214:     IrTypeId element = result_complex->element_type;
+016215:     bool left_complex = c_ir_complex_type_of(builder, left_type) != 0;
+016216:     bool right_complex = operand_count == 2 && c_ir_complex_type_of(builder, right_type) != 0;
+016217:     IrValueId real = IR_VALUE_ID_INVALID;
+016218:     IrValueId imaginary = IR_VALUE_ID_INVALID;
+016219:     if (operand_count == 1)
+016220:     {
+016221:         // GNU spells complex conjugation `~` -- C99 Annex G's `conj` -- so the
+016222:         // one bitwise operator that has no complex form on a real operand does
+016223:         // have one here. It negates the imaginary half alone; unary `-`
+016224:         // negates both.
+016225:         if (operation != C_CONDITIONAL_UNARY_MINUS && operation != C_CONDITIONAL_BITWISE_NOT)
+016226:         {
+016227:             builder->failure_message = S8("this unary operator has no complex form");
+016228:             return false;
+016229:         }
+016230:         IrValueId converted = c_ir_emit_cast(builder, values[first], result_type, source);
+016231:         if (converted.value == IR_ID_UNDERLYING_INVALID || !c_ir_complex_split(builder, converted, &real, &imaginary, source))
+016232:         {
+016233:             return false;
+016234:         }
+016235:         real = operation == C_CONDITIONAL_UNARY_MINUS ? c_ir_emit_unary_value(builder, real, element, IR_UNARY_FLOAT_NEGATE, source) : real;
+016236:         imaginary = c_ir_emit_unary_value(builder, imaginary, element, IR_UNARY_FLOAT_NEGATE, source);
+016237:         IrValueId negated = c_ir_complex_compose(builder, result_type, real, imaginary, source);
+016238:         if (negated.value == IR_ID_UNDERLYING_INVALID)
+016239:         {
+016240:             return false;
+016241:         }
+016242:         *value_count = first;
+016243:         values[(*value_count)++] = negated;
+016244:         return true;
+016245:     }
+016246:     // Both operands are read before anything is emitted for the operation, so
+016247:     // the two splits below cannot interleave with each other's field loads.
+016248:     IrValueId left_real = IR_VALUE_ID_INVALID;
+016249:     IrValueId left_imaginary = IR_VALUE_ID_INVALID;
+016250:     IrValueId right_real = IR_VALUE_ID_INVALID;
+016251:     IrValueId right_imaginary = IR_VALUE_ID_INVALID;
+016252:     if (left_complex)
+016253:     {
+016254:         IrValueId converted = c_ir_emit_cast(builder, values[first], result_type, source);
+016255:         if (converted.value == IR_ID_UNDERLYING_INVALID || !c_ir_complex_split(builder, converted, &left_real, &left_imaginary, source))
+016256:         {
+016257:             return false;
+016258:         }
+016259:     }
+016260:     else
+016261:     {
+016262:         left_real = c_ir_emit_cast(builder, values[first], element, source);
+016263:     }
+016264:     if (right_complex)
+016265:     {
+016266:         IrValueId converted = c_ir_emit_cast(builder, values[first + 1], result_type, source);
+016267:         if (converted.value == IR_ID_UNDERLYING_INVALID || !c_ir_complex_split(builder, converted, &right_real, &right_imaginary, source))
+016268:         {
+016269:             return false;
+016270:         }
+016271:     }
+016272:     else
+016273:     {
+016274:         right_real = c_ir_emit_cast(builder, values[first + 1], element, source);
+016275:     }
+016276:     if (left_real.value == IR_ID_UNDERLYING_INVALID || right_real.value == IR_ID_UNDERLYING_INVALID)
+016277:     {
+016278:         return false;
+016279:     }
+016280:     IrValueId result = IR_VALUE_ID_INVALID;
+016281:     switch (operation)
+016282:     {
+016283:     case C_CONDITIONAL_ADD:
+016284:     {
+016285:         real = c_ir_emit_binary_value(builder, left_real, right_real, element, IR_BINARY_FLOAT_ADD, source);
+016286:         imaginary = left_complex && right_complex
+016287:                         ? c_ir_emit_binary_value(builder, left_imaginary, right_imaginary, element, IR_BINARY_FLOAT_ADD, source)
+016288:                         : (left_complex ? left_imaginary : right_imaginary);
+016289:         result = c_ir_complex_compose(builder, result_type, real, imaginary, source);
+016290:         break;
+016291:     }
+016292:     case C_CONDITIONAL_SUBTRACT:
+016293:     {
+016294:         real = c_ir_emit_binary_value(builder, left_real, right_real, element, IR_BINARY_FLOAT_SUBTRACT, source);
+016295:         if (left_complex && right_complex)
+016296:         {
+016297:             imaginary = c_ir_emit_binary_value(builder, left_imaginary, right_imaginary, element, IR_BINARY_FLOAT_SUBTRACT, source);
+016298:         }
+016299:         else if (left_complex)
+016300:         {
+016301:             imaginary = left_imaginary;
+016302:         }
+016303:         else
+016304:         {
+016305:             imaginary = c_ir_emit_unary_value(builder, right_imaginary, element, IR_UNARY_FLOAT_NEGATE, source);
+016306:         }
+016307:         result = c_ir_complex_compose(builder, result_type, real, imaginary, source);
+016308:         break;
+016309:     }
+016310:     case C_CONDITIONAL_MULTIPLY:
+016311:     case C_CONDITIONAL_DIVIDE:
+016312:     {
+016313:         bool divide = operation == C_CONDITIONAL_DIVIDE;
+016314:         if (left_complex && !right_complex)
+016315:         {
+016316:             // A complex scaled or divided by a real is componentwise; only a
+016317:             // complex denominator needs the recovering algorithm.

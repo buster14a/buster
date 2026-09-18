@@ -1,0 +1,126 @@
+path: src/buster/lib/compiler/frontend/c/c.h
+needle: struct CEnumMember
+occurrence: 2/2
+line: 868
+
+000828: // handful of aggregates in a translation unit while the type table is tens of
+000829: // thousands of entries: a flag word per type would grow every one of them.
+000830: // Both layout engines -- the sizeof folding in c_parse.c and the IR layout in
+000831: // c_gen.c -- read this table, and they must agree or a folded sizeof
+000832: // contradicts the object it sizes.
+000833: typedef struct CAggregateAttributes CAggregateAttributes;
+000834: struct CAggregateAttributes
+000835: {
+000836:     u32 type_index;
+000837:     // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
+000838:     u32 alignment_start;
+000839:     u32 alignment_count;
+000840:     bool is_packed;
+000841:     u8 reserved[3];
+000842: };
+000843: 
+000844: // The alignment a declarator wrote on the *type* it declares rather than on an
+000845: // object it declares: `typedef int cache_line __attribute__((aligned(64)))`.
+000846: // GNU `aligned` there sets the alignment of the type, so unlike every other
+000847: // alignment record in this file it *replaces* the natural alignment instead of
+000848: // raising it, and it is the one place the attribute lowers one without
+000849: // `packed` -- `typedef int pair __attribute__((aligned(2)))` is two-byte
+000850: // aligned in both GCC and Clang. The record keys on the alias copy the
+000851: // declarator made, never on the type it aliases, so `int` keeps its own
+000852: // alignment -- and on every qualified copy of that alias, because a qualifier
+000853: // cannot take an alignment away and the qualified copy points past the alias
+000854: // at the type it strips to (#714). It lives in a side table for the reason
+000855: // CParseResult.noreturn_function_types does: the population is a handful of
+000856: // typedefs per translation unit against a type table of tens of thousands of
+000857: // entries, so a field on CType would cost every one of them.
+000858: typedef struct CTypeAlignment CTypeAlignment;
+000859: struct CTypeAlignment
+000860: {
+000861:     u32 type_index;
+000862:     // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
+000863:     u32 alignment_start;
+000864:     u32 alignment_count;
+000865: };
+000866: 
+000867: typedef struct CEnumMember CEnumMember;
+000868: struct CEnumMember
+000869: {
+000870:     String8 name;
+000871:     CSourceLocation location;
+000872:     // Interned id of `name`, carried from the declaring token so the entity
+000873:     // filed from this record is keyed without a second intern; 0 when the
+000874:     // parse ran without a symbol table.  It sits in the alignment hole
+000875:     // ahead of `value`, so the record's size is unchanged.
+000876:     u32 symbol;
+000877:     u64 value;
+000878:     bool is_negative;
+000879:     u8 reserved[7];
+000880: };
+000881: BUSTER_CT_CHECK(sizeof(CEnumMember) == 56);
+000882: 
+000883: typedef struct CParameter CParameter;
+000884: struct CParameter
+000885: {
+000886:     String8 name;
+000887:     CSourceLocation location;
+000888:     CTypeId type;
+000889:     CEntityId entity;
+000890:     // Interned id of `name`, as CEnumMember.symbol; fills the tail padding.
+000891:     u32 symbol;
+000892: };
+000893: BUSTER_CT_CHECK(sizeof(CParameter) == 48);
+000894: 
+000895: typedef struct CParserDeclaration CParserDeclaration;
+000896: 
+000897: typedef enum CEntityKind
+000898: {
+000899:     C_ENTITY_OBJECT,
+000900:     C_ENTITY_FUNCTION,
+000901:     C_ENTITY_TYPEDEF,
+000902:     C_ENTITY_PARAMETER,
+000903:     C_ENTITY_LOCAL,
+000904:     C_ENTITY_ENUMERATOR,
+000905:     C_ENTITY_COUNT,
+000906: } CEntityKind;
+000907: 
+000908: typedef struct CEntity CEntity;
+000909: struct CEntity
+000910: {
+000911:     String8 name;
+000912:     // Interned id of `name` (0 when the parse ran without a symbol table);
+000913:     // the scope-lookup buckets and chains key on it.
+000914:     u32 symbol;
+000915:     CSourceLocation location;
+000916:     CTypeId type;
+000917:     CScopeId scope;
+000918:     CEntityId next_in_scope;
+000919:     CEntityId next_in_lookup;
+000920:     CEntityId next_typedef_in_lookup;
+000921:     CEntityId next_by_name;
+000922:     u32 declaration_index;
+000923:     u32 declaration_token_plus_one;
+000924:     u32 declaration_token_start;
+000925:     u32 declaration_token_count;
+000926:     u32 alignment_start;
+000927:     u32 alignment_count;
+000928:     CEntityKind kind;
+000929:     bool is_definition;
+000930:     bool is_static_storage;
+000931:     bool is_thread_local;
+000932:     bool is_constexpr;
+000933:     bool has_constant_value;
+000934:     bool constant_is_negative;
+000935:     bool has_cleanup;
+000936:     bool cleanup_attribute_checked;
+000937:     // Register storage on a local. Only the local declarator path records it,
+000938:     // and only one reader needs it: an assembler label on a `register` local
+000939:     // binds a machine register instead of renaming a symbol.
+000940:     bool is_register;
+000941:     u8 reserved[1];
+000942:     CEntityId cleanup_function;
+000943:     u32 cleanup_attribute_token;
+000944:     u32 cleanup_attribute_end;
+000945:     u64 constant_value;
+000946: };
+000947: 
+000948: // One shadowed binding, restored when the scope that shadowed it closes.

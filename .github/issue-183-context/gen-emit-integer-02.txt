@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 2/111
+line: 6442
+
+006372:                                                               IrTypeId bits_type, IrSourceRange source);
+006373: BUSTER_C_INTERNAL IrValueId c_ir_atomic_aggregate_bits_value(CIntegerIrBuilder* builder, IrValueId value, IrTypeId record_type,
+006374:                                                               IrTypeId bits_type, bool to_bits, IrSourceRange source);
+006375: BUSTER_C_INTERNAL IrValueId c_ir_emit_address_of_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId element_type, IrSourceRange source);
+006376: BUSTER_C_INTERNAL IrValueId c_ir_emit_cast_instruction(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type,
+006377:                                                         IrConversionOperation operation, IrSourceRange source);
+006378: BUSTER_C_INTERNAL IrValueId c_ir_emit_cast(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source);
+006379: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 magnitude, bool is_negative, CToken token, IrTypeId type);
+006380: BUSTER_C_INTERNAL bool c_ir_emit_runtime_call_source(CIntegerIrBuilder* builder, IrSourceRange source, String8 link_name, IrTypeId return_type,
+006381:                                                       IrTypeId* parameter_types, IrValueId* arguments, u32 argument_count,
+006382:                                                       IrValueId* result_out);
+006383: 
+006384: BUSTER_C_INTERNAL bool c_ir_wide_atomic_runtime_required(CIntegerIrBuilder* builder, IrTypeId atomic_type)
+006385: {
+006386:     IrType* type = ir_type_from_id(&builder->program->types, atomic_type);
+006387:     return type && type->is_atomic && type->layout.resolved && type->layout.size == 16 &&
+006388:            builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+006389:            !target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16);
+006390: }
+006391: 
+006392: // The type-specific libatomic entry points erase the C object's signedness,
+006393: // atomic/volatile qualifiers and aggregate spelling at their ABI boundary.
+006394: // Use one unsigned bit representation and one plain pointer type so every
+006395: // source spelling in a translation unit reuses exactly one imported symbol.
+006396: BUSTER_C_INTERNAL bool c_ir_wide_atomic_runtime_arguments(CIntegerIrBuilder* builder, IrValueId place, IrTypeId atomic_type,
+006397:                                                            IrSourceRange source, IrTypeId* bits_type_out, IrTypeId* pointer_type_out,
+006398:                                                            IrValueId* address_out)
+006399: {
+006400:     IrTypeId bits_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_INT128);
+006401:     IrValueId bits_place = bits_type.value != IR_ID_UNDERLYING_INVALID
+006402:                                ? c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, bits_type, source)
+006403:                                : IR_VALUE_ID_INVALID;
+006404:     IrTypeId bits_place_type = bits_place.value < builder->function->value_count
+006405:                                    ? builder->function->values[bits_place.value].canonical_type
+006406:                                    : IR_TYPE_ID_INVALID;
+006407:     IrValueId qualified_address = bits_place_type.value != IR_ID_UNDERLYING_INVALID
+006408:                                       ? c_ir_emit_address_of_place(builder, bits_place, bits_place_type, source)
+006409:                                       : IR_VALUE_ID_INVALID;
+006410:     IrTypeId pointer_type = bits_type.value != IR_ID_UNDERLYING_INVALID
+006411:                                 ? c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type)
+006412:                                 : IR_TYPE_ID_INVALID;
+006413:     IrValueId address = qualified_address.value != IR_ID_UNDERLYING_INVALID && pointer_type.value != IR_ID_UNDERLYING_INVALID
+006414:                             ? c_ir_emit_cast_instruction(builder, qualified_address, pointer_type,
+006415:                                                          IR_CONVERSION_POINTER_REINTERPRET, source)
+006416:                             : IR_VALUE_ID_INVALID;
+006417:     bool valid = bits_place.value != IR_ID_UNDERLYING_INVALID && pointer_type.value != IR_ID_UNDERLYING_INVALID &&
+006418:                  address.value != IR_ID_UNDERLYING_INVALID;
+006419:     if (!valid && !builder->failure_message.length)
+006420:     {
+006421:         builder->failure_message = S8("could not form a canonical address for a 16-byte atomic runtime call");
+006422:     }
+006423:     if (valid)
+006424:     {
+006425:         *bits_type_out = bits_type;
+006426:         *pointer_type_out = pointer_type;
+006427:         *address_out = address;
+006428:     }
+006429:     return valid;
+006430: }
+006431: 
+006432: BUSTER_C_INTERNAL IrValueId c_ir_emit_wide_atomic_runtime_load(CIntegerIrBuilder* builder, IrValueId place, IrTypeId atomic_type,
+006433:                                                                 IrSourceRange source, IrMemoryOrder order)
+006434: {
+006435:     IrType* atomic = ir_type_from_id(&builder->program->types, atomic_type);
+006436:     IrTypeId value_type = atomic ? atomic->unqualified_type : IR_TYPE_ID_INVALID;
+006437:     IrType* value = ir_type_from_id(&builder->program->types, value_type);
+006438:     bool aggregate = value && (value->kind == IR_TYPE_STRUCT || value->kind == IR_TYPE_UNION);
+006439:     IrTypeId bits_type = IR_TYPE_ID_INVALID;
+006440:     IrTypeId pointer_type = IR_TYPE_ID_INVALID;
+006441:     IrValueId address = IR_VALUE_ID_INVALID;
+006442:     IrValueId order_value = c_ir_emit_integer_value_typed(builder, (u64)order, false, (CToken){0}, builder->s32_type);
+006443:     IrTypeId parameter_types[2] = {IR_TYPE_ID_INVALID, builder->s32_type};
+006444:     IrValueId arguments[2] = {IR_VALUE_ID_INVALID, order_value};
+006445:     IrValueId loaded = IR_VALUE_ID_INVALID;
+006446:     bool emitted = c_ir_wide_atomic_runtime_arguments(builder, place, atomic_type, source, &bits_type, &pointer_type, &address);
+006447:     parameter_types[0] = pointer_type;
+006448:     arguments[0] = address;
+006449:     emitted = emitted && order_value.value != IR_ID_UNDERLYING_INVALID &&
+006450:               c_ir_emit_runtime_call_source(builder, source, S8("__atomic_load_16"), bits_type,
+006451:                                             parameter_types, arguments, BUSTER_ARRAY_LENGTH(arguments), &loaded);
+006452:     IrValueId result = IR_VALUE_ID_INVALID;
+006453:     if (emitted)
+006454:     {
+006455:         result = aggregate ? c_ir_atomic_aggregate_bits_value(builder, loaded, value_type, bits_type, false, source)
+006456:                            : c_ir_emit_cast(builder, loaded, value_type, source);
+006457:     }
+006458:     else
+006459:     {
+006460:         if (!builder->failure_message.length)
+006461:         {
+006462:             builder->failure_message = S8("could not emit a 16-byte atomic runtime load");
+006463:         }
+006464:     }
+006465:     if (result.value == IR_ID_UNDERLYING_INVALID && !builder->failure_message.length)
+006466:     {
+006467:         builder->failure_message = S8("could not convert a 16-byte atomic runtime load result");
+006468:     }
+006469:     return result;
+006470: }
+006471: 
+006472: BUSTER_C_INTERNAL bool c_ir_emit_wide_atomic_runtime_store(CIntegerIrBuilder* builder, IrValueId place, IrTypeId atomic_type,
+006473:                                                             IrValueId value, IrSourceRange source, IrMemoryOrder order)
+006474: {
+006475:     IrType* atomic = ir_type_from_id(&builder->program->types, atomic_type);
+006476:     IrTypeId value_type = atomic ? atomic->unqualified_type : IR_TYPE_ID_INVALID;
+006477:     IrType* unqualified = ir_type_from_id(&builder->program->types, value_type);
+006478:     bool aggregate = unqualified && (unqualified->kind == IR_TYPE_STRUCT || unqualified->kind == IR_TYPE_UNION);
+006479:     IrTypeId bits_type = IR_TYPE_ID_INVALID;
+006480:     IrTypeId pointer_type = IR_TYPE_ID_INVALID;
+006481:     IrValueId address = IR_VALUE_ID_INVALID;
+006482:     bool emitted = c_ir_wide_atomic_runtime_arguments(builder, place, atomic_type, source, &bits_type, &pointer_type, &address);
+006483:     IrValueId bits_value = aggregate ? c_ir_atomic_aggregate_bits_value(builder, value, value_type, bits_type, true, source)
+006484:                                      : c_ir_emit_cast(builder, value, bits_type, source);
+006485:     IrValueId order_value = c_ir_emit_integer_value_typed(builder, (u64)order, false, (CToken){0}, builder->s32_type);
+006486:     IrTypeId parameter_types[3] = {pointer_type, bits_type, builder->s32_type};
+006487:     IrValueId arguments[3] = {address, bits_value, order_value};
+006488:     emitted = emitted && bits_value.value != IR_ID_UNDERLYING_INVALID && order_value.value != IR_ID_UNDERLYING_INVALID &&
+006489:               c_ir_emit_runtime_call_source(builder, source, S8("__atomic_store_16"), builder->void_type,
+006490:                                             parameter_types, arguments, BUSTER_ARRAY_LENGTH(arguments), 0);
+006491:     if (!emitted && !builder->failure_message.length)
+006492:     {
+006493:         builder->failure_message = S8("could not emit a 16-byte atomic runtime store");
+006494:     }
+006495:     return emitted;
+006496: }
+006497: 
+006498: BUSTER_C_INTERNAL IrValueId c_ir_emit_memory_load(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken token)
+006499: {
+006500:     IrType* place_type = ir_type_from_id(&builder->program->types, local->type);
+006501:     bool atomic = place_type && place_type->is_atomic;
+006502:     IrValueId result = IR_VALUE_ID_INVALID;
+006503:     if (atomic && !builder->preparing_calls && c_ir_wide_atomic_runtime_required(builder, local->type))
+006504:     {
+006505:         result = c_ir_emit_wide_atomic_runtime_load(builder, local->place, local->type, c_ir_token_source_range(builder, token),
+006506:                                                     IR_MEMORY_ORDER_SEQUENTIAL);
+006507:     }
+006508:     else
+006509:     {
+006510:         // The named-local load reads a qualified place at its unqualified type the
+006511:         // same way c_ir_emit_load_place_raw does; the two must agree or the same
+006512:         // object read through the two paths produces two different value types.
+006513:         IrTypeId result_type = place_type && (atomic || place_type->is_volatile) ? place_type->unqualified_type : local->type;
+006514:         result = c_ir_add_result(builder, result_type);
+006515:         if (local->place.value < builder->function->value_count)
+006516:         {
+006517:             c_ir_label_metadata_copy_for_place(builder, local->place);
+006518:             builder->function->values[result.value].points_to_read_only = builder->function->values[local->place.value].points_to_read_only;
+006519:             if (builder->label_metadata_enabled)
+006520:             {
+006521:                 ir_label_provenance_load(builder->arena, builder->function, result, local->place);
+006522:             }
+006523:         }
+006524:         IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
+006525:         operands[0] = local->place;
+006526:         IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+006527:         IrInstruction instruction = c_ir_instruction_initialize(atomic ? IR_OPCODE_ATOMIC_LOAD : IR_OPCODE_LOAD, result_type);
+006528:         instruction.operands = operands;
+006529:         instruction.operand_count = 1;
+006530:         instruction.canonical_local = local->id;
+006531:         instruction.result = result;
+006532:         instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
+006533:         instruction.volatile_access = local->place.value < builder->function->value_count && builder->function->values[local->place.value].is_volatile;
+006534:         IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+006535:         builder->function->values[result.value].definition = id;
+006536:     }
+006537:     return result;
+006538: }
+006539: 
+006540: BUSTER_C_INTERNAL IrValueId c_ir_emit_load(CIntegerIrBuilder* builder, CIntegerIrLocal* local, CToken token)
+006541: {
+006542:     CIrSsaLocal* direct = local->direct_ssa ? c_ir_ssa_place_local(builder, local->place) : 0;
+006543:     IrValueId result = direct ? c_ir_ssa_read(builder, direct, c_ir_token_source_range(builder, token), true)
+006544:                              : c_ir_emit_memory_load(builder, local, token);
+006545:     c_ir_vla_loaded_shape(builder, result, local->place);
+006546:     return result;
+006547: }
+006548: 
+006549: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 magnitude, bool is_negative, CToken token, IrTypeId type);
+006550: BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_runtime_call(CIntegerIrBuilder* builder, String8 link_name, IrTypeId return_type, IrValueId argument,
+006551:                                                             IrTypeId parameter_type, IrSourceRange source);
+006552: 
+006553: BUSTER_C_INTERNAL bool c_ir_type_is_ieee_binary16(CIntegerIrBuilder* builder, IrTypeId type_id)
+006554: {
+006555:     IrType* type = ir_type_from_id(&builder->program->types, type_id);
+006556:     return type && type->kind == IR_TYPE_FLOAT && type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE;
+006557: }
+006558: 
+006559: BUSTER_C_INTERNAL IrValueId c_ir_emit_binary_value_raw(CIntegerIrBuilder* builder, IrValueId left, IrValueId right, IrTypeId type,
+006560:                                                          IrBinaryOperation operation, IrSourceRange source)
+006561: {
+006562:     IrValueId result = c_ir_add_result(builder, type);
+006563:     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
+006564:     operands[0] = left;
+006565:     operands[1] = right;
+006566:     IrSourceRange instruction_source = source;
+006567:     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_BINARY, type);
+006568:     instruction.operands = operands;
+006569:     instruction.operand_count = 2;
+006570:     instruction.binary_operation = (u8)operation;
+006571:     instruction.result = result;
+006572:     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);

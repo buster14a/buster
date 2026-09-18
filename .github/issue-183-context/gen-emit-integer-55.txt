@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 55/111
+line: 18825
+
+018755:                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE
+018756:                                      ? 1
+018757:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE ? 0
+018758:                                                                                                      : 3;
+018759:             // GNU's `_n`, generic pointer, and legacy `__sync_*` families
+018760:             // share operations but not argument shapes.
+018761:             if (selected->builtin_atomic_generic)
+018762:             {
+018763:                 expected_count = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_LOAD ? 3
+018764:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_EXCHANGE ? 4
+018765:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ? 6
+018766:                                                                                                             : 3;
+018767:             }
+018768:             else if (selected->builtin_atomic_sequential)
+018769:             {
+018770:                 expected_count = 2;
+018771:             }
+018772:             else if (selected->builtin_atomic_gnu)
+018773:             {
+018774:                 expected_count = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG   ? 6
+018775:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE            ? 2
+018776:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
+018777:                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_CLEAR
+018778:                                      ? 2
+018779:                                      : expected_count;
+018780:             }
+018781:             IrSourceRange source = c_ir_token_source_range(builder, token);
+018782:             // `__sync_synchronize()` is the one atomic builtin with an empty
+018783:             // argument list, which the argument scan reports as malformed.
+018784:             bool empty_arguments = selected->open_index + 1 == selected->close_index;
+018785:             if (empty_arguments ? expected_count != 0
+018786:                                 : (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) ||
+018787:                                    argument_count != expected_count))
+018788:             {
+018789:                 return false;
+018790:             }
+018791:             if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
+018792:                 selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE)
+018793:             {
+018794:                 // `__sync_synchronize()` carries its ordering in its name.
+018795:                 IrMemoryOrder order = IR_MEMORY_ORDER_SEQUENTIAL;
+018796:                 if (selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE && !c_ir_atomic_memory_order(builder, starts[0], ends[0], &order))
+018797:                 {
+018798:                     return false;
+018799:                 }
+018800:                 IrSourceRange instruction_source = source;
+018801:                 IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_FENCE, builder->void_type);
+018802:                 instruction.memory_order = (u8)order;
+018803:                 instruction.atomic_signal_fence = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE;
+018804:                 c_ir_append_instruction(builder, instruction, instruction_source);
+018805:                 selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+018806:                 selected->argument_count = argument_count;
+018807:                 selected->emitted = true;
+018808:                 remaining -= 1;
+018809:                 continue;
+018810:             }
+018811:             if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE)
+018812:             {
+018813:                 // The GNU spelling takes the object's address after its size,
+018814:                 // for a target where alignment decides the answer. Every width
+018815:                 // this backend reports lock-free is naturally aligned by the
+018816:                 // ABI, so the address adds nothing and is not lowered: it is
+018817:                 // documented to be usable as a null pointer constant, which is
+018818:                 // what most callers pass.
+018819:                 u64 size = 0;
+018820:                 if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[0], ends[0], &size))
+018821:                 {
+018822:                     return false;
+018823:                 }
+018824:                 bool lock_free = size == 1 || size == 2 || size == 4 || size == 8;
+018825:                 selected->result = c_ir_emit_integer_value(builder, lock_free ? 1 : 0, false, token);
+018826:                 selected->argument_count = argument_count;
+018827:                 selected->emitted = true;
+018828:                 remaining -= 1;
+018829:                 continue;
+018830:             }
+018831:             IrValueId place = IR_VALUE_ID_INVALID;
+018832:             if (continuation >= C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE &&
+018833:                 continuation <= C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_RESULT_PLACE)
+018834:             {
+018835:                 place = frame->as.prepared_call.state->place;
+018836:             }
+018837:             else
+018838:             {
+018839:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE, starts[0], ends[0], false);
+018840:             }
+018841:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_PLACE)
+018842:             {
+018843:                 if (!child_success)
+018844:                 {
+018845:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+018846:                 }
+018847:                 IrValueId pointer = child_value;
+018848:                 if (selected->builtin_atomic_gnu && !selected->builtin_atomic_generic &&
+018849:                     pointer.value < builder->function->value_count)
+018850:                 {
+018851:                     IrType* pointer_type = ir_type_from_id(&builder->program->types, builder->function->values[pointer.value].canonical_type);
+018852:                     IrType* object = pointer_type && pointer_type->kind == IR_TYPE_POINTER
+018853:                                          ? ir_type_from_id(&builder->program->types, pointer_type->element_type) : 0;
+018854:                     bool scalar = object && (object->kind == IR_TYPE_INTEGER || object->kind == IR_TYPE_BOOLEAN ||
+018855:                                              object->kind == IR_TYPE_ENUM || object->kind == IR_TYPE_POINTER);
+018856:                     if (scalar && !object->is_atomic)
+018857:                     {
+018858:                         // GNU builtins accept ordinary scalar pointers, but
+018859:                         // canonical atomic instructions require an atomic
+018860:                         // place. Cast the pointer view, not the underlying
+018861:                         // object's type; plain accesses retain their semantics.
+018862:                         IrTypeId value_type = object->is_volatile ? object->unqualified_type : object->id;
+018863:                         IrTypeId view_type = c_ir_add_qualified_type(builder->program, value_type, true, object->is_volatile);
+018864:                         IrTypeId view_pointer = view_type.value != IR_ID_UNDERLYING_INVALID
+018865:                                                     ? c_ir_add_pointer_type(builder->program, builder->pointer_types, view_type) : IR_TYPE_ID_INVALID;
+018866:                         pointer = view_pointer.value != IR_ID_UNDERLYING_INVALID
+018867:                                       ? c_ir_emit_cast(builder, pointer, view_pointer, source) : IR_VALUE_ID_INVALID;
+018868:                     }
+018869:                 }
+018870:                 place = c_ir_emit_dereference_place(builder, pointer, source);
+018871:                 frame->as.prepared_call.state->place = place;
+018872:             }
+018873:             IrTypeId atomic_type = place.value < builder->function->value_count ? builder->function->values[place.value].canonical_type : IR_TYPE_ID_INVALID;
+018874:             IrType* atomic = ir_type_from_id(&builder->program->types, atomic_type);
+018875:             // The C11 spelling requires a pointer to an `_Atomic` object and
+018876:             // reads the value type out of it; the GNU one takes an ordinary
+018877:             // pointer, so the object's own type *is* the value type. A GNU call
+018878:             // on an `_Atomic` object is still accepted, and still strips.
+018879:             if (selected->builtin_atomic_gnu && !selected->builtin_atomic_generic &&
+018880:                 atomic && !atomic->is_atomic)
+018881:             {
+018882:                 // Canonical atomic operations carry an atomic place even for
+018883:                 // GNU's ordinary-pointer builtins.  Reinterpret the caller's
+018884:                 // pointer through the qualified view of the same object;
+018885:                 // keeping the original place would make an otherwise valid
+018886:                 // GNU store/load fail the IR atomic-place contract.
+018887:                 IrTypeId unqualified_type = atomic->is_volatile ? atomic->unqualified_type : atomic_type;
+018888:                 IrTypeId qualified_type = c_ir_add_atomic_access_type(builder->program, unqualified_type, atomic->is_volatile);
+018889:                 IrTypeId pointer_type = qualified_type.value != IR_ID_UNDERLYING_INVALID
+018890:                                             ? c_ir_add_pointer_type(builder->program, builder->pointer_types, qualified_type)
+018891:                                             : IR_TYPE_ID_INVALID;
+018892:                 IrValueId address = pointer_type.value != IR_ID_UNDERLYING_INVALID
+018893:                                         ? c_ir_emit_address_of_place(builder, place, atomic_type, source)
+018894:                                         : IR_VALUE_ID_INVALID;
+018895:                 IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID
+018896:                                      ? c_ir_emit_cast(builder, address, pointer_type, source)
+018897:                                      : IR_VALUE_ID_INVALID;
+018898:                 place = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+018899:                 if (place.value != IR_ID_UNDERLYING_INVALID)
+018900:                 {
+018901:                     frame->as.prepared_call.state->place = place;
+018902:                     atomic_type = qualified_type;
+018903:                     atomic = ir_type_from_id(&builder->program->types, atomic_type);
+018904:                 }
+018905:                 else
+018906:                 {
+018907:                     atomic_type = IR_TYPE_ID_INVALID;
+018908:                     atomic = 0;
+018909:                 }
+018910:             }
+018911:             IrTypeId value_type_id = atomic && atomic->is_atomic ? atomic->unqualified_type : atomic_type;
+018912:             IrType* unqualified = ir_type_from_id(&builder->program->types, value_type_id);
+018913:             if (!atomic || (!atomic->is_atomic && !selected->builtin_atomic_gnu) || !unqualified)
+018914:             {
+018915:                 return false;
+018916:             }
+018917:             bool aggregate_value = unqualified->kind == IR_TYPE_STRUCT || unqualified->kind == IR_TYPE_UNION;
+018918:             bool pointer_value = unqualified->kind == IR_TYPE_POINTER;
+018919:             bool representation_value = aggregate_value || selected->builtin_atomic_generic;
+018920:             u64 atomic_width = selected->builtin_atomic_generic
+018921:                                    ? (unqualified->layout.resolved ? unqualified->layout.size : 0)
+018922:                                    : (atomic->layout.resolved ? atomic->layout.size : 0);
+018923:             IrTypeId generic_bits_type = IR_TYPE_ID_INVALID;
+018924:             if (selected->builtin_atomic_generic)
+018925:             {
+018926:                 if (atomic_width != 1 && atomic_width != 2 && atomic_width != 4 && atomic_width != 8)
+018927:                 {
+018928:                     builder->failure_token_index = selected->token_index;
+018929:                     builder->failure_message =
+018930:                         S8("GNU generic atomic builtins require an object whose size is 1, 2, 4, or 8 bytes");
+018931:                     return false;
+018932:                 }
+018933:                 generic_bits_type = c_ir_unsigned_type_of_size(builder, atomic_width);
+018934:                 if (generic_bits_type.value == IR_ID_UNDERLYING_INVALID)
+018935:                 {
+018936:                     return false;
+018937:                 }
+018938:             }
+018939:             bool wide_atomic_runtime = builder->target.cpu_arch == CPU_ARCH_X86_64 && atomic_width == 16 &&
+018940:                                        !target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16);
+018941:             IrTypeId wide_atomic_runtime_type = wide_atomic_runtime
+018942:                                                     ? c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_INT128)
+018943:                                                     : IR_TYPE_ID_INVALID;
+018944:             IrTypeId wide_atomic_runtime_pointer_type = wide_atomic_runtime_type.value != IR_ID_UNDERLYING_INVALID
+018945:                                                             ? c_ir_add_pointer_type(builder->program, builder->pointer_types, wide_atomic_runtime_type)
+018946:                                                             : IR_TYPE_ID_INVALID;
+018947:             if (wide_atomic_runtime && (wide_atomic_runtime_type.value == IR_ID_UNDERLYING_INVALID ||
+018948:                                         wide_atomic_runtime_pointer_type.value == IR_ID_UNDERLYING_INVALID))
+018949:             {
+018950:                 return false;
+018951:             }
+018952:             if (c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, atomic_type))
+018953:             {
+018954:                 builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point builtins");
+018955:                 return false;

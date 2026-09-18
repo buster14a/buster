@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 85/111
+line: 23923
+
+023853:             instruction.operand_count = count;
+023854:             instruction.immediates = fields;
+023855:             instruction.immediate_count = array ? 0 : (u16)count;
+023856:             instruction.result = result;
+023857:             IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+023858:             builder->function->values[result.value].definition = id;
+023859:         }
+023860:     }
+023861:     return result;
+023862: }
+023863: 
+023864: #define C_IR_BOUNDED_ZERO_STORAGE_MIN_BYTES 4096u
+023865: 
+023866: BUSTER_C_INTERNAL bool c_ir_zero_storage_compatible(CIntegerIrBuilder* builder, IrTypeId root)
+023867: {
+023868:     IrType* root_type = ir_type_from_id(&builder->program->types, root);
+023869:     bool compatible = root_type && root_type->layout.resolved && root_type->layout.size >= C_IR_BOUNDED_ZERO_STORAGE_MIN_BYTES &&
+023870:                       (root_type->kind == IR_TYPE_ARRAY || root_type->kind == IR_TYPE_STRUCT || root_type->kind == IR_TYPE_UNION);
+023871:     if (compatible)
+023872:     {
+023873:         u32 capacity = builder->program->types.count;
+023874:         IrTypeId* pending = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
+023875:         u8* seen = arena_allocate(builder->temporary_arena, u8, capacity);
+023876:         memset(seen, 0, capacity);
+023877:         u32 count = 1;
+023878:         pending[0] = root;
+023879:         seen[root.value] = 1;
+023880:         for (u32 index = 0; compatible && index < count; index += 1)
+023881:         {
+023882:             IrType* type = ir_type_from_id(&builder->program->types, pending[index]);
+023883:             compatible = type && type->layout.resolved && !type->is_atomic && !type->is_volatile;
+023884:             if (compatible)
+023885:             {
+023886:                 bool array = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR;
+023887:                 bool record = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+023888:                 compatible = array || record || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN ||
+023889:                              type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FLOAT;
+023890:                 u32 children = array ? 1 : record ? type->field_count : 0;
+023891:                 for (u32 child = 0; compatible && child < children; child += 1)
+023892:                 {
+023893:                     IrTypeId id = array ? type->element_type : type->fields[child].type;
+023894:                     compatible = id.value < capacity;
+023895:                     if (compatible && !seen[id.value])
+023896:                     {
+023897:                         seen[id.value] = 1;
+023898:                         pending[count++] = id;
+023899:                     }
+023900:                 }
+023901:             }
+023902:         }
+023903:     }
+023904:     return compatible;
+023905: }
+023906: 
+023907: // Large aggregate zero initialization must not expand into one canonical
+023908: // value and spill slot per byte. Windows ARM64 unwind records cannot describe
+023909: // the multi-megabyte functions that expansion produces. Check representations
+023910: // and qualifiers before using a byte loop; this introduces no libc dependency.
+023911: BUSTER_C_INTERNAL bool c_ir_emit_zero_storage(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type_id,
+023912:                                              u64 count, CToken token)
+023913: {
+023914:     IrSourceRange source = c_ir_token_source_range(builder, token);
+023915:     IrTypeId element_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_CHAR);
+023916:     IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, element_type);
+023917:     IrValueId address = c_ir_emit_address_of_place(builder, place, type_id, source);
+023918:     IrValueId array = c_ir_emit_cast(builder, address, pointer_type, source);
+023919:     IrValueId cursor = c_ir_emit_temporary(builder, builder->size_type, source);
+023920:     IrValueId initial = c_ir_emit_integer_value_typed(builder, 0, false, token, builder->size_type);
+023921:     IrValueId limit = c_ir_emit_integer_value_typed(builder, count, false, token, builder->size_type);
+023922:     IrValueId one = c_ir_emit_integer_value_typed(builder, 1, false, token, builder->size_type);
+023923:     IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, element_type);
+023924:     IrBlockId body = c_ir_block_create(builder);
+023925:     IrBlockId done = c_ir_block_create(builder);
+023926:     bool valid = array.value != IR_ID_UNDERLYING_INVALID && cursor.value != IR_ID_UNDERLYING_INVALID &&
+023927:                  initial.value != IR_ID_UNDERLYING_INVALID && limit.value != IR_ID_UNDERLYING_INVALID &&
+023928:                  one.value != IR_ID_UNDERLYING_INVALID && zero.value != IR_ID_UNDERLYING_INVALID &&
+023929:                  body.value != IR_ID_UNDERLYING_INVALID && done.value != IR_ID_UNDERLYING_INVALID;
+023930:     valid = valid && c_ir_emit_store_place(builder, cursor, builder->size_type, initial, source) &&
+023931:             c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &body, 1, source) && c_ir_switch_block(builder, body);
+023932:     if (valid)
+023933:     {
+023934:         IrValueId index = c_ir_emit_load_place(builder, cursor, builder->size_type, source);
+023935:         IrValueId element = c_ir_emit_index_place(builder, array, index, source);
+023936:         IrValueId next = c_ir_emit_binary_value(builder, index, one, builder->size_type, IR_BINARY_INTEGER_ADD, source);
+023937:         IrValueId finished = c_ir_emit_binary_value(builder, next, limit, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
+023938:         IrBlockId targets[2] = {done, body};
+023939:         valid = index.value != IR_ID_UNDERLYING_INVALID && element.value != IR_ID_UNDERLYING_INVALID &&
+023940:                 next.value != IR_ID_UNDERLYING_INVALID && finished.value != IR_ID_UNDERLYING_INVALID &&
+023941:                 c_ir_emit_store_place(builder, element, element_type, zero, source) &&
+023942:                 c_ir_emit_store_place(builder, cursor, builder->size_type, next, source) &&
+023943:                 c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &finished, 1, targets, 2, source) &&
+023944:                 c_ir_switch_block(builder, done);
+023945:     }
+023946:     return valid;
+023947: }
+023948: 
+023949: BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrTypeId root_type, CToken token)
+023950: {
+023951:     typedef enum CIrZeroTaskKind
+023952:     {
+023953:         C_IR_ZERO_TASK_VALUE,
+023954:         C_IR_ZERO_TASK_COMPLETE,
+023955:     } CIrZeroTaskKind;
+023956:     typedef struct CIrZeroTask CIrZeroTask;
+023957:     struct CIrZeroTask
+023958:     {
+023959:         IrValueId* output;
+023960:         IrValueId* operands;
+023961:         u64* fields;
+023962:         IrTypeId type;
+023963:         u32 operand_count;
+023964:         CIrZeroTaskKind kind;
+023965:     };
+023966:     IrType* root = ir_type_from_id(&builder->program->types, root_type);
+023967:     if (!root || !root->layout.resolved || root->layout.size > (UINT32_MAX - 64) / 8)
+023968:     {
+023969:         builder->failure_message = !root                    ? S8("cannot zero-initialize an unresolved IR type")
+023970:                                    : !root->layout.resolved ? S8("cannot zero-initialize an aggregate with unresolved layout")
+023971:                                                             : S8("aggregate is too large to zero-initialize");
+023972:         return IR_VALUE_ID_INVALID;
+023973:     }
+023974:     u32 capacity = (u32)(root->layout.size * 8 + 64);
+023975:     CIrZeroTask* tasks = arena_allocate(builder->temporary_arena, CIrZeroTask, capacity);
+023976:     IrValueId result = IR_VALUE_ID_INVALID;
+023977:     u32 task_count = 1;
+023978:     tasks[0] = (CIrZeroTask){
+023979:         .output = &result,
+023980:         .type = root_type,
+023981:     };
+023982:     while (task_count)
+023983:     {
+023984:         CIrZeroTask task = tasks[--task_count];
+023985:         IrType* type = ir_type_from_id(&builder->program->types, task.type);
+023986:         if (!type)
+023987:         {
+023988:             builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize unresolved IR type {u32}"), task.type.value);
+023989:             return IR_VALUE_ID_INVALID;
+023990:         }
+023991:         if (task.kind == C_IR_ZERO_TASK_COMPLETE)
+023992:         {
+023993:             if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && task.operand_count > UINT16_MAX)
+023994:             {
+023995:                 builder->failure_message = string_format(builder->arena, S8("aggregate has too many fields to lower ({u32})"), task.operand_count);
+023996:                 return IR_VALUE_ID_INVALID;
+023997:             }
+023998:             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+023999:             IrValueId aggregate = c_ir_emit_initializer_capture(builder, task.type, task.operands, task.fields, task.operand_count, instruction_source);
+024000:             if (aggregate.value == IR_ID_UNDERLYING_INVALID)
+024001:             {
+024002:                 return IR_VALUE_ID_INVALID;
+024003:             }
+024004:             *task.output = aggregate;
+024005:             continue;
+024006:         }
+024007:         bool aggregate = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR || type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+024008:         if (!aggregate)
+024009:         {
+024010:             IrValueId zero = IR_VALUE_ID_INVALID;
+024011:             if (type->kind == IR_TYPE_FLOAT)
+024012:             {
+024013:                 if (type->bit_width == 80)
+024014:                 {
+024015:                     // The f80 constant carries the semantic ten bytes as two
+024016:                     // integer immediates; do not route synthetic zero through
+024017:                     // a host f64 literal or a generic floating conversion.
+024018:                     zero = c_ir_emit_f80_constant_bits(builder, c_ir_token_source_range(builder, token), S8("0.0L"), 0, 0);
+024019:                 }
+024020:                 else
+024021:                 {
+024022:                     CToken zero_token = {
+024023:                         .offset = C_SPELLING_FLOAT_ZERO,
+024024:                         .length = type->bit_width == 32 ? 4u : 3u,
+024025:                         .kind = C_TOKEN_PREPROCESSING_NUMBER,
+024026:                     };
+024027:                     zero = c_ir_emit_float(builder, zero_token);
+024028:                     zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+024029:                 }
+024030:             }
+024031:             else if (type->kind == IR_TYPE_INTEGER)
+024032:             {
+024033:                 zero = c_ir_emit_integer_value_typed(builder, 0, false, token, task.type);
+024034:             }
+024035:             else if (type->kind == IR_TYPE_POINTER)
+024036:             {
+024037:                 zero = c_ir_emit_integer_value(builder, 0, false, token);
+024038:                 zero = c_ir_emit_cast(builder, zero, task.type, c_ir_token_source_range(builder, token));
+024039:             }
+024040:             else if (type->kind == IR_TYPE_BOOLEAN)
+024041:             {
+024042:                 zero = c_ir_emit_integer_value(builder, 0, false, token);
+024043:                 zero = c_ir_truth_value(builder, zero, c_ir_token_source_range(builder, token));
+024044:             }
+024045:             if (zero.value == IR_ID_UNDERLYING_INVALID)
+024046:             {
+024047:                 builder->failure_message = string_format(builder->arena, S8("cannot zero-initialize IR type kind {u32}"), (u32)type->kind);
+024048:                 return zero;
+024049:             }
+024050:             *task.output = zero;
+024051:             continue;
+024052:         }
+024053:         u64 child_count_u64 = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count

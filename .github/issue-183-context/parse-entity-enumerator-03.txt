@@ -1,0 +1,286 @@
+path: src/buster/lib/compiler/frontend/c/c_parse.c
+needle: C_ENTITY_ENUMERATOR
+occurrence: 3/6
+line: 10017
+
+009897:                     valid = false;
+009898:                 }
+009899:                 else if (!item_open)
+009900:                 {
+009901:                     item_open = true;
+009902:                     item_braced = false;
+009903:                 }
+009904:             }
+009905:         }
+009906:         count += item_open;
+009907:         valid &= !item_open || !element_is_aggregate || item_braced;
+009908:         count = valid ? count : 0;
+009909:     }
+009910:     return count;
+009911: }
+009912: 
+009913: // The expression shapes the enum-constant evaluator can apply sizeof or
+009914: // _Alignof to without the type-parse machine: an object, parameter, local,
+009915: // or enumerator name under redundant parentheses and leading dereferences,
+009916: // extended by a postfix chain of subscripts and member selections. Anything
+009917: // else stays unresolved and the caller fails the enumerator rather than
+009918: // guessing â but these shapes cover the array-length idiom
+009919: // `enum { N = sizeof(table) / sizeof(table[0]) }`, whose failure used to
+009920: // fail the whole enum type and leave every one of its enumerators
+009921: // undeclared in function bodies (found by tools/differential_c_harness.py,
+009922: // family enum_sizeof; tests/basic_c_enum_sizeof_object.c is the fixture).
+009923: BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+009924:                                                                   u32 start, u32 end, u64* size_out, u32* alignment_out)
+009925: {
+009926:     bool stripping = true;
+009927:     while (stripping)
+009928:     {
+009929:         stripping = false;
+009930:         if (end > start + 1 && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+009931:         {
+009932:             u32 depth = 0;
+009933:             u32 close = 0;
+009934:             for (u32 index = start; index < end && !close; index += 1)
+009935:             {
+009936:                 CToken token = preprocess.tokens[index];
+009937:                 if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+009938:                 {
+009939:                     depth += 1;
+009940:                 }
+009941:                 else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+009942:                 {
+009943:                     depth -= 1;
+009944:                     if (!depth)
+009945:                     {
+009946:                         close = index;
+009947:                     }
+009948:                 }
+009949:             }
+009950:             if (close == end - 1)
+009951:             {
+009952:                 start += 1;
+009953:                 end -= 1;
+009954:                 stripping = true;
+009955:             }
+009956:         }
+009957:     }
+009958:     u32 dereference_count = 0;
+009959:     while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_STAR))
+009960:     {
+009961:         dereference_count += 1;
+009962:         start += 1;
+009963:     }
+009964:     u32 identifier_index = start;
+009965:     u32 postfix_index = start < end ? start + 1 : start;
+009966:     if (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+009967:     {
+009968:         u32 primary_close =
+009969:             c_parse_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+009970:         if (primary_close < end && primary_close + 1 < end)
+009971:         {
+009972:             u32 primary_start = start + 1;
+009973:             u32 primary_end = primary_close;
+009974:             bool primary_stripping = true;
+009975:             while (primary_stripping)
+009976:             {
+009977:                 primary_stripping = false;
+009978:                 if (primary_end > primary_start + 1 &&
+009979:                     c_token_is_punctuator(&preprocess.tokens[primary_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+009980:                 {
+009981:                     u32 nested_close = c_parse_matching_delimiter(preprocess, primary_start, primary_end,
+009982:                                                                   C_PUNCTUATOR_LEFT_PARENTHESIS,
+009983:                                                                   C_PUNCTUATOR_RIGHT_PARENTHESIS);
+009984:                     if (nested_close == primary_end - 1)
+009985:                     {
+009986:                         primary_start += 1;
+009987:                         primary_end -= 1;
+009988:                         primary_stripping = true;
+009989:                     }
+009990:                 }
+009991:             }
+009992:             if (primary_end == primary_start + 1 && preprocess.tokens[primary_start].kind == C_TOKEN_IDENTIFIER)
+009993:             {
+009994:                 identifier_index = primary_start;
+009995:                 postfix_index = primary_close + 1;
+009996:             }
+009997:         }
+009998:     }
+009999:     CTypeId type = C_TYPE_ID_INVALID;
+010000:     bool is_enumerator = false;
+010001:     u32 declaration_index = UINT32_MAX;
+010002:     u32 index = start;
+010003:     if (identifier_index < end && preprocess.tokens[identifier_index].kind == C_TOKEN_IDENTIFIER)
+010004:     {
+010005:         String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[identifier_index]);
+010006:         CEntityId entity =
+010007:             c_parse_lookup_entity_symbol(result, scope,
+010008:                                          c_parse_symbol_or_intern(result, preprocess.tokens[identifier_index].symbol, name), name);
+010009:         if (entity.value < result->entity_count)
+010010:         {
+010011:             CEntity* found = &result->entities[entity.value];
+010012:             if (found->kind == C_ENTITY_OBJECT || found->kind == C_ENTITY_PARAMETER || found->kind == C_ENTITY_LOCAL)
+010013:             {
+010014:                 type = found->type;
+010015:                 declaration_index = found->declaration_index;
+010016:             }
+010017:             else if (found->kind == C_ENTITY_ENUMERATOR)
+010018:             {
+010019:                 is_enumerator = true;
+010020:             }
+010021:         }
+010022:         else
+010023:         {
+010024:             // A member of the enum still being declared is not an entity yet;
+010025:             // the member table already holds everything declared before this
+010026:             // initializer.
+010027:             for (u32 member_index = 0; member_index < result->enum_member_count && !is_enumerator; member_index += 1)
+010028:             {
+010029:                 is_enumerator = string_equal(result->enum_members[member_index].name, name);
+010030:             }
+010031:         }
+010032:         index = postfix_index;
+010033:     }
+010034:     bool valid = type.value != C_ID_UNDERLYING_INVALID;
+010035:     while (valid && index < end)
+010036:     {
+010037:         CToken token = preprocess.tokens[index];
+010038:         CType* record = type.value < result->type_count ? &result->types[type.value] : 0;
+010039:         if (!record)
+010040:         {
+010041:             valid = false;
+010042:         }
+010043:         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+010044:         {
+010045:             u32 depth = 0;
+010046:             u32 close = 0;
+010047:             for (u32 cursor = index; cursor < end && !close; cursor += 1)
+010048:             {
+010049:                 CToken current = preprocess.tokens[cursor];
+010050:                 if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+010051:                 {
+010052:                     depth += 1;
+010053:                 }
+010054:                 else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+010055:                 {
+010056:                     depth -= 1;
+010057:                     if (!depth)
+010058:                     {
+010059:                         close = cursor;
+010060:                     }
+010061:                 }
+010062:             }
+010063:             valid = close != 0 &&
+010064:                     (record->kind == C_TYPE_ARRAY || record->kind == C_TYPE_POINTER || record->kind == C_TYPE_VECTOR);
+010065:             type = valid ? record->element_type : type;
+010066:             index = valid ? close + 1 : index;
+010067:         }
+010068:         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+010069:         {
+010070:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+010071:             {
+010072:                 valid = record->kind == C_TYPE_POINTER && record->element_type.value < result->type_count;
+010073:                 record = valid ? &result->types[record->element_type.value] : record;
+010074:             }
+010075:             valid = valid && index + 1 < end && preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER &&
+010076:                     (record->kind == C_TYPE_STRUCT || record->kind == C_TYPE_UNION);
+010077:             if (valid)
+010078:             {
+010079:                 String8 member_name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]);
+010080:                 bool found_member = false;
+010081:                 for (u32 member_index = record->member_start; member_index < record->member_start + record->member_count && !found_member;
+010082:                      member_index += 1)
+010083:                 {
+010084:                     CMember* member = &result->members[member_index];
+010085:                     if (string_equal(member->name, member_name) && !member->is_bit_field)
+010086:                     {
+010087:                         type = member->type;
+010088:                         found_member = true;
+010089:                     }
+010090:                 }
+010091:                 valid = found_member;
+010092:             }
+010093:             index += valid ? 2 : 0;
+010094:         }
+010095:         else
+010096:         {
+010097:             valid = false;
+010098:         }
+010099:     }
+010100:     while (valid && dereference_count)
+010101:     {
+010102:         CType* record = type.value < result->type_count ? &result->types[type.value] : 0;
+010103:         valid = record && (record->kind == C_TYPE_POINTER || record->kind == C_TYPE_ARRAY);
+010104:         type = valid ? record->element_type : type;
+010105:         dereference_count -= 1;
+010106:     }
+010107:     // A bare object name whose type is an inferred-length array needs its
+010108:     // element count before c_parse_infer_file_array_bounds has run; count
+010109:     // the plain initializer shapes directly and keep the answer local to
+010110:     // this query, like every other inferred layout.
+010111:     u64 counted_items = 0;
+010112:     CTypeId counted_element = C_TYPE_ID_INVALID;
+010113:     if (valid && !dereference_count && index == start + 1 && index == end && type.value < result->type_count &&
+010114:         declaration_index < result->declaration_count)
+010115:     {
+010116:         CType* record = &result->types[type.value];
+010117:         bool unresolved_bound = record->kind == C_TYPE_ARRAY && record->array_bound < result->array_bound_count &&
+010118:                                 !result->array_bounds[record->array_bound].token_count &&
+010119:                                 !result->array_bounds[record->array_bound].has_inferred_count &&
+010120:                                 !result->array_bounds[record->array_bound].is_star;
+010121:         if (unresolved_bound)
+010122:         {
+010123:             CDeclaration declaration = result->declarations[declaration_index];
+010124:             u32 declaration_start = declaration.declarator_count ? declaration.declarator_start : declaration.token_start;
+010125:             u32 declaration_end = declaration.declarator_count ? declaration.declarator_start + declaration.declarator_count
+010126:                                                                : declaration.token_start + declaration.token_count;
+010127:             u32 initializer = declaration_end;
+010128:             u32 depth = 0;
+010129:             for (u32 cursor = declaration_start; cursor < declaration_end && initializer == declaration_end; cursor += 1)
+010130:             {
+010131:                 CToken current = preprocess.tokens[cursor];
+010132:                 if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET) ||
+010133:                     c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
+010134:                 {
+010135:                     depth += 1;
+010136:                 }
+010137:                 else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET) ||
+010138:                          c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACE))
+010139:                 {
+010140:                     depth -= depth != 0;
+010141:                 }
+010142:                 else if (!depth && c_token_is_punctuator(&current, C_PUNCTUATOR_ASSIGN))
+010143:                 {
+010144:                     initializer = cursor + 1;
+010145:                 }
+010146:             }
+010147:             if (initializer < declaration_end)
+010148:             {
+010149:                 if (c_token_is_punctuator(&preprocess.tokens[declaration_end - 1], C_PUNCTUATOR_SEMICOLON))
+010150:                 {
+010151:                     declaration_end -= 1;
+010152:                 }
+010153:                 CType* element = record->element_type.value < result->type_count ? &result->types[record->element_type.value] : 0;
+010154:                 bool element_is_aggregate = element && (element->kind == C_TYPE_STRUCT || element->kind == C_TYPE_UNION ||
+010155:                                                         element->kind == C_TYPE_ARRAY || element->kind == C_TYPE_VECTOR);
+010156:                 if (element && c_ir_tokens_are_string_literals(preprocess, initializer, declaration_end))
+010157:                 {
+010158:                     CIrDecodedString decoded = {0};
+010159:                     if (c_ir_count_string_literal_range_for_target(arena, preprocess, preprocess.target, initializer, declaration_end, &decoded) &&
+010160:                         decoded.element_count != UINT64_MAX &&
+010161:                         c_parse_initializer_string_element_compatible(preprocess, result, record->element_type, decoded))
+010162:                     {
+010163:                         counted_items = decoded.element_count + 1;
+010164:                     }
+010165:                 }
+010166:                 else if (element)
+010167:                 {
+010168:                     counted_items = c_parse_count_plain_initializer_items(preprocess, initializer, declaration_end, element_is_aggregate);
+010169:                 }
+010170:                 counted_element = record->element_type;
+010171:             }
+010172:         }
+010173:     }
+010174:     bool resolved;
+010175:     if (is_enumerator && index == end && !dereference_count && type.value == C_ID_UNDERLYING_INVALID)
+010176:     {
+010177:         // An enumerator has type int, which is 4 bytes with 4-byte alignment

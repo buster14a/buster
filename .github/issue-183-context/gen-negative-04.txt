@@ -1,0 +1,166 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: constant_is_negative
+occurrence: 4/4
+line: 47271
+
+047211:                     // through the sizeof query only: the type-prediction query
+047212:                     // guesses int for anything it cannot resolve yet, and a
+047213:                     // guessed size folded into an array bound lays the global
+047214:                     // out too small (the stage-1 stray-global-write incident of
+047215:                     // 2026-08-08). Failing here re-queues the bound for a later
+047216:                     // type-mapping pass instead.
+047217:                     operand_resolved = c_ir_query_sizeof(builder, operand_start, operand_end, &operand_size, &operand_alignment);
+047218:                     if (builder->queries->has_request)
+047219:                     {
+047220:                         return false;
+047221:                     }
+047222:                 }
+047223:             }
+047224:             if (!operand_resolved)
+047225:             {
+047226:                 return false;
+047227:             }
+047228:             tokens[token_count++] = c_space_token(
+047229:                 &bound_space,
+047230:                 string_format(arena, S8("{u64}"),
+047231:                               c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) ? operand_alignment : operand_size),
+047232:                 C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+047233:             index = consumed_index;
+047234:             continue;
+047235:         }
+047236:         if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token))) &&
+047237:             index + 1 < end && !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+047238:         {
+047239:             // `char tmp[sizeof h->chksum]` (sbase's tar) applies sizeof to a
+047240:             // unary expression instead of a parenthesized type name. Its
+047241:             // operand ends where the call-discovery scan says an unevaluated
+047242:             // operand ends, and the sizeof query resolves the expression's
+047243:             // type or fails outright — it never guesses one, so a bound this
+047244:             // pass cannot fold yet is re-queued rather than folded wrong.
+047245:             // Without this the bound stays unresolved and the array becomes a
+047246:             // variable-length one, which a declarator list then rejects.
+047247:             u32 operand_start = index + 1;
+047248:             u32 operand_end = c_ir_unevaluated_operand_end(builder, operand_start, end);
+047249:             u64 operand_size = 0;
+047250:             u32 operand_alignment = 0;
+047251:             if (operand_end <= operand_start || !c_ir_query_sizeof(builder, operand_start, operand_end, &operand_size, &operand_alignment) ||
+047252:                 builder->queries->has_request)
+047253:             {
+047254:                 return false;
+047255:             }
+047256:             tokens[token_count++] = c_space_token(
+047257:                 &bound_space,
+047258:                 string_format(arena, S8("{u64}"),
+047259:                               c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) ? operand_alignment : operand_size),
+047260:                 C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+047261:             index = operand_end - 1;
+047262:             continue;
+047263:         }
+047264:         if (token.kind == C_TOKEN_IDENTIFIER)
+047265:         {
+047266:             CEntity* constant = c_parse_first_constant_entity_token(&parse, builder->preprocess.spelling_base, token);
+047267:             if (!constant)
+047268:             {
+047269:                 return false;
+047270:             }
+047271:             if (constant->constant_is_negative)
+047272:             {
+047273:                 tokens[token_count++] = c_space_token(&bound_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
+047274:             }
+047275:             tokens[token_count++] = c_space_token(&bound_space, string_format(arena, S8("{u64}"), constant->constant_value),
+047276:                                                   C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+047277:             continue;
+047278:         }
+047279:         tokens[token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
+047280:     }
+047281:     CPreprocessResult evaluation = {
+047282:         .diagnostics = arena_allocate(arena, CDiagnostic, bound.token_count + 1),
+047283:         .target = preprocess.target,
+047284:         .dialect = preprocess.dialect,
+047285:     };
+047286:     return c_integer_expression_evaluate(arena, bound_space.base, tokens, token_count, 65536, &evaluation, count_out) && evaluation.diagnostic_count == 0;
+047287: }
+047288: 
+047289: BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
+047290: {
+047291:     CIrQueryFrame result = {0};
+047292:     if (!c_ir_query_execute(builder, (CIrQueryFrame){.bound = bound, .kind = C_IR_QUERY_FRAME_ARRAY_BOUND}, &result) || !result.success)
+047293:     {
+047294:         return false;
+047295:     }
+047296:     *count_out = result.integer;
+047297:     return true;
+047298: }
+047299: 
+047300: // Answers the alignment the specifiers in [alignment_start, alignment_count)
+047301: // ask for: the maximum of `natural_alignment` and every request. The sizeof
+047302: // folding in c_parse_layout_alignment_specifiers walks the same records and
+047303: // must reach the same number.
+047304: //
+047305: // A GNU `aligned(N)` only ever raises, so an N the type already satisfies is
+047306: // exactly the no-op the maximum computes on its own -- a header defending
+047307: // itself with `aligned(2)` on an already 4-aligned member keeps its layout.
+047308: // `_Alignas` carries the opposite rule, since C requires a declaration's
+047309: // alignment to be at least the natural one, and Clang measures the largest
+047310: // request in the declaration rather than each one: `_Alignas(2)
+047311: // __attribute__((aligned(8))) int` is accepted, `_Alignas(2) int` is not.
+047312: //
+047313: // A rejected run still fills *alignment_out with the usable maximum, so the
+047314: // caller can finish the layout and report `*rejection_out` against the
+047315: // attribute instead of leaving a type nothing downstream can name.
+047316: //
+047317: // `requested_out`, when asked for, receives the largest alignment any of the
+047318: // records *asks* for, before it is merged with the declared type's natural
+047319: // alignment. Only the bit-field placement rule needs that raw number: GNU
+047320: // `aligned(N)` starts a bit-field at the next multiple of N bytes even when N
+047321: // is below the declared type's own alignment, while every other reader of a
+047322: // request only ever raises with it. Zero means no record resolved.
+047323: BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* builder, u32 alignment_start, u32 alignment_count, u32 natural_alignment,
+047324:                                                              u32* alignment_out, u32* requested_out, String8* rejection_out)
+047325: {
+047326:     IrProgram* program = builder->program;
+047327:     CParseResult parse = builder->parse;
+047328:     IrTypeId* c_type_ir_map = builder->c_type_ir_map;
+047329:     u32 alignment = natural_alignment;
+047330:     u64 requested_maximum = 0;
+047331:     bool standard_below_natural = false;
+047332:     CIrAlignmentStatus status = C_IR_ALIGNMENT_RESOLVED;
+047333:     if (alignment_start > parse.alignment_count || alignment_count > parse.alignment_count - alignment_start)
+047334:     {
+047335:         return C_IR_ALIGNMENT_PENDING;
+047336:     }
+047337:     for (u32 index = 0; index < alignment_count; index += 1)
+047338:     {
+047339:         CAlignmentSpecifier specifier = parse.alignments[alignment_start + index];
+047340:         u64 requested = 0;
+047341:         if (specifier.type.value < parse.type_count)
+047342:         {
+047343:             IrTypeId type = c_type_ir_map[specifier.type.value];
+047344:             IrType* value = ir_type_from_id(&program->types, type);
+047345:             if (!value || !value->layout.resolved)
+047346:             {
+047347:                 return C_IR_ALIGNMENT_PENDING;
+047348:             }
+047349:             requested = value->layout.alignment;
+047350:         }
+047351:         else if (!c_ir_array_bound_evaluate(builder, (CArrayBound){
+047352:                                                 .token_start = specifier.token_start,
+047353:                                                 .token_count = specifier.token_count,
+047354:                                             },
+047355:                                             &requested))
+047356:         {
+047357:             return C_IR_ALIGNMENT_PENDING;
+047358:         }
+047359:         if (!requested)
+047360:         {
+047361:             continue;
+047362:         }
+047363:         if (requested > UINT32_MAX || (requested & (requested - 1)))
+047364:         {
+047365:             if (status == C_IR_ALIGNMENT_RESOLVED)
+047366:             {
+047367:                 *rejection_out = string_format(builder->arena, S8("alignment specifier requests {u64}, which is not a power of two the target can align to"), requested);
+047368:                 status = C_IR_ALIGNMENT_REJECTED;
+047369:             }
+047370:             continue;
+047371:         }

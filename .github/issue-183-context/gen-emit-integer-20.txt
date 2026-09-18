@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 20/111
+line: 7934
+
+007864:         IrType* target_type = ir_type_from_id(&builder->program->types, stored_type);
+007865:         if (source_type && source_type->kind == IR_TYPE_ARRAY && target_type && target_type->kind == IR_TYPE_POINTER)
+007866:         {
+007867:             value = c_ir_decay_array(builder, value, stored_type, source);
+007868:         }
+007869:     }
+007870:     if (value.value < builder->function->value_count &&
+007871:         !c_ir_pointer_assignment_compatible(builder, stored_type, builder->function->values[value.value].canonical_type))
+007872:     {
+007873:         builder->failure_message = S8("assignment from an incompatible function pointer type");
+007874:         builder->failure_kind_plus_one = C_DIAGNOSTIC_CONFLICTING_DECLARATION + 1;
+007875:         return false;
+007876:     }
+007877:     value = c_ir_emit_cast(builder, value, stored_type, source);
+007878:     if (value.value == IR_ID_UNDERLYING_INVALID)
+007879:     {
+007880:         return false;
+007881:     }
+007882:     if (atomic && !builder->preparing_calls && c_ir_wide_atomic_runtime_required(builder, type))
+007883:     {
+007884:         return c_ir_emit_wide_atomic_runtime_store(builder, place, type, value, source, IR_MEMORY_ORDER_SEQUENTIAL);
+007885:     }
+007886:     IrValueLabelMetadata stored_metadata =
+007887:         value.value < builder->function->value_count ? ir_value_label_metadata(builder->function, value) : (IrValueLabelMetadata){0};
+007888:     bool label_value = stored_metadata.is_label_value;
+007889:     bool aggregate_label_value = stored_metadata.has_label_provenance;
+007890:     if ((label_value || aggregate_label_value) && c_ir_place_may_have_static_storage(builder, place))
+007891:     {
+007892:         builder->failure_message = S8("a label address may not be stored in static storage");
+007893:         return false;
+007894:     }
+007895:     if (!c_ir_label_metadata_store_for_place(builder, place, value))
+007896:     {
+007897:         return false;
+007898:     }
+007899:     IrField* bit_field = c_ir_bit_field_from_place(builder, place);
+007900:     IrType* value_type = ir_type_from_id(&builder->program->types, stored_type);
+007901:     // The read-modify-write runs in the unit the field is accessed through,
+007902:     // which is the declared type unless packing narrowed it; the value
+007903:     // truncates into that unit first, and the mask keeps only the field's own
+007904:     // bits either way. A span no integer is the width of takes one
+007905:     // read-modify-write per piece instead.
+007906:     // A `_Bool` bit-field reaches the read-modify-write like any other, through
+007907:     // the integer its unit is: writing the whole `_Bool` unit instead used to
+007908:     // clear every field sharing it.
+007909:     bool stored_boolean = value_type && value_type->kind == IR_TYPE_BOOLEAN;
+007910:     bool narrowed_access = bit_field && (bit_field->access_size || stored_boolean);
+007911:     IrTypeId access_type =
+007912:         narrowed_access ? c_ir_unsigned_type_of_size(builder, ir_field_access_size(&builder->program->types, bit_field)) : stored_type;
+007913:     if (narrowed_access && access_type.value == IR_ID_UNDERLYING_INVALID && value_type && value_type->kind == IR_TYPE_INTEGER && bit_field->bit_width &&
+007914:         bit_field->bit_width <= value_type->bit_width)
+007915:     {
+007916:         return c_ir_emit_split_bit_field_store(builder, place, bit_field, value, bit_field->access_size, source);
+007917:     }
+007918:     IrType* access_value_type = access_type.value == stored_type.value ? value_type : ir_type_from_id(&builder->program->types, access_type);
+007919:     if (narrowed_access && !access_value_type)
+007920:     {
+007921:         return false;
+007922:     }
+007923:     if (bit_field && value_type && access_value_type && (value_type->kind == IR_TYPE_INTEGER || stored_boolean) && bit_field->bit_width &&
+007924:         bit_field->bit_width <= value_type->bit_width && bit_field->bit_offset + bit_field->bit_width <= access_value_type->bit_width)
+007925:     {
+007926:         CToken token = {0};
+007927:         u64 value_mask = bit_field->bit_width == 64 ? UINT64_MAX : ((u64)1 << bit_field->bit_width) - 1;
+007928:         u64 storage_mask = value_mask << bit_field->bit_offset;
+007929:         IrValueId narrowed = access_type.value == stored_type.value ? value : c_ir_emit_cast(builder, value, access_type, source);
+007930:         if (narrowed.value == IR_ID_UNDERLYING_INVALID)
+007931:         {
+007932:             return false;
+007933:         }
+007934:         IrValueId mask = c_ir_emit_integer_value_typed(builder, value_mask, false, token, access_type);
+007935:         IrValueId packed = c_ir_emit_binary_value(builder, narrowed, mask, access_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+007936:         IrValueId shift = c_ir_emit_integer_value_typed(builder, bit_field->bit_offset, false, token, access_type);
+007937:         packed = c_ir_emit_binary_value(builder, packed, shift, access_type, IR_BINARY_SHIFT_LEFT, source);
+007938:         IrValueId current = c_ir_emit_load_place_raw(builder, place, access_type, source);
+007939:         IrValueId clear_mask = c_ir_emit_integer_value_typed(builder, ~storage_mask, false, token, access_type);
+007940:         current = c_ir_emit_binary_value(builder, current, clear_mask, access_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+007941:         value = c_ir_emit_binary_value(builder, current, packed, access_type, IR_BINARY_INTEGER_BITWISE_OR, source);
+007942:     }
+007943:     CIrSsaLocal* local = c_ir_ssa_place_local(builder, place);
+007944:     if (local && !atomic && stored_type.value == local->type.value &&
+007945:         builder->function->values[value.value].canonical_type.value == local->type.value &&
+007946:         builder->function->values[value.value].category == IR_VALUE_VALUE)
+007947:     {
+007948:         c_ir_ssa_slot(builder, builder->current_block.value, (u32)(local - builder->direct_ssa->locals))->value = value;
+007949:         c_ir_ssa_event(builder, (u32)(local - builder->direct_ssa->locals), IR_OPCODE_STORE, value, source);
+007950:         builder->direct_ssa->statistics.writes += 1;
+007951:     }
+007952:     else
+007953:     {
+007954:         IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
+007955:         operands[0] = place;
+007956:         operands[1] = value;
+007957:         IrSourceRange instruction_source = source;
+007958:         IrInstruction instruction = c_ir_instruction_initialize(atomic ? IR_OPCODE_ATOMIC_STORE : IR_OPCODE_STORE, builder->void_type);
+007959:         instruction.operands = operands;
+007960:         instruction.operand_count = 2;
+007961:         instruction.memory_order = atomic ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_COUNT;
+007962:         instruction.volatile_access = builder->function->values[place.value].is_volatile;
+007963:         c_ir_append_instruction(builder, instruction, instruction_source);
+007964:     }
+007965:     return true;
+007966: }
+007967: 
+007968: BUSTER_C_INTERNAL bool c_ir_emit_store(CIntegerIrBuilder* builder, CIntegerIrLocal* local, IrValueId value, IrSourceRange source)
+007969: {
+007970:     return c_ir_emit_store_place(builder, local->place, local->type, value, source);
+007971: }
+007972: 
+007973: // Whether a promoted-member search has already queued `type`.
+007974: //
+007975: // The two searches below (this one and c_ir_promoted_member_path) walk the
+007976: // anonymous nested aggregates of one struct or union, so their work lists hold
+007977: // a handful of entries and almost always exactly one. Both used to answer this
+007978: // question with a `bool` array indexed by type id, allocated and memset per
+007979: // call over the whole program type table: 72.167 calls at a mean capacity of
+007980: // 17.432 types, 1,26 GB of zeroing per self-host compile, 6,74% of every
+007981: // stage-1 L1d miss for a set that never held more than a few members (audit
+007982: // 2026-08-22T084855Z). The work list is the visited set; scanning it costs
+007983: // less than clearing the table did.
+007984: BUSTER_C_INTERNAL bool c_ir_type_queued(const IrTypeId* queued, u32 count, IrTypeId type)
+007985: {
+007986:     bool found = false;
+007987:     for (u32 index = 0; index < count; index += 1)
+007988:     {
+007989:         if (queued[index].value == type.value)
+007990:         {
+007991:             found = true;
+007992:             break;
+007993:         }
+007994:     }
+007995:     return found;
+007996: }
+007997: 
+007998: BUSTER_C_INTERNAL IrValueId c_ir_recover_place_from_value(CIntegerIrBuilder* builder, IrValueId value);
+007999: 
+008000: BUSTER_C_INTERNAL IrValueId c_ir_emit_field_place_from_value(CIntegerIrBuilder* builder, IrValueId operand, CToken access, CToken member)
+008001: {
+008002:     if (operand.value >= builder->function->value_count)
+008003:     {
+008004:         return IR_VALUE_ID_INVALID;
+008005:     }
+008006:     if (c_token_is_punctuator(&access, C_PUNCTUATOR_ARROW) && c_ir_value_contains_label_provenance(builder, operand))
+008007:     {
+008008:         builder->failure_message = S8("a label-provenance value may not be used as an addressable place");
+008009:         return IR_VALUE_ID_INVALID;
+008010:     }
+008011:     IrValueId base = operand;
+008012:     IrTypeId aggregate_type_id = builder->function->values[operand.value].canonical_type;
+008013:     if (c_token_is_punctuator(&access, C_PUNCTUATOR_ARROW))
+008014:     {
+008015:         operand = c_ir_decay_array_value_if_needed(builder, operand, c_ir_token_source_range(builder, access));
+008016:         if (operand.value >= builder->function->value_count)
+008017:         {
+008018:             return IR_VALUE_ID_INVALID;
+008019:         }
+008020:         aggregate_type_id = builder->function->values[operand.value].canonical_type;
+008021:         IrType* pointer_type = ir_type_from_id(&builder->program->types, aggregate_type_id);
+008022:         if (!pointer_type || pointer_type->kind != IR_TYPE_POINTER)
+008023:         {
+008024:             return IR_VALUE_ID_INVALID;
+008025:         }
+008026:         aggregate_type_id = pointer_type->element_type;
+008027:         base = ir_function_add_value(builder->arena, builder->function,
+008028:                                      (IrValue){
+008029:                                          .canonical_type = aggregate_type_id,
+008030:                                          .definition = IR_INSTRUCTION_ID_INVALID,
+008031:                                          .category = IR_VALUE_PLACE,
+008032:                                          .is_read_only = builder->function->values[operand.value].points_to_read_only,
+008033:                                          .is_volatile = ir_type_from_id(&builder->program->types, aggregate_type_id)->is_volatile,
+008034:                                      });
+008035:         IrSourceRange dereference_source = c_ir_token_source_range(builder, access);
+008036:         IrInstruction dereference = c_ir_instruction_initialize(IR_OPCODE_DEREFERENCE, aggregate_type_id);
+008037:         dereference.operands = arena_allocate(builder->arena, IrValueId, 1);
+008038:         dereference.operands[0] = operand;
+008039:         dereference.operand_count = 1;
+008040:         dereference.result = base;
+008041:         IrInstructionId dereference_id = c_ir_append_instruction(builder, dereference, dereference_source);
+008042:         builder->function->values[base.value].definition = dereference_id;
+008043:     }
+008044:     else if (!c_token_is_punctuator(&access, C_PUNCTUATOR_DOT))
+008045:     {
+008046:         return IR_VALUE_ID_INVALID;
+008047:     }
+008048:     else if (builder->function->values[operand.value].category != IR_VALUE_PLACE)
+008049:     {
+008050:         IrInstructionId definition = builder->function->values[operand.value].definition;
+008051:         if (definition.value >= builder->function->instruction_count)
+008052:         {
+008053:             return IR_VALUE_ID_INVALID;
+008054:         }
+008055:         IrInstruction* instruction = &builder->function->instructions[definition.value];
+008056:         if (instruction->opcode == IR_OPCODE_LOAD && instruction->operand_count == 1)
+008057:         {
+008058:             // The load only materialized the aggregate for the expression
+008059:             // walk; `E.m` designates a member of the object E names and never
+008060:             // reads the whole of it. Drop it when it is still the last
+008061:             // instruction emitted, the way the address-of arm of
+008062:             // c_ir_apply_operation drops the load behind `&E`. The token peek
+008063:             // in the member arm keeps the place before the load exists, but it
+008064:             // only sees the token that follows the member identifier, so a

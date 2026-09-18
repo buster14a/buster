@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 50/111
+line: 18408
+
+018338:     {
+018339:         if (va_list_operand)
+018340:         {
+018341:             builder->va_list_builtin_operand = frame->as.prepared_call.state->previous_va_list_operand;
+018342:         }
+018343:         builder->preparing_calls = frame->as.prepared_call.state->previous_preparing_calls;
+018344:         return C_IR_PREPARED_CALL_STEP_FAILED;
+018345:     }
+018346:     return C_IR_PREPARED_CALL_STEP_SUSPENDED;
+018347: }
+018348: 
+018349: BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_prepared_call_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+018350:                                                                                CIrPreparedCallContinuation continuation, u32 start, u32 end)
+018351: {
+018352:     frame->as.prepared_call.state->continuation = (u32)continuation;
+018353:     frame->stage = C_IR_LOWER_STAGE_CHILD;
+018354:     c_ir_prepared_call_suspend_preparation(builder, frame);
+018355:     if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+018356:                                             .kind = C_IR_LOWER_FRAME_PLACE,
+018357:                                             .as.place =
+018358:                                                 {
+018359:                                                     .start = start,
+018360:                                                     .end = end,
+018361:                                                 },
+018362:                                         }))
+018363:     {
+018364:         builder->preparing_calls = frame->as.prepared_call.state->previous_preparing_calls;
+018365:         return C_IR_PREPARED_CALL_STEP_FAILED;
+018366:     }
+018367:     return C_IR_PREPARED_CALL_STEP_SUSPENDED;
+018368: }
+018369: 
+018370: // Aggregate exchanges compare the promoted object's representation. Keep the
+018371: // atomic instruction integer-typed: two pointer views name the same object,
+018372: // and private scalar storage carries values between the record and its bits.
+018373: BUSTER_C_INTERNAL IrValueId c_ir_atomic_aggregate_bits_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId object_type,
+018374:                                                             IrTypeId bits_type, IrSourceRange source)
+018375: {
+018376:     IrType* object = ir_type_from_id(&builder->program->types, object_type);
+018377:     IrType* bits = ir_type_from_id(&builder->program->types, bits_type);
+018378:     // GNU's generic forms name an ordinary object, while C11 aggregate
+018379:     // exchange/CAS name an atomic-qualified one. In both cases the integer
+018380:     // view must cover exactly the storage the caller supplied.
+018381:     bool valid = object && bits && object->layout.resolved && bits->layout.resolved &&
+018382:                  object->layout.size == bits->layout.size && bits_type.value != IR_ID_UNDERLYING_INVALID;
+018383:     IrTypeId atomic_bits = valid ? c_ir_add_qualified_type(builder->program, bits_type, true, object->is_volatile) : IR_TYPE_ID_INVALID;
+018384:     IrTypeId pointer_type = valid ? c_ir_add_pointer_type(builder->program, builder->pointer_types, atomic_bits) : IR_TYPE_ID_INVALID;
+018385:     IrValueId address = valid ? c_ir_emit_address_of_place(builder, place, object_type, source) : IR_VALUE_ID_INVALID;
+018386:     IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, address, pointer_type, source) : IR_VALUE_ID_INVALID;
+018387:     IrValueId result = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+018388:     return result;
+018389: }
+018390: 
+018391: BUSTER_C_INTERNAL IrValueId c_ir_atomic_aggregate_bits_value(CIntegerIrBuilder* builder, IrValueId value, IrTypeId record_type,
+018392:                                                             IrTypeId bits_type, bool to_bits, IrSourceRange source)
+018393: {
+018394:     IrType* record = ir_type_from_id(&builder->program->types, record_type);
+018395:     IrType* bits = ir_type_from_id(&builder->program->types, bits_type);
+018396:     bool valid = record && bits && record->layout.resolved && bits->layout.resolved && record->layout.size <= bits->layout.size &&
+018397:                  value.value != IR_ID_UNDERLYING_INVALID;
+018398:     IrValueId slot = valid ? c_ir_emit_temporary(builder, bits_type, source) : IR_VALUE_ID_INVALID;
+018399:     IrTypeId pointer_type = valid ? c_ir_add_pointer_type(builder->program, builder->pointer_types, record_type) : IR_TYPE_ID_INVALID;
+018400:     IrValueId address = valid ? c_ir_emit_address_of_place(builder, slot, bits_type, source) : IR_VALUE_ID_INVALID;
+018401:     IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_cast(builder, address, pointer_type, source) : IR_VALUE_ID_INVALID;
+018402:     IrValueId record_place = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+018403:     valid = valid && record_place.value != IR_ID_UNDERLYING_INVALID;
+018404:     if (valid && to_bits)
+018405:     {
+018406:         // A three-byte record uses a four-byte atomic object. Initialize the
+018407:         // promoted tail before writing the record, matching aggregate stores.
+018408:         IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, bits_type);
+018409:         valid = zero.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, slot, bits_type, zero, source) &&
+018410:                 c_ir_emit_store_place(builder, record_place, record_type, value, source);
+018411:     }
+018412:     else if (valid)
+018413:     {
+018414:         valid = c_ir_emit_store_place(builder, slot, bits_type, value, source);
+018415:     }
+018416:     IrValueId result = valid ? c_ir_emit_load_place_raw(builder, to_bits ? slot : record_place, to_bits ? bits_type : record_type, source)
+018417:                             : IR_VALUE_ID_INVALID;
+018418:     return result;
+018419: }
+018420: 
+018421: // Builtins consume a pointer to the existing target-specific list object.
+018422: // Check this at the frontend boundary instead of publishing malformed VA IR.
+018423: BUSTER_C_INTERNAL bool c_ir_va_list_operand_valid(CIntegerIrBuilder* builder, IrValueId value)
+018424: {
+018425:     IrType* pointer = value.value < builder->function->value_count
+018426:                           ? ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type) : 0;
+018427:     IrType* list = pointer && pointer->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, pointer->element_type) : 0;
+018428:     return list && list->kind == IR_TYPE_VA_LIST;
+018429: }
+018430: 
+018431: BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_va_list_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+018432:                                                                         CIrPreparedCallContinuation continuation, bool child_success,
+018433:                                                                         IrValueId child_value)
+018434: {
+018435:     CIrPreparedCall* selected = builder->prepared_calls + frame->as.prepared_call.call_index;
+018436:     CToken token = builder->preprocess.tokens[selected->token_index];
+018437:     IrSourceRange source = c_ir_token_source_range(builder, token);
+018438:     u32 starts[2] = {0};
+018439:     u32 ends[2] = {0};
+018440:     u32 count = 0;
+018441:     bool valid = c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &count) &&
+018442:                  count == (selected->builtin_va_end ? 1u : 2u);
+018443:     CIrPreparedCallStepResult step = C_IR_PREPARED_CALL_STEP_FINISHED;
+018444:     IrValueId source_list = IR_VALUE_ID_INVALID;
+018445:     IrTypeId destination_type = IR_TYPE_ID_INVALID;
+018446:     if (valid && selected->builtin_va_start)
+018447:     {
+018448:         IrType* function_type = ir_type_from_id(&builder->program->types, builder->function->canonical_type);
+018449:         valid = function_type && function_type->is_variadic;
+018450:     }
+018451:     if (valid && selected->builtin_va_end)
+018452:     {
+018453:         if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_END)
+018454:         {
+018455:             source_list = child_value;
+018456:             valid = child_success && c_ir_va_list_operand_valid(builder, source_list);
+018457:         }
+018458:         else
+018459:         {
+018460:             step = c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_END, starts[0], ends[0], true);
+018461:         }
+018462:     }
+018463:     else if (valid)
+018464:     {
+018465:         if (continuation != C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION && continuation != C_IR_PREPARED_CALL_CONTINUATION_VA_COPY)
+018466:         {
+018467:             // MSVC's header passes the address to __va_start; recover the
+018468:             // same destination expression without re-evaluating its effects.
+018469:             if (selected->builtin_va_start && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("__va_start")) &&
+018470:                 starts[0] < ends[0] && c_token_is_punctuator(&builder->preprocess.tokens[starts[0]], C_PUNCTUATOR_AMPERSAND))
+018471:             {
+018472:                 starts[0] += 1;
+018473:             }
+018474:             step = c_ir_prepared_call_request_place(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION, starts[0], ends[0]);
+018475:         }
+018476:         else
+018477:         {
+018478:             // Keep the lowered place across the copy-source continuation.
+018479:             // Calls, indexing and increments in the destination run once.
+018480:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION)
+018481:             {
+018482:                 frame->as.prepared_call.state->place = child_value;
+018483:             }
+018484:             IrValueId place = frame->as.prepared_call.state->place;
+018485:             IrValue* destination = place.value < builder->function->value_count ? builder->function->values + place.value : 0;
+018486:             IrType* type = destination ? ir_type_from_id(&builder->program->types, destination->canonical_type) : 0;
+018487:             valid = child_success && destination && destination->category == IR_VALUE_PLACE && !destination->is_read_only &&
+018488:                     type && type->kind == IR_TYPE_VA_LIST && !type->is_atomic;
+018489:             if (valid)
+018490:             {
+018491:                 destination_type = type->is_volatile ? type->unqualified_type : destination->canonical_type;
+018492:                 if (selected->builtin_va_copy && continuation == C_IR_PREPARED_CALL_CONTINUATION_VA_DESTINATION)
+018493:                 {
+018494:                     step = c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VA_COPY, starts[1], ends[1], true);
+018495:                 }
+018496:                 else if (selected->builtin_va_copy)
+018497:                 {
+018498:                     source_list = child_value;
+018499:                     valid = c_ir_va_list_operand_valid(builder, source_list);
+018500:                 }
+018501:             }
+018502:         }
+018503:     }
+018504:     if (valid && step == C_IR_PREPARED_CALL_STEP_FINISHED)
+018505:     {
+018506:         IrTypeId result_type = selected->builtin_va_end ? builder->void_type : destination_type;
+018507:         IrValueId result = selected->builtin_va_end ? IR_VALUE_ID_INVALID : c_ir_add_result(builder, result_type);
+018508:         IrInstruction instruction = c_ir_instruction_initialize(selected->builtin_va_start ? IR_OPCODE_VA_START :
+018509:                                                                selected->builtin_va_copy ? IR_OPCODE_VA_COPY : IR_OPCODE_VA_END, result_type);
+018510:         if (!selected->builtin_va_start)
+018511:         {
+018512:             instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+018513:             instruction.operands[0] = source_list;
+018514:             instruction.operand_count = 1;
+018515:         }
+018516:         instruction.result = result;
+018517:         IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+018518:         if (!selected->builtin_va_end)
+018519:         {
+018520:             builder->function->values[result.value].definition = id;
+018521:             IrValueId place = frame->as.prepared_call.state->place;
+018522:             valid = c_ir_emit_store_place(builder, place, builder->function->values[place.value].canonical_type, result, source);
+018523:         }
+018524:     }
+018525:     if (!valid)
+018526:     {
+018527:         if (!builder->failure_message.length)
+018528:         {
+018529:             builder->failure_message = selected->builtin_va_end ? S8("va_end requires a va_list operand") :
+018530:                 S8("va_start/va_copy requires a modifiable va_list destination and valid arguments");
+018531:             builder->failure_token_index = selected->token_index;
+018532:         }
+018533:         step = C_IR_PREPARED_CALL_STEP_FAILED;
+018534:     }
+018535:     return step;
+018536: }
+018537: 
+018538: BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)

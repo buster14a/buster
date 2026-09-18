@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 108/111
+line: 32730
+
+032660:         if (target_index + 1 < target_count)
+032661:         {
+032662:             IrBlockId next = c_ir_block_create(builder);
+032663:             IrBlockId branch_targets[2] = {match, next};
+032664:             if (next.value == IR_ID_UNDERLYING_INVALID || !c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &equal, 1, branch_targets, 2, source) ||
+032665:                 !c_ir_switch_block(builder, next))
+032666:             {
+032667:                 return false;
+032668:             }
+032669:         }
+032670:         else
+032671:         {
+032672:             IrBlockId branch_targets[2] = {match, invalid};
+032673:             if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &equal, 1, branch_targets, 2, source) || !c_ir_switch_block(builder, invalid))
+032674:             {
+032675:                 return false;
+032676:             }
+032677:             IrSourceRange unreachable_source = source;
+032678:             IrInstruction unreachable = c_ir_instruction_initialize(IR_OPCODE_UNREACHABLE, builder->void_type);
+032679:             if (c_ir_append_instruction(builder, unreachable, unreachable_source).value == IR_ID_UNDERLYING_INVALID)
+032680:             {
+032681:                 return false;
+032682:             }
+032683:             builder->function->blocks[invalid.value].terminated = true;
+032684:         }
+032685:     }
+032686:     for (u32 target_index = 0; target_index < target_count; target_index += 1)
+032687:     {
+032688:         if (cleanup_blocks[target_index].value == IR_ID_UNDERLYING_INVALID)
+032689:         {
+032690:             continue;
+032691:         }
+032692:         CIrLabel* label = 0;
+032693:         for (u32 label_index = 0; label_index < label_count; label_index += 1)
+032694:         {
+032695:             if (labels[label_index].block.value == targets[target_index].value)
+032696:             {
+032697:                 label = labels + label_index;
+032698:                 break;
+032699:             }
+032700:         }
+032701:         if (!label || !c_ir_switch_block(builder, cleanup_blocks[target_index]))
+032702:         {
+032703:             return false;
+032704:         }
+032705:         CScopeId target_scope = c_parse_scope_for_token(&builder->parse, root_scope, label->token_index);
+032706:         if (!c_ir_emit_cleanup_calls(builder, 0, 0, target_scope, label->token_index, source) ||
+032707:             !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &label->block, 1, source))
+032708:         {
+032709:             return false;
+032710:         }
+032711:     }
+032712:     return true;
+032713: }
+032714: 
+032715: BUSTER_C_INTERNAL bool c_ir_initialize_cleanup_flags(CIntegerIrBuilder* builder, CDeclaration declaration)
+032716: {
+032717:     if (builder->cleanup_flag_count)
+032718:     {
+032719:         CToken token = c_ir_space_name_token(builder, declaration.name);
+032720:         IrSourceRange source = c_ir_source_range(declaration.location, declaration.name.length);
+032721:         for (u32 cleanup_index = 0; cleanup_index < builder->cleanup_flag_count; cleanup_index += 1)
+032722:         {
+032723:             u32 entry_index = builder->cleanup_flag_base + cleanup_index;
+032724:             CEntityId entity_id = builder->cleanup_entities[entry_index];
+032725:             if (entity_id.value >= builder->parse.entity_count)
+032726:             {
+032727:                 return false;
+032728:             }
+032729:             IrValueId flag = c_ir_emit_temporary(builder, builder->bool_type, source);
+032730:             IrValueId inactive = c_ir_emit_integer_value_typed(builder, 0, false, token, builder->bool_type);
+032731:             if (flag.value == IR_ID_UNDERLYING_INVALID || inactive.value == IR_ID_UNDERLYING_INVALID ||
+032732:                 !c_ir_emit_store_place(builder, flag, builder->bool_type, inactive, source))
+032733:             {
+032734:                 return false;
+032735:             }
+032736:             builder->cleanup_flags[cleanup_index] = flag;
+032737:         }
+032738:     }
+032739: 
+032740:     return true;
+032741: }
+032742: 
+032743: typedef struct CIrSwitchCase CIrSwitchCase;
+032744: struct CIrSwitchCase
+032745: {
+032746:     u32 label_start;
+032747:     u32 content_start;
+032748:     u32 content_end;
+032749:     CIrConstantValue low_constant;
+032750:     CIrConstantValue high_constant;
+032751:     u64 value;
+032752:     u64 high_value;
+032753:     IrBlockId block;
+032754:     bool is_default;
+032755:     bool is_range;
+032756:     // Set when the label prefixes a control statement's substatement rather
+032757:     // than opening a new statement of the switch body — `if (c) case 1: ...`.
+032758:     // Such a case still dispatches to a block of its own, but the block is
+032759:     // reached by falling into it from the statement stream that contains it,
+032760:     // so it owns no token range and gets no task.
+032761:     bool in_substatement;
+032762:     u8 reserved[1];
+032763: };
+032764: 
+032765: // One case label whose block the statement stream has to branch into when it
+032766: // reaches the label, keyed by the label's token index. Nested switches reuse
+032767: // the switch-case scratch array, so this registry lives for the whole body.
+032768: // A declaration between a switch's `{` and its first case label declares
+032769: // objects the cases go on to use, but no statement stream ever reaches it:
+032770: // the dispatch jumps straight to a label.  SQLite's lemon-generated parser
+032771: // declares `YYMINORTYPE yylhsminor;` exactly there and half of its reduce
+032772: // actions read it.  Give those objects their frame slots before the dispatch,
+032773: // where they dominate every case block, and leave any initializer unrun --
+032774: // which is what C says jumping past an initializer does.
+032775: BUSTER_C_INTERNAL bool c_ir_emit_switch_prefix_locals(CIntegerIrBuilder* builder, u32 body_start, u32 prefix_end)
+032776: {
+032777:     CScopeId root = builder->declaration_index < builder->parse.declaration_count ? builder->parse.declarations[builder->declaration_index].scope
+032778:                                                                                   : C_SCOPE_ID_INVALID;
+032779:     CScopeId scope = c_parse_scope_for_token(&builder->parse, root, body_start);
+032780:     if (scope.value >= builder->parse.scope_count)
+032781:     {
+032782:         return true;
+032783:     }
+032784:     for (CEntityId entity = builder->parse.scopes[scope.value].first_entity; entity.value < builder->parse.entity_count;
+032785:          entity = builder->parse.entities[entity.value].next_in_scope)
+032786:     {
+032787:         CEntity* value = builder->parse.entities + entity.value;
+032788:         u32 declaration_token = value->declaration_token_plus_one ? value->declaration_token_plus_one - 1 : UINT32_MAX;
+032789:         if (value->kind != C_ENTITY_LOCAL || value->is_static_storage || value->is_thread_local || declaration_token < body_start ||
+032790:             declaration_token >= prefix_end || value->type.value >= builder->parse.type_count || c_ir_find_local_by_entity(builder, entity))
+032791:         {
+032792:             continue;
+032793:         }
+032794:         IrTypeId local_type = builder->c_type_ir_map[value->type.value];
+032795:         IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
+032796:         u32 alignment = local_type_value ? local_type_value->layout.alignment : 0;
+032797:         String8 rejection = {0};
+032798:         if (!local_type_value || !local_type_value->layout.resolved ||
+032799:             c_ir_alignment_evaluate(builder, value->alignment_start, value->alignment_count, alignment, &alignment, 0, &rejection) != C_IR_ALIGNMENT_RESOLVED ||
+032800:             c_ir_emit_local(builder, builder->preprocess.tokens[declaration_token], local_type, entity, alignment).value == IR_ID_UNDERLYING_INVALID)
+032801:         {
+032802:             builder->failure_message =
+032803:                 rejection.length ? rejection
+032804:                                  : string_format(builder->arena, S8("could not declare local '{S8}', which precedes the first case label of a switch"), value->name);
+032805:             builder->failure_kind_plus_one = rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
+032806:             builder->failure_token_index = declaration_token;
+032807:             return false;
+032808:         }
+032809:     }
+032810:     return true;
+032811: }
+032812: 
+032813: typedef struct CIrSubstatementCase CIrSubstatementCase;
+032814: struct CIrSubstatementCase
+032815: {
+032816:     u32 label_start;
+032817:     u32 content_start;
+032818:     IrBlockId block;
+032819: };
+032820: 
+032821: typedef struct CIrLabel CIrLabel;
+032822: 
+032823: // The registry is keyed by token index, which is unique across the body, so a
+032824: // nested switch's labels can never be mistaken for an outer switch's. Bodies
+032825: // carry a handful of these at most, so a linear scan is the whole lookup.
+032826: BUSTER_C_INTERNAL CIrSubstatementCase* c_ir_substatement_case_find(CIrLowerBodyState* state, u32 label_start)
+032827: {
+032828:     CIrSubstatementCase* result = 0;
+032829:     for (u32 index = 0; index < state->substatement_case_count && !result; index += 1)
+032830:     {
+032831:         if (state->substatement_cases[index].label_start == label_start)
+032832:         {
+032833:             result = state->substatement_cases + index;
+032834:         }
+032835:     }
+032836: 
+032837:     return result;
+032838: }
+032839: 
+032840: // A colon only introduces a labeled statement when it is itself a label,
+032841: // case, or default colon; a conditional's colon can directly precede an
+032842: // `identifier :` pair (`b ? b ? c : s : l`), where `s` is not a label. Pair
+032843: // nested `? :` groups backward to the statement boundary: an unmatched `?`
+032844: // claims the colon for a conditional expression.
+032845: BUSTER_C_INTERNAL BUSTER_COLD BUSTER_PRESERVE_MOST bool c_ir_label_colon_at(CToken* tokens, u32 body_start, u32 colon_index)
+032846: {
+032847:     u32 parentheses = 0;
+032848:     u32 brackets = 0;
+032849:     u32 braces = 0;
+032850:     u32 pending_colons = 0;
+032851:     u32 scan = colon_index;
+032852:     while (scan > body_start)
+032853:     {
+032854:         scan -= 1;
+032855:         CToken token = tokens[scan];
+032856:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+032857:         {
+032858:             parentheses += 1;
+032859:         }
+032860:         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))

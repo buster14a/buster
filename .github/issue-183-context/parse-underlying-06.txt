@@ -1,0 +1,216 @@
+path: src/buster/lib/compiler/frontend/c/c_parse.c
+needle: enum_underlying_type
+occurrence: 6/10
+line: 10446
+
+010366:         u32 underlying_end = underlying_start;
+010367:         while (underlying_end < end && !c_token_is_punctuator(&preprocess.tokens[underlying_end], C_PUNCTUATOR_LEFT_BRACE))
+010368:         {
+010369:             underlying_end += 1;
+010370:         }
+010371:         u32 underlying_declarator = underlying_start;
+010372:         enum_underlying_type = c_parse_qualified_typedef_type(result, preprocess, frame->scope, underlying_start, underlying_end, &underlying_declarator);
+010373:         if (enum_underlying_type.value == C_ID_UNDERLYING_INVALID)
+010374:         {
+010375:             enum_underlying_type = c_parse_primitive_type(result, preprocess, underlying_start, underlying_end, &underlying_declarator);
+010376:         }
+010377:         CType* underlying = enum_underlying_type.value < result->type_count ? &result->types[enum_underlying_type.value] : 0;
+010378:         bool integer_underlying = false;
+010379:         if (underlying)
+010380:         {
+010381:             switch (underlying->kind)
+010382:             {
+010383:             case C_TYPE_BOOL:
+010384:             case C_TYPE_CHAR:
+010385:             case C_TYPE_SIGNED_CHAR:
+010386:             case C_TYPE_UNSIGNED_CHAR:
+010387:             case C_TYPE_SHORT:
+010388:             case C_TYPE_UNSIGNED_SHORT:
+010389:             case C_TYPE_INT:
+010390:             case C_TYPE_UNSIGNED_INT:
+010391:             case C_TYPE_LONG:
+010392:             case C_TYPE_UNSIGNED_LONG:
+010393:             case C_TYPE_LONG_LONG:
+010394:             case C_TYPE_UNSIGNED_LONG_LONG:
+010395:             case C_TYPE_INT128:
+010396:             case C_TYPE_UNSIGNED_INT128:
+010397:             {
+010398:                 integer_underlying = true;
+010399:                 break;
+010400:             }
+010401:             case C_TYPE_INVALID:
+010402:             case C_TYPE_VOID:
+010403:             case C_TYPE_FLOAT16:
+010404:             case C_TYPE_BFLOAT16:
+010405:             case C_TYPE_FLOAT:
+010406:             case C_TYPE_DOUBLE:
+010407:             case C_TYPE_LONG_DOUBLE:
+010408:             case C_TYPE_FLOAT16_COMPLEX:
+010409:             case C_TYPE_FLOAT_COMPLEX:
+010410:             case C_TYPE_DOUBLE_COMPLEX:
+010411:             case C_TYPE_LONG_DOUBLE_COMPLEX:
+010412:             case C_TYPE_VA_LIST:
+010413:             case C_TYPE_NULLPTR:
+010414:             case C_TYPE_POINTER:
+010415:             case C_TYPE_ARRAY:
+010416:             case C_TYPE_VECTOR:
+010417:             case C_TYPE_FUNCTION:
+010418:             case C_TYPE_STRUCT:
+010419:             case C_TYPE_UNION:
+010420:             case C_TYPE_ENUM:
+010421:             case C_TYPE_COUNT:
+010422:             {
+010423:                 break;
+010424:             }
+010425:             }
+010426:         }
+010427:         if (!integer_underlying || underlying_declarator != underlying_end)
+010428:         {
+010429:             return C_TYPE_ID_INVALID;
+010430:         }
+010431:         index = underlying_end;
+010432:     }
+010433:     CTypeId type = c_parse_aggregate_lookup(result, kind, tag, frame->scope);
+010434:     bool definition = index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
+010435:     if (!definition)
+010436:     {
+010437:         if (!tag.length)
+010438:         {
+010439:             return C_TYPE_ID_INVALID;
+010440:         }
+010441:         if (type.value == C_ID_UNDERLYING_INVALID)
+010442:         {
+010443:             type = c_parse_add_type(result, (CType){
+010444:                                                 .tag = tag,
+010445:                                                 .tag_scope = frame->scope,
+010446:                                                 .element_type = enum_underlying_type,
+010447:                                                 .return_type = C_TYPE_ID_INVALID,
+010448:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+010449:                                                 .kind = kind,
+010450:                                             });
+010451:         }
+010452:         type = c_parse_apply_trailing_qualifiers(result, preprocess, type, &index, end);
+010453:         *declarator_start = index;
+010454:         return type;
+010455:     }
+010456:     u32 open = index;
+010457:     u32 depth = 1;
+010458:     index += 1;
+010459:     while (index < end && depth)
+010460:     {
+010461:         if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE))
+010462:         {
+010463:             depth += 1;
+010464:         }
+010465:         else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_BRACE))
+010466:         {
+010467:             depth -= 1;
+010468:         }
+010469:         index += 1;
+010470:     }
+010471:     if (depth)
+010472:     {
+010473:         return C_TYPE_ID_INVALID;
+010474:     }
+010475:     u32 close = index - 1;
+010476:     u32 definition_type_start = result->type_count;
+010477:     // A body against a tag that is already complete is two different things
+010478:     // by scope.  In the same scope it is a redefinition and stays refused.
+010479:     // In an inner scope it is a new, distinct type that shadows the outer one
+010480:     // -- clang's xmmintrin.h defines `struct __mm_storeh_pi_struct` inside
+010481:     // two intrinsics, and the second body must not be read against the
+010482:     // first's completed record, which both mis-sized the second struct and
+010483:     // sent the whole statement back through the expression parser.  An
+010484:     // incomplete found tag keeps its existing completion path whatever the
+010485:     // scope, which is the `struct S; struct S { ... };` forward idiom.
+010486:     if (type.value != C_ID_UNDERLYING_INVALID && result->types[type.value].is_complete)
+010487:     {
+010488:         if (result->types[type.value].tag_scope.value == frame->scope.value)
+010489:         {
+010490:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[tag_index]), C_DIAGNOSTIC_REDEFINITION,
+010491:                                string_format(result->arena, S8("redefinition of tag '{S8}'"), tag));
+010492:             return C_TYPE_ID_INVALID;
+010493:         }
+010494:         type = C_TYPE_ID_INVALID;
+010495:     }
+010496:     if (type.value == C_ID_UNDERLYING_INVALID)
+010497:     {
+010498:         type = c_parse_add_type(result, (CType){
+010499:                                             .tag = tag,
+010500:                                             .tag_scope = frame->scope,
+010501:                                             .element_type = enum_underlying_type,
+010502:                                             .return_type = C_TYPE_ID_INVALID,
+010503:                                             .array_bound = C_ARRAY_BOUND_INVALID,
+010504:                                             .member_start = result->member_count,
+010505:                                             .kind = kind,
+010506:                                         });
+010507:     }
+010508:     if (type.value < definition_type_start && !c_type_parse_record_mutation(machine, result, type))
+010509:     {
+010510:         return C_TYPE_ID_INVALID;
+010511:     }
+010512:     CType* aggregate = &result->types[type.value];
+010513:     if (kind == C_TYPE_ENUM && enum_underlying_type.value != C_ID_UNDERLYING_INVALID)
+010514:     {
+010515:         if (aggregate->element_type.value != C_ID_UNDERLYING_INVALID && aggregate->element_type.value != enum_underlying_type.value)
+010516:         {
+010517:             return C_TYPE_ID_INVALID;
+010518:         }
+010519:         aggregate->element_type = enum_underlying_type;
+010520:     }
+010521:     aggregate->member_start = result->member_count;
+010522:     aggregate->definition_start = open + 1;
+010523:     aggregate->definition_token_count = close - (open + 1);
+010524:     if (kind == C_TYPE_ENUM)
+010525:     {
+010526:         aggregate->enum_member_start = result->enum_member_count;
+010527:         u32 enum_start = open + 1;
+010528:         s64 previous_value = -1;
+010529:         // Only a top-level comma separates enumerators. An initializer may
+010530:         // group commas of its own inside parentheses, brackets or braces --
+010531:         // `enum { E = (int)sizeof (struct S){1, 2}, F }` -- and splitting on
+010532:         // one of those cuts the initializer in half and fails the whole
+010533:         // definition.
+010534:         u32 enum_group_depth = 0;
+010535:         for (u32 token_index = enum_start; token_index <= close; token_index += 1)
+010536:         {
+010537:             if (token_index < close && c_punctuator_in_set(preprocess.tokens[token_index].punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+010538:             {
+010539:                 enum_group_depth += 1;
+010540:             }
+010541:             else if (token_index < close && c_punctuator_in_set(preprocess.tokens[token_index].punctuator, C_PUNCTUATOR_SET_DELIMITER_CLOSE))
+010542:             {
+010543:                 enum_group_depth -= enum_group_depth != 0;
+010544:             }
+010545:             bool enum_end = token_index == close ||
+010546:                             (!enum_group_depth && c_token_is_punctuator(&preprocess.tokens[token_index], C_PUNCTUATOR_COMMA));
+010547:             if (!enum_end)
+010548:             {
+010549:                 continue;
+010550:             }
+010551:             if (enum_start == token_index)
+010552:             {
+010553:                 enum_start = token_index + 1;
+010554:                 continue;
+010555:             }
+010556:             CToken name = preprocess.tokens[enum_start];
+010557:             if (name.kind != C_TOKEN_IDENTIFIER)
+010558:             {
+010559:                 return C_TYPE_ID_INVALID;
+010560:             }
+010561:             // An enumerator carries its attributes between the name and the
+010562:             // '=', or after the name when it has no value at all:
+010563:             // `enum { A [[deprecated]] = 1, B [[deprecated]] }`. The commas
+010564:             // inside an attribute list are already covered, because the
+010565:             // enumerator split above counts '[' as an opening delimiter.
+010566:             u32 enum_value_index = c_parse_skip_attributes(preprocess, enum_start + 1, token_index);
+010567:             s64 value = previous_value + 1;
+010568:             if (enum_value_index < token_index)
+010569:             {
+010570:                 if (!c_token_is_punctuator(&preprocess.tokens[enum_value_index], C_PUNCTUATOR_ASSIGN))
+010571:                 {
+010572:                     return C_TYPE_ID_INVALID;
+010573:                 }
+010574:                 u32 expression_start = enum_value_index + 1;
+010575:                 TemporalArena temporary = scratch_begin(0, 0);
+010576:                 CToken* constant_tokens = 0;

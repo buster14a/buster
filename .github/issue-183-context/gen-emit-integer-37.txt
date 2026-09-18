@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 37/111
+line: 15510
+
+015440:         if (argument_count != 1)
+015441:         {
+015442:             return IR_VALUE_ID_INVALID;
+015443:         }
+015444:         if (isfinite_builtin)
+015445:         {
+015446:             // `isfinite` accepts any real scalar and returns an int.  Compare
+015447:             // in binary64 against both signed infinities; NaN is unordered,
+015448:             // so it fails both comparisons as required.  This avoids a libc
+015449:             // dependency and keeps the result identical for Buster/Clang.
+015450:             IrSourceRange source = c_ir_token_source_range(builder, token);
+015451:             IrValueId value = c_ir_emit_cast(builder, arguments[0], builder->f64_type, source);
+015452:             if (value.value == IR_ID_UNDERLYING_INVALID)
+015453:             {
+015454:                 return IR_VALUE_ID_INVALID;
+015455:             }
+015456:             IrValueId positive_infinity = c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0x7ff0000000000000), source, S8("INF"));
+015457:             IrValueId negative_infinity = c_ir_emit_builtin_float_bits(builder, builder->f64_type, UINT64_C(0xfff0000000000000), source, S8("-INF"));
+015458:             if (positive_infinity.value == IR_ID_UNDERLYING_INVALID || negative_infinity.value == IR_ID_UNDERLYING_INVALID)
+015459:             {
+015460:                 return IR_VALUE_ID_INVALID;
+015461:             }
+015462:             IrValueId below_positive = c_ir_emit_binary_value(builder, value, positive_infinity, builder->bool_type, IR_BINARY_FLOAT_LESS, source);
+015463:             IrValueId above_negative = c_ir_emit_binary_value(builder, negative_infinity, value, builder->bool_type, IR_BINARY_FLOAT_LESS, source);
+015464:             if (below_positive.value == IR_ID_UNDERLYING_INVALID || above_negative.value == IR_ID_UNDERLYING_INVALID)
+015465:             {
+015466:                 return IR_VALUE_ID_INVALID;
+015467:             }
+015468:             IrValueId finite = c_ir_emit_binary_value(builder, below_positive, above_negative, builder->bool_type, IR_BINARY_BOOLEAN_AND, source);
+015469:             return finite.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, finite, builder->s32_type, source);
+015470:         }
+015471:         bool single = string_equal(link_name, S8("isnanf")) || string_equal(link_name, S8("isinff"));
+015472:         IrTypeId value_type = single ? builder->f32_type : builder->f64_type;
+015473:         IrType* type = ir_type_from_id(&builder->program->types, value_type);
+015474:         if (!type || type->kind != IR_TYPE_FLOAT || type->bit_width > 64)
+015475:         {
+015476:             return IR_VALUE_ID_INVALID;
+015477:         }
+015478:         IrSourceRange source = c_ir_token_source_range(builder, token);
+015479:         IrValueId value = c_ir_emit_cast(builder, arguments[0], value_type, source);
+015480:         if (value.value == IR_ID_UNDERLYING_INVALID)
+015481:         {
+015482:             return IR_VALUE_ID_INVALID;
+015483:         }
+015484:         if (isnan_builtin)
+015485:         {
+015486:             IrValueId result = c_ir_emit_binary_value(builder, value, value, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
+015487:             return result.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, result, builder->s32_type, source);
+015488:         }
+015489:         u64 positive_bits = type->bit_width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+015490:         u64 negative_bits = type->bit_width == 32 ? UINT64_C(0xff800000) : UINT64_C(0xfff0000000000000);
+015491:         IrValueId positive_infinity = c_ir_emit_builtin_float_bits(builder, value_type, positive_bits, source, S8("INF"));
+015492:         IrValueId negative_infinity = c_ir_emit_builtin_float_bits(builder, value_type, negative_bits, source, S8("-INF"));
+015493:         if (positive_infinity.value == IR_ID_UNDERLYING_INVALID || negative_infinity.value == IR_ID_UNDERLYING_INVALID)
+015494:         {
+015495:             return IR_VALUE_ID_INVALID;
+015496:         }
+015497:         IrValueId positive = c_ir_emit_binary_value(builder, value, positive_infinity, builder->bool_type, IR_BINARY_FLOAT_EQUAL, source);
+015498:         IrValueId negative = c_ir_emit_binary_value(builder, value, negative_infinity, builder->bool_type, IR_BINARY_FLOAT_EQUAL, source);
+015499:         if (positive.value == IR_ID_UNDERLYING_INVALID || negative.value == IR_ID_UNDERLYING_INVALID)
+015500:         {
+015501:             return IR_VALUE_ID_INVALID;
+015502:         }
+015503:         if (isinf_builtin)
+015504:         {
+015505:             IrValueId result = c_ir_emit_binary_value(builder, positive, negative, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
+015506:             return result.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_emit_cast(builder, result, builder->s32_type, source);
+015507:         }
+015508:         IrValueId positive_s32 = c_ir_emit_cast(builder, positive, builder->s32_type, source);
+015509:         IrValueId negative_s32 = c_ir_emit_cast(builder, negative, builder->s32_type, source);
+015510:         IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, builder->s32_type);
+015511:         if (positive_s32.value == IR_ID_UNDERLYING_INVALID || negative_s32.value == IR_ID_UNDERLYING_INVALID || zero.value == IR_ID_UNDERLYING_INVALID)
+015512:         {
+015513:             return IR_VALUE_ID_INVALID;
+015514:         }
+015515:         IrValueId signed_negative = c_ir_emit_binary_value(builder, zero, negative_s32, builder->s32_type, IR_BINARY_INTEGER_SUBTRACT, source);
+015516:         return signed_negative.value == IR_ID_UNDERLYING_INVALID
+015517:                    ? IR_VALUE_ID_INVALID
+015518:                    : c_ir_emit_binary_value(builder, positive_s32, signed_negative, builder->s32_type, IR_BINARY_INTEGER_ADD, source);
+015519:     }
+015520:     u32 expected_count =
+015521:         string_equal(link_name, S8("pow")) || string_equal(link_name, S8("powf")) || string_equal(link_name, S8("fmod")) || string_equal(link_name, S8("fmodf"))
+015522:             ? 2
+015523:             : 1;
+015524:     if (argument_count != expected_count)
+015525:     {
+015526:         return IR_VALUE_ID_INVALID;
+015527:     }
+015528:     IrTypeId value_type = string_ends_with_sequence(link_name, S8("f")) ? builder->f32_type : builder->f64_type;
+015529:     IrSourceRange source = c_ir_token_source_range(builder, token);
+015530:     IrTypeId* parameter_types = arena_allocate(builder->arena, IrTypeId, argument_count);
+015531:     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+015532:     {
+015533:         arguments[argument_index] = c_ir_emit_cast(builder, arguments[argument_index], value_type, source);
+015534:         if (arguments[argument_index].value == IR_ID_UNDERLYING_INVALID)
+015535:         {
+015536:             return IR_VALUE_ID_INVALID;
+015537:         }
+015538:         parameter_types[argument_index] = value_type;
+015539:     }
+015540:     IrSymbolId symbol = IR_SYMBOL_ID_INVALID;
+015541:     IrTypeId function_type = IR_TYPE_ID_INVALID;
+015542:     for (u32 symbol_index = 0; symbol_index < builder->program->symbols.count; symbol_index += 1)
+015543:     {
+015544:         IrSymbol* candidate = &builder->program->symbols.symbols[symbol_index];
+015545:         if (candidate->kind == IR_SYMBOL_FUNCTION && string_equal(candidate->link_name, link_name))
+015546:         {
+015547:             symbol = candidate->id;
+015548:             function_type = candidate->type;
+015549:             break;
+015550:         }
+015551:     }
+015552:     if (symbol.value == IR_ID_UNDERLYING_INVALID)
+015553:     {
+015554:         function_type = ir_program_add_type(builder->program, (IrType){
+015555:                                                                   .name = S8("C math function"),
+015556:                                                                   .parameter_types = parameter_types,
+015557:                                                                   .element_type = IR_TYPE_ID_INVALID,
+015558:                                                                   .return_type = value_type,
+015559:                                                                       .layout =
+015560:                                                                       {
+015561:                                                                           .size = builder->program->data_layout.pointer.size,
+015562:                                                                           .alignment = builder->program->data_layout.pointer.alignment,
+015563:                                                                           .resolved = true,
+015564:                                                                       },
+015565:                                                                   .kind = IR_TYPE_FUNCTION,
+015566:                                                                   .calling_convention = IR_CALLING_CONVENTION_C,
+015567:                                                                   .parameter_count = argument_count,
+015568:                                                               });
+015569:         symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+015570:                                                              .name = link_name,
+015571:                                                              .link_name = link_name,
+015572:                                                              .source = source,
+015573:                                                              .type = function_type,
+015574:                                                              .kind = IR_SYMBOL_FUNCTION,
+015575:                                                              .linkage = IR_LINKAGE_IMPORT,
+015576:                                                          });
+015577:     }
+015578:     if (symbol.value == IR_ID_UNDERLYING_INVALID || function_type.value == IR_ID_UNDERLYING_INVALID)
+015579:     {
+015580:         return IR_VALUE_ID_INVALID;
+015581:     }
+015582:     IrValueId reference_result = c_ir_add_result(builder, function_type);
+015583:     IrSourceRange reference_source = source;
+015584:     IrInstruction reference = c_ir_instruction_initialize(IR_OPCODE_FUNCTION, function_type);
+015585:     reference.symbol = symbol;
+015586:     reference.result = reference_result;
+015587:     IrInstructionId reference_id = c_ir_append_instruction(builder, reference, reference_source);
+015588:     builder->function->values[reference_result.value].definition = reference_id;
+015589:     IrValueId result = c_ir_add_result(builder, value_type);
+015590:     IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
+015591:     operands[0] = reference_result;
+015592:     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+015593:     {
+015594:         operands[argument_index + 1] = arguments[argument_index];
+015595:     }
+015596:     IrSourceRange call_source = source;
+015597:     IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, value_type);
+015598:     call.operands = operands;
+015599:     call.operand_count = argument_count + 1;
+015600:     call.symbol = symbol;
+015601:     call.result = result;
+015602:     IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+015603:     builder->function->values[result.value].definition = call_id;
+015604:     return result;
+015605: }
+015606: 
+015607: // --- Complex values -------------------------------------------------------
+015608: //
+015609: // A complex value is an ordinary two-field aggregate by the time it reaches
+015610: // the IR (see c_ir_complex_type). Arithmetic uses scalar float opcodes and
+015611: // constructs its result with the existing immutable AGGREGATE operation.
+015612: // Known constructors expose their scalar operands directly; memory objects
+015613: // and non-constructor values retain explicit field loads. Complex lvalues
+015614: // keep their object identity. There is no separate complex opcode or cleanup
+015615: // pass, and native backends keep the existing aggregate representation.
+015616: //
+015617: // Which arithmetic each operator gets is Clang's, checked against
+015618: // `clang -O0 -S -emit-llvm` for every combination rather than derived:
+015619: //   * `+` and `-` are componentwise, and a real operand touches only the real
+015620: //     half (the imaginary half of the promoted real operand is a positive
+015621: //     zero, and Clang carries the other operand's imaginary part through
+015622: //     unchanged rather than adding it).
+015623: //   * `*` and `/` with a real operand scale or divide both halves.
+015624: //   * `*` and `/` with two complex operands call the compiler runtime --
+015625: //     __mulsc3/__muldc3/__multc3 and __divsc3/__divdc3/__divtc3 -- which is
+015626: //     what Clang emits without -ffast-math or -fcx-limited-range. Those
+015627: //     helpers implement the overflow- and NaN-recovering forms from C11
+015628: //     Annex G, and calling them rather than inlining Smith's algorithm is the
+015629: //     choice made here: it is bit-for-bit what a Clang-built object does, and
+015630: //     the alternative would be a second, subtly different implementation of
+015631: //     the same numerics living in this file.
+015632: //   * `real / complex` also goes to the runtime, with the numerator's
+015633: //     imaginary part passed as a positive zero, again matching Clang.
+015634: //   * `==` and `!=` compare both halves.
+015635: //
+015636: // System V x86-64 returns a `long double _Complex` in ST(0)/ST(1) (the psABI's
+015637: // COMPLEX_X87 class) where the equivalent struct is returned in memory. That
+015638: // is the one place the aggregate model is not the ABI, and it is the only
+015639: // thing the backends had to learn about complex: the classifier gives that
+015640: // result four X87/X87_UP eightbyte parts, the canonical x86-64 emitter pushes

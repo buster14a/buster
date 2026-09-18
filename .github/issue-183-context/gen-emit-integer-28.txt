@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 28/111
+line: 8703
+
+008633: BUSTER_C_INTERNAL bool c_ir_emit_parameter(CIntegerIrBuilder* builder, CToken name, u32 argument_index, IrTypeId type, IrTypeId object_type, CEntityId entity)
+008634: {
+008635:     // A by-value parameter is a local object, not the caller's ABI slot.
+008636:     // Carry its type alignment just as an ordinary declaration does: native
+008637:     // lowering uses the place's alignment to reserve and materialize storage
+008638:     // beyond the frame pointer's guaranteed alignment.
+008639:     IrType* parameter_type = ir_type_from_id(&builder->program->types, object_type);
+008640:     u32 alignment = parameter_type ? parameter_type->layout.alignment : 0;
+008641:     IrValueId place = c_ir_emit_local(builder, name, object_type, entity, alignment);
+008642:     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+008643:     if (place.value == IR_ID_UNDERLYING_INVALID || !local)
+008644:     {
+008645:         return false;
+008646:     }
+008647:     local->is_parameter = true;
+008648:     // The pointer an array parameter was adjusted to points at the element
+008649:     // type, qualifiers included: `const struct timespec times[2]` yields a
+008650:     // modifiable pointer to constant elements, so the read-only answer moves
+008651:     // from the object to what it points to.
+008652:     if (entity.value < builder->parse.entity_count)
+008653:     {
+008654:         CTypeId declared = builder->parse.entities[entity.value].type;
+008655:         if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY &&
+008656:             c_ir_c_type_is_read_only(builder, builder->parse.types[declared.value].element_type))
+008657:         {
+008658:             builder->function->values[place.value].points_to_read_only = true;
+008659:         }
+008660:     }
+008661:     IrValueId value = c_ir_add_result(builder, type);
+008662:     u64* immediate = arena_allocate(builder->arena, u64, 1);
+008663:     immediate[0] = argument_index;
+008664:     IrSourceRange argument_source = c_ir_token_source_range(builder, name);
+008665:     IrInstruction argument = c_ir_instruction_initialize(IR_OPCODE_ARGUMENT, type);
+008666:     argument.immediates = immediate;
+008667:     argument.immediate_count = 1;
+008668:     argument.result = value;
+008669:     IrInstructionId id = c_ir_append_instruction(builder, argument, argument_source);
+008670:     builder->function->values[value.value].definition = id;
+008671:     bool stored = c_ir_emit_store(builder, local, value, argument_source);
+008672:     if (stored)
+008673:     {
+008674:         c_ir_mark_local_read_only(builder, local);
+008675:     }
+008676:     return stored;
+008677: }
+008678: 
+008679: // The constant rows every integer literal becomes, taking the source range
+008680: // directly: the fall-off of `main` has no token of its own to name, only the
+008681: // declaration's range.
+008682: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_at(CIntegerIrBuilder* builder, u64 value, bool is_negative, IrSourceRange instruction_source,
+008683:                                                        IrTypeId type)
+008684: {
+008685:     IrValueId result = c_ir_add_result(builder, type);
+008686:     u64* immediate = arena_allocate(builder->arena, u64, 1);
+008687:     immediate[0] = value;
+008688:     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_CONSTANT_INTEGER, type);
+008689:     instruction.immediates = immediate;
+008690:     instruction.immediate_count = 1;
+008691:     instruction.immediate_is_negative = is_negative;
+008692:     instruction.result = result;
+008693:     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+008694:     builder->function->values[result.value].definition = id;
+008695:     return result;
+008696: }
+008697: 
+008698: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token, IrTypeId type)
+008699: {
+008700:     return c_ir_emit_integer_value_at(builder, value, is_negative, c_ir_token_source_range(builder, token), type);
+008701: }
+008702: 
+008703: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token)
+008704: {
+008705:     return c_ir_emit_integer_value_typed(builder, value, is_negative, token, builder->s32_type);
+008706: }
+008707: 
+008708: typedef struct CIrVlaLayout CIrVlaLayout;
+008709: struct CIrVlaLayout
+008710: {
+008711:     IrValueId runtime_size;
+008712:     IrValueId* dimension_counts;
+008713:     IrValueId* suffix_sizes;
+008714:     IrTypeId element_type;
+008715:     u32 dimension_count;
+008716: };
+008717: 
+008718: BUSTER_C_INTERNAL CArrayBound c_ir_vla_bound_expression(CPreprocessResult preprocess, CArrayBound bound)
+008719: {
+008720:     u32 end = bound.token_start + bound.token_count;
+008721:     while (bound.token_start < end)
+008722:     {
+008723:         CToken token = preprocess.tokens[bound.token_start];
+008724:         bool qualifier = token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("static")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("const")) ||
+008725:                                                               string_equal(c_token_spelling(preprocess.spelling_base, token), S8("volatile")) || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("restrict")));
+008726:         if (!qualifier)
+008727:         {
+008728:             break;
+008729:         }
+008730:         bound.token_start += 1;
+008731:     }
+008732:     bound.token_count = end - bound.token_start;
+008733:     return bound;
+008734: }
+008735: 
+008736: BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
+008737:                                                 CIrVlaLayout* result);
+008738: 
+008739: BUSTER_C_INTERNAL bool c_ir_integer_literal_fits(CIntegerIrBuilder* builder, CTypeKind kind, u64 value)
+008740: {
+008741:     u64 limit = builder->literal_limits[kind];
+008742:     if (limit)
+008743:     {
+008744:         return value <= limit;
+008745:     }
+008746:     IrTypeId type = builder->scalar_types[kind];
+008747:     IrType* integer = ir_type_from_id(&builder->program->types, type);
+008748:     bool result;
+008749:     if (!integer || integer->kind != IR_TYPE_INTEGER)
+008750:     {
+008751:         result = false;
+008752:     }
+008753:     else if (integer->bit_width >= 64)
+008754:     {
+008755:         result = !integer->is_signed || value <= INT64_MAX;
+008756:     }
+008757:     else if (!integer->is_signed)
+008758:     {
+008759:         result = value <= (((u64)1 << integer->bit_width) - 1);
+008760:     }
+008761:     else
+008762:     {
+008763:         result = value <= (((u64)1 << (integer->bit_width - 1)) - 1);
+008764:     }
+008765: 
+008766:     return result;
+008767: }
+008768: 
+008769: BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
+008770: {
+008771:     IrTypeId result = IR_TYPE_ID_INVALID;
+008772:     bool suffix_valid = true;
+008773:     bool decimal = !spelling.length || spelling.pointer[0] != '0';
+008774:     bool is_unsigned = false;
+008775:     u32 long_count = 0;
+008776:     u64 suffix_start = spelling.length;
+008777:     u32 msvc_width = c_integer_msvc_literal_width(spelling, &is_unsigned);
+008778:     if (msvc_width)
+008779:     {
+008780:         long_count = 2;
+008781:     }
+008782:     while (!msvc_width && suffix_start)
+008783:     {
+008784:         u8 byte = spelling.pointer[suffix_start - 1];
+008785:         if (byte != 'u' && byte != 'U' && byte != 'l' && byte != 'L')
+008786:         {
+008787:             break;
+008788:         }
+008789:         suffix_start -= 1;
+008790:     }
+008791:     for (u64 index = suffix_start; suffix_valid && !msvc_width && index < spelling.length;)
+008792:     {
+008793:         u8 byte = spelling.pointer[index];
+008794:         if (byte == 'u' || byte == 'U')
+008795:         {
+008796:             if (is_unsigned)
+008797:             {
+008798:                 suffix_valid = false;
+008799:             }
+008800:             is_unsigned = true;
+008801:             index += 1;
+008802:         }
+008803:         else
+008804:         {
+008805:             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
+008806:             if (long_count || count > 2)
+008807:             {
+008808:                 suffix_valid = false;
+008809:             }
+008810:             long_count = count;
+008811:             index += count;
+008812:         }
+008813:     }
+008814:     CTypeKind candidates[6] = {0};
+008815:     u32 candidate_count = 0;
+008816: #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
+008817:     if (suffix_valid)
+008818:     {
+008819:         if (msvc_width && msvc_width < 64)
+008820:         {
+008821:             CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR : msvc_width == 16 ? C_TYPE_SHORT : C_TYPE_INT;
+008822:             CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_INT;
+008823:             C_INTEGER_LITERAL_CANDIDATE(is_unsigned ? unsigned_kind : signed_kind);
+008824:         }
+008825:         else if (!long_count && !is_unsigned)
+008826:         {
+008827:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
+008828:             if (!decimal)
+008829:             {
+008830:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+008831:             }
+008832:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+008833:             if (!decimal)

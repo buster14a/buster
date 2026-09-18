@@ -1,0 +1,246 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: C_ENTITY_ENUMERATOR
+occurrence: 3/6
+line: 25460
+
+025370:         bool arrow = c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW);
+025371:         if (!arrow && !c_token_is_punctuator(&token, C_PUNCTUATOR_DOT))
+025372:         {
+025373:             return false;
+025374:         }
+025375:         if (arrow)
+025376:         {
+025377:             if (value->kind != IR_TYPE_POINTER)
+025378:             {
+025379:                 return false;
+025380:             }
+025381:             *type = value->element_type;
+025382:             value = ir_type_from_id(&builder->program->types, *type);
+025383:         }
+025384:         if (!value || (value->kind != IR_TYPE_STRUCT && value->kind != IR_TYPE_UNION) || index + 1 >= end ||
+025385:             builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
+025386:         {
+025387:             return false;
+025388:         }
+025389:         CIrPromotedMemberPath member = {0};
+025390:         if (!c_ir_promoted_member_path(builder, *type, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]), &member))
+025391:         {
+025392:             // A resolved aggregate that lacks the name is a constraint
+025393:             // violation, not a shape this resolver cannot read; record it so
+025394:             // the prediction fallback refuses instead of guessing int.
+025395:             if (value->layout.resolved && !builder->sizeof_operand_constraint.length)
+025396:             {
+025397:                 builder->sizeof_operand_constraint =
+025398:                     string_format(builder->arena, S8("type '{S8}' has no member named '{S8}' ({u32} fields available)"), value->name,
+025399:                                   c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]), value->field_count);
+025400:             }
+025401:             return false;
+025402:         }
+025403:         *type = member.type;
+025404:         bool final_member = index + 2 == end ||
+025405:                             (index + 3 == end && (c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_PLUS_PLUS) ||
+025406:                                                  c_token_is_punctuator(&builder->preprocess.tokens[index + 2], C_PUNCTUATOR_MINUS_MINUS)));
+025407:         if (promote_bit_fields && final_member && c_ir_unsigned_bit_field_promotes_to_int(builder, member.field))
+025408:         {
+025409:             *type = builder->s32_type;
+025410:         }
+025411:         index += 2;
+025412:     }
+025413:     return type->value != IR_ID_UNDERLYING_INVALID;
+025414: }
+025415: 
+025416: BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, bool promote_bit_fields)
+025417: {
+025418:     CToken token = builder->preprocess.tokens[start];
+025419:     String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
+025420:     u32 chain_start = start + 1;
+025421: 
+025422:     // Builtin math names are parser symbols rather than ordinary declarations,
+025423:     // so they have no CEntity/signature for the strict type walk to query.
+025424:     // Resolve their result type directly and consume the call suffix.  This
+025425:     // matters for hosted headers where NAN/INFINITY expand to a conditional
+025426:     // expression containing __builtin_nanf/__builtin_inff: treating the
+025427:     // builtin as an unknown identifier poisons the conditional's type merge
+025428:     // even though lowering already knows the intrinsic's scalar result.
+025429:     String8 math_link_name = c_ir_math_builtin_link_name(name);
+025430:     if (math_link_name.length)
+025431:     {
+025432:         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+025433:         {
+025434:             return false;
+025435:         }
+025436:         u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+025437:         if (close >= end)
+025438:         {
+025439:             return false;
+025440:         }
+025441:         bool predicate = string_equal(math_link_name, S8("isnan")) || string_equal(math_link_name, S8("isnanf")) ||
+025442:                          string_equal(math_link_name, S8("isinf")) || string_equal(math_link_name, S8("isinff")) ||
+025443:                          string_equal(math_link_name, S8("isinf_sign")) || string_equal(math_link_name, S8("isfinite"));
+025444:         bool single = math_link_name.length && math_link_name.pointer[math_link_name.length - 1] == 'f';
+025445:         *type_out = predicate ? builder->s32_type : single ? builder->f32_type : builder->f64_type;
+025446:         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+025447:     }
+025448: 
+025449:     CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+025450:     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+025451:     IrTypeId type = IR_TYPE_ID_INVALID;
+025452:     if (local)
+025453:     {
+025454:         if (local->is_variable_length_array)
+025455:         {
+025456:             return false;
+025457:         }
+025458:         type = local->type;
+025459:     }
+025460:     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
+025461:     {
+025462:         type = builder->s32_type;
+025463:     }
+025464:     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+025465:     {
+025466:         CTypeId c_type = builder->parse.entities[entity.value].type;
+025467:         if (c_type.value < builder->parse.type_count)
+025468:         {
+025469:             type = builder->c_type_ir_map[c_type.value];
+025470:         }
+025471:     }
+025472:     if (type.value == IR_ID_UNDERLYING_INVALID && chain_start < end &&
+025473:         c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+025474:     {
+025475:         // A direct call through a function name resolves to the declared return type.
+025476:         CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, start);
+025477:         u32 close = UINT32_MAX;
+025478:         if (prepared_call && builder->function && prepared_call->emitted && prepared_call->result.value < builder->function->value_count)
+025479:         {
+025480:             type = builder->function->values[prepared_call->result.value].canonical_type;
+025481:             close = prepared_call->close_index;
+025482:         }
+025483:         else
+025484:         {
+025485:             u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+025486:             if (declaration_index != UINT32_MAX && builder->signatures)
+025487:             {
+025488:                 type = builder->signatures[declaration_index].return_type;
+025489:                 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+025490:             }
+025491:             else if (declaration_index != UINT32_MAX && declaration_index < builder->parse.declaration_count)
+025492:             {
+025493:                 // No signatures exist while the type-mapping fixed point
+025494:                 // evaluates array bounds, and a bound like
+025495:                 // `char buffer[sizeof(helper())]` that fails here classifies
+025496:                 // the local as a VLA — which a static local then rejects.
+025497:                 // Resolve the declared return type through the parse
+025498:                 // declaration instead; an unmapped return type still fails,
+025499:                 // deferring the bound to a later mapping round rather than
+025500:                 // guessing.
+025501:                 CDeclaration* function_declaration = &builder->parse.declarations[declaration_index];
+025502:                 if (function_declaration->type.value < builder->parse.type_count)
+025503:                 {
+025504:                     CType* function_type = &builder->parse.types[function_declaration->type.value];
+025505:                     if (function_type->kind == C_TYPE_FUNCTION && function_type->return_type.value < builder->parse.type_count)
+025506:                     {
+025507:                         type = builder->c_type_ir_map[function_type->return_type.value];
+025508:                     }
+025509:                 }
+025510:                 if (type.value != IR_ID_UNDERLYING_INVALID)
+025511:                 {
+025512:                     close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+025513:                 }
+025514:             }
+025515:         }
+025516:         if (close >= end)
+025517:         {
+025518:             return false;
+025519:         }
+025520:         chain_start = close + 1;
+025521:     }
+025522:     else if (type.value == IR_ID_UNDERLYING_INVALID)
+025523:     {
+025524:         // A bare function name resolves to its function type so a call applied
+025525:         // through parentheses, e.g. `(name)(...)`, still reaches the return type.
+025526:         u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+025527:         if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
+025528:         {
+025529:             type = builder->declaration_functions[declaration_index]->canonical_type;
+025530:         }
+025531:     }
+025532:     if (type.value == IR_ID_UNDERLYING_INVALID)
+025533:     {
+025534:         return false;
+025535:     }
+025536:     *type_out = type;
+025537:     return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, chain_start, end, promote_bit_fields);
+025538: }
+025539: 
+025540: /* Resolves the C result type of a sizeof/alignof expression operand strictly: every
+025541:    sub-operand must resolve through a mapped entity, literal, cast, or call before any
+025542:    type is combined, and binary operators apply the usual arithmetic conversions (so
+025543:    narrow operands promote to int and mixed widths take the wider side). Returning
+025544:    false defers to the older per-shape paths and ultimately the caller's fallback; a
+025545:    guessed type must never come out of this function, because the guessed size folds
+025546:    silently into the program (the 2026-08-08 array-bound incident, and the same
+025547:    defect shape in function bodies). */
+025548: BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields)
+025549: {
+025550:     // This resolver is a speculative type query: false lets the caller use
+025551:     // the ordinary expression paths.  Bound its recursive precedence walk so
+025552:     // adversarially deep, otherwise-valid expressions cannot exhaust the host
+025553:     // stack in sanitizer/fuzz configurations, whose instrumented frames are
+025554:     // substantially larger than Release frames.
+025555:     if (!remaining_depth)
+025556:     {
+025557:         return false;
+025558:     }
+025559:     remaining_depth -= 1;
+025560:     // GNU __extension__ is a diagnostic-only marker on the expression that
+025561:     // follows it; it contributes no value and no type of its own, so strip it
+025562:     // the same way a redundant parenthesis is stripped, and keep stripping
+025563:     // both until neither applies.  musl's <complex.h> spells `I` as
+025564:     // `(__extension__ (0.0f+1.0fi))` under __GNUC__, and leaving the marker in
+025565:     // this walk made the whole group resolve as the leading `0.0f` -- so
+025566:     // `0*I` was a float, `2.0+0*I` was a double, and every <tgmath.h> macro
+025567:     // reached through a complex argument selected the real function.
+025568:     bool trimmed = true;
+025569:     while (trimmed)
+025570:     {
+025571:         trimmed = false;
+025572:         while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+025573:                c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+025574:         {
+025575:             start += 1;
+025576:             end -= 1;
+025577:             trimmed = true;
+025578:         }
+025579:         while (start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+025580:                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), S8("__extension__")))
+025581:         {
+025582:             start += 1;
+025583:             trimmed = true;
+025584:         }
+025585:     }
+025586:     if (start >= end)
+025587:     {
+025588:         return false;
+025589:     }
+025590:     // One top-level scan records the loosest-binding operator of every precedence tier.
+025591:     // Left-associative tiers split at their last top-level operator, the right-associative
+025592:     // assignment at its first; a `?` only counts at ternary depth zero so operators inside
+025593:     // conditional arms never split the outer expression.
+025594:     u32 last_comma = UINT32_MAX;
+025595:     u32 first_assign = UINT32_MAX;
+025596:     u32 first_question = UINT32_MAX;
+025597:     u32 first_colon = UINT32_MAX;
+025598:     u32 logical_index = UINT32_MAX;
+025599:     u32 bit_or_index = UINT32_MAX;
+025600:     u32 bit_xor_index = UINT32_MAX;
+025601:     u32 bit_and_index = UINT32_MAX;
+025602:     u32 comparison_index = UINT32_MAX;
+025603:     u32 shift_index = UINT32_MAX;
+025604:     u32 additive_index = UINT32_MAX;
+025605:     u32 multiplicative_index = UINT32_MAX;
+025606:     u32 ternary_depth = 0;
+025607:     bool previous_is_operand = false;
+025608:     for (u32 index = start; index < end; index += 1)
+025609:     {
+025610:         CToken token = builder->preprocess.tokens[index];

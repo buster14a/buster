@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 98/111
+line: 29099
+
+029029:         {
+029030:             // The dimension the pointer spelling leaves out. It is absent
+029031:             // rather than unknown, which is exactly the outermost bound of an
+029032:             // array parameter, so the walk below skips it and leaves
+029033:             // dimension_counts[0] and suffix_sizes[0] invalid -- `sizeof p` is
+029034:             // the pointer's, and indexing scales by suffix_sizes[1].
+029035:             state->bounds[result->dimension_count++] = (CArrayBound){0};
+029036:         }
+029037:         while (type_id.value < builder->parse.type_count && builder->parse.types[type_id.value].kind == C_TYPE_ARRAY)
+029038:         {
+029039:             CType* type = &builder->parse.types[type_id.value];
+029040:             if (result->dimension_count >= capacity || type->array_bound >= builder->parse.array_bound_count)
+029041:             {
+029042:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029043:                 return;
+029044:             }
+029045:             state->bounds[result->dimension_count++] = builder->parse.array_bounds[type->array_bound];
+029046:             type_id = type->element_type;
+029047:         }
+029048:         if (!result->dimension_count || type_id.value >= builder->parse.type_count)
+029049:         {
+029050:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029051:             return;
+029052:         }
+029053:         result->element_type = builder->c_type_ir_map[type_id.value];
+029054:         IrType* element = ir_type_from_id(&builder->program->types, result->element_type);
+029055:         if (!element || !element->layout.resolved || !element->layout.size)
+029056:         {
+029057:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029058:             return;
+029059:         }
+029060:         result->dimension_counts = arena_allocate(builder->arena, IrValueId, result->dimension_count);
+029061:         result->suffix_sizes = arena_allocate(builder->arena, IrValueId, result->dimension_count + 1);
+029062:         memset(result->dimension_counts, 0xff, sizeof(*result->dimension_counts) * result->dimension_count);
+029063:         memset(result->suffix_sizes, 0xff, sizeof(*result->suffix_sizes) * (result->dimension_count + 1));
+029064:         state->source = c_ir_source_range(c_ir_token_location(builder, state->token), c_token_length(builder->preprocess.spelling_base, state->token));
+029065:         state->dimension = 0;
+029066:         frame->stage = C_IR_LOWER_STAGE_FINISH;
+029067:     }
+029068:     else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+029069:     {
+029070:         arena_set_position(builder->temporary_arena, state->temporary_mark);
+029071:         if (!machine->child_result.success)
+029072:         {
+029073:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029074:             return;
+029075:         }
+029076:         u32 dimension = state->dimension;
+029077:         IrValueId count = machine->child_result.value;
+029078:         if (count.value < builder->function->value_count && builder->function->values[count.value].category == IR_VALUE_PLACE)
+029079:         {
+029080:             count = c_ir_emit_load_place(builder, count, builder->function->values[count.value].canonical_type, state->source);
+029081:         }
+029082:         result->dimension_counts[dimension] = c_ir_emit_cast(builder, count, builder->size_type, state->source);
+029083:         if (result->dimension_counts[dimension].value == IR_ID_UNDERLYING_INVALID)
+029084:         {
+029085:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029086:             return;
+029087:         }
+029088:         state->dimension += 1;
+029089:         frame->stage = C_IR_LOWER_STAGE_FINISH;
+029090:     }
+029091:     while (state->dimension < result->dimension_count)
+029092:     {
+029093:         u32 dimension = state->dimension;
+029094:         CArrayBound bound = c_ir_vla_bound_expression(builder->preprocess, state->bounds[dimension]);
+029095:         u64 constant_count = 0;
+029096:         if (c_ir_array_bound_evaluate(builder, bound, &constant_count))
+029097:         {
+029098:             result->dimension_counts[dimension] =
+029099:                 c_ir_emit_integer_value_typed(builder, constant_count, false, state->token, builder->size_type);
+029100:             state->dimension += 1;
+029101:             continue;
+029102:         }
+029103:         if (!bound.token_count || bound.is_star)
+029104:         {
+029105:             if (state->parameter && dimension == 0)
+029106:             {
+029107:                 state->dimension += 1;
+029108:                 continue;
+029109:             }
+029110:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029111:             return;
+029112:         }
+029113:         state->temporary_mark = builder->temporary_arena->position;
+029114:         frame->stage = C_IR_LOWER_STAGE_CHILD;
+029115:         c_ir_lower_frame_push(builder, (CIrLowerFrame){
+029116:                                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+029117:                                            .as.expression =
+029118:                                                {
+029119:                                                    .start = bound.token_start,
+029120:                                                    .end = bound.token_start + bound.token_count,
+029121:                                                },
+029122:                                        });
+029123:         return;
+029124:     }
+029125:     IrType* element = ir_type_from_id(&builder->program->types, result->element_type);
+029126:     result->suffix_sizes[result->dimension_count] =
+029127:         c_ir_emit_integer_value_typed(builder, element->layout.size, false, state->token, builder->size_type);
+029128:     // suffix_sizes[0] is the whole object's size, and a parameter never has
+029129:     // one: an array parameter is a pointer, so the only reader of
+029130:     // CIrVlaLayout::runtime_size that wants suffix 0 is the ALLOCATE in
+029131:     // c_ir_lower_automatic_declaration_step, which is the declaration path and
+029132:     // not this one, and c_ir_lower_expression_core_step's sizeof arm refuses
+029133:     // suffix 0 for an is_vla_parameter local on purpose, because `sizeof a` is
+029134:     // the pointer's. Stopping the walk one dimension short therefore drops the
+029135:     // outermost MULTIPLY — for a one-dimensional `u8 a[n]` that is the whole
+029136:     // product, and unlike the constant bound `u8 slots[2]` the operands are not
+029137:     // both known, so it cost emitted code rather than compile time. Every inner
+029138:     // suffix is still built: `sizeof a[0]` on `u8 a[n][m]` reads
+029139:     // suffix_sizes[1]. suffix_sizes[0] stays INVALID from the 0xff fill above,
+029140:     // which is what an absent bound already left there and what the
+029141:     // c_ir_lower_frame_finish below already accepts for a parameter.
+029142:     u32 outermost_dimension = state->parameter ? 1 : 0;
+029143:     for (u32 dimension = result->dimension_count; dimension != outermost_dimension; dimension -= 1)
+029144:     {
+029145:         u32 index = dimension - 1;
+029146:         IrValueId count = result->dimension_counts[index];
+029147:         IrValueId suffix = result->suffix_sizes[index + 1];
+029148:         if (count.value != IR_ID_UNDERLYING_INVALID && suffix.value != IR_ID_UNDERLYING_INVALID)
+029149:         {
+029150:             result->suffix_sizes[index] =
+029151:                 c_ir_emit_binary_value(builder, count, suffix, builder->size_type, IR_BINARY_INTEGER_MULTIPLY, state->source);
+029152:         }
+029153:     }
+029154:     result->runtime_size = result->suffix_sizes[0];
+029155:     c_ir_lower_frame_finish(builder, state->parameter || result->runtime_size.value != IR_ID_UNDERLYING_INVALID, result->runtime_size);
+029156: }
+029157: 
+029158: BUSTER_C_INTERNAL void c_ir_lower_automatic_declaration_step(CIntegerIrBuilder* builder);
+029159: BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIrBuilder* builder);
+029160: BUSTER_C_INTERNAL void c_ir_lower_inline_assembly_step(CIntegerIrBuilder* builder);
+029161: BUSTER_C_INTERNAL bool c_ir_activate_cleanup(CIntegerIrBuilder* builder, CEntityId entity_id, IrSourceRange source);
+029162: 
+029163: // The request helpers run the pushed child now, off the dispatch loop, and
+029164: // return true when it completed: the advance loop in
+029165: // c_ir_lower_assignment_statement_step then re-enters the CHILD arm as a
+029166: // self-loop instead of a dispatch round trip. A suspension returns false and
+029167: // resumes through the loop unchanged.
+029168: BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_request_expression(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+029169:                                                                               CIrLowerAssignmentStatementState* state,
+029170:                                                                               CIrLowerAssignmentStatementContinuation continuation, u32 start,
+029171:                                                                               u32 end)
+029172: {
+029173:     CIrLowerMachine* machine = &builder->lower_machine;
+029174:     state->continuation = continuation;
+029175:     state->temporary_mark = builder->temporary_arena->position;
+029176:     frame->stage = C_IR_LOWER_STAGE_CHILD;
+029177:     u32 request_mark = machine->frame_count;
+029178:     bool completed = false;
+029179:     if (c_ir_lower_frame_push(builder, (CIrLowerFrame){
+029180:                                            .kind = C_IR_LOWER_FRAME_EXPRESSION,
+029181:                                            .as.expression =
+029182:                                                {
+029183:                                                    .start = start,
+029184:                                                    .end = end,
+029185:                                                },
+029186:                                        }))
+029187:     {
+029188:         c_ir_lower_expression_step(builder);
+029189:         completed = machine->frame_count == request_mark && !machine->failed;
+029190:     }
+029191:     return completed;
+029192: }
+029193: 
+029194: BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_request_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame,
+029195:                                                                          CIrLowerAssignmentStatementState* state, u32 start, u32 end)
+029196: {
+029197:     CIrLowerMachine* machine = &builder->lower_machine;
+029198:     state->continuation = C_IR_LOWER_ASSIGNMENT_STATEMENT_GENERAL_LEFT;
+029199:     state->temporary_mark = builder->temporary_arena->position;
+029200:     frame->stage = C_IR_LOWER_STAGE_CHILD;
+029201:     u32 request_mark = machine->frame_count;
+029202:     bool completed = false;
+029203:     if (c_ir_lower_place_frame_push(builder, start, end))
+029204:     {
+029205:         c_ir_lower_place_step(builder, machine->frames + machine->frame_count - 1);
+029206:         completed = machine->frame_count == request_mark && !machine->failed;
+029207:     }
+029208:     return completed;
+029209: }
+029210: 
+029211: // Recover the addressable place behind a just-emitted load. Both ordinary
+029212: // assignment statements and nested parenthesized assignment expressions use
+029213: // this when their left operand was lowered as a value first (for example an
+029214: // address-of/member chain in Lua's setnilvalue macro).
+029215: BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuilder* builder, IrValueId value)
+029216: {
+029217:     IrValueId result = IR_VALUE_ID_INVALID;
+029218:     if (value.value < builder->function->value_count)
+029219:     {
+029220:         IrValue* value_definition = builder->function->values + value.value;
+029221:         if (value_definition->category == IR_VALUE_PLACE)
+029222:         {
+029223:             result = value;
+029224:         }
+029225:         else if (value_definition->definition.value < builder->function->instruction_count)
+029226:         {
+029227:             IrInstructionId definition_id = value_definition->definition;
+029228:             IrInstruction* definition = builder->function->instructions + definition_id.value;
+029229:             CIrDirectSsa* ssa = builder->direct_ssa;

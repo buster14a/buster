@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 109/111
+line: 33581
+
+033511:     instruction.immediates = arena_allocate(builder->arena, u64, value_count);
+033512:     u32 value_index = 0;
+033513:     for (u32 index = 0; index < case_count; index += 1)
+033514:     {
+033515:         if (!cases[index].is_default)
+033516:         {
+033517:             instruction.targets[value_index] = cases[index].block;
+033518:             instruction.immediates[value_index] = cases[index].value;
+033519:             value_index += 1;
+033520:         }
+033521:     }
+033522:     instruction.targets[value_count] = default_block;
+033523:     instruction.target_count = (u16)(value_count + 1);
+033524:     instruction.immediate_count = (u16)value_count;
+033525:     if (c_ir_append_instruction(builder, instruction, instruction_source).value == IR_ID_UNDERLYING_INVALID)
+033526:     {
+033527:         return false;
+033528:     }
+033529:     builder->function->blocks[builder->current_block.value].terminated = true;
+033530:     return true;
+033531: }
+033532: 
+033533: BUSTER_C_INTERNAL IrTypeId c_ir_switch_promoted_type(CIntegerIrBuilder* builder, IrTypeId type_id)
+033534: {
+033535:     IrType* type = ir_type_from_id(&builder->program->types, type_id);
+033536:     IrTypeId result;
+033537:     if (!type || type->kind == IR_TYPE_BOOLEAN || type->kind == IR_TYPE_ENUM || (type->kind == IR_TYPE_INTEGER && type->bit_width < 32))
+033538:     {
+033539:         result = builder->s32_type;
+033540:     }
+033541:     else
+033542:     {
+033543:         result = type_id;
+033544:     }
+033545: 
+033546:     return result;
+033547: }
+033548: 
+033549: BUSTER_C_INTERNAL bool c_ir_switch_integer_less_equal(IrType* type, u64 left, u64 right)
+033550: {
+033551:     return type->is_signed ? c_ir_integer_signed_value(left, type) <= c_ir_integer_signed_value(right, type) : left <= right;
+033552: }
+033553: 
+033554: BUSTER_C_INTERNAL bool c_ir_terminate_switch_ranges(CIntegerIrBuilder* builder, IrValueId switched, CIrSwitchCase* cases, u32 case_count,
+033555:                                                       IrBlockId default_block, IrSourceRange source)
+033556: {
+033557:     (void)source;
+033558:     IrBlockId dispatch = builder->current_block;
+033559:     for (u32 case_index = 0; case_index < case_count; case_index += 1)
+033560:     {
+033561:         CIrSwitchCase* current = cases + case_index;
+033562:         if (current->is_default)
+033563:         {
+033564:             continue;
+033565:         }
+033566:         IrBlockId miss = default_block;
+033567:         for (u32 next = case_index + 1; next < case_count; next += 1)
+033568:         {
+033569:             if (!cases[next].is_default)
+033570:             {
+033571:                 miss = c_ir_block_create(builder);
+033572:                 break;
+033573:             }
+033574:         }
+033575:         if (miss.value == IR_ID_UNDERLYING_INVALID || !c_ir_switch_block(builder, dispatch))
+033576:         {
+033577:             return false;
+033578:         }
+033579:         CToken label = builder->preprocess.tokens[current->label_start];
+033580:         IrSourceRange label_source = c_ir_token_source_range(builder, label);
+033581:         IrValueId lower = c_ir_emit_integer_value_typed(builder, current->value, false, label, builder->function->values[switched.value].canonical_type);
+033582:         if (lower.value == IR_ID_UNDERLYING_INVALID)
+033583:         {
+033584:             return false;
+033585:         }
+033586:         IrValueId condition = IR_VALUE_ID_INVALID;
+033587:         IrValueId operands[2] = {switched, lower};
+033588:         u32 operand_count = 2;
+033589:         if (current->is_range)
+033590:         {
+033591:             IrBlockId upper_check = c_ir_block_create(builder);
+033592:             if (upper_check.value == IR_ID_UNDERLYING_INVALID ||
+033593:                 !c_ir_apply_operation(builder, C_CONDITIONAL_GREATER_EQUAL, operands, &operand_count, label_source, IR_TYPE_ID_INVALID) ||
+033594:                 operand_count != 1)
+033595:             {
+033596:                 return false;
+033597:             }
+033598:             condition = c_ir_truth_value(builder, operands[0], label_source);
+033599:             if (condition.value == IR_ID_UNDERLYING_INVALID)
+033600:             {
+033601:                 return false;
+033602:             }
+033603:             IrBlockId lower_targets[2] = {upper_check, miss};
+033604:             if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, lower_targets, 2, label_source) || !c_ir_switch_block(builder, upper_check))
+033605:             {
+033606:                 return false;
+033607:             }
+033608:             IrValueId upper = c_ir_emit_integer_value_typed(builder, current->high_value, false, label,
+033609:                                                              builder->function->values[switched.value].canonical_type);
+033610:             if (upper.value == IR_ID_UNDERLYING_INVALID)
+033611:             {
+033612:                 return false;
+033613:             }
+033614:             operands[0] = switched;
+033615:             operands[1] = upper;
+033616:             operand_count = 2;
+033617:             if (!c_ir_apply_operation(builder, C_CONDITIONAL_LESS_EQUAL, operands, &operand_count, label_source, IR_TYPE_ID_INVALID) ||
+033618:                 operand_count != 1)
+033619:             {
+033620:                 return false;
+033621:             }
+033622:             condition = c_ir_truth_value(builder, operands[0], label_source);
+033623:             if (condition.value == IR_ID_UNDERLYING_INVALID)
+033624:             {
+033625:                 return false;
+033626:             }
+033627:         }
+033628:         else
+033629:         {
+033630:             operands[0] = switched;
+033631:             operands[1] = lower;
+033632:             operand_count = 2;
+033633:             if (!c_ir_apply_operation(builder, C_CONDITIONAL_EQUAL, operands, &operand_count, label_source, IR_TYPE_ID_INVALID) || operand_count != 1)
+033634:             {
+033635:                 return false;
+033636:             }
+033637:             condition = c_ir_truth_value(builder, operands[0], label_source);
+033638:             if (condition.value == IR_ID_UNDERLYING_INVALID)
+033639:             {
+033640:                 return false;
+033641:             }
+033642:         }
+033643:         IrBlockId targets[2] = {current->block, miss};
+033644:         if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, label_source))
+033645:         {
+033646:             return false;
+033647:         }
+033648:         dispatch = miss;
+033649:     }
+033650:     return true;
+033651: }
+033652: 
+033653: // The storage a variable-length array declaration allocates, and the local
+033654: // that names it. A VLA local is a pointer variable: the ALLOCATE moves the
+033655: // stack pointer by the runtime size and the pointer it produces is stored into
+033656: // the local's frame slot, which is what every later index and sizeof reads
+033657: // through. Both declaration paths emit it -- the single declarator in
+033658: // c_ir_lower_body_advance and a declarator split out of a list in
+033659: // c_ir_prepare_automatic_declaration -- so it lives here rather than in either.
+033660: BUSTER_C_INTERNAL bool c_ir_emit_vla_storage(CIntegerIrBuilder* builder, CIrVlaLayout* layout, IrTypeId pointer_type_id, IrTypeId element_type,
+033661:                                              CEntityId entity, CToken name, u32 alignment)
+033662: {
+033663:     IrValueId storage = c_ir_add_result(builder, pointer_type_id);
+033664:     bool emitted = layout->runtime_size.value != IR_ID_UNDERLYING_INVALID && storage.value != IR_ID_UNDERLYING_INVALID;
+033665:     IrSourceRange source = c_ir_source_range(c_ir_token_location(builder, name), name.length);
+033666:     if (emitted)
+033667:     {
+033668:         IrInstruction allocation = c_ir_instruction_initialize(IR_OPCODE_STACK_ALLOCATE, pointer_type_id);
+033669:         allocation.operands = arena_allocate(builder->arena, IrValueId, 1);
+033670:         allocation.operands[0] = layout->runtime_size;
+033671:         allocation.operand_count = 1;
+033672:         allocation.immediates = arena_allocate(builder->arena, u64, 1);
+033673:         allocation.immediates[0] = alignment;
+033674:         allocation.immediate_count = 1;
+033675:         allocation.result = storage;
+033676:         builder->function->values[storage.value].definition = c_ir_append_instruction(builder, allocation, source);
+033677:         IrType* pointer_type = ir_type_from_id(&builder->program->types, pointer_type_id);
+033678:         IrValueId place = c_ir_emit_local(builder, name, pointer_type_id, entity, pointer_type ? pointer_type->layout.alignment : alignment);
+033679:         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+033680:         emitted = place.value != IR_ID_UNDERLYING_INVALID && local;
+033681:         if (emitted)
+033682:         {
+033683:             local->runtime_size = layout->runtime_size;
+033684:             local->vla_element_type = element_type;
+033685:             local->vla_dimension_counts = layout->dimension_counts;
+033686:             local->vla_suffix_sizes = layout->suffix_sizes;
+033687:             local->vla_dimension_count = layout->dimension_count;
+033688:             local->is_variable_length_array = true;
+033689:             c_ir_vla_local_shape(builder, local);
+033690:             emitted = c_ir_emit_store(builder, local, storage, source);
+033691:         }
+033692:         if (emitted)
+033693:         {
+033694:             c_ir_mark_local_read_only(builder, local);
+033695:             emitted = c_ir_activate_cleanup(builder, entity, source);
+033696:         }
+033697:     }
+033698: 
+033699:     return emitted;
+033700: }
+033701: 
+033702: BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* builder, CIrLowerAutomaticDeclarationState* state,
+033703:                                                              u32* expression_start_out, u32* expression_end_out, bool* expression_pending_out)
+033704: {
+033705:     u32 start = state->start;
+033706:     u32 end = state->end;
+033707:     *expression_pending_out = false;
+033708:     CEntityId entity = C_ENTITY_ID_INVALID;
+033709:     u32 name_index = end;
+033710:     for (u32 index = start; index < end; index += 1)
+033711:     {

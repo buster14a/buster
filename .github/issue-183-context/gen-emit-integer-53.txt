@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 53/111
+line: 18661
+
+018591:                     }
+018592:                     selected->result = child_value;
+018593:                 }
+018594:                 else
+018595:                 {
+018596:                     return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_CHOOSE, starts[branch], ends[branch], false);
+018597:                 }
+018598:             }
+018599:             else if (selected->builtin_types_compatible_p)
+018600:             {
+018601:                 IrTypeId left = argument_count == 2 ? c_ir_type_name(builder, starts[0], ends[0]) : IR_TYPE_ID_INVALID;
+018602:                 IrTypeId right = argument_count == 2 ? c_ir_type_name(builder, starts[1], ends[1]) : IR_TYPE_ID_INVALID;
+018603:                 if (left.value == IR_ID_UNDERLYING_INVALID || right.value == IR_ID_UNDERLYING_INVALID)
+018604:                 {
+018605:                     return false;
+018606:                 }
+018607:                 bool compatible = c_ir_types_compatible(builder, left, right);
+018608:                 selected->result = c_ir_emit_integer_value_typed(builder, compatible ? 1 : 0, false, token, builder->s32_type);
+018609:             }
+018610:             else if (selected->builtin_object_size)
+018611:             {
+018612:                 if (argument_count != 2)
+018613:                 {
+018614:                     return false;
+018615:                 }
+018616:                 u64 mode = 0;
+018617:                 if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[1], ends[1], &mode) || mode > 3)
+018618:                 {
+018619:                     return false;
+018620:                 }
+018621:                 u64 size = mode >= 2 ? 0 : UINT64_MAX;
+018622:                 u32 object_start = starts[0];
+018623:                 u32 object_end = ends[0];
+018624:                 while (object_start < object_end && c_token_is_punctuator(&builder->preprocess.tokens[object_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+018625:                        c_ir_matching_delimiter_cached(builder, object_start, object_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
+018626:                            object_end - 1)
+018627:                 {
+018628:                     object_start += 1;
+018629:                     object_end -= 1;
+018630:                 }
+018631:                 if (object_start < object_end && builder->preprocess.tokens[object_start].kind == C_TOKEN_STRING_LITERAL &&
+018632:                     c_ir_tokens_are_string_literals(builder->preprocess, object_start, object_end))
+018633:                 {
+018634:                     CIrDecodedString decoded = {0};
+018635:                     if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, object_start, object_end, &decoded) ||
+018636:                         decoded.element_count == UINT64_MAX || decoded.element_count + 1 > UINT64_MAX / decoded.element_width)
+018637:                     {
+018638:                         return false;
+018639:                     }
+018640:                     size = (decoded.element_count + 1) * decoded.element_width;
+018641:                 }
+018642:                 else if (object_start + 1 == object_end && builder->preprocess.tokens[object_start].kind == C_TOKEN_IDENTIFIER)
+018643:                 {
+018644:                     CEntityId entity = c_ir_identifier_entity(builder, object_start);
+018645:                     IrTypeId object_type = IR_TYPE_ID_INVALID;
+018646:                     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+018647:                     if (local)
+018648:                     {
+018649:                         object_type = local->type;
+018650:                     }
+018651:                     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].type.value < builder->parse.type_count)
+018652:                     {
+018653:                         object_type = builder->c_type_ir_map[builder->parse.entities[entity.value].type.value];
+018654:                     }
+018655:                     IrType* object = ir_type_from_id(&builder->program->types, object_type);
+018656:                     if (object && object->kind == IR_TYPE_ARRAY && object->layout.resolved)
+018657:                     {
+018658:                         size = object->layout.size;
+018659:                     }
+018660:                 }
+018661:                 selected->result = c_ir_emit_integer_value_typed(builder, size, false, token, builder->size_type);
+018662:             }
+018663:             else
+018664:             {
+018665:                 u64 alignment = 0;
+018666:                 u64 offset = 0;
+018667:                 if ((argument_count != 2 && argument_count != 3) ||
+018668:                     !c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[1], ends[1], &alignment) || !alignment ||
+018669:                     (argument_count == 3 && !c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[2], ends[2], &offset)))
+018670:                 {
+018671:                     return false;
+018672:                 }
+018673:                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ASSUME_ALIGNED)
+018674:                 {
+018675:                     if (!child_success)
+018676:                     {
+018677:                         return C_IR_PREPARED_CALL_STEP_FAILED;
+018678:                     }
+018679:                     selected->result = child_value;
+018680:                 }
+018681:                 else
+018682:                 {
+018683:                     return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ASSUME_ALIGNED, starts[0], ends[0], false);
+018684:                 }
+018685:                 if (selected->result.value >= builder->function->value_count)
+018686:                 {
+018687:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+018688:                 }
+018689:                 IrType* aligned_type = ir_type_from_id(&builder->program->types, builder->function->values[selected->result.value].canonical_type);
+018690:                 if (aligned_type && aligned_type->kind == IR_TYPE_ARRAY)
+018691:                 {
+018692:                     IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, aligned_type->element_type);
+018693:                     selected->result = c_ir_decay_array(builder, selected->result, pointer_type, c_ir_token_source_range(builder, token));
+018694:                     aligned_type = ir_type_from_id(&builder->program->types, pointer_type);
+018695:                 }
+018696:                 if (!aligned_type || aligned_type->kind != IR_TYPE_POINTER)
+018697:                 {
+018698:                     return false;
+018699:                 }
+018700:             }
+018701:             if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+018702:             {
+018703:                 return false;
+018704:             }
+018705:             selected->argument_count = argument_count;
+018706:             selected->emitted = true;
+018707:             remaining -= 1;
+018708:             continue;
+018709:         }
+018710:         if (selected->builtin_generic)
+018711:         {
+018712:             u32 association_start = 0;
+018713:             u32 association_end = 0;
+018714:             IrTypeId association_type = IR_TYPE_ID_INVALID;
+018715:             bool selection_valid =
+018716:                 c_ir_generic_selection(builder, selected->token_index, selected->close_index + 1, &association_start, &association_end, &association_type);
+018717:             if (!selection_valid)
+018718:             {
+018719:                 return false;
+018720:             }
+018721:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_GENERIC)
+018722:             {
+018723:                 if (!child_success)
+018724:                 {
+018725:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+018726:                 }
+018727:                 selected->result = child_value;
+018728:             }
+018729:             else
+018730:             {
+018731:                 // The selected association is the only one lowered, and
+018732:                 // discovery never looked inside _Generic, so its calls are
+018733:                 // prepared by the child expression itself.
+018734:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_GENERIC, association_start,
+018735:                                                              association_end, false);
+018736:             }
+018737:             (void)association_type;
+018738:             selected->argument_count = 1;
+018739:             selected->emitted = true;
+018740:             remaining -= 1;
+018741:             continue;
+018742:         }
+018743:         if (selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_COUNT)
+018744:         {
+018745:             u32 starts[6] = {0};
+018746:             u32 ends[6] = {0};
+018747:             u32 argument_count = 0;
+018748:             u32 expected_count = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_LOAD   ? 2
+018749:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_INIT ? 2
+018750:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ||
+018751:                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK
+018752:                                      ? 5
+018753:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_THREAD_FENCE ||
+018754:                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
+018755:                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE
+018756:                                      ? 1
+018757:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE ? 0
+018758:                                                                                                      : 3;
+018759:             // GNU's `_n`, generic pointer, and legacy `__sync_*` families
+018760:             // share operations but not argument shapes.
+018761:             if (selected->builtin_atomic_generic)
+018762:             {
+018763:                 expected_count = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_LOAD ? 3
+018764:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_EXCHANGE ? 4
+018765:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ? 6
+018766:                                                                                                             : 3;
+018767:             }
+018768:             else if (selected->builtin_atomic_sequential)
+018769:             {
+018770:                 expected_count = 2;
+018771:             }
+018772:             else if (selected->builtin_atomic_gnu)
+018773:             {
+018774:                 expected_count = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG   ? 6
+018775:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE            ? 2
+018776:                                  : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
+018777:                                          selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_CLEAR
+018778:                                      ? 2
+018779:                                      : expected_count;
+018780:             }
+018781:             IrSourceRange source = c_ir_token_source_range(builder, token);
+018782:             // `__sync_synchronize()` is the one atomic builtin with an empty
+018783:             // argument list, which the argument scan reports as malformed.
+018784:             bool empty_arguments = selected->open_index + 1 == selected->close_index;
+018785:             if (empty_arguments ? expected_count != 0
+018786:                                 : (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) ||
+018787:                                    argument_count != expected_count))
+018788:             {
+018789:                 return false;
+018790:             }
+018791:             if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_THREAD_FENCE || selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||

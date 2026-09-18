@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 100/111
+line: 29657
+
+029587:                 base = local_type && local_type->kind == IR_TYPE_ARRAY ? local->place : c_ir_emit_load(builder, local, first);
+029588:             }
+029589:             if (base.value != IR_ID_UNDERLYING_INVALID)
+029590:             {
+029591:                 state->base = base;
+029592:                 state->assignment = close + 1;
+029593:                 state->close = close;
+029594:                 state->operation = operation;
+029595:                 state->simple = simple;
+029596:                 return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_INDEX_SUBSCRIPT, start + 2, close);
+029597:             }
+029598:         }
+029599:         // A postfix update or another full expression follows the subscript;
+029600:         // leave it to the expression machine below rather than treating the
+029601:         // update token as a malformed assignment operator.
+029602:     }
+029603:     if (first.kind == C_TOKEN_IDENTIFIER && start + 4 < end &&
+029604:         (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_DOT) ||
+029605:          c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_ARROW)) &&
+029606:         builder->preprocess.tokens[start + 2].kind == C_TOKEN_IDENTIFIER && c_ir_assignment_operator(builder->preprocess.tokens[start + 3]))
+029607:     {
+029608:         CToken assignment = builder->preprocess.tokens[start + 3];
+029609:         CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+029610:         bool simple = c_token_is_punctuator(&assignment, C_PUNCTUATOR_ASSIGN);
+029611:         c_ir_compound_assignment_operator(assignment, &operation);
+029612:         CEntityId entity = c_ir_identifier_entity(builder, start);
+029613:         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+029614:         IrValueId place = IR_VALUE_ID_INVALID;
+029615:         if (local)
+029616:         {
+029617:             place = c_ir_emit_field_place(builder, local, builder->preprocess.tokens[start + 1], builder->preprocess.tokens[start + 2]);
+029618:         }
+029619:         else
+029620:         {
+029621:             IrSourceRange field_source = c_ir_token_source_range(builder, first);
+029622:             IrValueId base = c_ir_emit_global_place(builder, entity, field_source);
+029623:             if (base.value != IR_ID_UNDERLYING_INVALID && c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_ARROW))
+029624:             {
+029625:                 IrTypeId base_type = builder->function->values[base.value].canonical_type;
+029626:                 base = c_ir_emit_arrow_operand_from_place(builder, base, base_type, field_source);
+029627:             }
+029628:             place = c_ir_emit_field_place_from_value(builder, base, builder->preprocess.tokens[start + 1], builder->preprocess.tokens[start + 2]);
+029629:         }
+029630:         if (place.value >= builder->function->value_count)
+029631:         {
+029632:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029633:             return false;
+029634:         }
+029635:         state->place = place;
+029636:         state->type = builder->function->values[place.value].canonical_type;
+029637:         state->assignment = start + 3;
+029638:         state->operation = operation;
+029639:         state->simple = simple;
+029640:         return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_FIELD_RIGHT, start + 4, end);
+029641:     }
+029642:     if (first.kind == C_TOKEN_IDENTIFIER && start + 2 == end &&
+029643:         (c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_PLUS_PLUS) ||
+029644:          c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_MINUS_MINUS)))
+029645:     {
+029646:         CToken update = builder->preprocess.tokens[start + 1];
+029647:         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, c_ir_identifier_entity(builder, start));
+029648:         if (!local)
+029649:         {
+029650:             // Global objects use the general expression-core update path,
+029651:             // which resolves their identifier to a global place before
+029652:             // applying the increment.  Keep this local fast path narrow so
+029653:             // a direct statement such as `listing++` is not rejected merely
+029654:             // because it has no CIntegerIrLocal entry.
+029655:             return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+029656:         }
+029657:         IrValueId one = c_ir_emit_integer_value(builder, 1, false, update);
+029658:         bool success = c_ir_emit_compound_assignment(builder, local->place, local->type,
+029659:                                                       c_token_is_punctuator(&update, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
+029660:                                                       c_ir_token_source_range(builder, update), 0, 0);
+029661:         c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+029662:         return false;
+029663:     }
+029664:     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
+029665:     {
+029666:         if (start + 2 != end || builder->preprocess.tokens[start + 1].kind != C_TOKEN_IDENTIFIER)
+029667:         {
+029668:             // Prefix updates over a dereference (for example ++(*input)) are
+029669:             // full expressions rather than the identifier fast path below.
+029670:             // Let the expression machine form the dereferenced place and
+029671:             // apply the same increment semantics used by return/condition
+029672:             // expressions.
+029673:             return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+029674:         }
+029675:         CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, c_ir_identifier_entity(builder, start + 1));
+029676:         if (!local)
+029677:         {
+029678:             // See the postfix case above: the expression core already knows
+029679:             // how to form a place for a global identifier, so let it handle
+029680:             // prefix updates instead of treating a missing local as an
+029681:             // unsupported statement.
+029682:             return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+029683:         }
+029684:         IrValueId one = c_ir_emit_integer_value(builder, 1, false, first);
+029685:         bool success = c_ir_emit_compound_assignment(builder, local->place, local->type,
+029686:                                                       c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
+029687:                                                       c_ir_token_source_range(builder, first), 0, 0);
+029688:         c_ir_lower_frame_finish(builder, success, IR_VALUE_ID_INVALID);
+029689:         return false;
+029690:     }
+029691:     if (first.kind == C_TOKEN_IDENTIFIER && start + 2 < end)
+029692:     {
+029693:         CToken assignment = builder->preprocess.tokens[start + 1];
+029694:         CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+029695:         bool simple = c_token_is_punctuator(&assignment, C_PUNCTUATOR_ASSIGN);
+029696:         bool compound = c_ir_compound_assignment_operator(assignment, &operation);
+029697:         if (simple || compound)
+029698:         {
+029699:             CEntityId entity = c_ir_identifier_entity(builder, start);
+029700:             CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+029701:             IrSourceRange source = c_ir_token_source_range(builder, assignment);
+029702:             IrValueId place = local ? local->place : c_ir_emit_global_place(builder, entity, source);
+029703:             if (place.value >= builder->function->value_count)
+029704:             {
+029705:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+029706:                 return false;
+029707:             }
+029708:             state->place = place;
+029709:             state->type = local ? local->type : builder->function->values[place.value].canonical_type;
+029710:             state->assignment = start + 1;
+029711:             state->operation = operation;
+029712:             state->simple = simple;
+029713:             return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_IDENTIFIER_RIGHT, start + 2, end);
+029714:         }
+029715:     }
+029716:     return c_ir_lower_assignment_statement_request_expression(builder, frame, state, C_IR_LOWER_ASSIGNMENT_STATEMENT_EXPRESSION, start, end);
+029717: }
+029718: 
+029719: // Each advance runs the stage machine to a child request or the finish; the
+029720: // request helpers run the child off the dispatch loop and report whether it
+029721: // completed, so a completed child re-enters the CHILD arm here as a
+029722: // self-loop instead of resuming through a dispatch round trip.
+029723: BUSTER_C_INTERNAL void c_ir_lower_assignment_statement_step(CIntegerIrBuilder* builder)
+029724: {
+029725:     bool stepping = true;
+029726:     while (stepping)
+029727:     {
+029728:         stepping = c_ir_lower_assignment_statement_advance(builder);
+029729:     }
+029730: }
+029731: 
+029732: BUSTER_C_INTERNAL void c_ir_lower_frame_fallback(CIntegerIrBuilder* builder)
+029733: {
+029734:     CIrLowerMachine* machine = &builder->lower_machine;
+029735:     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+029736:     CIrLowerFrame* active = machine->frames + machine->frame_count - 1;
+029737:     switch (active->kind)
+029738:     {
+029739:         case C_IR_LOWER_FRAME_PLACE:
+029740:             c_ir_lower_place_step(builder, active);
+029741:             return;
+029742:         case C_IR_LOWER_FRAME_VLA_INDEX_PLACE:
+029743:             c_ir_lower_vla_index_place_step(builder, active);
+029744:             return;
+029745:         case C_IR_LOWER_FRAME_ATOMIC_PLACE:
+029746:             c_ir_lower_atomic_place_step(builder, active);
+029747:             return;
+029748:         case C_IR_LOWER_FRAME_VA_LIST_EXPRESSION:
+029749:             c_ir_lower_va_list_expression_step(builder, active);
+029750:             return;
+029751:         case C_IR_LOWER_FRAME_COMPOUND_LITERAL:
+029752:             c_ir_lower_compound_literal_step(builder, active);
+029753:             return;
+029754:         case C_IR_LOWER_FRAME_NESTED_COMPOUND_LITERAL:
+029755:             c_ir_lower_nested_compound_literal_step(builder, active);
+029756:             return;
+029757:         case C_IR_LOWER_FRAME_PREPARE_CONTROL_EXPRESSIONS:
+029758:             c_ir_prepare_control_expressions_step(builder, active);
+029759:             return;
+029760:         case C_IR_LOWER_FRAME_PREPARE_CALLS:
+029761:             c_ir_prepare_calls_step(builder, active);
+029762:             return;
+029763:         case C_IR_LOWER_FRAME_PREPARED_CALL:
+029764:         {
+029765:             CIrPreparedCallStepResult result = c_ir_emit_prepared_call_step(builder, active);
+029766:             if (result != C_IR_PREPARED_CALL_STEP_SUSPENDED)
+029767:             {
+029768:                 c_ir_lower_frame_finish(builder, result == C_IR_PREPARED_CALL_STEP_FINISHED, IR_VALUE_ID_INVALID);
+029769:             }
+029770:             return;
+029771:         }
+029772:         default:
+029773:             break;
+029774:     }
+029775:     switch (active->kind)
+029776:     {
+029777:         case C_IR_LOWER_FRAME_EXPRESSION:
+029778:             c_ir_lower_expression_step(builder);
+029779:             return;
+029780:         case C_IR_LOWER_FRAME_EXPRESSION_CORE:
+029781:             c_ir_lower_expression_core_step(builder);
+029782:             return;
+029783:         case C_IR_LOWER_FRAME_LOGICAL_VALUE:
+029784:             c_ir_lower_logical_value_step(builder);
+029785:             return;
+029786:         case C_IR_LOWER_FRAME_CONDITION:
+029787:             c_ir_lower_condition_step(builder);

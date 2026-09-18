@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 65/111
+line: 19524
+
+019454:                         if (operation_place.value == IR_ID_UNDERLYING_INVALID || operation_value.value == IR_ID_UNDERLYING_INVALID)
+019455:                         {
+019456:                             return false;
+019457:                         }
+019458:                     }
+019459:                     if (wide_atomic_runtime && !aggregate_value)
+019460:                     {
+019461:                         operation_type = wide_atomic_runtime_type;
+019462:                         operation_value = c_ir_emit_cast(builder, value, operation_type, source);
+019463:                         if (operation_value.value == IR_ID_UNDERLYING_INVALID)
+019464:                         {
+019465:                             return false;
+019466:                         }
+019467:                     }
+019468:                     IrValueId previous = IR_VALUE_ID_INVALID;
+019469:                     if (wide_atomic_runtime)
+019470:                     {
+019471:                         String8 runtime_name = operation == IR_ATOMIC_ADD          ? S8("__atomic_fetch_add_16")
+019472:                                                : operation == IR_ATOMIC_SUBTRACT ? S8("__atomic_fetch_sub_16")
+019473:                                                : operation == IR_ATOMIC_BITWISE_AND ? S8("__atomic_fetch_and_16")
+019474:                                                : operation == IR_ATOMIC_BITWISE_OR  ? S8("__atomic_fetch_or_16")
+019475:                                                : operation == IR_ATOMIC_BITWISE_XOR ? S8("__atomic_fetch_xor_16")
+019476:                                                : operation == IR_ATOMIC_BITWISE_NAND ? S8("__atomic_fetch_nand_16")
+019477:                                                                                       : S8("__atomic_exchange_16");
+019478:                         IrTypeId runtime_type = IR_TYPE_ID_INVALID;
+019479:                         IrTypeId runtime_pointer_type = IR_TYPE_ID_INVALID;
+019480:                         IrValueId address = IR_VALUE_ID_INVALID;
+019481:                         bool runtime_arguments = c_ir_wide_atomic_runtime_arguments(builder, place, atomic_type, source,
+019482:                                                                                      &runtime_type, &runtime_pointer_type, &address);
+019483:                         IrValueId order_value = c_ir_emit_integer_value_typed(builder, (u64)order, false, token, builder->s32_type);
+019484:                         IrTypeId parameter_types[3] = {runtime_pointer_type, runtime_type, builder->s32_type};
+019485:                         IrValueId arguments[3] = {address, operation_value, order_value};
+019486:                         if (!runtime_arguments || runtime_type.value != operation_type.value ||
+019487:                             runtime_pointer_type.value != wide_atomic_runtime_pointer_type.value ||
+019488:                             address.value == IR_ID_UNDERLYING_INVALID || order_value.value == IR_ID_UNDERLYING_INVALID ||
+019489:                             !c_ir_emit_runtime_call(builder, token, runtime_name, runtime_type,
+019490:                                                     parameter_types, arguments, BUSTER_ARRAY_LENGTH(arguments), &previous))
+019491:                         {
+019492:                             return false;
+019493:                         }
+019494:                     }
+019495:                     else
+019496:                     {
+019497:                         previous = c_ir_add_result(builder, operation_type);
+019498:                         IrSourceRange instruction_source = source;
+019499:                         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE, operation_type);
+019500:                         instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
+019501:                         instruction.operands[0] = operation_place;
+019502:                         instruction.operands[1] = operation_value;
+019503:                         instruction.operand_count = 2;
+019504:                         instruction.memory_order = (u8)order;
+019505:                         instruction.atomic_operation = (u8)operation;
+019506:                         instruction.result = previous;
+019507:                         IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+019508:                         builder->function->values[previous.value].definition = id;
+019509:                     }
+019510:                     selected->result = representation_value
+019511:                                            ? c_ir_atomic_aggregate_bits_value(builder, previous, value_type_id, operation_type, false, source)
+019512:                                            : c_ir_emit_cast(builder, previous, value_type_id, source);
+019513:                     if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+019514:                     {
+019515:                         return false;
+019516:                     }
+019517:                     if (selected->builtin_atomic_generic)
+019518:                     {
+019519:                         if (!c_ir_emit_store_place(builder, generic_exchange_result_place, value_type_id,
+019520:                                                    selected->result, source))
+019521:                         {
+019522:                             return false;
+019523:                         }
+019524:                         selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+019525:                     }
+019526:                     if (selected->builtin_atomic_new_value)
+019527:                     {
+019528:                         // `__atomic_add_fetch` and its four siblings answer the
+019529:                         // updated value. The instruction answers the previous
+019530:                         // one, so the operation is applied again to it -- which
+019531:                         // is what the reference compilers emit too, and is
+019532:                         // correct without a second atomic access because the
+019533:                         // operation is a pure function of the two operands.
+019534:                         IrTypeId recompute_type = pointer_value ? builder->ptrdiff_type : value_type_id;
+019535:                         IrValueId recompute_values[2] = {
+019536:                             pointer_value ? c_ir_emit_cast(builder, previous, recompute_type, source) : previous,
+019537:                             pointer_value ? c_ir_emit_cast(builder, operand_value, recompute_type, source) : operand_value,
+019538:                         };
+019539:                         if (recompute_values[0].value == IR_ID_UNDERLYING_INVALID ||
+019540:                             recompute_values[1].value == IR_ID_UNDERLYING_INVALID)
+019541:                         {
+019542:                             return false;
+019543:                         }
+019544:                         if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_NAND)
+019545:                         {
+019546:                             IrValueId combined = c_ir_emit_binary_value(builder, recompute_values[0], recompute_values[1],
+019547:                                                                         recompute_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+019548:                             IrValueId inverted = combined.value != IR_ID_UNDERLYING_INVALID
+019549:                                                      ? c_ir_add_result(builder, recompute_type)
+019550:                                                      : IR_VALUE_ID_INVALID;
+019551:                             if (inverted.value == IR_ID_UNDERLYING_INVALID)
+019552:                             {
+019553:                                 return false;
+019554:                             }
+019555:                             IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, recompute_type);
+019556:                             instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+019557:                             instruction.operands[0] = combined;
+019558:                             instruction.operand_count = 1;
+019559:                             instruction.unary_operation = IR_UNARY_INTEGER_BITWISE_NOT;
+019560:                             instruction.result = inverted;
+019561:                             IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+019562:                             builder->function->values[inverted.value].definition = id;
+019563:                             recompute_values[0] = inverted;
+019564:                         }
+019565:                         else
+019566:                         {
+019567:                             CConditionalOperator recompute =
+019568:                                 selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_ADD        ? C_CONDITIONAL_ADD
+019569:                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT ? C_CONDITIONAL_SUBTRACT
+019570:                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_AND      ? C_CONDITIONAL_BITWISE_AND
+019571:                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_OR       ? C_CONDITIONAL_BITWISE_OR
+019572:                                                                                                   : C_CONDITIONAL_BITWISE_XOR;
+019573:                             u32 recompute_count = 2;
+019574:                             if (!c_ir_apply_operation(builder, recompute, recompute_values, &recompute_count,
+019575:                                                       source, recompute_type) ||
+019576:                                 recompute_count != 1)
+019577:                             {
+019578:                                 return false;
+019579:                             }
+019580:                         }
+019581:                         selected->result = c_ir_emit_cast(builder, recompute_values[0], value_type_id, source);
+019582:                         if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+019583:                         {
+019584:                             return false;
+019585:                         }
+019586:                     }
+019587:                 }
+019588:             }
+019589:             selected->argument_count = argument_count;
+019590:             selected->emitted = true;
+019591:             remaining -= 1;
+019592:             continue;
+019593:         }
+019594:         if (selected->builtin_simd != C_IR_SIMD_BUILTIN_NONE)
+019595:         {
+019596:             CIrSimdBuiltin entry = c_ir_simd_builtins[selected->builtin_simd];
+019597:             IrSimdShape shape = ir_simd_operation_shape((IrSimdOperation)entry.operation);
+019598:             u32 starts[4] = {0};
+019599:             u32 ends[4] = {0};
+019600:             u32 argument_count = 0;
+019601:             builder->failure_token_index = selected->open_index;
+019602:             if (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) ||
+019603:                 argument_count != (u32)shape.operand_count + shape.immediate_count)
+019604:             {
+019605:                 builder->failure_message = string_format(builder->arena, S8("{S8} takes {u32} arguments"), entry.name,
+019606:                                                          (u32)shape.operand_count + shape.immediate_count);
+019607:                 return false;
+019608:             }
+019609:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT)
+019610:             {
+019611:                 if (!child_success)
+019612:                 {
+019613:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+019614:                 }
+019615:                 u32 argument_index = frame->as.prepared_call.state->argument_count;
+019616:                 IrSourceRange argument_source = c_ir_token_source_range(builder, builder->preprocess.tokens[starts[argument_index]]);
+019617:                 IrValueId value = c_ir_simd_coerce_argument(builder, child_value, (CIrSimdArgument)entry.arguments[argument_index], argument_source);
+019618:                 if (value.value == IR_ID_UNDERLYING_INVALID)
+019619:                 {
+019620:                     builder->failure_token_index = starts[argument_index];
+019621:                     builder->failure_message = string_format(builder->arena, S8("argument {u32} of {S8} has the wrong type"), argument_index + 1, entry.name);
+019622:                     return false;
+019623:                 }
+019624:                 selected->arguments[argument_index] = value;
+019625:                 frame->as.prepared_call.state->argument_count = argument_index + 1;
+019626:             }
+019627:             else
+019628:             {
+019629:                 selected->arguments = arena_allocate(builder->arena, IrValueId, BUSTER_ARRAY_LENGTH(starts));
+019630:                 frame->as.prepared_call.state->argument_count = 0;
+019631:             }
+019632:             // The operands are ordinary expressions and are lowered one at a
+019633:             // time through the machine; a trailing immediate never becomes a
+019634:             // value and is folded straight out of its tokens below.
+019635:             u32 next = frame->as.prepared_call.state->argument_count;
+019636:             if (next < shape.operand_count)
+019637:             {
+019638:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT, starts[next], ends[next], false);
+019639:             }
+019640:             u64 immediate = 0;
+019641:             if (shape.immediate_count &&
+019642:                 (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[shape.operand_count], ends[shape.operand_count], &immediate) ||
+019643:                  immediate >= entry.immediate_limit))
+019644:             {
+019645:                 builder->failure_token_index = starts[shape.operand_count];
+019646:                 builder->failure_message =
+019647:                     string_format(builder->arena, S8("the last argument of {S8} must be a constant below {u32}"), entry.name, entry.immediate_limit);
+019648:                 return false;
+019649:             }
+019650:             IrTypeId result_type = c_ir_simd_result_type(builder, (IrSimdOperation)entry.operation);
+019651:             if (result_type.value == IR_ID_UNDERLYING_INVALID)
+019652:             {
+019653:                 builder->failure_message = S8("this target has no 512-bit SIMD type");
+019654:                 return false;

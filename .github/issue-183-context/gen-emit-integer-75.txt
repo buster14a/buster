@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 75/111
+line: 20877
+
+020807:             frame->as.prepared_call.state->argument_index = index;
+020808:             frame->as.prepared_call.state->separator = separator;
+020809:             return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_ARGUMENT, index, separator, false);
+020810:         }
+020811:         // Too few arguments for the parameters the callee does declare. The
+020812:         // direct call reports this from its name resolution, which never
+020813:         // reaches an indirect callee: without this the shortfall used to
+020814:         // travel to IR validation and be reported as a code generation
+020815:         // failure naming an opcode.
+020816:         if (argument_count < signature.parameter_count)
+020817:         {
+020818:             builder->failure_token_index = selected->open_index;
+020819:             builder->failure_message =
+020820:                 c_ir_call_arity_message(builder, selected->indirect ? (String8){0} : c_token_spelling(builder->preprocess.spelling_base, token),
+020821:                                         signature, argument_count);
+020822:             return false;
+020823:         }
+020824:         selected->argument_count = argument_count;
+020825:         if (selected->indirect)
+020826:         {
+020827:             for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+020828:             {
+020829:                 if (c_ir_value_contains_label_provenance(builder, selected->arguments[argument_index]))
+020830:                 {
+020831:                     builder->failure_message = S8("a label address may not escape through a function call");
+020832:                     return false;
+020833:                 }
+020834:             }
+020835:             // The call's source range is taken before the callee, because the
+020836:             // retyping below is emitted against it too.
+020837:             IrSourceRange call_source = c_ir_token_source_range(builder, token);
+020838:             // Through a pre-C23 `()` pointer the call names its own
+020839:             // parameters, so the pointer takes the call's signature; see
+020840:             // c_ir_unprototyped_call_type.
+020841:             if (signature.is_unprototyped && argument_count > signature.parameter_count)
+020842:             {
+020843:                 IrTypeId callee_type =
+020844:                     c_ir_unprototyped_call_type(builder, signature.return_type, selected->arguments, argument_count);
+020845:                 IrTypeId callee_pointer_type = callee_type.value != IR_ID_UNDERLYING_INVALID
+020846:                                                    ? c_ir_add_pointer_type(builder->program, builder->pointer_types, callee_type)
+020847:                                                    : IR_TYPE_ID_INVALID;
+020848:                 indirect_callee = callee_pointer_type.value != IR_ID_UNDERLYING_INVALID
+020849:                                       ? c_ir_emit_cast(builder, indirect_callee, callee_pointer_type, call_source)
+020850:                                       : IR_VALUE_ID_INVALID;
+020851:                 if (indirect_callee.value == IR_ID_UNDERLYING_INVALID)
+020852:                 {
+020853:                     return false;
+020854:                 }
+020855:             }
+020856:             bool terminates = signature.is_noreturn && !c_ir_lowering_resumes_after_call(builder);
+020857:             IrValueId result = signature.returns_void ? (terminates ? c_ir_emit_integer_value(builder, 0, false, token) : IR_VALUE_ID_INVALID)
+020858:                                                       : c_ir_add_result(builder, signature.return_type);
+020859:             IrValueId* operands = arena_allocate(builder->arena, IrValueId, argument_count + 1);
+020860:             operands[0] = indirect_callee;
+020861:             for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+020862:             {
+020863:                 operands[argument_index + 1] = selected->arguments[argument_index];
+020864:             }
+020865:             IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, signature.return_type);
+020866:             call.operands = operands;
+020867:             call.operand_count = argument_count + 1;
+020868:             call.result = signature.returns_void ? IR_VALUE_ID_INVALID : result;
+020869:             IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+020870:             if (!signature.returns_void)
+020871:             {
+020872:                 builder->function->values[result.value].definition = call_id;
+020873:                 selected->result = result;
+020874:             }
+020875:             else
+020876:             {
+020877:                 selected->result = terminates ? result : c_ir_emit_integer_value(builder, 0, false, token);
+020878:             }
+020879:             c_ir_end_control_flow_after_call(builder, signature.is_noreturn, call_source);
+020880:         }
+020881:         else
+020882:         {
+020883:             selected->result = c_ir_emit_call_values(builder, token, declaration_index, selected->arguments, argument_count);
+020884:         }
+020885:         if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+020886:         {
+020887:             return false;
+020888:         }
+020889:         selected->emitted = true;
+020890:         remaining -= 1;
+020891:     } while (false);
+020892:     BUSTER_CHECK(!remaining);
+020893:     return true;
+020894: }
+020895: 
+020896: BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+020897: {
+020898:     CIrLowerMachine* machine = &builder->lower_machine;
+020899:     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+020900:     {
+020901:         frame->as.prepare_calls.previous_preparing_calls = builder->preparing_calls;
+020902:         if (builder->preparing_calls)
+020903:         {
+020904:             c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
+020905:             return;
+020906:         }
+020907:         builder->preparing_calls = true;
+020908:         if (!c_ir_prepare_calls_discover(builder, frame->as.prepare_calls.start, frame->as.prepare_calls.end,
+020909:                                          &frame->as.prepare_calls.emission_order, &frame->as.prepare_calls.emission_count))
+020910:         {
+020911:             builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
+020912:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+020913:             return;
+020914:         }
+020915:         frame->as.prepare_calls.emission_index = 0;
+020916:         frame->stage = C_IR_LOWER_STAGE_CHILD;
+020917:     }
+020918:     else if (frame->stage == C_IR_LOWER_STAGE_CHILD)
+020919:     {
+020920:         if (!machine->child_result.success)
+020921:         {
+020922:             builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
+020923:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+020924:             return;
+020925:         }
+020926:         frame->as.prepare_calls.emission_index += 1;
+020927:     }
+020928:     if (frame->as.prepare_calls.emission_index >= frame->as.prepare_calls.emission_count)
+020929:     {
+020930:         builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
+020931:         c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
+020932:         return;
+020933:     }
+020934:     u32 call_index = frame->as.prepare_calls.emission_order[frame->as.prepare_calls.emission_index];
+020935:     CIrPreparedCallState* state = arena_allocate(builder->temporary_arena, CIrPreparedCallState, 1);
+020936:     *state = (CIrPreparedCallState){0};
+020937:     frame->stage = C_IR_LOWER_STAGE_CHILD;
+020938:     if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+020939:                                             .kind = C_IR_LOWER_FRAME_PREPARED_CALL,
+020940:                                             .as.prepared_call =
+020941:                                                 {
+020942:                                                     .state = state,
+020943:                                                     .call_index = call_index,
+020944:                                                 },
+020945:                                         }))
+020946:     {
+020947:         builder->preparing_calls = frame->as.prepare_calls.previous_preparing_calls;
+020948:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+020949:     }
+020950: }
+020951: 
+020952: BUSTER_C_INTERNAL bool c_ir_operation(CConditionalOperator operation, IrUnaryOperation* unary, IrBinaryOperation* binary)
+020953: {
+020954:     *unary = IR_UNARY_COUNT;
+020955:     *binary = IR_BINARY_COUNT;
+020956:     switch (operation)
+020957:     {
+020958:     case C_CONDITIONAL_UNARY_PLUS:
+020959:         return true;
+020960:     case C_CONDITIONAL_UNARY_MINUS:
+020961:         *unary = IR_UNARY_INTEGER_NEGATE;
+020962:         return true;
+020963:     case C_CONDITIONAL_BITWISE_NOT:
+020964:         *unary = IR_UNARY_INTEGER_BITWISE_NOT;
+020965:         return true;
+020966:     case C_CONDITIONAL_ADDRESS_OF:
+020967:     case C_CONDITIONAL_DEREFERENCE:
+020968:     case C_CONDITIONAL_CAST:
+020969:     case C_CONDITIONAL_REAL_PART:
+020970:     case C_CONDITIONAL_IMAGINARY_PART:
+020971:         return true;
+020972:     case C_CONDITIONAL_MULTIPLY:
+020973:         *binary = IR_BINARY_INTEGER_MULTIPLY;
+020974:         return true;
+020975:     case C_CONDITIONAL_DIVIDE:
+020976:         *binary = IR_BINARY_SIGNED_DIVIDE;
+020977:         return true;
+020978:     case C_CONDITIONAL_REMAINDER:
+020979:         *binary = IR_BINARY_SIGNED_REMAINDER;
+020980:         return true;
+020981:     case C_CONDITIONAL_ADD:
+020982:         *binary = IR_BINARY_INTEGER_ADD;
+020983:         return true;
+020984:     case C_CONDITIONAL_SUBTRACT:
+020985:         *binary = IR_BINARY_INTEGER_SUBTRACT;
+020986:         return true;
+020987:     case C_CONDITIONAL_SHIFT_LEFT:
+020988:         *binary = IR_BINARY_SHIFT_LEFT;
+020989:         return true;
+020990:     case C_CONDITIONAL_SHIFT_RIGHT:
+020991:         *binary = IR_BINARY_SIGNED_SHIFT_RIGHT;
+020992:         return true;
+020993:     case C_CONDITIONAL_BITWISE_AND:
+020994:         *binary = IR_BINARY_INTEGER_BITWISE_AND;
+020995:         return true;
+020996:     case C_CONDITIONAL_BITWISE_XOR:
+020997:         *binary = IR_BINARY_INTEGER_BITWISE_XOR;
+020998:         return true;
+020999:     case C_CONDITIONAL_BITWISE_OR:
+021000:         *binary = IR_BINARY_INTEGER_BITWISE_OR;
+021001:         return true;
+021002:     case C_CONDITIONAL_LESS:
+021003:         *binary = IR_BINARY_SIGNED_LESS;
+021004:         return true;
+021005:     case C_CONDITIONAL_LESS_EQUAL:
+021006:         *binary = IR_BINARY_SIGNED_LESS_EQUAL;
+021007:         return true;

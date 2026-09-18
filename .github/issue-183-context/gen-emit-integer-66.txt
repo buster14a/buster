@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 66/111
+line: 19682
+
+019612:                 {
+019613:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+019614:                 }
+019615:                 u32 argument_index = frame->as.prepared_call.state->argument_count;
+019616:                 IrSourceRange argument_source = c_ir_token_source_range(builder, builder->preprocess.tokens[starts[argument_index]]);
+019617:                 IrValueId value = c_ir_simd_coerce_argument(builder, child_value, (CIrSimdArgument)entry.arguments[argument_index], argument_source);
+019618:                 if (value.value == IR_ID_UNDERLYING_INVALID)
+019619:                 {
+019620:                     builder->failure_token_index = starts[argument_index];
+019621:                     builder->failure_message = string_format(builder->arena, S8("argument {u32} of {S8} has the wrong type"), argument_index + 1, entry.name);
+019622:                     return false;
+019623:                 }
+019624:                 selected->arguments[argument_index] = value;
+019625:                 frame->as.prepared_call.state->argument_count = argument_index + 1;
+019626:             }
+019627:             else
+019628:             {
+019629:                 selected->arguments = arena_allocate(builder->arena, IrValueId, BUSTER_ARRAY_LENGTH(starts));
+019630:                 frame->as.prepared_call.state->argument_count = 0;
+019631:             }
+019632:             // The operands are ordinary expressions and are lowered one at a
+019633:             // time through the machine; a trailing immediate never becomes a
+019634:             // value and is folded straight out of its tokens below.
+019635:             u32 next = frame->as.prepared_call.state->argument_count;
+019636:             if (next < shape.operand_count)
+019637:             {
+019638:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT, starts[next], ends[next], false);
+019639:             }
+019640:             u64 immediate = 0;
+019641:             if (shape.immediate_count &&
+019642:                 (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[shape.operand_count], ends[shape.operand_count], &immediate) ||
+019643:                  immediate >= entry.immediate_limit))
+019644:             {
+019645:                 builder->failure_token_index = starts[shape.operand_count];
+019646:                 builder->failure_message =
+019647:                     string_format(builder->arena, S8("the last argument of {S8} must be a constant below {u32}"), entry.name, entry.immediate_limit);
+019648:                 return false;
+019649:             }
+019650:             IrTypeId result_type = c_ir_simd_result_type(builder, (IrSimdOperation)entry.operation);
+019651:             if (result_type.value == IR_ID_UNDERLYING_INVALID)
+019652:             {
+019653:                 builder->failure_message = S8("this target has no 512-bit SIMD type");
+019654:                 return false;
+019655:             }
+019656:             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+019657:             IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_SIMD, result_type);
+019658:             instruction.operands = selected->arguments;
+019659:             instruction.operand_count = shape.operand_count;
+019660:             instruction.simd_operation = entry.operation;
+019661:             if (shape.immediate_count)
+019662:             {
+019663:                 instruction.immediates = arena_allocate(builder->arena, u64, 1);
+019664:                 instruction.immediates[0] = immediate;
+019665:                 instruction.immediate_count = 1;
+019666:             }
+019667:             if (shape.has_result)
+019668:             {
+019669:                 instruction.result = c_ir_add_result(builder, result_type);
+019670:             }
+019671:             IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+019672:             if (shape.has_result)
+019673:             {
+019674:                 builder->function->values[instruction.result.value].definition = id;
+019675:                 selected->result = instruction.result;
+019676:             }
+019677:             else
+019678:             {
+019679:                 // A void builtin still has to hand a value back to whatever
+019680:                 // expression contained it, the same way the other statement-like
+019681:                 // builtins do.
+019682:                 selected->result = c_ir_emit_integer_value(builder, 0, false, token);
+019683:             }
+019684:             selected->argument_count = argument_count;
+019685:             selected->emitted = true;
+019686:             remaining -= 1;
+019687:             continue;
+019688:         }
+019689:         if (selected->builtin_unary != IR_UNARY_COUNT)
+019690:         {
+019691:             u32 argument_start = selected->open_index + 1;
+019692:             u32 argument_end = selected->close_index;
+019693:             IrValueId operand = IR_VALUE_ID_INVALID;
+019694:             if (argument_start >= argument_end)
+019695:             {
+019696:                 return false;
+019697:             }
+019698:             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_UNARY)
+019699:             {
+019700:                 if (!child_success)
+019701:                 {
+019702:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+019703:                 }
+019704:                 operand = child_value;
+019705:             }
+019706:             else
+019707:             {
+019708:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_UNARY, argument_start, argument_end, false);
+019709:             }
+019710:             if (operand.value >= builder->function->value_count)
+019711:             {
+019712:                 return false;
+019713:             }
+019714:             IrTypeId type = builder->function->values[operand.value].canonical_type;
+019715:             IrType* type_value = ir_type_from_id(&builder->program->types, type);
+019716:             if (!type_value || type_value->kind != IR_TYPE_INTEGER)
+019717:             {
+019718:                 return false;
+019719:             }
+019720:             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+019721:             IrValueId result = IR_VALUE_ID_INVALID;
+019722:             if (selected->builtin_unary == IR_UNARY_INTEGER_POPULATION_COUNT)
+019723:             {
+019724:                 result = c_ir_emit_population_count(builder, operand, type, token, instruction_source);
+019725:                 if (result.value == IR_ID_UNDERLYING_INVALID)
+019726:                 {
+019727:                     return false;
+019728:                 }
+019729:             }
+019730:             else
+019731:             {
+019732:                 result = c_ir_add_result(builder, type);
+019733:                 IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, type);
+019734:                 instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+019735:                 instruction.operands[0] = operand;
+019736:                 instruction.operand_count = 1;
+019737:                 instruction.unary_operation = (u8)selected->builtin_unary;
+019738:                 instruction.result = result;
+019739:                 IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+019740:                 builder->function->values[result.value].definition = id;
+019741:             }
+019742:             selected->result = result;
+019743:             selected->argument_count = 1;
+019744:             selected->emitted = true;
+019745:             remaining -= 1;
+019746:             continue;
+019747:         }
+019748:         if (selected->builtin_strlen)
+019749:         {
+019750:             u32 argument_start = selected->open_index + 1;
+019751:             u32 argument_end = selected->close_index;
+019752:             while (argument_start < argument_end && c_token_is_punctuator(&builder->preprocess.tokens[argument_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+019753:                    c_ir_matching_delimiter_cached(builder, argument_start, argument_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) ==
+019754:                        argument_end - 1)
+019755:             {
+019756:                 argument_start += 1;
+019757:                 argument_end -= 1;
+019758:             }
+019759:             u64 length = 0;
+019760:             bool valid = false;
+019761:             if (argument_start < argument_end && builder->preprocess.tokens[argument_start].kind == C_TOKEN_STRING_LITERAL)
+019762:             {
+019763:                 CIrDecodedString decoded = {0};
+019764:                 valid =
+019765:                     c_ir_tokens_are_string_literals(builder->preprocess, argument_start, argument_end) &&
+019766:                     c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, argument_start, argument_end, &decoded) &&
+019767:                     decoded.element_width == 1;
+019768:                 length = decoded.element_count;
+019769:             }
+019770:             else if (argument_end == argument_start + 1 && builder->preprocess.tokens[argument_start].kind == C_TOKEN_IDENTIFIER &&
+019771:                      (string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__func__")) ||
+019772:                       string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__FUNCTION__")) ||
+019773:                       string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[argument_start]), S8("__PRETTY_FUNCTION__"))))
+019774:             {
+019775:                 length = builder->function->name.length;
+019776:                 valid = true;
+019777:             }
+019778:             if (!valid)
+019779:             {
+019780:                 IrValueId argument = IR_VALUE_ID_INVALID;
+019781:                 u32 declaration_index = c_ir_find_function(builder, S8("strlen"));
+019782:                 if (argument_start >= argument_end)
+019783:                 {
+019784:                     return false;
+019785:                 }
+019786:                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_STRLEN)
+019787:                 {
+019788:                     if (!child_success)
+019789:                     {
+019790:                         return C_IR_PREPARED_CALL_STEP_FAILED;
+019791:                     }
+019792:                     argument = child_value;
+019793:                 }
+019794:                 else
+019795:                 {
+019796:                     return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_STRLEN, argument_start, argument_end, false);
+019797:                 }
+019798:                 selected->result = c_ir_emit_call_values(builder, token, declaration_index, &argument, 1);
+019799:                 if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+019800:                 {
+019801:                     return false;
+019802:                 }
+019803:                 selected->argument_count = 1;
+019804:                 selected->emitted = true;
+019805:                 remaining -= 1;
+019806:                 continue;
+019807:             }
+019808:             selected->result = c_ir_emit_integer_value_typed(builder, length, false, token, builder->size_type);
+019809:             selected->argument_count = 1;
+019810:             selected->emitted = true;
+019811:             remaining -= 1;
+019812:             continue;

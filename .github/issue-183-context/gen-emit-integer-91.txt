@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 91/111
+line: 24500
+
+024430:             else
+024431:             {
+024432:                 child_place = c_ir_emit_field_index_place(builder, task.place, selected_index, source);
+024433:             }
+024434:             if (child_place.value == IR_ID_UNDERLYING_INVALID)
+024435:             {
+024436:                 goto c_ir_nested_compound_failed;
+024437:             }
+024438:             for (u32 designator = nested_designator_start; designator < designator_equals;)
+024439:             {
+024440:                 if (c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_LEFT_BRACKET))
+024441:                 {
+024442:                     u32 subscript_close =
+024443:                         c_ir_matching_delimiter_cached(builder, designator, designator_equals, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+024444:                     u64 subscript_value = UINT64_MAX;
+024445:                     if (subscript_close >= designator_equals || c_ir_array_designator_has_range(builder, designator, subscript_close) ||
+024446:                         !c_ir_integer_constant_evaluate(builder->arena, builder, designator + 1, subscript_close, &subscript_value) ||
+024447:                         subscript_value > UINT32_MAX)
+024448:                     {
+024449:                         goto c_ir_nested_compound_failed;
+024450:                     }
+024451:                     IrValueId subscript = c_ir_emit_integer_value(builder, subscript_value, false, builder->preprocess.tokens[designator]);
+024452:                     child_place = c_ir_emit_index_place(builder, child_place, subscript, source);
+024453:                     designator = subscript_close + 1;
+024454:                 }
+024455:                 else
+024456:                 {
+024457:                     child_place = c_ir_emit_field_place_from_value(builder, child_place, builder->preprocess.tokens[designator],
+024458:                                                                    builder->preprocess.tokens[designator + 1]);
+024459:                     designator += 2;
+024460:                 }
+024461:                 if (child_place.value >= builder->function->value_count)
+024462:                 {
+024463:                     goto c_ir_nested_compound_failed;
+024464:                 }
+024465:                 child_type = builder->function->values[child_place.value].canonical_type;
+024466:             }
+024467:             IrType* child = ir_type_from_id(&builder->program->types, child_type);
+024468:             // A string literal initializes an entire character-array member;
+024469:             // brace elision must not descend into its first character.
+024470:             bool string_initializer = child && child->kind == IR_TYPE_ARRAY &&
+024471:                                       c_ir_tokens_are_string_literals(builder->preprocess, value_start, index);
+024472:             // C's brace-elision permits a scalar initializer to reach the
+024473:             // first scalar subobject of a nested aggregate (`.ptr = 3` when
+024474:             // ptr is a struct whose first member is an integer).  The old
+024475:             // lowering attempted an aggregate-to-scalar cast instead.  Only
+024476:             // descend when the value expression itself is not aggregate-valued
+024477:             // so assigning an existing struct/array still stores it whole.
+024478:             CScopeId initializer_scope = C_SCOPE_ID_INVALID;
+024479:             if (builder->declaration_index < builder->parse.declaration_count)
+024480:             {
+024481:                 initializer_scope = builder->parse.declarations[builder->declaration_index].scope;
+024482:             }
+024483:             bool value_is_aggregate = c_ir_initializer_value_is_aggregate_expression(builder, initializer_scope, value_start, index);
+024484:             // Type prediction intentionally stays conservative for a
+024485:             // parenthesized compound literal.  Recognize `(T){...}` here so
+024486:             // it is stored as one aggregate rather than brace-elided into its
+024487:             // first scalar member.
+024488:             if (!value_is_aggregate && value_start + 2 < index &&
+024489:                 c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+024490:             {
+024491:                 u32 type_close = c_ir_matching_delimiter_cached(builder, value_start, index, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+024492:                 value_is_aggregate = type_close + 1 < index &&
+024493:                                      c_token_is_punctuator(&builder->preprocess.tokens[type_close + 1], C_PUNCTUATOR_LEFT_BRACE);
+024494:             }
+024495:             while (child && c_ir_initializer_type_is_aggregate(child) && !value_is_aggregate && !string_initializer &&
+024496:                    !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
+024497:             {
+024498:                 if ((child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR) && child->element_count)
+024499:                 {
+024500:                     IrValueId zero = c_ir_emit_integer_value(builder, 0, false, builder->preprocess.tokens[value_start]);
+024501:                     child_place = c_ir_emit_index_place(builder, child_place, zero, source);
+024502:                     child_type = child->element_type;
+024503:                 }
+024504:                 else if ((child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && child->field_count)
+024505:                 {
+024506:                     u32 first_field = c_ir_initializer_next_field_index(child, 0);
+024507:                     child_place = c_ir_emit_field_index_place(builder, child_place, first_field, source);
+024508:                     if (child_place.value != IR_ID_UNDERLYING_INVALID)
+024509:                     {
+024510:                         child_type = child->fields[first_field].type;
+024511:                     }
+024512:                 }
+024513:                 else
+024514:                 {
+024515:                     child_place = IR_VALUE_ID_INVALID;
+024516:                     break;
+024517:                 }
+024518:                 if (child_place.value == IR_ID_UNDERLYING_INVALID)
+024519:                 {
+024520:                     break;
+024521:                 }
+024522:                 child = ir_type_from_id(&builder->program->types, child_type);
+024523:             }
+024524:             if (child_place.value == IR_ID_UNDERLYING_INVALID)
+024525:             {
+024526:                 goto c_ir_nested_compound_failed;
+024527:             }
+024528:             bool nested = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) &&
+024529:                           c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE) &&
+024530:                           c_token_is_punctuator(&builder->preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
+024531:                           c_ir_matching_delimiter_cached(builder, value_start, index, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == index - 1;
+024532:             if (string_initializer)
+024533:             {
+024534:                 IrValueId string_value = c_ir_emit_string_range_typed(builder, value_start, index, child_type);
+024535:                 if (string_value.value == IR_ID_UNDERLYING_INVALID ||
+024536:                     !c_ir_emit_store_place(builder, child_place, child_type, string_value, source))
+024537:                 {
+024538:                     goto c_ir_nested_compound_failed;
+024539:                 }
+024540:             }
+024541:             else if (nested)
+024542:             {
+024543:                 if (frame->as.nested_compound_literal.state->task_count >= frame->as.nested_compound_literal.state->capacity)
+024544:                 {
+024545:                     goto c_ir_nested_compound_failed;
+024546:                 }
+024547:                 frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = (CIrNestedInitializerTask){
+024548:                     .place = child_place,
+024549:                     .type = child_type,
+024550:                     .open = value_start,
+024551:                     .close = index - 1,
+024552:                 };
+024553:             }
+024554:             else
+024555:             {
+024556:                 u32 scalar_start = value_start;
+024557:                 u32 scalar_end = index;
+024558:                 if (child && child->kind != IR_TYPE_ARRAY && child->kind != IR_TYPE_VECTOR && child->kind != IR_TYPE_STRUCT && child->kind != IR_TYPE_UNION && scalar_end > scalar_start + 1 &&
+024559:                     c_token_is_punctuator(&builder->preprocess.tokens[scalar_start], C_PUNCTUATOR_LEFT_BRACE) &&
+024560:                     c_token_is_punctuator(&builder->preprocess.tokens[scalar_end - 1], C_PUNCTUATOR_RIGHT_BRACE))
+024561:                 {
+024562:                     scalar_start += 1;
+024563:                     scalar_end -= 1;
+024564:                 }
+024565:                 frame->as.nested_compound_literal.state->child_place = child_place;
+024566:                 frame->as.nested_compound_literal.state->child_type = child_type;
+024567:                 frame->as.nested_compound_literal.state->source = source;
+024568:                 frame->as.nested_compound_literal.state->item_start = item_start;
+024569:                 frame->as.nested_compound_literal.state->index = index;
+024570:                 frame->as.nested_compound_literal.state->next_index = next_index;
+024571:                 frame->as.nested_compound_literal.state->selected_index = selected_index;
+024572:                 frame->as.nested_compound_literal.state->promoted_designator = promoted_designator;
+024573:                 frame->stage = C_IR_LOWER_STAGE_CHILD;
+024574:                 if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+024575:                                                         .kind = C_IR_LOWER_FRAME_EXPRESSION,
+024576:                                                         .as.expression =
+024577:                                                             {
+024578:                                                                 .start = scalar_start,
+024579:                                                                 .end = scalar_end,
+024580:                                                             },
+024581:                                                     }))
+024582:                 {
+024583:                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+024584:                 }
+024585:                 return;
+024586:             }
+024587:             if (!promoted_designator)
+024588:             {
+024589:                 next_index = selected_index + 1;
+024590:             }
+024591:             item_start = index + 1;
+024592:             index += 1;
+024593:         }
+024594:         frame->as.nested_compound_literal.state->task_active = false;
+024595:     }
+024596:     {
+024597:         CToken root_token = builder->preprocess.tokens[frame->as.nested_compound_literal.state->root_open];
+024598:         IrValueId result = c_ir_emit_load_place(builder, frame->as.nested_compound_literal.state->root_place,
+024599:                                                 frame->as.nested_compound_literal.state->root_type,
+024600:                                                 c_ir_token_source_range(builder, root_token));
+024601:         c_ir_lower_frame_finish(builder, result.value != IR_ID_UNDERLYING_INVALID, result);
+024602:         return;
+024603:     }
+024604: c_ir_nested_compound_failed:
+024605:     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+024606: }
+024607: 
+024608: // C11 6.7.9p9: unnamed members of a structure object take no part in
+024609: // initialization, so a positional item skips an anonymous bit-field and lands
+024610: // on the next member that has a name. The constant path spells the same rule
+024611: // in c_ir_constant_initializer_field_at, and the two must agree or a local and
+024612: // a static built from the same brace list read back differently. A named
+024613: // member's own index is returned unchanged, so designators -- which resolve
+024614: // their field by name before this runs -- are unaffected.
+024615: BUSTER_C_INTERNAL u32 c_ir_compound_literal_positional_field(IrType* type, u32 field_index)
+024616: {
+024617:     u32 result = field_index;
+024618:     if (type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION))
+024619:     {
+024620:         while (result < type->field_count && type->fields[result].is_bit_field && !type->fields[result].name.length)
+024621:         {
+024622:             result += 1;
+024623:         }
+024624:     }
+024625:     return result;
+024626: }
+024627: 
+024628: BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+024629: {
+024630:     CIrLowerMachine* machine = &builder->lower_machine;

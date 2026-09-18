@@ -1,0 +1,286 @@
+path: src/buster/lib/compiler/frontend/c/c_parse.c
+needle: C_ENTITY_ENUMERATOR
+occurrence: 2/6
+line: 4349
+
+004229:                             cast_type = candidate->type;
+004230:                             type_index = type_end;
+004231:                             break;
+004232:                         }
+004233:                     }
+004234:                 }
+004235:                 if (cast_type.value != C_ID_UNDERLYING_INVALID)
+004236:                 {
+004237:                     cast_type = c_parse_pointer_chain(result, preprocess, cast_type, &type_index, type_end);
+004238:                     if (cast_type.value != C_ID_UNDERLYING_INVALID && type_index == type_end)
+004239:                     {
+004240:                         expression_index = cast_close;
+004241:                         continue;
+004242:                     }
+004243:                 }
+004244:             }
+004245:         }
+004246:         if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))) &&
+004247:             expression_index + 2 < expression_count && c_token_is_punctuator(&preprocess.tokens[start + 3 + expression_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+004248:         {
+004249:             u32 type_start = start + 4 + expression_index;
+004250:             u32 type_end = type_start;
+004251:             u32 type_depth = 1;
+004252:             while (type_end < expression_end && type_depth)
+004253:             {
+004254:                 CToken type_token = preprocess.tokens[type_end];
+004255:                 if (c_token_is_punctuator(&type_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+004256:                 {
+004257:                     type_depth += 1;
+004258:                 }
+004259:                 else if (c_token_is_punctuator(&type_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+004260:                 {
+004261:                     type_depth -= 1;
+004262:                     if (!type_depth)
+004263:                     {
+004264:                         break;
+004265:                     }
+004266:                 }
+004267:                 type_end += 1;
+004268:             }
+004269:             if (type_depth || type_end == type_start)
+004270:             {
+004271:                 return false;
+004272:             }
+004273:             // `sizeof (T){...}` sizes the compound literal, not the type name
+004274:             // the parenthesis closes: the size is the same either way, but the
+004275:             // initializer has to be consumed here or it stays in the
+004276:             // retokenized integer expression and fails to evaluate. A postfix
+004277:             // suffix on the literal is left unclaimed, so it still reports
+004278:             // "not an integer constant expression" instead of folding the
+004279:             // whole literal's size.
+004280:             u32 literal_close = UINT32_MAX;
+004281:             if (type_end + 1 < expression_end && c_token_is_punctuator(&preprocess.tokens[type_end + 1], C_PUNCTUATOR_LEFT_BRACE))
+004282:             {
+004283:                 u32 initializer_close = c_parse_matching_delimiter(preprocess, type_end + 1, expression_end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+004284:                 literal_close = initializer_close < expression_end ? initializer_close : UINT32_MAX;
+004285:             }
+004286:             u32 type_index = type_start;
+004287:             // A lone identifier the assertion's scope binds to an object is
+004288:             // that object, whatever typedef shares the spelling further out:
+004289:             // ctypes declares `typedef PyObject *string;` at file scope and
+004290:             // then asserts over a local `char string[256]`, and the type
+004291:             // interpretation must lose to the shadow before it runs.
+004292:             bool shadowed_object = false;
+004293:             if (type_start + 1 == type_end && preprocess.tokens[type_start].kind == C_TOKEN_IDENTIFIER)
+004294:             {
+004295:                 CEntityId shadow_entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[type_start]);
+004296:                 shadowed_object = shadow_entity.value < result->entity_count && result->entities[shadow_entity.value].kind != C_ENTITY_TYPEDEF;
+004297:             }
+004298:             // The machineless half already resolves in the assertion's scope;
+004299:             // the machine half has to as well, or a block-local typedef
+004300:             // shadowing an outer name of the same spelling sizes the outer
+004301:             // type.
+004302:             CTypeId type = shadowed_object ? C_TYPE_ID_INVALID
+004303:                            : machine       ? c_parse_scalar_type_in_scope(machine, result, preprocess, scope, type_start, type_end, &type_index)
+004304:                                            : c_parse_machineless_base_type(result, preprocess, scope, type_start, type_end, &type_index);
+004305:             if (type.value != C_ID_UNDERLYING_INVALID)
+004306:             {
+004307:                 type = c_parse_pointer_chain(result, preprocess, type, &type_index, type_end);
+004308:                 type = c_parse_array_suffixes(result, preprocess, type, &type_index, type_end);
+004309:             }
+004310:             u64 size = 0;
+004311:             u32 alignment = 0;
+004312:             bool have_layout = false;
+004313:             if ((type.value == C_ID_UNDERLYING_INVALID || type_index != type_end) && string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")))
+004314:             {
+004315:                 if (machine)
+004316:                 {
+004317:                     type = C_TYPE_ID_INVALID;
+004318:                     c_parse_sizeof_expression_type(machine, arena, preprocess, result, scope, type_start, type_end, &type);
+004319:                 }
+004320:                 else
+004321:                 {
+004322:                     // A machineless caller cannot enter the type-parse
+004323:                     // machine for a sizeof over a full expression; the
+004324:                     // operand-layout walk answers directly instead.
+004325:                     have_layout = c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope, type_start, type_end, &size, &alignment);
+004326:                     if (!have_layout)
+004327:                     {
+004328:                         return false;
+004329:                     }
+004330:                 }
+004331:                 type_index = type_end;
+004332:             }
+004333:             if (!have_layout && (type.value == C_ID_UNDERLYING_INVALID || type_index != type_end ||
+004334:                                  !c_parse_type_layout(machine, arena, preprocess, result, type, &size, &alignment)))
+004335:             {
+004336:                 return false;
+004337:             }
+004338:             bool evaluation_word_is_alignof = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
+004339:             token = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), evaluation_word_is_alignof ? alignment : size),
+004340:                                   C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+004341:             expression_index = (literal_close != UINT32_MAX ? literal_close : type_end) - (start + 2);
+004342:             tokens[token_count++] = token;
+004343:             continue;
+004344:         }
+004345:         if (token.kind == C_TOKEN_IDENTIFIER)
+004346:         {
+004347:             CEntityId enumerator_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+004348:             CEntity* constant = enumerator_id.value < result->entity_count &&
+004349:                                         (result->entities[enumerator_id.value].kind == C_ENTITY_ENUMERATOR ||
+004350:                                          (result->entities[enumerator_id.value].is_constexpr && result->entities[enumerator_id.value].has_constant_value))
+004351:                                     ? &result->entities[enumerator_id.value]
+004352:                                     : 0;
+004353:             if (!constant)
+004354:             {
+004355:                 return false;
+004356:             }
+004357:             if (constant->constant_is_negative)
+004358:             {
+004359:                 tokens[token_count++] = c_space_token(&evaluation_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
+004360:             }
+004361:             tokens[token_count++] = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), constant->constant_value),
+004362:                                                   C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+004363:             continue;
+004364:         }
+004365:         tokens[token_count++] = c_space_retoken(&evaluation_space, preprocess.spelling_base, token);
+004366:     }
+004367:     CPreprocessResult evaluation = {
+004368:         .diagnostics = arena_allocate(arena, CDiagnostic, token_count + 1),
+004369:         .target = preprocess.target,
+004370:         .dialect = preprocess.dialect,
+004371:     };
+004372:     return c_integer_expression_evaluate(arena, evaluation_space.base, tokens, token_count, 65536, &evaluation, value_out) && !evaluation.diagnostic_count;
+004373: }
+004374: 
+004375: BUSTER_C_INTERNAL bool c_parse_integer_constant_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+004376:                                                         CScopeId scope, u32 start, u32 end, u64* value_out)
+004377: {
+004378:     if (start >= end)
+004379:     {
+004380:         return false;
+004381:     }
+004382:     u32 expression_count = end - start;
+004383:     CToken* tokens = arena_allocate(arena, CToken, expression_count + 4);
+004384:     // The wrapper tokens reference the fixed prelude of the shared spelling
+004385:     // space; their recovered locations are the prelude's placeholder, which
+004386:     // no diagnostic path reads (the expression tokens keep their own).
+004387:     tokens[0] = (CToken){
+004388:         .offset = C_SPELLING_STATIC_ASSERT,
+004389:         .length = C_SPELLING_STATIC_ASSERT_LENGTH,
+004390:         .kind = C_TOKEN_IDENTIFIER,
+004391:     };
+004392:     tokens[1] = (CToken){
+004393:         .offset = C_SPELLING_LEFT_PARENTHESIS,
+004394:         .length = 1,
+004395:         .kind = C_TOKEN_PUNCTUATOR,
+004396:         .punctuator = C_PUNCTUATOR_LEFT_PARENTHESIS,
+004397:     };
+004398:     memcpy(tokens + 2, preprocess.tokens + start, sizeof(*tokens) * expression_count);
+004399:     tokens[expression_count + 2] = (CToken){
+004400:         .offset = C_SPELLING_RIGHT_PARENTHESIS,
+004401:         .length = 1,
+004402:         .kind = C_TOKEN_PUNCTUATOR,
+004403:         .punctuator = C_PUNCTUATOR_RIGHT_PARENTHESIS,
+004404:     };
+004405:     tokens[expression_count + 3] = (CToken){
+004406:         .offset = C_SPELLING_SEMICOLON,
+004407:         .length = 1,
+004408:         .kind = C_TOKEN_PUNCTUATOR,
+004409:         .punctuator = C_PUNCTUATOR_SEMICOLON,
+004410:     };
+004411:     CPreprocessResult synthetic = preprocess;
+004412:     synthetic.tokens = tokens;
+004413:     synthetic.token_count = expression_count + 4;
+004414:     String8 ignored_message = {0};
+004415:     return c_parse_static_assert_evaluate(machine, arena, synthetic, result,
+004416:                                           (CDeclaration){
+004417:                                               .token_count = expression_count + 4,
+004418:                                           },
+004419:                                           scope, value_out, &ignored_message);
+004420: }
+004421: 
+004422: // C11 6.3.2.3p3 gives a null pointer constant two spellings: an integer
+004423: // constant expression with the value 0, or such an expression cast to
+004424: // `void *`.  The second is the only one that survives as a conditional
+004425: // operand, and it is what musl's <tgmath.h> selects a type with --
+004426: // `0 ? (t *)0 : (void *)!(c)` names `t` exactly when the `void *` arm is one.
+004427: //
+004428: // The type gate is not a shortcut, it is the whole correctness of the answer:
+004429: // the constant walk below strips every cast before evaluating, so
+004430: // `(double *)0` folds to zero just as `(void *)0` does, and without the gate
+004431: // any zero-valued pointer cast would claim to be a null pointer constant.
+004432: // The walk is entered machineless -- the caller is already inside a type-parse
+004433: // frame -- so an operand whose value needs the machine (a `sizeof` over a type
+004434: // only a frame can resolve) simply answers no, which is the conservative half.
+004435: BUSTER_C_INTERNAL bool c_parse_range_is_null_pointer_constant(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+004436:                                                                 CTypeId type_id, u32 start, u32 end)
+004437: {
+004438:     type_id = c_parse_unqualified_type(result, type_id);
+004439:     bool constant = false;
+004440:     if (type_id.value < result->type_count && start < end)
+004441:     {
+004442:         // By value: c_parse_unqualified_type may append a type and move the
+004443:         // table out from under a borrowed row.
+004444:         CType type = result->types[type_id.value];
+004445:         bool void_pointer = false;
+004446:         if (type.kind == C_TYPE_POINTER)
+004447:         {
+004448:             CTypeId element = c_parse_unqualified_type(result, type.element_type);
+004449:             void_pointer = element.value < result->type_count && result->types[element.value].kind == C_TYPE_VOID;
+004450:         }
+004451:         if (void_pointer || c_parse_expression_integer_kind(type.kind))
+004452:         {
+004453:             // Strip the pointer casts in front of the constant by shape, not
+004454:             // by resolving them: a parenthesized group whose last token is
+004455:             // `*` is never a parenthesized expression, so it can only be a
+004456:             // pointer cast.  The walk below resolves a cast type of its own,
+004457:             // but only through the machineless base-type reader, which cannot
+004458:             // read the `(__typeof__(...) *)` musl's `__type2` writes around
+004459:             // its inner `__type1` -- and one unstripped cast is the whole
+004460:             // answer, because the operand it hides is the literal `0`.
+004461:             while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+004462:             {
+004463:                 u32 close = c_parse_matching_delimiter(preprocess, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+004464:                 if (close + 1 >= end || close < start + 2 || !c_token_is_punctuator(&preprocess.tokens[close - 1], C_PUNCTUATOR_STAR))
+004465:                 {
+004466:                     break;
+004467:                 }
+004468:                 start = close + 1;
+004469:             }
+004470:             u64 value = 0;
+004471:             constant = c_parse_integer_constant_range(0, arena, preprocess, result, scope, start, end, &value) && !value;
+004472:         }
+004473:     }
+004474:     return constant;
+004475: }
+004476: 
+004477: BUSTER_C_INTERNAL bool c_parse_static_assert_has_unresolved_array(CPreprocessResult preprocess, CParseResult* result, CDeclaration declaration, CScopeId scope)
+004478: {
+004479:     u32 start = declaration.token_start + 2;
+004480:     u32 end = declaration.token_start + declaration.token_count;
+004481:     for (u32 token_index = start; token_index < end; token_index += 1)
+004482:     {
+004483:         CToken token = preprocess.tokens[token_index];
+004484:         if (token.kind != C_TOKEN_IDENTIFIER)
+004485:         {
+004486:             continue;
+004487:         }
+004488:         CEntityId entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+004489:         if (entity_id.value >= result->entity_count)
+004490:         {
+004491:             continue;
+004492:         }
+004493:         CEntity* entity = result->entities + entity_id.value;
+004494:         if (entity->kind != C_ENTITY_LOCAL && entity->kind != C_ENTITY_OBJECT)
+004495:         {
+004496:             continue;
+004497:         }
+004498:         CTypeId type_id = entity->type;
+004499:         while (type_id.value < result->type_count && result->types[type_id.value].has_unqualified_type)
+004500:         {
+004501:             type_id = result->types[type_id.value].unqualified_type;
+004502:         }
+004503:         if (type_id.value < result->type_count)
+004504:         {
+004505:             CType* type = result->types + type_id.value;
+004506:             if (type->kind == C_TYPE_ARRAY && type->array_bound < result->array_bound_count &&
+004507:                 !result->array_bounds[type->array_bound].token_count && !result->array_bounds[type->array_bound].is_star &&
+004508:                 !result->array_bounds[type->array_bound].has_inferred_count)
+004509:             {

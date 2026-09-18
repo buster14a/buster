@@ -1,0 +1,276 @@
+path: src/buster/lib/compiler/frontend/c/c_source.c
+needle: c_conditional_number(
+occurrence: 2/5
+line: 5607
+
+005517:                                                       string_equal(argument, S8("apple"))
+005518:                         : is_target_environment ? false
+005519:                                                 : false;
+005520:         }
+005521:         else if (!has_feature)
+005522:         {
+005523:             return false;
+005524:         }
+005525:         node->token.token.kind = C_TOKEN_PREPROCESSING_NUMBER;
+005526:         node->token.token.punctuator = C_PUNCTUATOR_NONE;
+005527:         node->token.token.offset = supported ? C_SPELLING_ONE : C_SPELLING_ZERO;
+005528:         node->token.token.length = 1;
+005529:         node->token.token.symbol = 0;
+005530:         node->next = close->next;
+005531:     }
+005532:     return true;
+005533: }
+005534: 
+005535: BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
+005536:                                                                      CPpStampTable* stamps, CPpToken* tokens, u32 token_count, u32 expansion_limit,
+005537:                                                                      CPreprocessResult* result,
+005538:                                                                      CPreprocessOptions* options, String8 including_path,
+005539:                                                                      CIncludeSearchOrigin including_origin, u64* value_out)
+005540: {
+005541:     bool valid = true;
+005542:     char8 const* base = space->base;
+005543:     CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
+005544:     u32 transformed_count = 0;
+005545:     for (u32 token_index = 0; valid && token_index < token_count; token_index += 1)
+005546:     {
+005547:         CPpToken token = tokens[token_index];
+005548:         if (token.token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token.token, S8("defined")))
+005549:         {
+005550:             u32 name_index = token_index + 1;
+005551:             bool parenthesized = name_index < token_count && c_token_is_punctuator(&tokens[name_index].token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+005552:             name_index += parenthesized;
+005553:             if (name_index >= token_count || tokens[name_index].token.kind != C_TOKEN_IDENTIFIER)
+005554:             {
+005555:                 valid = false;
+005556:             }
+005557:             else
+005558:             {
+005559:                 CMacro* macro = c_macro_find_token(first_macro, symbols, base, &tokens[name_index].token);
+005560:                 CPpToken replacement = token;
+005561:                 replacement.token.kind = C_TOKEN_PREPROCESSING_NUMBER;
+005562:                 replacement.token.punctuator = C_PUNCTUATOR_NONE;
+005563:                 replacement.token.offset = macro && macro->definition.defined ? C_SPELLING_ONE : C_SPELLING_ZERO;
+005564:                 replacement.token.length = 1;
+005565:                 replacement.token.symbol = 0;
+005566:                 transformed[transformed_count++] = replacement;
+005567:                 token_index = name_index;
+005568:                 if (parenthesized)
+005569:                 {
+005570:                     valid = token_index + 1 < token_count && c_token_is_punctuator(&tokens[token_index + 1].token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+005571:                     token_index += 1;
+005572:                 }
+005573:             }
+005574:         }
+005575:         else
+005576:         {
+005577:             transformed[transformed_count++] = token;
+005578:         }
+005579:     }
+005580:     CPreprocessTokenNode* first_expanded = 0;
+005581:     CPreprocessTokenNode* last_expanded = 0;
+005582:     u64 expanded_count = 0;
+005583:     if (valid)
+005584:     {
+005585:         valid = c_preprocess_expand(arena, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
+005586:                                     &last_expanded, &expanded_count, expansion_limit, result);
+005587:     }
+005588:     if (valid)
+005589:     {
+005590:         valid = c_conditional_feature_operators(arena, space, symbols, first_macro, first_expanded, options, including_path, including_origin);
+005591:     }
+005592:     if (valid)
+005593:     {
+005594:         u64* values = arena_allocate(arena, u64, expanded_count + 1);
+005595:         u8* value_flags = arena_allocate(arena, u8, expanded_count + 1);
+005596:         CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
+005597:         u32 value_count = 0;
+005598:         u32 operation_count = 0;
+005599:         bool expect_operand = true;
+005600:         for (CPreprocessTokenNode* node = first_expanded; valid && node; node = node->next)
+005601:         {
+005602:             CToken token = node->token.token;
+005603:             if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+005604:             {
+005605:                 u64 value = 0;
+005606:                 String8 number_spelling = c_token_spelling(base, token);
+005607:                 valid = expect_operand && c_conditional_number(number_spelling, &value);
+005608:                 if (valid)
+005609:                 {
+005610:                     // The literal is uintmax_t when it says so or when its
+005611:                     // value does not fit intmax_t. Characters and keywords
+005612:                     // below remain signed regardless of their bit patterns.
+005613:                     bool literal_unsigned = value > (u64)INT64_MAX;
+005614:                     for (u64 suffix_index = 0; suffix_index < number_spelling.length; suffix_index += 1)
+005615:                     {
+005616:                         literal_unsigned |= number_spelling.pointer[suffix_index] == 'u' || number_spelling.pointer[suffix_index] == 'U';
+005617:                     }
+005618:                     value_flags[value_count] = literal_unsigned ? C_CONDITIONAL_VALUE_UNSIGNED : 0;
+005619:                     values[value_count++] = value;
+005620:                     expect_operand = false;
+005621:                 }
+005622:             }
+005623:             else if (token.kind == C_TOKEN_CHARACTER_LITERAL)
+005624:             {
+005625:                 u64 character = 0;
+005626:                 CTypeKind character_kind = C_TYPE_INVALID;
+005627:                 valid = expect_operand && c_ir_decode_character_value(arena, base, token, result->target, &character, &character_kind);
+005628:                 if (valid)
+005629:                 {
+005630:                     value_flags[value_count] = 0;
+005631:                     values[value_count++] = character;
+005632:                     expect_operand = false;
+005633:                 }
+005634:             }
+005635:             else if (token.kind == C_TOKEN_IDENTIFIER)
+005636:             {
+005637:                 valid = expect_operand;
+005638:                 if (valid)
+005639:                 {
+005640:                     value_flags[value_count] = 0;
+005641:                     values[value_count++] = c_preprocess_dialect_is_c23(result->dialect) && c_token_spelling_equal(base, token, S8("true"));
+005642:                     expect_operand = false;
+005643:                 }
+005644:             }
+005645:             else if (token.kind != C_TOKEN_PUNCTUATOR)
+005646:             {
+005647:                 valid = false;
+005648:             }
+005649:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+005650:             {
+005651:                 valid = expect_operand;
+005652:                 if (valid)
+005653:                 {
+005654:                     operations[operation_count++] = C_CONDITIONAL_OPEN;
+005655:                 }
+005656:             }
+005657:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+005658:             {
+005659:                 valid = !expect_operand;
+005660:                 while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
+005661:                 {
+005662:                     valid = c_conditional_apply(operations[--operation_count], values, value_flags, &value_count);
+005663:                 }
+005664:                 valid = valid && operation_count != 0;
+005665:                 if (valid)
+005666:                 {
+005667:                     operation_count -= 1;
+005668:                 }
+005669:             }
+005670:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+005671:             {
+005672:                 valid = !expect_operand;
+005673:                 u32 precedence = c_conditional_precedence(C_CONDITIONAL_QUESTION);
+005674:                 while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN &&
+005675:                        c_conditional_precedence(operations[operation_count - 1]) > precedence)
+005676:                 {
+005677:                     valid = c_conditional_apply(operations[--operation_count], values, value_flags, &value_count);
+005678:                 }
+005679:                 if (valid)
+005680:                 {
+005681:                     operations[operation_count++] = C_CONDITIONAL_QUESTION;
+005682:                     expect_operand = true;
+005683:                 }
+005684:             }
+005685:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+005686:             {
+005687:                 valid = !expect_operand;
+005688:                 while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_QUESTION)
+005689:                 {
+005690:                     CConditionalOperator previous = operations[--operation_count];
+005691:                     valid = previous != C_CONDITIONAL_OPEN && c_conditional_apply(previous, values, value_flags, &value_count);
+005692:                 }
+005693:                 valid = valid && operation_count != 0;
+005694:                 if (valid)
+005695:                 {
+005696:                     operations[operation_count - 1] = C_CONDITIONAL_SELECT;
+005697:                     expect_operand = true;
+005698:                 }
+005699:             }
+005700:             else
+005701:             {
+005702:                 CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+005703:                 valid = c_conditional_operator(token, expect_operand, &operation);
+005704:                 bool unary = c_conditional_is_unary(operation);
+005705:                 valid = valid && expect_operand == unary;
+005706:                 u32 precedence = c_conditional_precedence(operation);
+005707:                 while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
+005708:                 {
+005709:                     CConditionalOperator previous = operations[operation_count - 1];
+005710:                     u32 previous_precedence = c_conditional_precedence(previous);
+005711:                     if (previous_precedence < precedence || (unary && previous_precedence == precedence))
+005712:                     {
+005713:                         break;
+005714:                     }
+005715:                     operation_count -= 1;
+005716:                     valid = c_conditional_apply(previous, values, value_flags, &value_count);
+005717:                 }
+005718:                 if (valid)
+005719:                 {
+005720:                     operations[operation_count++] = operation;
+005721:                     expect_operand = true;
+005722:                 }
+005723:             }
+005724:         }
+005725:         valid = valid && !expect_operand;
+005726:         while (valid && operation_count)
+005727:         {
+005728:             CConditionalOperator operation = operations[--operation_count];
+005729:             valid = operation != C_CONDITIONAL_OPEN && operation != C_CONDITIONAL_QUESTION &&
+005730:                     c_conditional_apply(operation, values, value_flags, &value_count);
+005731:         }
+005732:         valid = valid && value_count == 1 && !(value_flags[0] & C_CONDITIONAL_VALUE_FAULT);
+005733:         if (valid)
+005734:         {
+005735:             *value_out = values[0];
+005736:         }
+005737:     }
+005738:     return valid;
+005739: }
+005740: 
+005741: // The parse-side entry point: no macro table, so expansion is a pass-through
+005742: // and nothing ever allocates spelling bytes — the read-only space view over
+005743: // the finished result is enough, and any allocation attempt fails loudly.
+005744: BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* spelling_base, CToken* tokens, u32 token_count, u32 expansion_limit,
+005745:                                                        CPreprocessResult* result, u64* value_out)
+005746: {
+005747:     CSpellingSpace view = {
+005748:         .base = (char8*)spelling_base,
+005749:     };
+005750:     CPpToken* wrapped = arena_allocate(arena, CPpToken, token_count);
+005751:     for (u32 token_index = 0; token_index < token_count; token_index += 1)
+005752:     {
+005753:         wrapped[token_index] = (CPpToken){
+005754:             .token = tokens[token_index],
+005755:         };
+005756:     }
+005757:     return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, result, 0, (String8){0},
+005758:                                                        (CIncludeSearchOrigin){0}, value_out);
+005759: }
+005760: 
+005761: BUSTER_C_INTERNAL bool c_conditional_evaluate(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro, CPpStampTable* stamps,
+005762:                                                 CPpToken* tokens, u32 token_count, u32 expansion_limit, CPreprocessResult* result, CPreprocessOptions options,
+005763:                                                 String8 including_path, CIncludeSearchOrigin including_origin, bool* value_out)
+005764: {
+005765:     u64 value = 0;
+005766:     bool valid =
+005767:         c_integer_expression_evaluate_with_features(arena, space, symbols, first_macro, stamps, tokens, token_count, expansion_limit, result, &options, including_path,
+005768:                                                     including_origin, &value);
+005769:     *value_out = value != 0;
+005770:     return valid;
+005771: }
+005772: 
+005773: typedef struct CConditionalFrame CConditionalFrame;
+005774: struct CConditionalFrame
+005775: {
+005776:     CConditionalFrame* previous;
+005777:     CSourceLocation location;
+005778:     bool parent_active;
+005779:     bool active;
+005780:     bool branch_taken;
+005781:     bool else_seen;
+005782: };
+005783: 
+005784: BUSTER_C_INTERNAL bool c_preprocess_is_active(CConditionalFrame* conditional)
+005785: {
+005786:     return !conditional || conditional->active;
+005787: }

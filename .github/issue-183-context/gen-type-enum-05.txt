@@ -1,0 +1,186 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: C_TYPE_ENUM
+occurrence: 5/5
+line: 48237
+
+048167:             {
+048168:                 IrType* aggregate_type = ir_type_from_id(&program->types, c_type_ir_map[type_index]);
+048169:                 if (!aggregate_type || aggregate_type->layout.resolved || !c_type->is_complete)
+048170:                 {
+048171:                     continue;
+048172:                 }
+048173:                 // The layout runs in bits, which is what the System V rule for
+048174:                 // bit-fields is written in: a bit-field takes the next
+048175:                 // available bits and only moves on to the next storage unit of
+048176:                 // its declared type when it would otherwise straddle one. A
+048177:                 // per-declared-type unit model instead started a fresh unit
+048178:                 // whenever the declared type changed, so
+048179:                 // `struct { int a:3; unsigned char b:1; }` measured 8 bytes
+048180:                 // where every other C compiler on the target measures 4.
+048181:                 u64 bit_position = 0;
+048182:                 u32 alignment = 1;
+048183:                 // `__attribute__((packed))` on the definition and `#pragma
+048184:                 // pack(N)` around it ask the same question: the ceiling a
+048185:                 // member's alignment is clamped to. Packed is that ceiling at
+048186:                 // one byte. c_parse_type_layout folds sizeof through the same
+048187:                 // two inputs, and the two must agree or a folded size
+048188:                 // contradicts the object it sizes.
+048189:                 CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(&parse, (CTypeId){.value = type_index});
+048190:                 u32 pack_alignment = c_type->definition_start < preprocess.token_count
+048191:                                          ? c_preprocess_pack_alignment(&preprocess, c_type->definition_start)
+048192:                                          : 0;
+048193:                 if (aggregate_attributes.is_packed)
+048194:                 {
+048195:                     pack_alignment = 1;
+048196:                 }
+048197:                 bool packed_fields = false;
+048198:                 bool fields_resolved = true;
+048199:                 // One report per aggregate, whatever the definition got wrong:
+048200:                 // the diagnostic budget allows one diagnostic per type, and the
+048201:                 // rejected alignment specifier and the named zero-width
+048202:                 // bit-field share it, so the kind travels with the message
+048203:                 // rather than being fixed at the emission site. The member that
+048204:                 // carried the rejected construct is kept as an index rather
+048205:                 // than as a location, so an aggregate that lays out cleanly --
+048206:                 // every aggregate of a working translation unit -- does not
+048207:                 // recover a source location it will not use. The out-of-line
+048208:                 // rejection string is written only on rejection, which is why
+048209:                 // it is initialized once here rather than per member.
+048210:                 String8 definition_rejection = {0};
+048211:                 String8 member_rejection = {0};
+048212:                 u32 definition_rejection_member = UINT32_MAX;
+048213:                 CDiagnosticKind definition_rejection_kind = C_DIAGNOSTIC_INVALID_ALIGNMENT;
+048214:                 for (u32 field_index = 0; field_index < c_type->member_count; field_index += 1)
+048215:                 {
+048216:                     CMember* member = &parse.members[c_type->member_start + field_index];
+048217:                     if (member->type.value >= parse.type_count)
+048218:                     {
+048219:                         fields_resolved = false;
+048220:                         break;
+048221:                     }
+048222:                     IrTypeId field_type_id = c_type_ir_map[member->type.value];
+048223:                     // A bit-field of enumerated type is read with the
+048224:                     // signedness C leaves to the implementation, and the
+048225:                     // choice GCC and Clang make is the enum's own underlying
+048226:                     // type: unsigned when no enumerator is negative. Read as
+048227:                     // a signed field instead, QuickJS's
+048228:                     // `JSClosureTypeEnum closure_type : 3` answers -3 for the
+048229:                     // enumerator 5 and its switch falls to `default: abort()`.
+048230:                     if (member->is_bit_field)
+048231:                     {
+048232:                         CType const* enumeration = &parse.types[member->type.value];
+048233:                         if (enumeration->has_unqualified_type && enumeration->unqualified_type.value < parse.type_count)
+048234:                         {
+048235:                             enumeration = &parse.types[enumeration->unqualified_type.value];
+048236:                         }
+048237:                         if (enumeration->kind == C_TYPE_ENUM && enumeration->element_type.value >= parse.type_count)
+048238:                         {
+048239:                             bool negative_enumerator = false;
+048240:                             for (u32 enum_index = 0; enum_index < enumeration->enum_member_count; enum_index += 1)
+048241:                             {
+048242:                                 negative_enumerator |= parse.enum_members[enumeration->enum_member_start + enum_index].is_negative;
+048243:                             }
+048244:                             if (!negative_enumerator)
+048245:                             {
+048246:                                 field_type_id = constant_builder.scalar_types[C_TYPE_UNSIGNED_INT];
+048247:                             }
+048248:                         }
+048249:                     }
+048250:                     IrType* field_type = ir_type_from_id(&program->types, field_type_id);
+048251:                     // A `void` member lays out beside the others rather than
+048252:                     // holding the whole definition unresolved, exactly as a
+048253:                     // rejected alignment specifier does: the program hears
+048254:                     // about the member it wrote instead of about a type that
+048255:                     // never got a layout, and the report fails the driver.
+048256:                     if (c_ir_type_is_void_object(program, field_type_id) && !definition_rejection.length)
+048257:                     {
+048258:                         definition_rejection = S8("a member may not have type 'void'");
+048259:                         definition_rejection_member = field_index;
+048260:                         definition_rejection_kind = C_DIAGNOSTIC_INVALID_VOID_OBJECT;
+048261:                     }
+048262:                     if (!field_type || !field_type->layout.resolved || !field_type->layout.alignment)
+048263:                     {
+048264:                         fields_resolved = false;
+048265:                         break;
+048266:                     }
+048267:                     u32 natural_alignment = field_type->layout.alignment;
+048268:                     u32 field_alignment = natural_alignment;
+048269:                     // A byte ceiling is what makes a bit-field take the next
+048270:                     // bit rather than the next storage unit, so the predicate
+048271:                     // is "packed to one byte", not "ended up byte-aligned": an
+048272:                     // `unsigned char` bit-field is naturally byte-aligned and
+048273:                     // still obeys the storage-unit rule.
+048274:                     bool packed_field = member->is_packed || pack_alignment == 1;
+048275:                     if (packed_field)
+048276:                     {
+048277:                         field_alignment = 1;
+048278:                     }
+048279:                     else if (pack_alignment)
+048280:                     {
+048281:                         field_alignment = BUSTER_MIN(field_alignment, pack_alignment);
+048282:                     }
+048283:                     packed_fields |= packed_field;
+048284:                     // A rejected specifier still hands back the alignment the
+048285:                     // member can be laid out with, so the definition finishes
+048286:                     // and the program hears about the attribute it wrote
+048287:                     // rather than about a type that never got a layout.
+048288:                     // Almost no member carries a specifier at all, and the
+048289:                     // evaluation answers the alignment it was handed for the
+048290:                     // ones that do not; asking first keeps the call itself off
+048291:                     // the path every other member takes.
+048292:                     u32 field_alignment_request = 0;
+048293:                     CIrAlignmentStatus member_status =
+048294:                         member->alignment_count ? c_ir_alignment_evaluate(&constant_builder, member->alignment_start, member->alignment_count, field_alignment,
+048295:                                                                           &field_alignment, &field_alignment_request, &member_rejection)
+048296:                                                 : C_IR_ALIGNMENT_RESOLVED;
+048297:                     if (member_status == C_IR_ALIGNMENT_PENDING)
+048298:                     {
+048299:                         fields_resolved = false;
+048300:                         break;
+048301:                     }
+048302:                     if (member_status == C_IR_ALIGNMENT_REJECTED && !definition_rejection.length)
+048303:                     {
+048304:                         definition_rejection = member_rejection;
+048305:                         definition_rejection_member = field_index;
+048306:                     }
+048307:                     u32 member_bit_width = member->bit_width;
+048308:                     if (member->is_bit_field && member->bit_width_token_count)
+048309:                     {
+048310:                         u64 evaluated_width = 0;
+048311:                         if (!c_ir_array_bound_evaluate(&constant_builder, (CArrayBound){
+048312:                                                            .token_start = member->bit_width_token_start,
+048313:                                                            .token_count = member->bit_width_token_count,
+048314:                                                        },
+048315:                                                        &evaluated_width) ||
+048316:                             evaluated_width > UINT32_MAX)
+048317:                         {
+048318:                             fields_resolved = false;
+048319:                             break;
+048320:                         }
+048321:                         member_bit_width = (u32)evaluated_width;
+048322:                     }
+048323:                     // C requires the width of a *named* bit-field to be at
+048324:                     // least one bit (C23 6.7.3.2p4); zero is reserved for the
+048325:                     // unnamed `int : 0;`, where the width is not a width at all
+048326:                     // but the request to move the next member to a boundary
+048327:                     // that the layout below performs. Accepted, the named
+048328:                     // spelling laid out a member occupying no bits that could
+048329:                     // still be assigned and read back. The check sits here,
+048330:                     // where the constant expression has just been folded, so
+048331:                     // `int b : 1 - 1;` is refused with the literal `int b : 0;`
+048332:                     // rather than only the spelling the parse fast path folds.
+048333:                     // The layout below still runs, the same way a rejected
+048334:                     // alignment specifier still hands back an alignment: the
+048335:                     // definition finishes and the program hears about the
+048336:                     // member it wrote rather than about a type without a
+048337:                     // layout.
+048338:                     if (member->is_bit_field && member->name.length && !member_bit_width && !definition_rejection.length)
+048339:                     {
+048340:                         definition_rejection = string_format(arena, S8("named bit-field '{S8}' has zero width"), member->name);
+048341:                         definition_rejection_member = field_index;
+048342:                         definition_rejection_kind = C_DIAGNOSTIC_INVALID_BIT_FIELD_WIDTH;
+048343:                     }
+048344:                     u64 offset = 0;
+048345:                     u32 bit_offset = 0;
+048346:                     if (member->is_bit_field)
+048347:                     {

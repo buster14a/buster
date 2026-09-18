@@ -1,0 +1,186 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: C_TYPE_ENUM
+occurrence: 3/5
+line: 23155
+
+023085:                     }
+023086:                     bool arrow = c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_ARROW);
+023087:                     if (!arrow && !c_token_is_punctuator(&builder->preprocess.tokens[postfix], C_PUNCTUATOR_DOT))
+023088:                     {
+023089:                         type = IR_TYPE_ID_INVALID;
+023090:                         break;
+023091:                     }
+023092:                     if (arrow)
+023093:                     {
+023094:                         if (base->kind != IR_TYPE_POINTER)
+023095:                         {
+023096:                             type = IR_TYPE_ID_INVALID;
+023097:                             break;
+023098:                         }
+023099:                         type = base->element_type;
+023100:                         base = ir_type_from_id(&builder->program->types, type);
+023101:                     }
+023102:                     if (!base || (base->kind != IR_TYPE_STRUCT && base->kind != IR_TYPE_UNION) || postfix + 1 >= close ||
+023103:                         builder->preprocess.tokens[postfix + 1].kind != C_TOKEN_IDENTIFIER)
+023104:                     {
+023105:                         type = IR_TYPE_ID_INVALID;
+023106:                         break;
+023107:                     }
+023108:                     IrTypeId member_type = IR_TYPE_ID_INVALID;
+023109:                     for (u32 field_index = 0; field_index < base->field_count; field_index += 1)
+023110:                     {
+023111:                         if (string_equal(base->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[postfix + 1])))
+023112:                         {
+023113:                             member_type = base->fields[field_index].type;
+023114:                             break;
+023115:                         }
+023116:                     }
+023117:                     type = member_type;
+023118:                     postfix += 2;
+023119:                 }
+023120:             }
+023121:             // A parenthesized or otherwise compound operand (for example
+023122:             // `(map)->key`) needs the full expression type walker.  Unlike
+023123:             // lowering, typeof does not evaluate the operand, so this query
+023124:             // is side-effect free and preserves array/function types.
+023125:             if (type.value == IR_ID_UNDERLYING_INVALID)
+023126:             {
+023127:                 c_ir_sizeof_operand_type_attempt(builder, index + 2, close, &type);
+023128:             }
+023129:             index = close + 1;
+023130:         }
+023131:     }
+023132:     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_TYPEDEF)
+023133:     {
+023134:         CTypeId c_type = builder->parse.entities[entity.value].type;
+023135:         if (c_type.value < builder->parse.type_count)
+023136:         {
+023137:             named_type = c_type;
+023138:             type = builder->c_type_ir_map[c_type.value];
+023139:             if (type.value == IR_ID_UNDERLYING_INVALID && c_type.value < builder->parse.type_count)
+023140:             {
+023141:                 CType* c_type_value = builder->parse.types + c_type.value;
+023142:                 if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
+023143:                     builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
+023144:                 {
+023145:                     type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+023146:                 }
+023147:             }
+023148:             index += 1;
+023149:         }
+023150:     }
+023151:     else if (first.kind == C_TOKEN_IDENTIFIER &&
+023152:              (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("struct")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("union")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("enum"))) &&
+023153:              index + 1 < end)
+023154:     {
+023155:         CTypeKind kind = string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("struct")) ? C_TYPE_STRUCT : string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("union")) ? C_TYPE_UNION : C_TYPE_ENUM;
+023156:         // A type name may define the aggregate rather than name one:
+023157:         // `(union{float _f; uint32_t _i;}){x}` is how a libc's math library
+023158:         // punts a float through an integer. The parser registered the
+023159:         // definition against the position of its opening brace, which is what
+023160:         // identifies it -- the tag lookup below cannot, because an anonymous
+023161:         // aggregate has no tag and two of them in one file would collide.
+023162:         u32 body_open = index + 1;
+023163:         if (body_open < end && builder->preprocess.tokens[body_open].kind == C_TOKEN_IDENTIFIER)
+023164:         {
+023165:             body_open += 1;
+023166:         }
+023167:         if (body_open < end && c_token_is_punctuator(&builder->preprocess.tokens[body_open], C_PUNCTUATOR_LEFT_BRACE))
+023168:         {
+023169:             u32 body_close = c_ir_matching_delimiter_cached(builder, body_open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+023170:             for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+023171:             {
+023172:                 if (builder->parse.types[type_index].definition_start == body_open + 1)
+023173:                 {
+023174:                     type = builder->c_type_ir_map[type_index];
+023175:                     break;
+023176:                 }
+023177:             }
+023178:             index = body_close < end ? body_close + 1 : end;
+023179:         }
+023180:         else
+023181:         {
+023182:             bool named = builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER;
+023183:             String8 tag = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]);
+023184:             // Several types may carry one tag -- a block-scope definition
+023185:             // shadows a sibling's or the file scope's -- so among candidates
+023186:             // visible from the reference the innermost wins, exactly as the
+023187:             // parse-side lookup resolves it.  The first match stays the
+023188:             // answer when nothing is visible or nothing beats it, which is
+023189:             // what every unique-tag unit resolved to before scopes were
+023190:             // consulted -- including the forward-declared tag whose pointer
+023191:             // typedef was lowered against the opaque made before the
+023192:             // definition.
+023193:             CScopeId reference_scope = c_parse_scope_for_token(&builder->parse, (CScopeId){0}, index + 1);
+023194:             u32 best_distance = UINT32_MAX;
+023195:             for (u32 type_index = 0; type_index < builder->parse.type_count; type_index += 1)
+023196:             {
+023197:                 CType* candidate = &builder->parse.types[type_index];
+023198:                 if (candidate->kind == kind && !candidate->has_unqualified_type && string_equal(candidate->tag, tag))
+023199:                 {
+023200:                     u32 distance = c_parse_scope_distance(&builder->parse, candidate->tag_scope, reference_scope);
+023201:                     if (type.value == IR_ID_UNDERLYING_INVALID || (distance < best_distance))
+023202:                     {
+023203:                         type = builder->c_type_ir_map[type_index];
+023204:                         best_distance = distance;
+023205:                     }
+023206:                 }
+023207:             }
+023208:             // A tag first named inside a type name declares an incomplete
+023209:             // type there and then (C11 6.7.2.3p8): musl's `dlinfo` writes
+023210:             // `*(struct link_map **)res = dso;` without ever including the
+023211:             // header that defines the tag, and only a pointer to it is
+023212:             // formed. Give it the opaque aggregate that stands for one,
+023213:             // reusing the opaque already made for this tag so two casts to
+023214:             // it agree on one type.
+023215:             if (type.value == IR_ID_UNDERLYING_INVALID && (kind == C_TYPE_STRUCT || kind == C_TYPE_UNION) && named && tag.length)
+023216:             {
+023217:                 IrTypeKind opaque_kind = kind == C_TYPE_STRUCT ? IR_TYPE_STRUCT : IR_TYPE_UNION;
+023218:                 for (u32 type_index = 0; type_index < builder->program->types.count; type_index += 1)
+023219:                 {
+023220:                     IrType* candidate = builder->program->types.types + type_index;
+023221:                     if (candidate->kind == opaque_kind && !candidate->layout.resolved && !candidate->field_count && string_equal(candidate->name, tag))
+023222:                     {
+023223:                         type = (IrTypeId){
+023224:                             .value = type_index,
+023225:                         };
+023226:                         break;
+023227:                     }
+023228:                 }
+023229:                 if (type.value == IR_ID_UNDERLYING_INVALID)
+023230:                 {
+023231:                     type = ir_program_add_type(builder->program, (IrType){
+023232:                                                                      .name = tag,
+023233:                                                                      .element_type = IR_TYPE_ID_INVALID,
+023234:                                                                      .return_type = IR_TYPE_ID_INVALID,
+023235:                                                                      .kind = opaque_kind,
+023236:                                                                  });
+023237:                 }
+023238:             }
+023239:             index += 2;
+023240:         }
+023241:     }
+023242:     else
+023243:     {
+023244:         u32 invalid_specifier;
+023245:         CTypeKind kind = c_ir_primitive_type_kind(builder->preprocess, start, end, &index, &invalid_specifier);
+023246:         if (invalid_specifier != UINT32_MAX)
+023247:         {
+023248:             builder->failure_message = S8("invalid or unsupported type specifier combination");
+023249:             builder->failure_token_index = invalid_specifier;
+023250:             builder->failure_kind_plus_one = C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS + 1;
+023251:             builder->sizeof_operand_constraint = builder->failure_message;
+023252:             builder->sizeof_operand_constraint_token = invalid_specifier;
+023253:         }
+023254:         else if (kind != C_TYPE_INVALID && kind < C_TYPE_COUNT)
+023255:         {
+023256:             type = c_ir_builder_scalar_type(builder, kind);
+023257:         }
+023258:     }
+023259:     if (type.value != IR_ID_UNDERLYING_INVALID)
+023260:     {
+023261:         while (index < end && builder->preprocess.tokens[index].kind == C_TOKEN_IDENTIFIER &&
+023262:                c_parse_type_qualifier_word(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index]), &qualifiers))
+023263:         {
+023264:             index += 1;
+023265:         }

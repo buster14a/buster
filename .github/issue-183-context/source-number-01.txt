@@ -1,0 +1,276 @@
+path: src/buster/lib/compiler/frontend/c/c_source.c
+needle: c_conditional_number(
+occurrence: 1/5
+line: 4975
+
+004885:         else if (digits == 2)
+004886:         {
+004887:             u8 first = suffix.pointer[index];
+004888:             u8 second = suffix.pointer[index + 1];
+004889:             if (first == '1' && second == '6')
+004890:             {
+004891:                 width = 16;
+004892:             }
+004893:             else if (first == '3' && second == '2')
+004894:             {
+004895:                 width = 32;
+004896:             }
+004897:             else if (first == '6' && second == '4')
+004898:             {
+004899:                 width = 64;
+004900:             }
+004901:         }
+004902:     }
+004903:     return width;
+004904: }
+004905: 
+004906: BUSTER_C_SHARED u32 c_integer_msvc_literal_width(String8 spelling, bool* is_unsigned)
+004907: {
+004908:     u32 width = 0;
+004909:     for (u32 length = 2; !width && length <= 3 && length <= spelling.length; length += 1)
+004910:     {
+004911:         u64 start = spelling.length - length;
+004912:         width = c_integer_msvc_suffix_width((String8){.pointer = spelling.pointer + start, .length = length});
+004913:         if (width)
+004914:         {
+004915:             *is_unsigned = start && (spelling.pointer[start - 1] == 'u' || spelling.pointer[start - 1] == 'U');
+004916:         }
+004917:     }
+004918:     return width;
+004919: }
+004920: 
+004921: BUSTER_C_INTERNAL bool c_integer_suffix_valid(String8 suffix)
+004922: {
+004923:     bool valid = !suffix.length;
+004924:     if (suffix.length)
+004925:     {
+004926:         bool first_unsigned = suffix.pointer[0] == 'u' || suffix.pointer[0] == 'U';
+004927:         bool first_long = suffix.pointer[0] == 'l' || suffix.pointer[0] == 'L';
+004928:         if (c_integer_msvc_suffix_width(suffix))
+004929:         {
+004930:             valid = true;
+004931:         }
+004932:         else if (suffix.length == 1)
+004933:         {
+004934:             valid = first_unsigned || first_long;
+004935:         }
+004936:         else if (suffix.length == 2 || suffix.length == 3)
+004937:         {
+004938:             bool second_unsigned = suffix.pointer[1] == 'u' || suffix.pointer[1] == 'U';
+004939:             bool second_long = suffix.pointer[1] == 'l' || suffix.pointer[1] == 'L';
+004940:             bool long_pair = first_long && second_long && suffix.pointer[0] == suffix.pointer[1];
+004941:             if (suffix.length == 2)
+004942:             {
+004943:                 valid = long_pair || (first_unsigned && second_long) || (first_long && second_unsigned);
+004944:             }
+004945:             else
+004946:             {
+004947:                 bool third_unsigned = suffix.pointer[2] == 'u' || suffix.pointer[2] == 'U';
+004948:                 bool third_long = suffix.pointer[2] == 'l' || suffix.pointer[2] == 'L';
+004949:                 valid = (first_unsigned && second_long && third_long && suffix.pointer[1] == suffix.pointer[2]) ||
+004950:                         (long_pair && third_unsigned);
+004951:             }
+004952:         }
+004953:     }
+004954:     return valid;
+004955: }
+004956: 
+004957: BUSTER_C_INTERNAL u32 c_integer_digit(u8 byte)
+004958: {
+004959:     u32 digit = UINT32_MAX;
+004960:     if (byte >= '0' && byte <= '9')
+004961:     {
+004962:         digit = (u32)(byte - '0');
+004963:     }
+004964:     else if (byte >= 'a' && byte <= 'f')
+004965:     {
+004966:         digit = (u32)(byte - 'a') + 10;
+004967:     }
+004968:     else if (byte >= 'A' && byte <= 'F')
+004969:     {
+004970:         digit = (u32)(byte - 'A') + 10;
+004971:     }
+004972:     return digit;
+004973: }
+004974: 
+004975: BUSTER_C_SHARED bool c_conditional_number(String8 spelling, u64* value)
+004976: {
+004977:     u32 base = 10;
+004978:     u64 index = 0;
+004979:     if (spelling.length >= 2 && spelling.pointer[0] == '0')
+004980:     {
+004981:         if (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X')
+004982:         {
+004983:             base = 16;
+004984:             index = 2;
+004985:         }
+004986:         else if (spelling.pointer[1] == 'b' || spelling.pointer[1] == 'B')
+004987:         {
+004988:             base = 2;
+004989:             index = 2;
+004990:         }
+004991:         else
+004992:         {
+004993:             base = 8;
+004994:         }
+004995:     }
+004996:     u64 parsed = 0;
+004997:     u64 cutoff = UINT64_MAX / base;
+004998:     u32 last_digit = (u32)(UINT64_MAX % base);
+004999:     bool any = false;
+005000:     bool valid = true;
+005001:     while (valid && index < spelling.length)
+005002:     {
+005003:         u8 byte = spelling.pointer[index];
+005004:         if (byte == '\'')
+005005:         {
+005006:             // A separator joins two digits of this base, never a prefix or
+005007:             // suffix. Checking the next byte also rejects consecutive quotes.
+005008:             valid = any && index + 1 < spelling.length && c_integer_digit(spelling.pointer[index + 1]) < base;
+005009:             index += 1;
+005010:         }
+005011:         else
+005012:         {
+005013:             u32 digit = c_integer_digit(byte);
+005014:             if (digit >= base)
+005015:             {
+005016:                 break;
+005017:             }
+005018:             valid = parsed < cutoff || (parsed == cutoff && digit <= last_digit);
+005019:             if (valid)
+005020:             {
+005021:                 parsed = parsed * base + digit;
+005022:                 any = true;
+005023:                 index += 1;
+005024:             }
+005025:         }
+005026:     }
+005027:     valid = valid && any && c_integer_suffix_valid((String8){.pointer = spelling.pointer + index, .length = spelling.length - index});
+005028:     if (valid)
+005029:     {
+005030:         *value = parsed;
+005031:     }
+005032:     return valid;
+005033: }
+005034: 
+005035: // C11 6.10.1p4: conditional-inclusion arithmetic uses intmax_t or
+005036: // uintmax_t. Keep signedness and deferred arithmetic faults in the existing
+005037: // one-byte-per-value sidecar. Reductions still validate every operand's syntax,
+005038: // but &&, || and ?: discard faults from operands they do not evaluate.
+005039: // A fault always follows an evaluated condition/left operand, even when its
+005040: // placeholder value makes a later logical expression appear to succeed.
+005041: enum
+005042: {
+005043:     C_CONDITIONAL_VALUE_UNSIGNED = 1,
+005044:     C_CONDITIONAL_VALUE_FAULT = 2,
+005045: };
+005046: 
+005047: BUSTER_C_INTERNAL bool c_conditional_apply(CConditionalOperator operation, u64* values, u8* value_flags, u32* value_count)
+005048: {
+005049:     bool valid = true;
+005050:     if (c_conditional_is_unary(operation))
+005051:     {
+005052:         if (!*value_count)
+005053:         {
+005054:             valid = false;
+005055:         }
+005056:         else
+005057:         {
+005058:             u32 index = *value_count - 1;
+005059:             u64* value = values + index;
+005060:             switch (operation)
+005061:             {
+005062:             case C_CONDITIONAL_UNARY_PLUS:
+005063:                 break;
+005064:             case C_CONDITIONAL_UNARY_MINUS:
+005065:                 *value = 0 - *value;
+005066:                 break;
+005067:             case C_CONDITIONAL_LOGICAL_NOT:
+005068:                 *value = !*value;
+005069:                 value_flags[index] &= C_CONDITIONAL_VALUE_FAULT;
+005070:                 break;
+005071:             case C_CONDITIONAL_BITWISE_NOT:
+005072:                 *value = ~*value;
+005073:                 break;
+005074:             default:
+005075:                 valid = false;
+005076:                 break;
+005077:             }
+005078:         }
+005079:     }
+005080:     else if (operation == C_CONDITIONAL_SELECT)
+005081:     {
+005082:         if (*value_count < 3)
+005083:         {
+005084:             valid = false;
+005085:         }
+005086:         else
+005087:         {
+005088:             u64 false_value = values[--*value_count];
+005089:             u8 false_flags = value_flags[*value_count];
+005090:             u64 true_value = values[--*value_count];
+005091:             u8 true_flags = value_flags[*value_count];
+005092:             u32 index = *value_count - 1;
+005093:             u64* condition = values + index;
+005094:             u8 selected_flags = *condition ? true_flags : false_flags;
+005095:             // Both arms determine the common type, but only the selected
+005096:             // arm and the always-evaluated condition contribute faults.
+005097:             value_flags[index] = (u8)(((true_flags | false_flags) & C_CONDITIONAL_VALUE_UNSIGNED) |
+005098:                                      ((value_flags[index] | selected_flags) & C_CONDITIONAL_VALUE_FAULT));
+005099:             *condition = *condition ? true_value : false_value;
+005100:         }
+005101:     }
+005102:     else if (*value_count < 2)
+005103:     {
+005104:         valid = false;
+005105:     }
+005106:     else
+005107:     {
+005108:         u64 right = values[--*value_count];
+005109:         u8 right_flags = value_flags[*value_count];
+005110:         u32 index = *value_count - 1;
+005111:         u64* left = values + index;
+005112:         u8 left_flags = value_flags[index];
+005113:         u8 flags = (u8)(left_flags | right_flags);
+005114:         bool mixed_unsigned = (flags & C_CONDITIONAL_VALUE_UNSIGNED) != 0;
+005115:         switch (operation)
+005116:         {
+005117:         case C_CONDITIONAL_MULTIPLY:
+005118:             *left *= right;
+005119:             break;
+005120:         case C_CONDITIONAL_DIVIDE:
+005121:         case C_CONDITIONAL_REMAINDER:
+005122:             // Never execute an invalid host division, even in a subtree
+005123:             // whose fault will be discarded by an enclosing short circuit.
+005124:             if ((flags & C_CONDITIONAL_VALUE_FAULT) || !right ||
+005125:                 (!mixed_unsigned && (s64)*left == INT64_MIN && (s64)right == -1))
+005126:             {
+005127:                 flags |= C_CONDITIONAL_VALUE_FAULT;
+005128:                 *left = 0;
+005129:             }
+005130:             else if (mixed_unsigned)
+005131:             {
+005132:                 *left = operation == C_CONDITIONAL_DIVIDE ? *left / right : *left % right;
+005133:             }
+005134:             else
+005135:             {
+005136:                 *left = operation == C_CONDITIONAL_DIVIDE ? (u64)((s64)*left / (s64)right) : (u64)((s64)*left % (s64)right);
+005137:             }
+005138:             break;
+005139:         case C_CONDITIONAL_ADD:
+005140:             *left += right;
+005141:             break;
+005142:         case C_CONDITIONAL_SUBTRACT:
+005143:             *left -= right;
+005144:             break;
+005145:         case C_CONDITIONAL_SHIFT_LEFT:
+005146:             *left = right < 64 ? *left << right : 0;
+005147:             flags = (u8)((flags & C_CONDITIONAL_VALUE_FAULT) | (left_flags & C_CONDITIONAL_VALUE_UNSIGNED));
+005148:             break;
+005149:         case C_CONDITIONAL_SHIFT_RIGHT:
+005150:             if (left_flags & C_CONDITIONAL_VALUE_UNSIGNED)
+005151:             {
+005152:                 *left = right < 64 ? *left >> right : 0;
+005153:             }
+005154:             else
+005155:             {

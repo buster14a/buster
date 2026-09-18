@@ -1,0 +1,186 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: C_TYPE_ENUM
+occurrence: 2/5
+line: 582
+
+000512:         return true;
+000513:     case C_TYPE_UNSIGNED_LONG:
+000514:         *bit_width = layout.unsigned_long_integer.bit_width;
+000515:         *alignment = layout.unsigned_long_integer.alignment;
+000516:         return true;
+000517:     case C_TYPE_LONG_LONG:
+000518:         *bit_width = layout.long_long_integer.bit_width;
+000519:         *is_signed = true;
+000520:         *alignment = layout.long_long_integer.alignment;
+000521:         return true;
+000522:     case C_TYPE_UNSIGNED_LONG_LONG:
+000523:         *bit_width = layout.unsigned_long_long_integer.bit_width;
+000524:         *alignment = layout.unsigned_long_long_integer.alignment;
+000525:         return true;
+000526:     case C_TYPE_INT128:
+000527:         *bit_width = layout.integer128.bit_width;
+000528:         *is_signed = true;
+000529:         *alignment = layout.integer128.alignment;
+000530:         return true;
+000531:     case C_TYPE_UNSIGNED_INT128:
+000532:         *bit_width = layout.unsigned_integer128.bit_width;
+000533:         *alignment = layout.unsigned_integer128.alignment;
+000534:         return true;
+000535:     case C_TYPE_FLOAT16:
+000536:     case C_TYPE_BFLOAT16:
+000537:     {
+000538:         TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
+000539:         *ir_kind = IR_TYPE_FLOAT;
+000540:         *bit_width = narrow.bit_width;
+000541:         *alignment = narrow.alignment;
+000542:         return true;
+000543:     }
+000544:     case C_TYPE_FLOAT:
+000545:         *ir_kind = IR_TYPE_FLOAT;
+000546:         *bit_width = layout.float_type.bit_width;
+000547:         *alignment = layout.float_type.alignment;
+000548:         return true;
+000549:     case C_TYPE_DOUBLE:
+000550:         *ir_kind = IR_TYPE_FLOAT;
+000551:         *bit_width = layout.double_type.bit_width;
+000552:         *alignment = layout.double_type.alignment;
+000553:         return true;
+000554:     case C_TYPE_LONG_DOUBLE:
+000555:         *ir_kind = IR_TYPE_FLOAT;
+000556:         *bit_width = layout.long_double_type.bit_width;
+000557:         *alignment = layout.long_double_type.alignment;
+000558:         return true;
+000559:     case C_TYPE_VA_LIST:
+000560:         *ir_kind = IR_TYPE_VA_LIST;
+000561:         *bit_width = layout.va_list.bit_width;
+000562:         *alignment = layout.va_list.alignment;
+000563:         return true;
+000564:     case C_TYPE_NULLPTR:
+000565:         *ir_kind = IR_TYPE_POINTER;
+000566:         *bit_width = layout.pointer.bit_width;
+000567:         *alignment = layout.pointer.alignment;
+000568:         return true;
+000569:     // The complex kinds are two-element aggregates, not scalars; they are
+000570:     // built by c_ir_scalar_type before it reaches this ladder.
+000571:     case C_TYPE_FLOAT16_COMPLEX:
+000572:     case C_TYPE_FLOAT_COMPLEX:
+000573:     case C_TYPE_DOUBLE_COMPLEX:
+000574:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+000575:     case C_TYPE_INVALID:
+000576:     case C_TYPE_POINTER:
+000577:     case C_TYPE_ARRAY:
+000578:     case C_TYPE_VECTOR:
+000579:     case C_TYPE_FUNCTION:
+000580:     case C_TYPE_STRUCT:
+000581:     case C_TYPE_UNION:
+000582:     case C_TYPE_ENUM:
+000583:     case C_TYPE_COUNT:
+000584:         return false;
+000585:     }
+000586:     return false;
+000587: }
+000588: 
+000589: BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind);
+000590: 
+000591: // A complex type as canonical IR: a two-field struct holding the real part
+000592: // then the imaginary part, both of the underlying real type. The C ABIs
+000593: // classify a complex value exactly as they classify that struct on every
+000594: // target this compiler emits for, with one documented exception -- System V
+000595: // x86-64 returns a `long double _Complex` in ST(0)/ST(1) where the struct
+000596: // goes to memory -- so the struct model is the ABI as well as the layout.
+000597: // `is_complex` on the IrType is what lets the arithmetic below recognize the
+000598: // value again after it has become an ordinary aggregate; it survives
+000599: // qualification because c_ir_add_qualified_type copies the record.
+000600: //
+000601: // The fields are named `__real` and `__imag`. They are reserved spellings, so
+000602: // no C member designator can collide with them, and a debugger that renders
+000603: // the struct still shows which half is which.
+000604: BUSTER_C_INTERNAL IrTypeId c_ir_complex_type(CIrTypeContext* context, CTypeKind kind)
+000605: {
+000606:     CTypeKind element_kind = c_type_kind_complex_element(kind);
+000607:     IrTypeId element = c_ir_scalar_type(context, element_kind);
+000608:     IrType* element_type = ir_type_from_id(&context->program->types, element);
+000609:     u64 size = 0;
+000610:     u32 alignment = 0;
+000611:     if (!element_type || !element_type->layout.resolved || !c_parse_builtin_type_layout(context->target, kind, &size, &alignment))
+000612:     {
+000613:         return IR_TYPE_ID_INVALID;
+000614:     }
+000615:     IrField* fields = arena_allocate(context->program->arena, IrField, 2);
+000616:     fields[0] = (IrField){
+000617:         .name = S8("__real"),
+000618:         .type = element,
+000619:         .offset = 0,
+000620:     };
+000621:     fields[1] = (IrField){
+000622:         .name = S8("__imag"),
+000623:         .type = element,
+000624:         .offset = element_type->layout.size,
+000625:     };
+000626:     IrTypeId type = ir_program_add_type(context->program, (IrType){
+000627:                                                               .name = c_ir_scalar_type_name(kind),
+000628:                                                               .fields = fields,
+000629:                                                               .element_type = element,
+000630:                                                               .return_type = IR_TYPE_ID_INVALID,
+000631:                                                               .unqualified_type = IR_TYPE_ID_INVALID,
+000632:                                                               .layout =
+000633:                                                                   {
+000634:                                                                       .size = size,
+000635:                                                                       .alignment = alignment,
+000636:                                                                       .resolved = true,
+000637:                                                                   },
+000638:                                                               .kind = IR_TYPE_STRUCT,
+000639:                                                               .field_count = 2,
+000640:                                                               .is_complex = true,
+000641:                                                           });
+000642:     context->scalar_types[kind] = type;
+000643:     return type;
+000644: }
+000645: 
+000646: BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind)
+000647: {
+000648:     if ((u32)kind >= C_TYPE_COUNT)
+000649:     {
+000650:         return IR_TYPE_ID_INVALID;
+000651:     }
+000652:     IrTypeId existing = context->scalar_types[kind];
+000653:     if (existing.value != IR_ID_UNDERLYING_INVALID)
+000654:     {
+000655:         return existing;
+000656:     }
+000657:     if (c_type_kind_is_complex(kind))
+000658:     {
+000659:         return c_ir_complex_type(context, kind);
+000660:     }
+000661:     IrTypeKind ir_kind = IR_TYPE_COUNT;
+000662:     u32 bit_width = 0;
+000663:     bool is_signed = false;
+000664:     u32 alignment = 0;
+000665:     if (!c_ir_scalar_type_properties(context->target, kind, &ir_kind, &bit_width, &is_signed, &alignment))
+000666:     {
+000667:         return IR_TYPE_ID_INVALID;
+000668:     }
+000669:     // The IR layout of every scalar is the one c_parse_builtin_type_layout
+000670:     // folds, `void` included: the two engines answer one question and this is
+000671:     // the single table they both read. `void` is one byte aligned one there,
+000672:     // which is what makes a `void *` step by bytes -- the pointer arithmetic
+000673:     // below scales by the pointee's layout size and the incomplete-type
+000674:     // refusal beside it tests that size for zero.
+000675:     u64 size = 0;
+000676:     u32 storage_alignment = 0;
+000677:     if (!c_parse_builtin_type_layout(context->target, kind, &size, &storage_alignment))
+000678:     {
+000679:         return IR_TYPE_ID_INVALID;
+000680:     }
+000681:     alignment = storage_alignment;
+000682:     IrTypeId type = ir_program_add_type(context->program, (IrType){
+000683:                                                               .name = c_ir_scalar_type_name(kind),
+000684:                                                               .element_type = IR_TYPE_ID_INVALID,
+000685:                                                               .return_type = IR_TYPE_ID_INVALID,
+000686:                                                               .layout =
+000687:                                                                   {
+000688:                                                                       .size = size,
+000689:                                                                       .alignment = alignment,
+000690:                                                                       .resolved = true,
+000691:                                                                   },
+000692:                                                               .kind = ir_kind,

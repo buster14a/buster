@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 92/111
+line: 27325
+
+027255:                     nested -= 1;
+027256:                 }
+027257:                 else if (!nested && c_token_is_punctuator(&item, C_PUNCTUATOR_COMMA))
+027258:                 {
+027259:                     comma = scan;
+027260:                     break;
+027261:                 }
+027262:             }
+027263:             IrTypeId type = comma < close ? c_ir_type_name(builder, index + 2, comma) : IR_TYPE_ID_INVALID;
+027264:             u64 offset = 0;
+027265:             u32 designator = comma + 1;
+027266:             bool valid = close < end && designator < close && type.value != IR_ID_UNDERLYING_INVALID;
+027267:             while (valid && designator < close)
+027268:             {
+027269:                 CToken member = builder->preprocess.tokens[designator];
+027270:                 IrType* aggregate = ir_type_from_id(&builder->program->types, type);
+027271:                 if (!aggregate || member.kind != C_TOKEN_IDENTIFIER || (aggregate->kind != IR_TYPE_STRUCT && aggregate->kind != IR_TYPE_UNION))
+027272:                 {
+027273:                     valid = false;
+027274:                     break;
+027275:                 }
+027276:                 IrField* field = 0;
+027277:                 for (u32 field_index = 0; field_index < aggregate->field_count; field_index += 1)
+027278:                 {
+027279:                     if (string_equal(aggregate->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, member)))
+027280:                     {
+027281:                         field = aggregate->fields + field_index;
+027282:                         break;
+027283:                     }
+027284:                 }
+027285:                 if (!field || field->is_bit_field)
+027286:                 {
+027287:                     valid = false;
+027288:                     break;
+027289:                 }
+027290:                 offset += field->offset;
+027291:                 type = field->type;
+027292:                 designator += 1;
+027293:                 while (valid && designator < close && c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_LEFT_BRACKET))
+027294:                 {
+027295:                     u32 bracket_close = c_ir_matching_delimiter_cached(builder, designator, close, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+027296:                     IrType* array = ir_type_from_id(&builder->program->types, type);
+027297:                     u64 element_index = 0;
+027298:                     IrType* element = array && array->kind == IR_TYPE_ARRAY ? ir_type_from_id(&builder->program->types, array->element_type) : 0;
+027299:                     if (bracket_close >= close || !element || !element->layout.resolved ||
+027300:                         !c_ir_integer_constant_evaluate(builder->arena, builder, designator + 1, bracket_close, &element_index))
+027301:                     {
+027302:                         valid = false;
+027303:                         break;
+027304:                     }
+027305:                     offset += element->layout.size * element_index;
+027306:                     type = array->element_type;
+027307:                     designator = bracket_close + 1;
+027308:                 }
+027309:                 if (designator < close)
+027310:                 {
+027311:                     if (!c_token_is_punctuator(&builder->preprocess.tokens[designator], C_PUNCTUATOR_DOT) || designator + 1 >= close)
+027312:                     {
+027313:                         valid = false;
+027314:                         break;
+027315:                     }
+027316:                     designator += 1;
+027317:                 }
+027318:             }
+027319:             if (!valid)
+027320:             {
+027321:                 builder->failure_message = S8("invalid __builtin_offsetof type or member designator");
+027322:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027323:                 return;
+027324:             }
+027325:             values[value_count++] = c_ir_emit_integer_value_typed(builder, offset, false, token, builder->size_type);
+027326:             expect_operand = false;
+027327:             index = close;
+027328:             continue;
+027329:         }
+027330:         if (expect_operand && token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, token))) &&
+027331:             index + 1 < end)
+027332:         {
+027333:             bool is_sizeof = string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("sizeof"));
+027334:             bool parenthesized = c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+027335:             // A `{` past the closing parenthesis makes the operand a compound
+027336:             // literal rather than a parenthesized type name, so the operand
+027337:             // starts at that `(` and runs to the initializer's `}`. The
+027338:             // widened range no longer begins with an identifier, so the
+027339:             // type-name shortcut below skips itself and the sizeof query
+027340:             // resolves it through its compound-literal shape.
+027341:             u32 literal_end = parenthesized ? c_ir_sizeof_compound_literal_operand_end(builder, index + 1, end) : UINT32_MAX;
+027342:             parenthesized = parenthesized && literal_end == UINT32_MAX;
+027343:             if (!is_sizeof && !parenthesized && literal_end == UINT32_MAX)
+027344:             {
+027345:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027346:                 return;
+027347:             }
+027348:             u32 operand_start = index + (parenthesized ? 2 : 1);
+027349:             u32 operand_end = literal_end != UINT32_MAX ? literal_end
+027350:                               : parenthesized
+027351:                                   ? c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS)
+027352:                                   : c_ir_unary_expression_end(builder, operand_start, end);
+027353:             if (operand_end > end || operand_start >= operand_end)
+027354:             {
+027355:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027356:                 return;
+027357:             }
+027358:             // Parentheses after sizeof are ambiguous: `(T)` is a type name,
+027359:             // while `(expression)->field` (and `(expression)[index]`) is a
+027360:             // parenthesized value with postfix operators.  The old shortcut
+027361:             // stopped at the inner `)` for the latter and left `->field` in
+027362:             // the enclosing expression, which then failed in the logical-core
+027363:             // lowerer.  Probe the type-name shape and, when it is not one,
+027364:             // let the normal unary walker consume the complete postfix chain.
+027365:             bool has_postfix_after_parenthesized = operand_end + 1 < end &&
+027366:                                                    (c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_DOT) ||
+027367:                                                     c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_ARROW) ||
+027368:                                                     c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_LEFT_BRACKET) ||
+027369:                                                     c_token_is_punctuator(&builder->preprocess.tokens[operand_end + 1], C_PUNCTUATOR_LEFT_PARENTHESIS));
+027370:             if (is_sizeof && parenthesized && literal_end == UINT32_MAX && has_postfix_after_parenthesized &&
+027371:                 c_ir_group_type_name(builder, index + 1, operand_end).value == IR_ID_UNDERLYING_INVALID)
+027372:             {
+027373:                 parenthesized = false;
+027374:                 operand_start = index + 1;
+027375:                 operand_end = c_ir_unary_expression_end(builder, operand_start, end);
+027376:                 if (operand_end > end || operand_start >= operand_end)
+027377:                 {
+027378:                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027379:                     return;
+027380:                 }
+027381:             }
+027382:             u32 consumed_index = parenthesized ? operand_end : operand_end - 1;
+027383:             // A dereference of a pointer-to-VLA names the same array object
+027384:             // as subscript zero. Use its saved size, including through groups,
+027385:             // without reading the object or reevaluating declaration bounds.
+027386:             u32 size_start = operand_start;
+027387:             u32 size_end = operand_end;
+027388:             u32 size_dereferences = 0;
+027389:             bool size_prefix = is_sizeof;
+027390:             while (size_prefix && size_start < size_end)
+027391:             {
+027392:                 if (c_token_is_punctuator(&builder->preprocess.tokens[size_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+027393:                     c_ir_matching_delimiter_cached(builder, size_start, size_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == size_end - 1)
+027394:                 {
+027395:                     size_start += 1;
+027396:                     size_end -= 1;
+027397:                 }
+027398:                 else if (c_token_is_punctuator(&builder->preprocess.tokens[size_start], C_PUNCTUATOR_STAR))
+027399:                 {
+027400:                     size_dereferences += 1;
+027401:                     size_start += 1;
+027402:                 }
+027403:                 else
+027404:                 {
+027405:                     size_prefix = false;
+027406:                 }
+027407:             }
+027408:             if (is_sizeof && size_start < size_end && builder->preprocess.tokens[size_start].kind == C_TOKEN_IDENTIFIER)
+027409:             {
+027410:                 CEntityId size_entity = c_ir_identifier_entity(builder, size_start);
+027411:                 CIntegerIrLocal* size_local = c_ir_find_local_by_entity(builder, size_entity);
+027412:                 if (size_local && size_local->is_variable_length_array)
+027413:                 {
+027414:                     u32 suffix_index = size_dereferences;
+027415:                     u32 suffix_token = size_start + 1;
+027416:                     while (suffix_token < size_end && c_token_is_punctuator(&builder->preprocess.tokens[suffix_token], C_PUNCTUATOR_LEFT_BRACKET))
+027417:                     {
+027418:                         u32 suffix_close =
+027419:                             c_ir_matching_delimiter_cached(builder, suffix_token, size_end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+027420:                         if (suffix_close >= size_end)
+027421:                         {
+027422:                             break;
+027423:                         }
+027424:                         suffix_index += 1;
+027425:                         suffix_token = suffix_close + 1;
+027426:                     }
+027427:                     IrValueId runtime_size = IR_VALUE_ID_INVALID;
+027428:                     if (suffix_token == size_end && suffix_index <= size_local->vla_dimension_count && (suffix_index || !size_local->is_vla_parameter))
+027429:                     {
+027430:                         runtime_size = size_local->vla_suffix_sizes[suffix_index];
+027431:                     }
+027432:                     if (runtime_size.value != IR_ID_UNDERLYING_INVALID)
+027433:                     {
+027434:                         values[value_count++] = runtime_size;
+027435:                         expect_operand = false;
+027436:                         index = consumed_index;
+027437:                         continue;
+027438:                     }
+027439:                 }
+027440:             }
+027441:             builder->sizeof_operand_constraint = (String8){0};
+027442:             builder->sizeof_operand_constraint_token = UINT32_MAX;
+027443:             IrTypeId operand_type = builder->preprocess.tokens[operand_start].kind != C_TOKEN_IDENTIFIER ? IR_TYPE_ID_INVALID
+027444:                                     : parenthesized ? c_ir_group_type_name(builder, index + 1, operand_end)
+027445:                                                     : c_ir_type_name(builder, operand_start, operand_end);
+027446:             IrType* operand = ir_type_from_id(&builder->program->types, operand_type);
+027447:             u64 value = 0;
+027448:             u32 literal_alignment = 0;
+027449:             if (operand && operand->layout.resolved)
+027450:             {
+027451:                 value = is_sizeof ? c_ir_sizeof_operand_size(operand) : c_ir_sizeof_operand_alignment(operand);
+027452:             }
+027453:             else if (!is_sizeof && !builder->sizeof_operand_constraint.length &&
+027454:                      c_ir_sizeof_expression(builder, operand_start, operand_end, &value, &literal_alignment))
+027455:             {

@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 40/111
+line: 15987
+
+015917:             instruction.operand_count = 2;
+015918:             instruction.immediates = arena_allocate(builder->arena, u64, 2);
+015919:             instruction.immediates[0] = 0;
+015920:             instruction.immediates[1] = 1;
+015921:             instruction.immediate_count = 2;
+015922:             instruction.result = result;
+015923:             IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+015924:             builder->function->values[result.value].definition = id;
+015925:         }
+015926:     }
+015927:     return result;
+015928: }
+015929: 
+015930: // Whether a complex value of this type can be computed with here.  Every
+015931: // float element this frontend has is admitted; the 80-bit x87 one reaches the
+015932: // magnitude below through its sign/exponent halfword rather than through a
+015933: // whole-value integer, which is the same view musl's `union ldshape` takes.
+015934: BUSTER_C_INTERNAL bool c_ir_complex_element_supported(CIntegerIrBuilder* builder, IrType* complex_type)
+015935: {
+015936:     IrType* element = complex_type ? ir_type_from_id(&builder->program->types, complex_type->element_type) : 0;
+015937:     return element && element->kind == IR_TYPE_FLOAT && (element->bit_width == 32 || element->bit_width == 64 || element->bit_width == 80);
+015938: }
+015939: 
+015940: // |x|, branchless: clear the sign bit through the same stack-slot punning the
+015941: // signbit builtin uses, because there is no absolute-value opcode and calling
+015942: // libm would make complex division depend on a library.
+015943: //
+015944: // The 80-bit x87 spelling has no integer of its own width, so it is punned
+015945: // one halfword at a time: the sign bit is bit 15 of the sixteen-bit
+015946: // sign/exponent field at byte eight, which is exactly the `se` member of
+015947: // musl's `union ldshape`, and the ten-byte significand below it is left
+015948: // alone.
+015949: BUSTER_C_INTERNAL IrValueId c_ir_emit_float_magnitude(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type_id, IrSourceRange source)
+015950: {
+015951:     IrType* type = ir_type_from_id(&builder->program->types, type_id);
+015952:     if (!type || type->kind != IR_TYPE_FLOAT || (type->bit_width != 32 && type->bit_width != 64 && type->bit_width != 80))
+015953:     {
+015954:         return IR_VALUE_ID_INVALID;
+015955:     }
+015956:     u32 bit_width = type->bit_width;
+015957:     CTypeKind bits_kind = bit_width == 32 ? C_TYPE_UNSIGNED_INT : bit_width == 64 ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_SHORT;
+015958:     IrTypeId bits_type = c_ir_builder_scalar_type(builder, bits_kind);
+015959:     IrValueId slot = c_ir_emit_temporary(builder, type_id, source);
+015960:     if (bits_type.value == IR_ID_UNDERLYING_INVALID || slot.value == IR_ID_UNDERLYING_INVALID ||
+015961:         !c_ir_emit_store_place(builder, slot, type_id, value, source))
+015962:     {
+015963:         return IR_VALUE_ID_INVALID;
+015964:     }
+015965:     IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+015966:     IrValueId address = c_ir_emit_address_of_place(builder, slot, type_id, source);
+015967:     IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+015968:                                  ? c_ir_emit_cast(builder, address, bits_pointer_type, source)
+015969:                                  : IR_VALUE_ID_INVALID;
+015970:     IrValueId bits_place = IR_VALUE_ID_INVALID;
+015971:     if (bits_address.value != IR_ID_UNDERLYING_INVALID)
+015972:     {
+015973:         if (bit_width == 80)
+015974:         {
+015975:             // The fifth halfword of the sixteen-byte slot: byte eight, where
+015976:             // the x87 format keeps the sign and the exponent.
+015977:             IrValueId halfword_index = c_ir_emit_integer_value_typed(builder, 4, false, (CToken){0}, builder->s32_type);
+015978:             bits_place = halfword_index.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, bits_address, halfword_index, source)
+015979:                                                                          : IR_VALUE_ID_INVALID;
+015980:         }
+015981:         else
+015982:         {
+015983:             bits_place = c_ir_emit_dereference_place(builder, bits_address, source);
+015984:         }
+015985:     }
+015986:     IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
+015987:     IrValueId mask = c_ir_emit_integer_value_typed(builder,
+015988:                                                    bit_width == 32   ? UINT64_C(0x7fffffff)
+015989:                                                    : bit_width == 64 ? UINT64_C(0x7fffffffffffffff)
+015990:                                                                      : UINT64_C(0x7fff),
+015991:                                                    false, (CToken){0}, bits_type);
+015992:     if (bits.value == IR_ID_UNDERLYING_INVALID || mask.value == IR_ID_UNDERLYING_INVALID)
+015993:     {
+015994:         return IR_VALUE_ID_INVALID;
+015995:     }
+015996:     IrValueId cleared = c_ir_emit_binary_value(builder, bits, mask, bits_type, IR_BINARY_INTEGER_BITWISE_AND, source);
+015997:     if (cleared.value == IR_ID_UNDERLYING_INVALID || !c_ir_emit_store_place(builder, bits_place, bits_type, cleared, source))
+015998:     {
+015999:         return IR_VALUE_ID_INVALID;
+016000:     }
+016001:     return c_ir_emit_load_place(builder, slot, type_id, source);
+016002: }
+016003: 
+016004: // One arm of Smith's algorithm, with `dominant` the denominator half of
+016005: // larger magnitude and `lesser` the other one. The obvious names for that pair
+016006: // are the two the Windows SDK still defines as empty segment-model macros, so
+016007: // a parameter called either of them vanishes and the definition stops being
+016008: // one; these two are deliberately not those.
+016009: BUSTER_C_INTERNAL bool c_ir_emit_complex_smith_arm(CIntegerIrBuilder* builder, IrTypeId complex_type, IrTypeId element, IrValueId result_place,
+016010:                                                      IrValueId a, IrValueId b, IrValueId dominant, IrValueId lesser, bool dominant_is_real, IrSourceRange source)
+016011: {
+016012:     IrValueId ratio = c_ir_emit_binary_value(builder, lesser, dominant, element, IR_BINARY_FLOAT_DIVIDE, source);
+016013:     IrValueId scaled = c_ir_emit_binary_value(builder, ratio, lesser, element, IR_BINARY_FLOAT_MULTIPLY, source);
+016014:     IrValueId denominator = c_ir_emit_binary_value(builder, dominant, scaled, element, IR_BINARY_FLOAT_ADD, source);
+016015:     IrValueId real_numerator;
+016016:     IrValueId imaginary_numerator;
+016017:     if (dominant_is_real)
+016018:     {
+016019:         // |c| >= |d|: r = d/c, den = c + r*d, (a + b*r)/den and (b - a*r)/den.
+016020:         IrValueId b_ratio = c_ir_emit_binary_value(builder, b, ratio, element, IR_BINARY_FLOAT_MULTIPLY, source);
+016021:         IrValueId a_ratio = c_ir_emit_binary_value(builder, a, ratio, element, IR_BINARY_FLOAT_MULTIPLY, source);
+016022:         real_numerator = c_ir_emit_binary_value(builder, a, b_ratio, element, IR_BINARY_FLOAT_ADD, source);
+016023:         imaginary_numerator = c_ir_emit_binary_value(builder, b, a_ratio, element, IR_BINARY_FLOAT_SUBTRACT, source);
+016024:     }
+016025:     else
+016026:     {
+016027:         // |d| > |c|: r = c/d, den = d + r*c, (a*r + b)/den and (b*r - a)/den.
+016028:         IrValueId a_ratio = c_ir_emit_binary_value(builder, a, ratio, element, IR_BINARY_FLOAT_MULTIPLY, source);
+016029:         IrValueId b_ratio = c_ir_emit_binary_value(builder, b, ratio, element, IR_BINARY_FLOAT_MULTIPLY, source);
+016030:         real_numerator = c_ir_emit_binary_value(builder, a_ratio, b, element, IR_BINARY_FLOAT_ADD, source);
+016031:         imaginary_numerator = c_ir_emit_binary_value(builder, b_ratio, a, element, IR_BINARY_FLOAT_SUBTRACT, source);
+016032:     }
+016033:     IrValueId real = c_ir_emit_binary_value(builder, real_numerator, denominator, element, IR_BINARY_FLOAT_DIVIDE, source);
+016034:     IrValueId imaginary = c_ir_emit_binary_value(builder, imaginary_numerator, denominator, element, IR_BINARY_FLOAT_DIVIDE, source);
+016035:     IrValueId real_place = c_ir_emit_field_index_place(builder, result_place, 0, source);
+016036:     IrValueId imaginary_place = c_ir_emit_field_index_place(builder, result_place, 1, source);
+016037:     BUSTER_UNUSED(complex_type);
+016038:     return real.value != IR_ID_UNDERLYING_INVALID && imaginary.value != IR_ID_UNDERLYING_INVALID &&
+016039:            real_place.value != IR_ID_UNDERLYING_INVALID && imaginary_place.value != IR_ID_UNDERLYING_INVALID &&
+016040:            c_ir_emit_store_place(builder, real_place, element, real, source) &&
+016041:            c_ir_emit_store_place(builder, imaginary_place, element, imaginary, source);
+016042: }
+016043: 
+016044: // (a + bi) / (c + di) by Smith's algorithm, which is what Clang emits inline
+016045: // for `-fcomplex-arithmetic=improved`: divide through by whichever denominator
+016046: // half has the larger magnitude so the intermediate `c*c + d*d` of the naive
+016047: // form -- which overflows for operands whose squares do not fit -- never
+016048: // appears.
+016049: //
+016050: // Clang's default for C is neither this nor the naive form: it calls
+016051: // __divdc3 (and __muldc3 for the product), the compiler-runtime helpers that
+016052: // add C11 Annex G's infinity recovery, and for division an ilogb rescaling,
+016053: // on top of the same arithmetic. Those helpers live in libgcc or compiler-rt,
+016054: // and this toolchain ships neither and links neither, so calling them would
+016055: // turn every complex multiply into an unresolved symbol at link time.
+016056: //
+016057: // The inline forms below were differenced against Clang over an operand
+016058: // matrix covering the signed zeroes, the subnormal and overflow edges and the
+016059: // infinities. Against `-fcomplex-arithmetic=improved` every answer in that
+016060: // matrix is bit-identical, on System V x86-64, AAPCS64 and Win64 alike.
+016061: // Against the default they part company in two places, both inside the
+016062: // library helpers: Annex G's recovery, where the helper turns a NaN into a
+016063: // signed infinity, and a quotient whose operands straddle the format's
+016064: // exponent range, where the helper's rescaling rounds one unit in the last
+016065: // place differently.
+016066: BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_divide(CIntegerIrBuilder* builder, IrTypeId complex_type, IrTypeId element, IrValueId a, IrValueId b,
+016067:                                                        IrValueId c, IrValueId d, IrSourceRange source)
+016068: {
+016069:     IrValueId result_place = c_ir_emit_temporary(builder, complex_type, source);
+016070:     IrValueId magnitude_c = c_ir_emit_float_magnitude(builder, c, element, source);
+016071:     IrValueId magnitude_d = c_ir_emit_float_magnitude(builder, d, element, source);
+016072:     if (result_place.value == IR_ID_UNDERLYING_INVALID || magnitude_c.value == IR_ID_UNDERLYING_INVALID ||
+016073:         magnitude_d.value == IR_ID_UNDERLYING_INVALID)
+016074:     {
+016075:         return IR_VALUE_ID_INVALID;
+016076:     }
+016077:     IrValueId condition = c_ir_emit_binary_value(builder, magnitude_c, magnitude_d, builder->bool_type, IR_BINARY_FLOAT_GREATER_EQUAL, source);
+016078:     IrBlockId near_real = c_ir_block_create(builder);
+016079:     IrBlockId near_imaginary = c_ir_block_create(builder);
+016080:     IrBlockId merge = c_ir_block_create(builder);
+016081:     if (condition.value == IR_ID_UNDERLYING_INVALID || near_real.value == IR_ID_UNDERLYING_INVALID ||
+016082:         near_imaginary.value == IR_ID_UNDERLYING_INVALID || merge.value == IR_ID_UNDERLYING_INVALID)
+016083:     {
+016084:         return IR_VALUE_ID_INVALID;
+016085:     }
+016086:     IrBlockId targets[2] = {near_real, near_imaginary};
+016087:     if (!c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, source))
+016088:     {
+016089:         return IR_VALUE_ID_INVALID;
+016090:     }
+016091:     IrBlockId merge_target[1] = {merge};
+016092:     if (!c_ir_switch_block(builder, near_real) ||
+016093:         !c_ir_emit_complex_smith_arm(builder, complex_type, element, result_place, a, b, c, d, true, source) ||
+016094:         !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, merge_target, 1, source))
+016095:     {
+016096:         return IR_VALUE_ID_INVALID;
+016097:     }
+016098:     if (!c_ir_switch_block(builder, near_imaginary) ||
+016099:         !c_ir_emit_complex_smith_arm(builder, complex_type, element, result_place, a, b, d, c, false, source) ||
+016100:         !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, merge_target, 1, source))
+016101:     {
+016102:         return IR_VALUE_ID_INVALID;
+016103:     }
+016104:     if (!c_ir_switch_block(builder, merge))
+016105:     {
+016106:         return IR_VALUE_ID_INVALID;
+016107:     }
+016108:     return c_ir_emit_load_place(builder, result_place, complex_type, source);
+016109: }
+016110: 
+016111: // Complex <-> real and complex <-> complex conversions (C11 6.3.1.6-7): the
+016112: // halves convert independently, a real value gains a positive-zero imaginary
+016113: // part, and a complex value converted to a real type keeps its real half.
+016114: BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source)
+016115: {
+016116:     IrType* source_complex = c_ir_value_complex_type(builder, value);
+016117:     IrType* target_complex = c_ir_complex_type_of(builder, target_type);

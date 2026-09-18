@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 38/111
+line: 15662
+
+015592:     for (u32 argument_index = 0; argument_index < argument_count; argument_index += 1)
+015593:     {
+015594:         operands[argument_index + 1] = arguments[argument_index];
+015595:     }
+015596:     IrSourceRange call_source = source;
+015597:     IrInstruction call = c_ir_instruction_initialize(IR_OPCODE_CALL, value_type);
+015598:     call.operands = operands;
+015599:     call.operand_count = argument_count + 1;
+015600:     call.symbol = symbol;
+015601:     call.result = result;
+015602:     IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+015603:     builder->function->values[result.value].definition = call_id;
+015604:     return result;
+015605: }
+015606: 
+015607: // --- Complex values -------------------------------------------------------
+015608: //
+015609: // A complex value is an ordinary two-field aggregate by the time it reaches
+015610: // the IR (see c_ir_complex_type). Arithmetic uses scalar float opcodes and
+015611: // constructs its result with the existing immutable AGGREGATE operation.
+015612: // Known constructors expose their scalar operands directly; memory objects
+015613: // and non-constructor values retain explicit field loads. Complex lvalues
+015614: // keep their object identity. There is no separate complex opcode or cleanup
+015615: // pass, and native backends keep the existing aggregate representation.
+015616: //
+015617: // Which arithmetic each operator gets is Clang's, checked against
+015618: // `clang -O0 -S -emit-llvm` for every combination rather than derived:
+015619: //   * `+` and `-` are componentwise, and a real operand touches only the real
+015620: //     half (the imaginary half of the promoted real operand is a positive
+015621: //     zero, and Clang carries the other operand's imaginary part through
+015622: //     unchanged rather than adding it).
+015623: //   * `*` and `/` with a real operand scale or divide both halves.
+015624: //   * `*` and `/` with two complex operands call the compiler runtime --
+015625: //     __mulsc3/__muldc3/__multc3 and __divsc3/__divdc3/__divtc3 -- which is
+015626: //     what Clang emits without -ffast-math or -fcx-limited-range. Those
+015627: //     helpers implement the overflow- and NaN-recovering forms from C11
+015628: //     Annex G, and calling them rather than inlining Smith's algorithm is the
+015629: //     choice made here: it is bit-for-bit what a Clang-built object does, and
+015630: //     the alternative would be a second, subtly different implementation of
+015631: //     the same numerics living in this file.
+015632: //   * `real / complex` also goes to the runtime, with the numerator's
+015633: //     imaginary part passed as a positive zero, again matching Clang.
+015634: //   * `==` and `!=` compare both halves.
+015635: //
+015636: // System V x86-64 returns a `long double _Complex` in ST(0)/ST(1) (the psABI's
+015637: // COMPLEX_X87 class) where the equivalent struct is returned in memory. That
+015638: // is the one place the aggregate model is not the ABI, and it is the only
+015639: // thing the backends had to learn about complex: the classifier gives that
+015640: // result four X87/X87_UP eightbyte parts, the canonical x86-64 emitter pushes
+015641: // the imaginary half and then the real one before its RET and pops them in
+015642: // that order after a call, and every other position -- the argument, the
+015643: // loads, the stores, the copies -- is the two-field aggregate unchanged.
+015644: 
+015645: BUSTER_C_INTERNAL IrValueId c_ir_emit_float16_negate(CIntegerIrBuilder* builder, IrValueId value, IrTypeId type_id, IrSourceRange source)
+015646: {
+015647:     IrValueId result = IR_VALUE_ID_INVALID;
+015648:     IrTypeId bits_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_SHORT);
+015649:     IrValueId slot = c_ir_emit_temporary(builder, type_id, source);
+015650:     if (c_ir_type_is_ieee_binary16(builder, type_id) && bits_type.value != IR_ID_UNDERLYING_INVALID &&
+015651:         slot.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, slot, type_id, value, source))
+015652:     {
+015653:         IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+015654:         IrValueId address = c_ir_emit_address_of_place(builder, slot, type_id, source);
+015655:         IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+015656:                                      ? c_ir_emit_cast(builder, address, bits_pointer_type, source)
+015657:                                      : IR_VALUE_ID_INVALID;
+015658:         IrValueId bits_place = bits_address.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, bits_address, source)
+015659:                                                                               : IR_VALUE_ID_INVALID;
+015660:         IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source)
+015661:                                                                       : IR_VALUE_ID_INVALID;
+015662:         IrValueId sign_mask = c_ir_emit_integer_value_typed(builder, UINT64_C(0x8000), false, (CToken){0}, bits_type);
+015663:         IrValueId flipped = bits.value != IR_ID_UNDERLYING_INVALID && sign_mask.value != IR_ID_UNDERLYING_INVALID
+015664:                                 ? c_ir_emit_binary_value(builder, bits, sign_mask, bits_type, IR_BINARY_INTEGER_BITWISE_XOR, source)
+015665:                                 : IR_VALUE_ID_INVALID;
+015666:         if (flipped.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, bits_place, bits_type, flipped, source))
+015667:         {
+015668:             result = c_ir_emit_load_place(builder, slot, type_id, source);
+015669:         }
+015670:     }
+015671:     return result;
+015672: }
+015673: 
+015674: BUSTER_C_INTERNAL IrValueId c_ir_emit_unary_value(CIntegerIrBuilder* builder, IrValueId operand, IrTypeId type, IrUnaryOperation operation,
+015675:                                                     IrSourceRange source)
+015676: {
+015677:     IrValueId result = IR_VALUE_ID_INVALID;
+015678:     if (operand.value != IR_ID_UNDERLYING_INVALID && type.value != IR_ID_UNDERLYING_INVALID &&
+015679:         operation == IR_UNARY_FLOAT_NEGATE && c_ir_type_is_ieee_binary16(builder, type))
+015680:     {
+015681:         result = c_ir_emit_float16_negate(builder, operand, type, source);
+015682:     }
+015683:     else if (operand.value != IR_ID_UNDERLYING_INVALID && type.value != IR_ID_UNDERLYING_INVALID)
+015684:     {
+015685:         result = c_ir_add_result(builder, type);
+015686:         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, type);
+015687:         instruction.operands = arena_allocate(builder->arena, IrValueId, 1);
+015688:         instruction.operands[0] = operand;
+015689:         instruction.operand_count = 1;
+015690:         instruction.unary_operation = (u8)operation;
+015691:         instruction.result = result;
+015692:         IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+015693:         builder->function->values[result.value].definition = id;
+015694:     }
+015695:     return result;
+015696: }
+015697: 
+015698: // GNU's `__real__`/`__imag__` and their unsuffixed spellings, as the unary
+015699: // operator each names. The expression walker asks this of every identifier it
+015700: // meets where an operand is expected, so the length test carries the common
+015701: // answer before any comparison runs.
+015702: BUSTER_C_INTERNAL bool c_ir_complex_part_operator(CIntegerIrBuilder* builder, CToken token, CConditionalOperator* operation)
+015703: {
+015704:     if (token.kind != C_TOKEN_IDENTIFIER)
+015705:     {
+015706:         return false;
+015707:     }
+015708:     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+015709:     if (spelling.length != 6 && spelling.length != 8)
+015710:     {
+015711:         return false;
+015712:     }
+015713:     if (string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__real")))
+015714:     {
+015715:         *operation = C_CONDITIONAL_REAL_PART;
+015716:         return true;
+015717:     }
+015718:     if (string_equal(spelling, S8("__imag__")) || string_equal(spelling, S8("__imag")))
+015719:     {
+015720:         *operation = C_CONDITIONAL_IMAGINARY_PART;
+015721:         return true;
+015722:     }
+015723:     return false;
+015724: }
+015725: 
+015726: BUSTER_C_INTERNAL IrType* c_ir_complex_type_of(CIntegerIrBuilder* builder, IrTypeId type_id)
+015727: {
+015728:     IrType* type = ir_type_from_id(&builder->program->types, type_id);
+015729:     return type && type->is_complex ? type : 0;
+015730: }
+015731: 
+015732: BUSTER_C_INTERNAL IrType* c_ir_value_complex_type(CIntegerIrBuilder* builder, IrValueId value)
+015733: {
+015734:     if (value.value >= builder->function->value_count)
+015735:     {
+015736:         return 0;
+015737:     }
+015738:     return c_ir_complex_type_of(builder, builder->function->values[value.value].canonical_type);
+015739: }
+015740: 
+015741: // The complex type whose halves are `element`, or invalid when `element` is
+015742: // not one of the three real floating types a complex type can be built over.
+015743: BUSTER_C_INTERNAL IrTypeId c_ir_complex_type_for_element(CIntegerIrBuilder* builder, IrTypeId element)
+015744: {
+015745:     CTypeKind kind = element.value == builder->f32_type.value            ? C_TYPE_FLOAT_COMPLEX
+015746:                      : element.value == builder->f64_type.value          ? C_TYPE_DOUBLE_COMPLEX
+015747:                      : element.value == builder->long_double_type.value  ? C_TYPE_LONG_DOUBLE_COMPLEX
+015748:                                                                          : C_TYPE_INVALID;
+015749:     return kind == C_TYPE_INVALID ? IR_TYPE_ID_INVALID : c_ir_builder_scalar_type(builder, kind);
+015750: }
+015751: 
+015752: // A field whose index is already known. Complex halves and anonymous aggregate
+015753: // members have no C name to turn into a source token or look up again.
+015754: BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source)
+015755: {
+015756:     IrValueId next = IR_VALUE_ID_INVALID;
+015757:     if (place.value < builder->function->value_count)
+015758:     {
+015759:         IrTypeId owner_type = builder->function->values[place.value].canonical_type;
+015760:         IrType* owner = ir_type_from_id(&builder->program->types, owner_type);
+015761:         if (owner && field_index < owner->field_count)
+015762:         {
+015763:             IrTypeId field_type = owner->fields[field_index].type;
+015764:             IrType* field_value_type = ir_type_from_id(&builder->program->types, field_type);
+015765:             next = ir_function_add_value(
+015766:                 builder->arena, builder->function,
+015767:                 (IrValue){
+015768:                     .canonical_type = field_type,
+015769:                     .definition = IR_INSTRUCTION_ID_INVALID,
+015770:                     .category = IR_VALUE_PLACE,
+015771:                     .is_read_only = builder->function->values[place.value].is_read_only,
+015772:                     .is_volatile = builder->function->values[place.value].is_volatile || (field_value_type && field_value_type->is_volatile),
+015773:                 });
+015774:             IrInstruction field = c_ir_instruction_initialize(IR_OPCODE_FIELD, field_type);
+015775:             field.operands = arena_allocate(builder->arena, IrValueId, 1);
+015776:             field.operands[0] = place;
+015777:             field.operand_count = 1;
+015778:             field.immediates = arena_allocate(builder->arena, u64, 1);
+015779:             field.immediates[0] = field_index;
+015780:             field.immediate_count = 1;
+015781:             field.result = next;
+015782:             IrInstructionId field_id = c_ir_append_instruction(builder, field, source);
+015783:             builder->function->values[next.value].definition = field_id;
+015784:         }
+015785:     }
+015786:     return next;
+015787: }
+015788: 
+015789: // An addressable place holding `value`. An aggregate lvalue is already one, a
+015790: // value that a load produced can reuse the place that load read (the same
+015791: // recovery c_ir_emit_field_place_from_value performs for `x.member`), and
+015792: // anything else -- a call result, a freshly composed value -- is spilled.

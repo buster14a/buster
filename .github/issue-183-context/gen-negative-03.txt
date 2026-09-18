@@ -1,0 +1,166 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: constant_is_negative
+occurrence: 3/4
+line: 43135
+
+043075:             if (global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && type && type->kind == IR_TYPE_FLOAT && type->bit_width <= 64)
+043076:             {
+043077:                 f64 value = 0.0;
+043078:                 if (type->bit_width == 16)
+043079:                 {
+043080:                     value = type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_to_f64(global->initializer_bits)
+043081:                                                                          : c_ir_float16_to_f64(global->initializer_bits);
+043082:                 }
+043083:                 else if (type->bit_width == 32)
+043084:                 {
+043085:                     f32 narrowed = 0.0f;
+043086:                     u32 bits = (u32)global->initializer_bits;
+043087:                     memcpy(&narrowed, &bits, sizeof(narrowed));
+043088:                     value = (f64)narrowed;
+043089:                 }
+043090:                 else
+043091:                 {
+043092:                     memcpy(&value, &global->initializer_bits, sizeof(value));
+043093:                 }
+043094:                 *result = (CIrConstantValue){.type = global->type, .floating = value, .kind = C_IR_CONSTANT_FLOAT};
+043095:                 return true;
+043096:             }
+043097:             if (global->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS && type && type->kind == IR_TYPE_POINTER)
+043098:             {
+043099:                 *result = (CIrConstantValue){
+043100:                     .type = global->type,
+043101:                     .symbol = global->initializer_symbol,
+043102:                     .addend = global->initializer_addend,
+043103:                     .kind = C_IR_CONSTANT_POINTER,
+043104:                 };
+043105:                 return true;
+043106:             }
+043107:             return false;
+043108:         }
+043109:     }
+043110: 
+043111:     return false;
+043112: }
+043113: 
+043114: BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 token_index, CIrConstantValue* result)
+043115: {
+043116:     CToken token = builder->preprocess.tokens[token_index];
+043117:     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("false"))))
+043118:     {
+043119:         *result = c_ir_constant_integer(builder->bool_type, string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")));
+043120:         return true;
+043121:     }
+043122:     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("nullptr")))
+043123:     {
+043124:         *result = (CIrConstantValue){.type = builder->nullptr_type, .kind = C_IR_CONSTANT_POINTER};
+043125:         return true;
+043126:     }
+043127:     CEntityId entity_id = c_ir_constant_entity_at(builder, token_index);
+043128:     if (entity_id.value < builder->parse.entity_count)
+043129:     {
+043130:         CEntity* entity = builder->parse.entities + entity_id.value;
+043131:         if (entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value))
+043132:         {
+043133:             IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : builder->s32_type;
+043134:             u64 value = entity->constant_value;
+043135:             if (entity->constant_is_negative)
+043136:             {
+043137:                 value = 0 - value;
+043138:             }
+043139:             *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, value);
+043140:             return true;
+043141:         }
+043142:         // A function-local static is C_ENTITY_LOCAL with a symbol -- the
+043143:         // clinic macros write `.kwtuple = (&_kwtuple.ob_base.ob_base)` where
+043144:         // _kwtuple is exactly that -- and it folds like any file-scope
+043145:         // object.  An automatic local has no symbol and stays refused.
+043146:         bool static_local = entity->kind == C_ENTITY_LOCAL && builder->entity_symbols[entity_id.value].value != IR_ID_UNDERLYING_INVALID;
+043147:         if ((entity->kind == C_ENTITY_OBJECT || static_local) && entity->type.value < builder->parse.type_count)
+043148:         {
+043149:             IrSymbolId symbol = builder->entity_symbols[entity_id.value];
+043150:             IrTypeId type = builder->c_type_ir_map[entity->type.value];
+043151:             IrType* type_value = ir_type_from_id(&builder->program->types, type);
+043152:             if (type_value && type_value->layout.resolved)
+043153:             {
+043154:                 *result = (CIrConstantValue){
+043155:                     .type = type,
+043156:                     .symbol = symbol,
+043157:                     .kind = C_IR_CONSTANT_LVALUE,
+043158:                 };
+043159:                 return true;
+043160:             }
+043161:         }
+043162:         if (entity->kind == C_ENTITY_FUNCTION && entity->type.value < builder->parse.type_count)
+043163:         {
+043164:             IrTypeId function_type = builder->c_type_ir_map[entity->type.value];
+043165:             IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, function_type);
+043166:             if (pointer_type.value != IR_ID_UNDERLYING_INVALID)
+043167:             {
+043168:                 *result = (CIrConstantValue){
+043169:                     .type = pointer_type,
+043170:                     .symbol = builder->entity_symbols[entity_id.value],
+043171:                     .kind = C_IR_CONSTANT_POINTER,
+043172:                 };
+043173:                 return result->symbol.value != IR_ID_UNDERLYING_INVALID;
+043174:             }
+043175:         }
+043176:     }
+043177: 
+043178:     return false;
+043179: }
+043180: 
+043181: BUSTER_C_INTERNAL bool c_ir_constant_lvalue_field(CIntegerIrBuilder* builder, CIrConstantValue* value, String8 name)
+043182: {
+043183:     if (value->kind == C_IR_CONSTANT_UNKNOWN)
+043184:     {
+043185:         return true;
+043186:     }
+043187:     IrType* type = ir_type_from_id(&builder->program->types, value->type);
+043188:     if (type && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION))
+043189:     {
+043190:         for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+043191:         {
+043192:             IrField* field = type->fields + field_index;
+043193:             if (!string_equal(field->name, name))
+043194:             {
+043195:                 continue;
+043196:             }
+043197:             if (field->offset > INT64_MAX || value->addend > INT64_MAX - (s64)field->offset)
+043198:             {
+043199:                 return false;
+043200:             }
+043201:             value->type = field->type;
+043202:             value->addend += (s64)field->offset;
+043203:             value->kind = C_IR_CONSTANT_LVALUE;
+043204:             return true;
+043205:         }
+043206:     }
+043207: 
+043208:     return false;
+043209: }
+043210: 
+043211: BUSTER_C_INTERNAL bool c_ir_constant_index(CIntegerIrBuilder* builder, CIrConstantValue* value, u64 index)
+043212: {
+043213:     if (value->kind != C_IR_CONSTANT_UNKNOWN)
+043214:     {
+043215:         IrType* type = ir_type_from_id(&builder->program->types, value->type);
+043216:         if (!type || (value->kind != C_IR_CONSTANT_LVALUE && value->kind != C_IR_CONSTANT_POINTER) ||
+043217:             (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_POINTER))
+043218:         {
+043219:             return false;
+043220:         }
+043221:         IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
+043222:         if (!element || !element->layout.resolved || element->layout.size > INT64_MAX || index > (u64)INT64_MAX / BUSTER_MAX((u64)1, element->layout.size))
+043223:         {
+043224:             return false;
+043225:         }
+043226:         s64 offset = (s64)(index * element->layout.size);
+043227:         if (value->addend > INT64_MAX - offset)
+043228:         {
+043229:             return false;
+043230:         }
+043231:         value->type = type->element_type;
+043232:         value->addend += offset;
+043233:         value->kind = C_IR_CONSTANT_LVALUE;
+043234:     }
+043235: 

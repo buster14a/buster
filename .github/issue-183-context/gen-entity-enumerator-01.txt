@@ -1,0 +1,246 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: C_ENTITY_ENUMERATOR
+occurrence: 1/6
+line: 4640
+
+004550: 
+004551: // The last local this token names, for the four sites whose token has no
+004552: // resolved entity. A resolved global must never select a same-named local
+004553: // from a scope that has ended.  All four ran a string_equal per
+004554: // row: 24.940 fallbacks over 2,32 M rows on a self-compile, which is where the
+004555: // lowering's 2,3 M memcmp calls came from, and string_equal is the worst
+004556: // L1d-miss-per-cycle ratio of any ordinary symbol in the compile.  The intern
+004557: // table is injective and both sides read the one spelling space, so two
+004558: // nonzero symbols answer exactly what the two spellings answer; a row or token
+004559: // the intern pass never saw still compares spellings, so a missed path costs
+004560: // speed and never correctness.
+004561: BUSTER_C_INTERNAL CIntegerIrLocal* c_ir_find_local_by_name(CIntegerIrBuilder* builder, CToken token)
+004562: {
+004563:     CIntegerIrLocal* result = 0;
+004564:     // Local rows and symbol rows are allocated together by c_lower_to_ir.
+004565:     BUSTER_CHECK(!builder->local_count || (builder->locals && builder->local_symbols));
+004566:     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+004567:     for (u32 index = builder->local_count; index != 0 && !result; index -= 1)
+004568:     {
+004569:         u32 candidate_symbol = builder->local_symbols[index - 1];
+004570:         bool same = token.symbol && candidate_symbol ? token.symbol == candidate_symbol : string_equal(builder->locals[index - 1].name, spelling);
+004571:         if (same)
+004572:         {
+004573:             result = builder->locals + index - 1;
+004574:         }
+004575:     }
+004576:     return result;
+004577: }
+004578: 
+004579: BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity(CIntegerIrBuilder* builder, u32 token_index)
+004580: {
+004581:     CEntityId result;
+004582:     if (!builder->token_entities_plus_one || token_index >= builder->preprocess.token_count)
+004583:     {
+004584:         result = C_ENTITY_ID_INVALID;
+004585:     }
+004586:     else
+004587:     {
+004588:         result = (CEntityId){.value = builder->token_entities_plus_one[token_index] - 1};
+004589:     }
+004590: 
+004591:     return result;
+004592: }
+004593: 
+004594: BUSTER_C_INTERNAL CEntityId c_ir_identifier_entity_or_lookup(CIntegerIrBuilder* builder, u32 token_index)
+004595: {
+004596:     CEntityId entity = c_ir_identifier_entity(builder, token_index);
+004597:     if (entity.value == C_ID_UNDERLYING_INVALID && token_index < builder->preprocess.token_count && builder->parse.scope_count &&
+004598:         builder->preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER)
+004599:     {
+004600:         entity = c_parse_lookup_entity_token(&builder->parse, builder->preprocess.spelling_base, (CScopeId){.value = 0}, &builder->preprocess.tokens[token_index]);
+004601:     }
+004602:     return entity;
+004603: }
+004604: 
+004605: BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start, u32 end);
+004606: 
+004607: // May the parenthesized group opening at `open` spell a type name?  False
+004608: // only when the token after the `(` proves it cannot, without entering the
+004609: // query machine.  c_ir_type_name_prefix accepts a type name that begins with
+004610: // a type, qualifier, tag, typeof or _Atomic keyword, a decoration
+004611: // c_ir_primitive_type_kind steps over (an attribute, an asm label, a `[[`
+004612: // attribute) or an identifier naming a typedef, and nothing else, so:
+004613: // - a number, a string, a character and every punctuator but `[` is refused
+004614: //   outright;
+004615: // - an identifier the parser bound to a local, object, parameter,
+004616: //   enumerator or function is refused too: the prefix reads that binding
+004617: //   before any scope lookup, and none of them is a typedef.  Its spelling
+004618: //   must not be one of the keywords above, which
+004619: //   c_parse_type_name_start_word_token answers from the word bits (an
+004620: //   interned spelling outside the predefined range is no keyword; symbol 0
+004621: //   is unclassified and stays a candidate).
+004622: // An unbound identifier keeps the scope-chain lookup the probe does for it,
+004623: // and a typedef is the candidate the probe exists for.
+004624: BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u32 open)
+004625: {
+004626:     bool result = true;
+004627:     if (open + 1 < builder->preprocess.token_count)
+004628:     {
+004629:         CToken first = builder->preprocess.tokens[open + 1];
+004630:         if (first.kind != C_TOKEN_IDENTIFIER)
+004631:         {
+004632:             result = first.punctuator == C_PUNCTUATOR_LEFT_BRACKET;
+004633:         }
+004634:         else if (first.symbol && !c_parse_type_name_start_word_token(builder->preprocess, first))
+004635:         {
+004636:             CEntityId entity = c_ir_identifier_entity(builder, open + 1);
+004637:             if (entity.value < builder->parse.entity_count)
+004638:             {
+004639:                 CEntityKind kind = builder->parse.entities[entity.value].kind;
+004640:                 result = kind != C_ENTITY_LOCAL && kind != C_ENTITY_OBJECT && kind != C_ENTITY_PARAMETER && kind != C_ENTITY_ENUMERATOR &&
+004641:                          kind != C_ENTITY_FUNCTION;
+004642:             }
+004643:         }
+004644:     }
+004645:     return result;
+004646: }
+004647: 
+004648: // The memo slot for the group opening at `open`, in the body-token array
+004649: // prepared_call_indices also spans: a `(` outside the body -- a parameter
+004650: // bound's declarator, a global initializer -- has none and is probed each
+004651: // time.
+004652: BUSTER_C_INTERNAL u32* c_ir_group_type_name_slot(CIntegerIrBuilder* builder, u32 open)
+004653: {
+004654:     u32* slot = 0;
+004655:     if (builder->group_type_names && open >= builder->body_token_start && open - builder->body_token_start < builder->body_token_count)
+004656:     {
+004657:         slot = builder->group_type_names + (open - builder->body_token_start);
+004658:     }
+004659:     return slot;
+004660: }
+004661: 
+004662: // Whether a probe's answer for the group `open .. close` may be stored.  A
+004663: // group headed by typeof/__typeof__/__typeof/typeof_unqual reads the locals
+004664: // declared so far, so its answer can change between two probes; a lone
+004665: // identifier the parser left unbound is looked up at file scope by
+004666: // c_ir_type_name and at the declaration's scope by the query, so the two
+004667: // probe paths may not share one answer for it.  Everything else is a
+004668: // function of the tokens and the parse alone.
+004669: BUSTER_C_INTERNAL bool c_ir_group_type_name_memoizable(CIntegerIrBuilder* builder, u32 open, u32 close)
+004670: {
+004671:     bool result = true;
+004672:     CToken first = builder->preprocess.tokens[open + 1];
+004673:     if (first.kind == C_TOKEN_IDENTIFIER)
+004674:     {
+004675:         String8 spelling = c_token_spelling(builder->preprocess.spelling_base, first);
+004676:         if (string_equal(spelling, S8("typeof")) || string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("__typeof")) ||
+004677:             string_equal(spelling, S8("typeof_unqual")))
+004678:         {
+004679:             result = false;
+004680:         }
+004681:         else if (close == open + 2 && c_ir_identifier_entity(builder, open + 1).value == C_ID_UNDERLYING_INVALID)
+004682:         {
+004683:             result = false;
+004684:         }
+004685:     }
+004686:     return result;
+004687: }
+004688: 
+004689: BUSTER_C_INTERNAL u32 c_ir_group_type_name_encode(IrTypeId type)
+004690: {
+004691:     return type.value == IR_ID_UNDERLYING_INVALID ? 1 : type.value + 2;
+004692: }
+004693: 
+004694: BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name_decode(u32 encoded)
+004695: {
+004696:     IrTypeId result;
+004697:     if (encoded == 1)
+004698:     {
+004699:         result = IR_TYPE_ID_INVALID;
+004700:     }
+004701:     else
+004702:     {
+004703:         result = (IrTypeId){.value = encoded - 2};
+004704:     }
+004705:     return result;
+004706: }
+004707: 
+004708: // The type name the group `open .. close` (a `(` and its matching `)`)
+004709: // spells, or invalid: c_ir_type_name over the interior, asked once per
+004710: // opener.  The gate refuses the groups that cannot be one before the query
+004711: // machine runs, and the memo answers the second and third probe of one `(`
+004712: // -- the expression steps, the unary-end scan and the call preparer each ask
+004713: // -- so the probe itself, unchanged, stays the reference for both.
+004714: BUSTER_C_INTERNAL IrTypeId c_ir_group_type_name(CIntegerIrBuilder* builder, u32 open, u32 close)
+004715: {
+004716:     IrTypeId result;
+004717:     u32* slot = c_ir_group_type_name_slot(builder, open);
+004718:     if (slot && *slot)
+004719:     {
+004720:         result = c_ir_group_type_name_decode(*slot);
+004721:     }
+004722:     else if (!c_ir_group_may_be_type_name(builder, open))
+004723:     {
+004724:         result = IR_TYPE_ID_INVALID;
+004725:         if (slot)
+004726:         {
+004727:             *slot = 1;
+004728:         }
+004729:     }
+004730:     else
+004731:     {
+004732:         result = c_ir_type_name(builder, open + 1, close);
+004733:         if (slot && c_ir_group_type_name_memoizable(builder, open, close))
+004734:         {
+004735:             *slot = c_ir_group_type_name_encode(result);
+004736:         }
+004737:     }
+004738:     return result;
+004739: }
+004740: 
+004741: // c_ir_query_type_name over the same group, for callers that run inside the
+004742: // query machine: the gate and the memo answer without raising a request, and
+004743: // a request the probe raises passes through unanswered -- has_request set,
+004744: // type_out untouched -- exactly as before.
+004745: BUSTER_C_INTERNAL bool c_ir_query_group_type_name(CIntegerIrBuilder* builder, u32 open, u32 close, IrTypeId* type_out)
+004746: {
+004747:     bool resolved;
+004748:     u32* slot = c_ir_group_type_name_slot(builder, open);
+004749:     if (slot && *slot)
+004750:     {
+004751:         *type_out = c_ir_group_type_name_decode(*slot);
+004752:         resolved = type_out->value != IR_ID_UNDERLYING_INVALID;
+004753:     }
+004754:     else if (!c_ir_group_may_be_type_name(builder, open))
+004755:     {
+004756:         *type_out = IR_TYPE_ID_INVALID;
+004757:         resolved = false;
+004758:         if (slot)
+004759:         {
+004760:             *slot = 1;
+004761:         }
+004762:     }
+004763:     else
+004764:     {
+004765:         resolved = c_ir_query_type_name(builder, open + 1, close, true, type_out);
+004766:         if (!builder->queries->has_request && slot && c_ir_group_type_name_memoizable(builder, open, close))
+004767:         {
+004768:             *slot = c_ir_group_type_name_encode(*type_out);
+004769:         }
+004770:     }
+004771:     return resolved;
+004772: }
+004773: 
+004774: BUSTER_C_INTERNAL CEntityId c_ir_local_entity_at(CIntegerIrBuilder* builder, u32 token_index)
+004775: {
+004776:     CEntityId bound = c_ir_identifier_entity(builder, token_index);
+004777:     CEntityId result;
+004778:     if (bound.value < builder->parse.entity_count && builder->parse.entities[bound.value].kind == C_ENTITY_LOCAL)
+004779:     {
+004780:         result = bound;
+004781:     }
+004782:     else
+004783:     {
+004784:         result = C_ENTITY_ID_INVALID;
+004785:     }
+004786: 
+004787:     return result;
+004788: }
+004789: 
+004790: BUSTER_C_INTERNAL bool c_ir_c_type_is_read_only(CIntegerIrBuilder* builder, CTypeId type_id)

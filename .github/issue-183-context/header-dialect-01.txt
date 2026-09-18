@@ -1,0 +1,116 @@
+path: src/buster/lib/compiler/frontend/c/c.h
+needle: typedef enum CPreprocessDialect
+occurrence: 1/1
+line: 457
+
+000427: 
+000428: typedef struct CPreprocessorDefinition CPreprocessorDefinition;
+000429: struct CPreprocessorDefinition
+000430: {
+000431:     // An identifier, optionally followed immediately by a function-like
+000432:     // parameter list parsed under the same rules as a source `#define`.
+000433:     String8 name;
+000434:     // The replacement list, taken verbatim: an empty value defines an
+000435:     // object-like macro that expands to nothing, the way `-DNAME=` does. A
+000436:     // caller that wants the `1` a valueless `-DNAME` means must spell it.
+000437:     String8 value;
+000438: };
+000439: 
+000440: typedef enum CPreprocessorOperationKind
+000441: {
+000442:     C_PREPROCESSOR_OPERATION_DEFINE,
+000443:     C_PREPROCESSOR_OPERATION_UNDEFINE,
+000444:     C_PREPROCESSOR_OPERATION_COUNT,
+000445: } CPreprocessorOperationKind;
+000446: 
+000447: typedef struct CPreprocessorOperation CPreprocessorOperation;
+000448: struct CPreprocessorOperation
+000449: {
+000450:     // The operand without its -D/-U prefix. Definitions retain their first
+000451:     // '=' so forwarding consumers preserve `-DNAME`, `-DNAME=`, and values
+000452:     // containing later '=' characters exactly.
+000453:     String8 operand;
+000454:     CPreprocessorOperationKind kind;
+000455: };
+000456: 
+000457: typedef enum CPreprocessDialect
+000458: {
+000459:     C_PREPROCESS_DIALECT_GNU17,
+000460:     C_PREPROCESS_DIALECT_GNU99,
+000461:     C_PREPROCESS_DIALECT_GNU11,
+000462:     C_PREPROCESS_DIALECT_GNU23,
+000463:     C_PREPROCESS_DIALECT_C99,
+000464:     C_PREPROCESS_DIALECT_C11,
+000465:     C_PREPROCESS_DIALECT_C17,
+000466:     C_PREPROCESS_DIALECT_C23,
+000467:     C_PREPROCESS_DIALECT_COUNT,
+000468: } CPreprocessDialect;
+000469: 
+000470: typedef struct CPreprocessOptions CPreprocessOptions;
+000471: struct CPreprocessOptions
+000472: {
+000473:     // Authoritative when macro_operation_count is nonzero. The separate
+000474:     // arrays below remain the compatibility path for existing callers: their
+000475:     // definitions are applied first, followed by their undefinitions.
+000476:     CPreprocessorOperation* macro_operations;
+000477:     CPreprocessorDefinition* definitions;
+000478:     String8* undefinitions;
+000479:     String8* include_paths;
+000480:     String8* system_include_paths;
+000481:     String8 source_path;
+000482:     Target target;
+000483:     TargetDataLayout data_layout;
+000484:     u32 macro_operation_count;
+000485:     u32 definition_count;
+000486:     u32 undefinition_count;
+000487:     u32 include_path_count;
+000488:     u32 system_include_path_count;
+000489:     u32 expansion_limit;
+000490:     u32 include_depth_limit;
+000491:     CPreprocessDialect dialect;
+000492:     bool disable_external_includes;
+000493:     // GNU-as sources use `#` for line comments, so a `.S` run treats a `#`
+000494:     // line whose word is no known directive as a comment instead of an
+000495:     // error; conditionals, defines and includes keep their meaning.
+000496:     bool assembly_comment_lines;
+000497:     u8 reserved[2];
+000498: };
+000499: 
+000500: typedef struct CSymbolTable CSymbolTable;
+000501: 
+000502: // The spelling space of every preprocess result begins with this fixed
+000503: // prelude, so tokens synthesized after preprocessing (static-assert
+000504: // wrappers, lowering-internal constants, C23 respells) can reference
+000505: // well-known spellings at compile-time-known offsets.
+000506: #define C_SPELLING_PRELUDE_TEXT "_Static_assert();._Bool_Alignas_Alignof_Thread_local010.0f"
+000507: enum
+000508: {
+000509:     C_SPELLING_STATIC_ASSERT = 0,
+000510:     C_SPELLING_STATIC_ASSERT_LENGTH = 14,
+000511:     C_SPELLING_LEFT_PARENTHESIS = 14,
+000512:     C_SPELLING_RIGHT_PARENTHESIS = 15,
+000513:     C_SPELLING_SEMICOLON = 16,
+000514:     C_SPELLING_DOT = 17,
+000515:     C_SPELLING_BOOL = 18,
+000516:     C_SPELLING_BOOL_LENGTH = 5,
+000517:     C_SPELLING_ALIGNAS = 23,
+000518:     C_SPELLING_ALIGNAS_LENGTH = 8,
+000519:     C_SPELLING_ALIGNOF = 31,
+000520:     C_SPELLING_ALIGNOF_LENGTH = 8,
+000521:     C_SPELLING_THREAD_LOCAL = 39,
+000522:     C_SPELLING_THREAD_LOCAL_LENGTH = 13,
+000523:     C_SPELLING_ZERO = 52,
+000524:     C_SPELLING_ONE = 53,
+000525:     // "0.0f"; length 3 spells "0.0".
+000526:     C_SPELLING_FLOAT_ZERO = 54,
+000527:     C_SPELLING_PRELUDE_LENGTH = 58,
+000528: };
+000529: 
+000530: BUSTER_CT_CHECK(sizeof(C_SPELLING_PRELUDE_TEXT) - 1 == C_SPELLING_PRELUDE_LENGTH);
+000531: 
+000532: // Location-recovery state of one preprocess run: the source map over the
+000533: // spelling space, and the commit-on-demand arena owning that space. Behind
+000534: // one pointer because CPreprocessResult travels by value through the whole
+000535: // parse and lowering surface — growing that struct taxes every call.
+000536: //
+000537: // The map partitions the space into IrSourceRegions: TEXT regions recover

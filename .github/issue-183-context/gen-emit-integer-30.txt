@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 30/111
+line: 8906
+
+008836:             }
+008837:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+008838:             if (!decimal)
+008839:             {
+008840:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+008841:             }
+008842:         }
+008843:         else if (!long_count)
+008844:         {
+008845:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+008846:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+008847:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+008848:         }
+008849:         else if (long_count == 1 && !is_unsigned)
+008850:         {
+008851:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+008852:             if (!decimal)
+008853:             {
+008854:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+008855:             }
+008856:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+008857:             if (!decimal)
+008858:             {
+008859:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+008860:             }
+008861:         }
+008862:         else if (long_count == 1)
+008863:         {
+008864:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+008865:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+008866:         }
+008867:         else if (!is_unsigned)
+008868:         {
+008869:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+008870:             if (!decimal)
+008871:             {
+008872:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+008873:             }
+008874:         }
+008875:         else
+008876:         {
+008877:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+008878:         }
+008879:     }
+008880: #undef C_INTEGER_LITERAL_CANDIDATE
+008881:     for (u32 index = 0; result.value == IR_ID_UNDERLYING_INVALID && index < candidate_count; index += 1)
+008882:     {
+008883:         if (c_ir_integer_literal_fits(builder, candidates[index], value))
+008884:         {
+008885:             result = builder->scalar_types[candidates[index]];
+008886:         }
+008887:     }
+008888:     return result;
+008889: }
+008890: 
+008891: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, CToken token)
+008892: {
+008893:     u64 value = 0;
+008894:     if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, token), &value))
+008895:     {
+008896:         return IR_VALUE_ID_INVALID;
+008897:     }
+008898:     IrTypeId type = c_ir_integer_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, token), value);
+008899:     IrValueId result;
+008900:     if (type.value == IR_TYPE_ID_INVALID.value)
+008901:     {
+008902:         result = IR_VALUE_ID_INVALID;
+008903:     }
+008904:     else
+008905:     {
+008906:         result = c_ir_emit_integer_value_typed(builder, value, false, token, type);
+008907:     }
+008908: 
+008909:     return result;
+008910: }
+008911: 
+008912: // The imaginary suffix of a floating literal. C's suffixes are `f`/`l` and
+008913: // GNU adds `i`/`j` for an imaginary constant, in either order and either
+008914: // case, so the run of trailing letters is scanned rather than just the last
+008915: // one. Reports the spelling with the imaginary letter removed, which is an
+008916: // ordinary real literal the parser below already understands; `arena` is only
+008917: // touched when that letter is not the last one.
+008918: BUSTER_C_INTERNAL bool c_ir_number_imaginary_spelling(Arena* arena, String8 spelling, String8* real_out)
+008919: {
+008920:     u64 suffix_start = spelling.length;
+008921:     u64 imaginary_index = spelling.length;
+008922:     while (suffix_start)
+008923:     {
+008924:         u8 byte = (u8)spelling.pointer[suffix_start - 1];
+008925:         if (byte == 'i' || byte == 'I' || byte == 'j' || byte == 'J')
+008926:         {
+008927:             // Two imaginary letters is not a literal any compiler accepts;
+008928:             // leave it alone and let the real parser refuse the spelling.
+008929:             if (imaginary_index != spelling.length)
+008930:             {
+008931:                 return false;
+008932:             }
+008933:             imaginary_index = suffix_start - 1;
+008934:         }
+008935:         else if (byte != 'f' && byte != 'F' && byte != 'l' && byte != 'L')
+008936:         {
+008937:             break;
+008938:         }
+008939:         suffix_start -= 1;
+008940:     }
+008941:     if (imaginary_index == spelling.length || !suffix_start)
+008942:     {
+008943:         return false;
+008944:     }
+008945:     if (imaginary_index == spelling.length - 1)
+008946:     {
+008947:         *real_out = (String8){.pointer = spelling.pointer, .length = spelling.length - 1};
+008948:         return true;
+008949:     }
+008950:     char8* copy = arena_allocate(arena, char8, spelling.length - 1);
+008951:     memcpy(copy, spelling.pointer, imaginary_index);
+008952:     memcpy(copy + imaginary_index, spelling.pointer + imaginary_index + 1, spelling.length - imaginary_index - 1);
+008953:     *real_out = (String8){.pointer = copy, .length = spelling.length - 1};
+008954:     return true;
+008955: }
+008956: 
+008957: // The suffix of a floating constant: how many trailing bytes it occupies and
+008958: // which type it names, reported as one code. C's suffixes are `f`/`F` for
+008959: // float and `l`/`L` for long double, and C23 adds `f16`/`F16` for `_Float16`
+008960: // -- the only one longer than a letter, so reading the last byte alone cannot
+008961: // recognize it. The half suffix reports as 'h', a letter C does not use as a
+008962: // suffix, so a caller comparing against 'f' or 'l' cannot confuse the two.
+008963: // Every spelling-to-value path shares this so that the type a literal is
+008964: // given and the digits that are parsed for it cannot disagree.
+008965: BUSTER_C_INTERNAL u32 c_ir_float_suffix(String8 spelling, char8* code_out)
+008966: {
+008967:     // In a hexadecimal spelling `f` and `F` are digits, and only a `p`
+008968:     // exponent makes such a spelling a floating constant at all: `0x2f16` is
+008969:     // the integer 12054 and `0x2f` the integer 47, where `0x1p4f` really does
+008970:     // carry the float suffix. Asking for the exponent is what keeps a
+008971:     // float-typed initializer written with a hexadecimal integer from losing
+008972:     // its last digits to a suffix that is not there.
+008973:     bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
+008974:     bool suffixable = !hexadecimal;
+008975:     for (u64 index = 2; !suffixable && index < spelling.length; index += 1)
+008976:     {
+008977:         suffixable = spelling.pointer[index] == 'p' || spelling.pointer[index] == 'P';
+008978:     }
+008979:     char8 code = 0;
+008980:     u32 length = 0;
+008981:     if (suffixable && spelling.length >= 3 && (spelling.pointer[spelling.length - 3] == 'f' || spelling.pointer[spelling.length - 3] == 'F') &&
+008982:         spelling.pointer[spelling.length - 2] == '1' && spelling.pointer[spelling.length - 1] == '6')
+008983:     {
+008984:         code = 'h';
+008985:         length = 3;
+008986:     }
+008987:     else if (suffixable && spelling.length)
+008988:     {
+008989:         char8 last = spelling.pointer[spelling.length - 1];
+008990:         if (last == 'f' || last == 'F' || last == 'l' || last == 'L')
+008991:         {
+008992:             code = last;
+008993:             length = 1;
+008994:         }
+008995:     }
+008996:     *code_out = code;
+008997: 
+008998:     return length;
+008999: }
+009000: 
+009001: BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out)
+009002: {
+009003:     spelling.length -= c_ir_float_suffix(spelling, suffix_out);
+009004:     bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
+009005:     u32 base = hexadecimal ? 16 : 10;
+009006:     u64 index = hexadecimal ? 2 : 0;
+009007:     f64 value = 0.0;
+009008:     f64 fraction_scale = 1.0;
+009009:     bool fraction = false;
+009010:     bool saw_digit = false;
+009011:     // The integer view of a decimal literal: every digit absorbed into a u64
+009012:     // mantissa plus a power of ten. When the whole spelling fits — mantissa
+009013:     // under 2^53, scale within the exactly representable 1e22 — one multiply
+009014:     // or divide of two exact doubles is correctly rounded (Clinger's fast
+009015:     // path), where the digit-by-digit accumulation below drifts by an ulp
+009016:     // (its running fraction scales 0.1, 0.01, ... are themselves rounded).
+009017:     u64 mantissa = 0;
+009018:     s64 mantissa_scale = 0;
+009019:     s64 fraction_digits = 0;
+009020:     bool mantissa_exact = true;
+009021:     while (index < spelling.length)
+009022:     {
+009023:         u8 byte = spelling.pointer[index];
+009024:         if (byte == '.')
+009025:         {
+009026:             if (fraction)
+009027:             {
+009028:                 return false;
+009029:             }
+009030:             fraction = true;
+009031:             index += 1;
+009032:             continue;
+009033:         }
+009034:         if ((!hexadecimal && (byte == 'e' || byte == 'E')) || (hexadecimal && (byte == 'p' || byte == 'P')))
+009035:         {
+009036:             break;

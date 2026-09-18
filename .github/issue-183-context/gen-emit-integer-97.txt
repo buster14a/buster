@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 97/111
+line: 28350
+
+028280: }
+028281: 
+028282: BUSTER_C_INTERNAL IrValueId c_ir_truth_value(CIntegerIrBuilder* builder, IrValueId value, IrSourceRange source)
+028283: {
+028284:     IrTypeId type_id = builder->function->values[value.value].canonical_type;
+028285:     IrType* type = ir_type_from_id(&builder->program->types, type_id);
+028286:     if (!type)
+028287:     {
+028288:         return IR_VALUE_ID_INVALID;
+028289:     }
+028290:     // Array expressions decay to pointers in every value context, including
+028291:     // the truth conversion of an assertion's `condition && "message"`
+028292:     // operand.  Keep the declared array type for sizeof/type-only queries,
+028293:     // but materialize its address before forming the pointer comparison here.
+028294:     if (type->kind == IR_TYPE_ARRAY)
+028295:     {
+028296:         IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, type->element_type);
+028297:         value = c_ir_decay_array(builder, value, pointer_type, source);
+028298:         if (value.value == IR_ID_UNDERLYING_INVALID)
+028299:         {
+028300:             return IR_VALUE_ID_INVALID;
+028301:         }
+028302:         type_id = pointer_type;
+028303:         type = ir_type_from_id(&builder->program->types, type_id);
+028304:         if (!type)
+028305:         {
+028306:             return IR_VALUE_ID_INVALID;
+028307:         }
+028308:     }
+028309:     if (c_ir_type_is_ieee_binary16(builder, type_id))
+028310:     {
+028311:         IrValueId widened = c_ir_emit_float16_runtime_call(builder, S8("__extendhfsf2"), builder->f32_type, value, type_id, source);
+028312:         return widened.value == IR_ID_UNDERLYING_INVALID ? IR_VALUE_ID_INVALID : c_ir_truth_value(builder, widened, source);
+028313:     }
+028314:     // Truth conversion is a comparison against a zero of the same type, so it
+028315:     // needs the x87 comparison the canonical backend provides only for f80.
+028316:     // A wide long double on any other target still has none.
+028317:     if (type->kind == IR_TYPE_FLOAT && type->bit_width > 64 && !c_ir_target_supports_f80(builder->target))
+028318:     {
+028319:         builder->failure_message = S8("C IR lowering does not yet support wide floating-point truth conversion");
+028320:         return IR_VALUE_ID_INVALID;
+028321:     }
+028322:     if (type->kind == IR_TYPE_BOOLEAN)
+028323:     {
+028324:         return value;
+028325:     }
+028326:     // A complex value is false only when both halves are zero (C11 6.3.1.2
+028327:     // applied to G.4.1's model), so the conversion is `re != 0 || im != 0`.
+028328:     if (type->is_complex)
+028329:     {
+028330:         IrTypeId element = type->element_type;
+028331:         IrValueId real = IR_VALUE_ID_INVALID;
+028332:         IrValueId imaginary = IR_VALUE_ID_INVALID;
+028333:         IrValueId zero = c_ir_complex_zero(builder, element, source);
+028334:         if (zero.value == IR_ID_UNDERLYING_INVALID || !c_ir_complex_split(builder, value, &real, &imaginary, source))
+028335:         {
+028336:             return IR_VALUE_ID_INVALID;
+028337:         }
+028338:         IrValueId real_nonzero = c_ir_emit_binary_value(builder, real, zero, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
+028339:         IrValueId imaginary_nonzero = c_ir_emit_binary_value(builder, imaginary, zero, builder->bool_type, IR_BINARY_FLOAT_NOT_EQUAL, source);
+028340:         return c_ir_emit_binary_value(builder, real_nonzero, imaginary_nonzero, builder->bool_type, IR_BINARY_BOOLEAN_OR, source);
+028341:     }
+028342:     if (type->is_nullptr)
+028343:     {
+028344:         return c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, builder->bool_type);
+028345:     }
+028346:     // A pointer's zero is built at pointer width for the reason
+028347:     // c_ir_emit_nullptr gives: it saves the widening cast on the hottest
+028348:     // conversion in the language.
+028349:     IrTypeId zero_type = type->kind == IR_TYPE_POINTER ? builder->size_type : builder->s32_type;
+028350:     IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, zero_type);
+028351:     if (zero.value != IR_ID_UNDERLYING_INVALID && type_id.value != zero_type.value)
+028352:     {
+028353:         IrType* integer_type = ir_type_from_id(&builder->program->types, builder->s32_type);
+028354:         IrConversionOperation conversion = IR_CONVERSION_COUNT;
+028355:         if (integer_type && type->kind == IR_TYPE_INTEGER)
+028356:         {
+028357:             conversion = integer_type->bit_width < type->bit_width
+028358:                              ? (integer_type->is_signed ? IR_CONVERSION_INTEGER_SIGN_EXTEND : IR_CONVERSION_INTEGER_ZERO_EXTEND)
+028359:                          : integer_type->bit_width > type->bit_width ? IR_CONVERSION_INTEGER_TRUNCATE
+028360:                                                                     : IR_CONVERSION_INTEGER_REINTERPRET;
+028361:         }
+028362:         else if (type->kind == IR_TYPE_FLOAT)
+028363:         {
+028364:             conversion = IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+028365:         }
+028366:         if (type->kind == IR_TYPE_POINTER)
+028367:         {
+028368:             zero = c_ir_emit_integer_to_pointer(builder, zero, type_id, source);
+028369:         }
+028370:         else
+028371:         {
+028372:             zero = conversion == IR_CONVERSION_COUNT ? IR_VALUE_ID_INVALID
+028373:                                                      : c_ir_emit_cast_instruction(builder, zero, type_id, conversion, source);
+028374:         }
+028375:     }
+028376:     if (zero.value == IR_ID_UNDERLYING_INVALID)
+028377:     {
+028378:         return IR_VALUE_ID_INVALID;
+028379:     }
+028380:     IrBinaryOperation operation = type->kind == IR_TYPE_INTEGER   ? IR_BINARY_INTEGER_NOT_EQUAL
+028381:                                   : type->kind == IR_TYPE_FLOAT   ? IR_BINARY_FLOAT_NOT_EQUAL
+028382:                                   : type->kind == IR_TYPE_POINTER ? IR_BINARY_POINTER_NOT_EQUAL
+028383:                                                                   : IR_BINARY_COUNT;
+028384:     if (operation == IR_BINARY_COUNT)
+028385:     {
+028386:         return IR_VALUE_ID_INVALID;
+028387:     }
+028388:     IrValueId result = c_ir_add_result(builder, builder->bool_type);
+028389:     IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
+028390:     operands[0] = value;
+028391:     operands[1] = zero;
+028392:     IrSourceRange comparison_source = source;
+028393:     IrInstruction comparison = c_ir_instruction_initialize(IR_OPCODE_BINARY, builder->bool_type);
+028394:     comparison.operands = operands;
+028395:     comparison.operand_count = 2;
+028396:     comparison.binary_operation = (u8)operation;
+028397:     comparison.result = result;
+028398:     IrInstructionId id = c_ir_append_instruction(builder, comparison, comparison_source);
+028399:     builder->function->values[result.value].definition = id;
+028400:     return result;
+028401: }
+028402: 
+028403: BUSTER_C_INTERNAL u32 c_ir_matching_delimiter(CPreprocessResult preprocess, u32 open, u32 end, CPunctuator opening, CPunctuator closing);
+028404: 
+028405: BUSTER_C_INTERNAL bool c_ir_root_conditional(CIntegerIrBuilder* builder, u32 start, u32 end, u32* expression_start, u32* question, u32* colon,
+028406:                                                u32* expression_end);
+028407: 
+028408: struct CIrConditionTask
+028409: {
+028410:     u32 start;
+028411:     u32 end;
+028412:     IrBlockId block;
+028413:     IrBlockId true_block;
+028414:     IrBlockId false_block;
+028415: };
+028416: 
+028417: BUSTER_C_INTERNAL void c_ir_lower_condition_leaf_step(CIntegerIrBuilder* builder)
+028418: {
+028419:     CIrLowerMachine* machine = &builder->lower_machine;
+028420:     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+028421:     CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+028422:     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_CONDITION_LEAF);
+028423:     if (frame->stage == C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE)
+028424:     {
+028425:         IrValueId place = machine->child_result.value;
+028426:         if (!machine->child_result.success || place.value >= builder->function->value_count)
+028427:         {
+028428:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+028429:             return;
+028430:         }
+028431:         frame->as.condition_leaf.place = place;
+028432:         frame->as.condition_leaf.type = builder->function->values[place.value].canonical_type;
+028433:         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITION_LEAF_ASSIGNMENT;
+028434:         if (!c_ir_lower_expression_core_frame_push(builder, frame->as.condition_leaf.start, frame->as.condition_leaf.end))
+028435:         {
+028436:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+028437:         }
+028438:         return;
+028439:     }
+028440:     if (frame->stage == C_IR_LOWER_STAGE_CONDITION_LEAF_CORE)
+028441:     {
+028442:         c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
+028443:         return;
+028444:     }
+028445:     if (frame->stage == C_IR_LOWER_STAGE_CONDITION_LEAF_ASSIGNMENT)
+028446:     {
+028447:         IrValueId value = machine->child_result.value;
+028448:         IrValueId place = frame->as.condition_leaf.place;
+028449:         IrTypeId type = frame->as.condition_leaf.type;
+028450:         IrSourceRange source = frame->as.condition_leaf.source;
+028451:         if (!machine->child_result.success || place.value >= builder->function->value_count)
+028452:         {
+028453:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+028454:             return;
+028455:         }
+028456:         if (!frame->as.condition_leaf.simple)
+028457:         {
+028458:             bool success = c_ir_emit_compound_assignment(builder, place, type, frame->as.condition_leaf.operation, value, source, 0, &value);
+028459:             c_ir_lower_frame_finish(builder, success, value);
+028460:             return;
+028461:         }
+028462:         value = c_ir_decay_array(builder, value, type, source);
+028463:         value = c_ir_emit_cast(builder, value, type, source);
+028464:         bool success = value.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, place, type, value, source);
+028465:         c_ir_lower_frame_finish(builder, success, value);
+028466:         return;
+028467:     }
+028468:     BUSTER_CHECK(frame->stage == C_IR_LOWER_STAGE_BEGIN);
+028469:     u32 start = frame->as.condition_leaf.start;
+028470:     u32 end = frame->as.condition_leaf.end;
+028471:     u32 assignment = end;
+028472:     u32 parentheses = 0;
+028473:     u32 brackets = 0;
+028474:     u32 braces = 0;
+028475:     u32 conditional_depth = 0;
+028476:     bool top_level_comma = false;
+028477:     CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+028478:     for (u32 index = start; index < end; index += 1)
+028479:     {
+028480:         CToken token = builder->preprocess.tokens[index];

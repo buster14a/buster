@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 77/111
+line: 21901
+
+021831:         return false;
+021832:     }
+021833:     if (operation == C_CONDITIONAL_UNARY_PLUS)
+021834:     {
+021835:         bool valid = *value_count != 0;
+021836:         if (valid)
+021837:         {
+021838:             IrValueId value = values[*value_count - 1];
+021839:             values[*value_count - 1] = c_ir_emit_cast(builder, value, c_ir_integer_promoted_value_type(builder, value), source);
+021840:             valid = values[*value_count - 1].value != IR_ID_UNDERLYING_INVALID;
+021841:         }
+021842:         return valid;
+021843:     }
+021844:     if (operation == C_CONDITIONAL_REAL_PART || operation == C_CONDITIONAL_IMAGINARY_PART)
+021845:     {
+021846:         if (!*value_count)
+021847:         {
+021848:             return false;
+021849:         }
+021850:         u32 first_operand = *value_count - 1;
+021851:         IrValueId result = c_ir_emit_complex_part_operator(builder, values[first_operand], operation == C_CONDITIONAL_IMAGINARY_PART, source);
+021852:         if (result.value == IR_ID_UNDERLYING_INVALID)
+021853:         {
+021854:             return false;
+021855:         }
+021856:         *value_count = first_operand;
+021857:         values[(*value_count)++] = result;
+021858:         return true;
+021859:     }
+021860:     if (operation == C_CONDITIONAL_LOGICAL_NOT)
+021861:     {
+021862:         if (!*value_count)
+021863:         {
+021864:             return false;
+021865:         }
+021866:         u32 first = *value_count - 1;
+021867:         IrValueId operand = c_ir_truth_value(builder, values[first], source);
+021868:         if (operand.value == IR_ID_UNDERLYING_INVALID)
+021869:         {
+021870:             return false;
+021871:         }
+021872:         IrValueId* operands = arena_allocate(builder->arena, IrValueId, 1);
+021873:         operands[0] = operand;
+021874:         IrValueId result = c_ir_add_result(builder, builder->bool_type);
+021875:         IrSourceRange instruction_source = source;
+021876:         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_UNARY, builder->bool_type);
+021877:         instruction.operands = operands;
+021878:         instruction.operand_count = 1;
+021879:         instruction.unary_operation = IR_UNARY_BOOLEAN_NOT;
+021880:         instruction.result = result;
+021881:         IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+021882:         builder->function->values[result.value].definition = id;
+021883:         result = c_ir_emit_cast(builder, result, builder->s32_type, source);
+021884:         if (result.value == IR_ID_UNDERLYING_INVALID)
+021885:         {
+021886:             return false;
+021887:         }
+021888:         *value_count = first;
+021889:         values[(*value_count)++] = result;
+021890:         return true;
+021891:     }
+021892:     if (operation == C_CONDITIONAL_CAST)
+021893:     {
+021894:         if (!*value_count || cast_type.value == IR_ID_UNDERLYING_INVALID)
+021895:         {
+021896:             return false;
+021897:         }
+021898:         u32 first = *value_count - 1;
+021899:         IrType* source_type = ir_type_from_id(&builder->program->types, builder->function->values[values[first].value].canonical_type);
+021900:         IrType* destination_type = ir_type_from_id(&builder->program->types, cast_type);
+021901:         IrValueId result = destination_type && destination_type->kind == IR_TYPE_VOID ? c_ir_emit_integer_value(builder, 0, false, (CToken){0})
+021902:                            : source_type && source_type->kind == IR_TYPE_ARRAY && destination_type && destination_type->kind == IR_TYPE_POINTER
+021903:                                ? c_ir_decay_array(builder, values[first], cast_type, source)
+021904:                                : c_ir_emit_cast(builder, values[first], cast_type, source);
+021905:         if (result.value == IR_ID_UNDERLYING_INVALID)
+021906:         {
+021907:             return false;
+021908:         }
+021909:         // An explicit cast produces an ordinary value even when no machine
+021910:         // conversion is needed. It must not retain the operand's bit-field.
+021911:         if (result.value < builder->unsigned_bit_field_value_capacity)
+021912:         {
+021913:             builder->unsigned_bit_field_values[result.value] = 0;
+021914:         }
+021915:         // Canonical scalar pointers flatten pointer-to-VLA types. An explicit
+021916:         // cast such as (char *)&rows[i] must discard both row stride and the
+021917:         // array-lvalue witness even when that canonical cast is an identity.
+021918:         CIrVlaValue cast_shape = c_ir_vla_value(builder, result);
+021919:         if (cast_shape.counts)
+021920:         {
+021921:             IrType* result_type = ir_type_from_id(&builder->program->types, builder->function->values[result.value].canonical_type);
+021922:             IrTypeId element = result_type->element_type;
+021923:             IrValueId place = c_ir_emit_dereference_place(builder, result, source);
+021924:             result = place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_address_of_place(builder, place, element, source) : IR_VALUE_ID_INVALID;
+021925:             if (result.value == IR_ID_UNDERLYING_INVALID)
+021926:             {
+021927:                 return false;
+021928:             }
+021929:         }
+021930:         *value_count = first;
+021931:         values[(*value_count)++] = result;
+021932:         return true;
+021933:     }
+021934:     if (operation == C_CONDITIONAL_COMMA)
+021935:     {
+021936:         if (*value_count < 2)
+021937:         {
+021938:             return false;
+021939:         }
+021940:         values[*value_count - 2] = c_ir_vla_pointer_rvalue(builder, values[*value_count - 1], source);
+021941:         *value_count -= 1;
+021942:         return true;
+021943:     }
+021944:     bool pointer_operator = operation == C_CONDITIONAL_ADDRESS_OF || operation == C_CONDITIONAL_DEREFERENCE;
+021945:     u32 operand_count = unary != IR_UNARY_COUNT || pointer_operator ? 1 : 2;
+021946:     if (*value_count < operand_count)
+021947:     {
+021948:         return false;
+021949:     }
+021950:     u32 first = *value_count - operand_count;
+021951:     if (builder->vla_value_count)
+021952:     {
+021953:         for (u32 operand_index = first; operand_index < *value_count; operand_index += 1)
+021954:         {
+021955:             values[operand_index] = c_ir_vla_flat_pointer(builder, values[operand_index], source);
+021956:             if (values[operand_index].value == IR_ID_UNDERLYING_INVALID)
+021957:             {
+021958:                 return false;
+021959:             }
+021960:         }
+021961:     }
+021962:     if (pointer_operator)
+021963:     {
+021964:         IrValueId operand = values[first];
+021965:         IrTypeId operand_type = builder->function->values[operand.value].canonical_type;
+021966:         IrSourceRange pointer_source = source;
+021967:         IrValueId result = IR_VALUE_ID_INVALID;
+021968:         if (operation == C_CONDITIONAL_ADDRESS_OF)
+021969:         {
+021970:             IrType* operand_type_value = ir_type_from_id(&builder->program->types, operand_type);
+021971:             // Most scalar lvalues are loaded while the expression is walked;
+021972:             // recover their place from that load below.  Array and aggregate
+021973:             // lvalues intentionally remain places (there is no scalar load to
+021974:             // materialize), so address-of must accept the place directly.
+021975:             CIrVlaValue shape = c_ir_vla_value(builder, operand);
+021976:             if (shape.counts && shape.rvalue)
+021977:             {
+021978:                 return false;
+021979:             }
+021980:             if (shape.counts && shape.array_lvalue && !shape.slot)
+021981:             {
+021982:                 result = c_ir_vla_address(builder, operand, pointer_source);
+021983:             }
+021984:             else if (builder->function->values[operand.value].category == IR_VALUE_PLACE)
+021985:             {
+021986:                 result = c_ir_emit_address_of_place(builder, operand, operand_type, pointer_source);
+021987:             }
+021988:             else if (c_ir_ssa_read_place(builder, operand, false).value != IR_ID_UNDERLYING_INVALID)
+021989:             {
+021990:                 IrValueId place = c_ir_ssa_read_place(builder, operand, false);
+021991:                 IrValueId recovered = c_ir_recover_place_from_value(builder, operand);
+021992:                 if (recovered.value != IR_ID_UNDERLYING_INVALID)
+021993:                 {
+021994:                     place = recovered;
+021995:                 }
+021996:                 result = c_ir_emit_address_of_place(builder, place, builder->function->values[place.value].canonical_type, pointer_source);
+021997:             }
+021998:             else
+021999:             {
+022000:                 IrInstructionId definition = builder->function->values[operand.value].definition;
+022001:                 if (definition.value >= builder->function->instruction_count)
+022002:                 {
+022003:                     return false;
+022004:                 }
+022005:                 IrInstruction* materialization = builder->function->instructions + definition.value;
+022006:                 IrType* address_element_type = operand_type_value && operand_type_value->kind == IR_TYPE_POINTER
+022007:                                                    ? ir_type_from_id(&builder->program->types, operand_type_value->element_type)
+022008:                                                    : 0;
+022009:                 if (materialization->opcode == IR_OPCODE_FUNCTION && operand_type_value && operand_type_value->kind == IR_TYPE_POINTER)
+022010:                 {
+022011:                     result = operand;
+022012:                 }
+022013:                 // On a target where a `va_list` object decays the way an array
+022014:                 // does, the walk already produced its address rather than a
+022015:                 // load of it, and `&ap` is that same address.  musl's
+022016:                 // `vfprintf` hands its list to `printf_core` exactly this way,
+022017:                 // and without this the address-of below has no load to recover
+022018:                 // a place from and refuses the expression.
+022019:                 else if (materialization->opcode == IR_OPCODE_ADDRESS_OF && address_element_type && address_element_type->kind == IR_TYPE_VA_LIST)
+022020:                 {
+022021:                     result = operand;
+022022:                 }
+022023:                 else if ((materialization->opcode != IR_OPCODE_LOAD && materialization->opcode != IR_OPCODE_ATOMIC_LOAD) || materialization->operand_count != 1)
+022024:                 {
+022025:                     return false;
+022026:                 }
+022027:                 else
+022028:                 {
+022029:                     // The load only materialized the lvalue for the expression
+022030:                     // walk; `&E` never reads E.  Drop it when it is still the
+022031:                     // last instruction emitted, because the read is not merely

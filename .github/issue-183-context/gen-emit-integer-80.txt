@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 80/111
+line: 23759
+
+023689:         }
+023690:         if (selected == UINT64_MAX)
+023691:         {
+023692:             return false;
+023693:         }
+023694:         next_index = selected + 1;
+023695:         count = BUSTER_MAX(count, next_index);
+023696:         item_start = index + 1;
+023697:     }
+023698:     *count_out = count;
+023699:     return count != 0;
+023700: }
+023701: 
+023702: BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type_attempt(CIntegerIrBuilder* builder, u32 type_start, u32 type_end, u32 initializer_open,
+023703:                                                                  u32 initializer_close)
+023704: {
+023705:     IrTypeId type = IR_TYPE_ID_INVALID;
+023706:     bool resolved = c_ir_query_type_name(builder, type_start, type_end, true, &type);
+023707:     if (!resolved && builder->queries->has_request)
+023708:     {
+023709:         return IR_TYPE_ID_INVALID;
+023710:     }
+023711:     if (type.value != IR_ID_UNDERLYING_INVALID)
+023712:     {
+023713:         return type;
+023714:     }
+023715:     if (type_end < type_start + 2 || !c_token_is_punctuator(&builder->preprocess.tokens[type_end - 2], C_PUNCTUATOR_LEFT_BRACKET) ||
+023716:         !c_token_is_punctuator(&builder->preprocess.tokens[type_end - 1], C_PUNCTUATOR_RIGHT_BRACKET))
+023717:     {
+023718:         return IR_TYPE_ID_INVALID;
+023719:     }
+023720:     IrTypeId element = IR_TYPE_ID_INVALID;
+023721:     resolved = c_ir_query_type_name(builder, type_start, type_end - 2, true, &element);
+023722:     if (!resolved && builder->queries->has_request)
+023723:     {
+023724:         return IR_TYPE_ID_INVALID;
+023725:     }
+023726:     u64 element_count = 0;
+023727:     IrTypeId result;
+023728:     if (element.value == IR_ID_UNDERLYING_INVALID || !c_ir_query_compound_element_count(builder, initializer_open, initializer_close, &element_count))
+023729:     {
+023730:         result = IR_TYPE_ID_INVALID;
+023731:     }
+023732:     else
+023733:     {
+023734:         result = c_ir_add_array_type(builder->program, builder->pointer_types, element, element_count);
+023735:     }
+023736: 
+023737:     return result;
+023738: }
+023739: 
+023740: BUSTER_C_INTERNAL IrTypeId c_ir_compound_literal_type(CIntegerIrBuilder* builder, u32 type_start, u32 type_end, u32 initializer_open, u32 initializer_close)
+023741: {
+023742:     CIrQueryFrame result = {0};
+023743:     CIrQueryFrame root = {
+023744:         .start = type_start,
+023745:         .end = type_end,
+023746:         .third = initializer_open,
+023747:         .fourth = initializer_close,
+023748:         .kind = C_IR_QUERY_FRAME_COMPOUND_TYPE,
+023749:     };
+023750:     if (!c_ir_query_execute(builder, root, &result) || !result.success)
+023751:     {
+023752:         return IR_TYPE_ID_INVALID;
+023753:     }
+023754:     return result.result_type;
+023755: }
+023756: 
+023757: BUSTER_C_INTERNAL IrValueId c_ir_emit_increment(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrValueId previous, CToken token, bool prefix)
+023758: {
+023759:     IrValueId one = c_ir_emit_integer_value(builder, 1, false, token);
+023760:     IrType* place_type = ir_type_from_id(&builder->program->types, type);
+023761:     if (place_type && place_type->is_atomic)
+023762:     {
+023763:         IrValueId atomic_previous = IR_VALUE_ID_INVALID;
+023764:         IrValueId atomic_result = IR_VALUE_ID_INVALID;
+023765:         if (!c_ir_emit_compound_assignment(builder, place, type,
+023766:                                            c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, one,
+023767:                                            c_ir_token_source_range(builder, token), &atomic_previous, &atomic_result))
+023768:         {
+023769:             return IR_VALUE_ID_INVALID;
+023770:         }
+023771:         return prefix ? atomic_result : atomic_previous;
+023772:     }
+023773:     IrValueId values[2] = {
+023774:         previous,
+023775:         one,
+023776:     };
+023777:     u32 value_count = 2;
+023778:     IrSourceRange source = c_ir_token_source_range(builder, token);
+023779:     if (!c_ir_apply_operation(builder, c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) ? C_CONDITIONAL_ADD : C_CONDITIONAL_SUBTRACT, values, &value_count,
+023780:                               source, IR_TYPE_ID_INVALID) ||
+023781:         value_count != 1 || !c_ir_emit_store_place(builder, place, type, values[0], source))
+023782:     {
+023783:         return IR_VALUE_ID_INVALID;
+023784:     }
+023785:     if (prefix && values[0].value < builder->function->value_count && builder->function->values[values[0].value].canonical_type.value != type.value)
+023786:     {
+023787:         // `++E` has the value E holds after the store, which is the value in
+023788:         // E's own type: the addition ran in the promoted type, so a narrower
+023789:         // object's result has to come back down before anything reads it.
+023790:         // SQLite carries its page-header cell count into the high byte with
+023791:         // `if( (++data[hdr+4])==0 ) data[hdr+3]++;`, and that carry is lost
+023792:         // when the comparison sees 256 instead of 0.
+023793:         values[0] = c_ir_emit_cast(builder, values[0], type, source);
+023794:     }
+023795:     return prefix ? c_ir_bit_field_assignment_value(builder, place, values[0], source) : c_ir_vla_pointer_rvalue(builder, previous, source);
+023796: }
+023797: 
+023798: BUSTER_C_INTERNAL bool c_ir_postfix_update_at(CIntegerIrBuilder* builder, u32 index, u32 end)
+023799: {
+023800:     return index + 1 < end && (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_PLUS_PLUS) ||
+023801:                                c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_MINUS_MINUS));
+023802: }
+023803: 
+023804: // Aggregate operands are captured values, while volatile qualifiers belong to
+023805: // their destination places. If a conversion retained the unqualified value,
+023806: // initialize explicit storage through the ordinary qualified STORE contract.
+023807: // Keep exact constructor typing and evaluate each initializer only once.
+023808: BUSTER_C_INTERNAL IrValueId c_ir_emit_initializer_capture(CIntegerIrBuilder* builder, IrTypeId type_id, IrValueId* operands,
+023809:                                                         u64* fields, u32 count, IrSourceRange source)
+023810: {
+023811:     IrType* type = ir_type_from_id(&builder->program->types, type_id);
+023812:     bool array = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR;
+023813:     bool storage = false;
+023814:     for (u32 index = 0; index < count && !storage; index += 1)
+023815:     {
+023816:         IrTypeId field_type = array ? type->element_type : type->fields[fields[index]].type;
+023817:         IrTypeId operand_type = builder->function->values[operands[index].value].canonical_type;
+023818:         storage = operand_type.value != field_type.value &&
+023819:                   ir_types_differ_only_in_volatile(&builder->program->types, operand_type, field_type);
+023820:     }
+023821:     IrValueId result = IR_VALUE_ID_INVALID;
+023822:     if (storage)
+023823:     {
+023824:         IrValueId place = c_ir_emit_temporary(builder, type_id, source);
+023825:         bool valid = place.value != IR_ID_UNDERLYING_INVALID;
+023826:         for (u32 index = 0; index < count && valid; index += 1)
+023827:         {
+023828:             IrValueId field;
+023829:             if (array)
+023830:             {
+023831:                 IrValueId offset = c_ir_emit_integer_value_typed(builder, index, false, (CToken){0}, builder->size_type);
+023832:                 field = offset.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_index_place(builder, place, offset, source) : IR_VALUE_ID_INVALID;
+023833:             }
+023834:             else
+023835:             {
+023836:                 field = c_ir_emit_field_index_place(builder, place, (u32)fields[index], source);
+023837:             }
+023838:             IrTypeId field_type = array ? type->element_type : type->fields[fields[index]].type;
+023839:             valid = field.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, field, field_type, operands[index], source);
+023840:         }
+023841:         if (valid)
+023842:         {
+023843:             result = c_ir_emit_load_place(builder, place, type_id, source);
+023844:         }
+023845:     }
+023846:     else
+023847:     {
+023848:         result = c_ir_add_result(builder, type_id);
+023849:         if (result.value != IR_ID_UNDERLYING_INVALID)
+023850:         {
+023851:             IrInstruction instruction = c_ir_instruction_initialize(array ? IR_OPCODE_ARRAY : IR_OPCODE_AGGREGATE, type_id);
+023852:             instruction.operands = operands;
+023853:             instruction.operand_count = count;
+023854:             instruction.immediates = fields;
+023855:             instruction.immediate_count = array ? 0 : (u16)count;
+023856:             instruction.result = result;
+023857:             IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+023858:             builder->function->values[result.value].definition = id;
+023859:         }
+023860:     }
+023861:     return result;
+023862: }
+023863: 
+023864: #define C_IR_BOUNDED_ZERO_STORAGE_MIN_BYTES 4096u
+023865: 
+023866: BUSTER_C_INTERNAL bool c_ir_zero_storage_compatible(CIntegerIrBuilder* builder, IrTypeId root)
+023867: {
+023868:     IrType* root_type = ir_type_from_id(&builder->program->types, root);
+023869:     bool compatible = root_type && root_type->layout.resolved && root_type->layout.size >= C_IR_BOUNDED_ZERO_STORAGE_MIN_BYTES &&
+023870:                       (root_type->kind == IR_TYPE_ARRAY || root_type->kind == IR_TYPE_STRUCT || root_type->kind == IR_TYPE_UNION);
+023871:     if (compatible)
+023872:     {
+023873:         u32 capacity = builder->program->types.count;
+023874:         IrTypeId* pending = arena_allocate(builder->temporary_arena, IrTypeId, capacity);
+023875:         u8* seen = arena_allocate(builder->temporary_arena, u8, capacity);
+023876:         memset(seen, 0, capacity);
+023877:         u32 count = 1;
+023878:         pending[0] = root;
+023879:         seen[root.value] = 1;
+023880:         for (u32 index = 0; compatible && index < count; index += 1)
+023881:         {
+023882:             IrType* type = ir_type_from_id(&builder->program->types, pending[index]);
+023883:             compatible = type && type->layout.resolved && !type->is_atomic && !type->is_volatile;
+023884:             if (compatible)
+023885:             {
+023886:                 bool array = type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR;
+023887:                 bool record = type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION;
+023888:                 compatible = array || record || type->kind == IR_TYPE_INTEGER || type->kind == IR_TYPE_BOOLEAN ||
+023889:                              type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FLOAT;

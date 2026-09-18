@@ -1,0 +1,166 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: constant_is_negative
+occurrence: 2/4
+line: 27831
+
+027771:                         IrValueId place = c_ir_emit_field_place(builder, local, builder->preprocess.tokens[index + 1], builder->preprocess.tokens[index + 2]);
+027772:                         if (place.value != IR_ID_UNDERLYING_INVALID)
+027773:                         {
+027774:                             value_place = place;
+027775:                             IrTypeId field_type = builder->function->values[place.value].canonical_type;
+027776:                             IrType* field = ir_type_from_id(&builder->program->types, field_type);
+027777:                             value = field && (field->kind == IR_TYPE_ARRAY || (field->is_atomic && c_ir_postfix_update_at(builder, index + 2, end)))
+027778:                                         ? place
+027779:                                         : c_ir_emit_expression_place_value(builder, place, field_type, source);
+027780:                             index += 2;
+027781:                         }
+027782:                     }
+027783:                     else
+027784:                     {
+027785:                         IrType* local_type = ir_type_from_id(&builder->program->types, local->type);
+027786:                         bool address_va_list = local_type && local_type->kind == IR_TYPE_VA_LIST &&
+027787:                                                (builder->va_list_builtin_operand || c_ir_va_list_parameter_decays(builder->target));
+027788:                         value = local_type && (local_type->kind == IR_TYPE_ARRAY || (local_type->is_atomic && c_ir_postfix_update_at(builder, index, end)))
+027789:                                     ? local->place
+027790:                                 : address_va_list ? c_ir_emit_address_of_place(builder, local->place, local->type, source)
+027791:                                       : c_ir_emit_load(builder, local, token);
+027792:                         if (!local_type || (local_type->kind != IR_TYPE_ARRAY && !address_va_list))
+027793:                         {
+027794:                             value_place = local->place;
+027795:                         }
+027796:                     }
+027797:                 }
+027798:                 else if (entity.value < builder->parse.entity_count &&
+027799:                          (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT ||
+027800:                           (builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL && !local)))
+027801:                 {
+027802:                     IrValueId place = c_ir_emit_global_place(builder, entity, source);
+027803:                     if (place.value != IR_ID_UNDERLYING_INVALID && index + 2 < end &&
+027804:                         (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_DOT) ||
+027805:                          c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_ARROW)) &&
+027806:                         builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)
+027807:                     {
+027808:                         IrValueId operand = place;
+027809:                         if (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_ARROW))
+027810:                         {
+027811:                             IrTypeId place_type = builder->function->values[place.value].canonical_type;
+027812:                             operand = c_ir_emit_arrow_operand_from_place(builder, place, place_type, source);
+027813:                         }
+027814:                         place =
+027815:                             c_ir_emit_field_place_from_value(builder, operand, builder->preprocess.tokens[index + 1], builder->preprocess.tokens[index + 2]);
+027816:                         index += 2;
+027817:                     }
+027818:                     if (place.value != IR_ID_UNDERLYING_INVALID)
+027819:                     {
+027820:                         value_place = place;
+027821:                         IrTypeId type = builder->function->values[place.value].canonical_type;
+027822:                         IrType* type_value = ir_type_from_id(&builder->program->types, type);
+027823:                         value = type_value && (type_value->kind == IR_TYPE_ARRAY || (type_value->is_atomic && c_ir_postfix_update_at(builder, index, end)))
+027824:                                     ? place
+027825:                                     : c_ir_emit_expression_place_value(builder, place, type, source);
+027826:                     }
+027827:                 }
+027828:                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
+027829:                 {
+027830:                     CEntity* enumerator = &builder->parse.entities[entity.value];
+027831:                     value = c_ir_emit_integer_value(builder, enumerator->constant_value, enumerator->constant_is_negative, token);
+027832:                 }
+027833:                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_FUNCTION)
+027834:                 {
+027835:                     value = c_ir_emit_function_pointer(builder, token, c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token)));
+027836:                 }
+027837:             }
+027838:             if (value.value != IR_ID_UNDERLYING_INVALID && value_place.value != IR_ID_UNDERLYING_INVALID && index + 1 < end &&
+027839:                 (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_PLUS_PLUS) ||
+027840:                  c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_MINUS_MINUS)))
+027841:             {
+027842:                 IrTypeId type = builder->function->values[value_place.value].canonical_type;
+027843:                 value = c_ir_emit_increment(builder, value_place, type, value, builder->preprocess.tokens[index + 1], false);
+027844:                 index += 1;
+027845:             }
+027846:             if (value.value == IR_ID_UNDERLYING_INVALID)
+027847:             {
+027848:                 if (!builder->failure_message.length)
+027849:                 {
+027850:                     // A callee token is not an identifier *use*: a direct call
+027851:                     // resolves through the function-name index, so the parser
+027852:                     // records no binding for it, and reporting the name as
+027853:                     // unbound blames the declaration when it is the call that
+027854:                     // could not be resolved.  Look the name up before saying
+027855:                     // so, and say which of the two failed.
+027856:                     CEntityId failed_entity = c_ir_identifier_entity_or_lookup(builder, identifier_index);
+027857:                     bool called = identifier_index + 1 < end &&
+027858:                                   c_token_is_punctuator(&builder->preprocess.tokens[identifier_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+027859:                     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+027860:                     builder->failure_message =
+027861:                         failed_entity.value >= builder->parse.entity_count
+027862:                             ? string_format(builder->arena, S8("could not lower unbound identifier '{S8}'"), spelling)
+027863:                         : called ? string_format(builder->arena, S8("could not lower call to '{S8}' bound to C entity {u32} of kind {u32}"), spelling,
+027864:                                                  failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind)
+027865:                                  : string_format(builder->arena, S8("could not lower identifier '{S8}' bound to C entity {u32} of kind {u32}"), spelling,
+027866:                                                  failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind);
+027867:                 }
+027868:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027869:                 return;
+027870:             }
+027871:             values[value_count++] = value;
+027872:             expect_operand = false;
+027873:             continue;
+027874:         }
+027875:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 2 < end &&
+027876:             c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+027877:         {
+027878:             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+027879:             if (close < end && close > index + 2 && c_token_is_punctuator(&builder->preprocess.tokens[close - 1], C_PUNCTUATOR_RIGHT_BRACE) &&
+027880:                 c_ir_matching_delimiter_cached(builder, index + 1, close, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE) == close - 1)
+027881:             {
+027882:                 c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types, value_count, operation_count,
+027883:                                           close + 1, expect_operand);
+027884:                 frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT;
+027885:                 if (!c_ir_lower_statement_expression_frame_push(builder, index + 1, close - 1))
+027886:                 {
+027887:                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027888:                 }
+027889:                 return;
+027890:             }
+027891:         }
+027892:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+027893:         {
+027894:             if (!expect_operand)
+027895:             {
+027896:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027897:                 return;
+027898:             }
+027899:             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+027900:             IrTypeId cast_type = close < end ? c_ir_group_type_name(builder, index, close) : IR_TYPE_ID_INVALID;
+027901:             u32 initializer_close = UINT32_MAX;
+027902:             bool compound_literal = close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE);
+027903:             if (compound_literal)
+027904:             {
+027905:                 initializer_close = c_ir_matching_delimiter_cached(builder, close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+027906:                 if (initializer_close >= end)
+027907:                 {
+027908:                     c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+027909:                     return;
+027910:                 }
+027911:                 cast_type = c_ir_group_may_be_type_name(builder, index) ? c_ir_compound_literal_type(builder, index + 1, close, close + 1, initializer_close)
+027912:                                                                         : IR_TYPE_ID_INVALID;
+027913:             }
+027914:             if (cast_type.value == IR_ID_UNDERLYING_INVALID && close + 2 < end &&
+027915:                 c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+027916:                 builder->preprocess.tokens[index + 1].kind == C_TOKEN_IDENTIFIER)
+027917:             {
+027918:                 CEntityId type_entity = c_ir_identifier_entity(builder, index + 1);
+027919:                 if (type_entity.value < builder->parse.entity_count && builder->parse.entities[type_entity.value].kind == C_ENTITY_TYPEDEF)
+027920:                 {
+027921:                     CTypeId c_type = builder->parse.entities[type_entity.value].type;
+027922:                     if (c_type.value < builder->parse.type_count)
+027923:                     {
+027924:                         cast_type = builder->c_type_ir_map[c_type.value];
+027925:                         if (cast_type.value == IR_ID_UNDERLYING_INVALID)
+027926:                         {
+027927:                             CType* c_type_value = builder->parse.types + c_type.value;
+027928:                             if (c_type_value->kind == C_TYPE_POINTER && c_type_value->element_type.value < builder->parse.type_count &&
+027929:                                 builder->parse.types[c_type_value->element_type.value].kind == C_TYPE_VOID)
+027930:                             {
+027931:                                 cast_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);

@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 18/111
+line: 7738
+
+007668:         operation = IR_CONVERSION_INTEGER_ZERO_EXTEND;
+007669:     }
+007670:     else if (source_value->kind == IR_TYPE_FLOAT && target_value->kind == IR_TYPE_FLOAT)
+007671:     {
+007672:         if (source_value->bit_width == target_value->bit_width && source_value->float_format != target_value->float_format)
+007673:         {
+007674:             IrValueId widened = c_ir_emit_cast_instruction(builder, value, builder->f32_type, IR_CONVERSION_FLOAT_EXTEND, source);
+007675:             if (widened.value != IR_ID_UNDERLYING_INVALID)
+007676:             {
+007677:                 value = widened;
+007678:                 operation = IR_CONVERSION_FLOAT_TRUNCATE;
+007679:             }
+007680:         }
+007681:         else
+007682:         {
+007683:             operation = source_value->bit_width < target_value->bit_width   ? IR_CONVERSION_FLOAT_EXTEND
+007684:                         : source_value->bit_width > target_value->bit_width ? IR_CONVERSION_FLOAT_TRUNCATE
+007685:                                                                             : IR_CONVERSION_IDENTITY;
+007686:         }
+007687:     }
+007688:     else if (source_value->kind == IR_TYPE_INTEGER && target_value->kind == IR_TYPE_FLOAT)
+007689:     {
+007690:         operation = source_value->is_signed ? IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT : IR_CONVERSION_UNSIGNED_INTEGER_TO_FLOAT;
+007691:     }
+007692:     else if (source_value->kind == IR_TYPE_BOOLEAN && target_value->kind == IR_TYPE_FLOAT)
+007693:     {
+007694:         value = c_ir_emit_cast_instruction(builder, value, builder->s32_type, IR_CONVERSION_INTEGER_ZERO_EXTEND, source);
+007695:         if (value.value == IR_ID_UNDERLYING_INVALID)
+007696:         {
+007697:             return IR_VALUE_ID_INVALID;
+007698:         }
+007699:         operation = IR_CONVERSION_SIGNED_INTEGER_TO_FLOAT;
+007700:     }
+007701:     else if (source_value->kind == IR_TYPE_FLOAT && target_value->kind == IR_TYPE_INTEGER)
+007702:     {
+007703:         operation = target_value->is_signed ? IR_CONVERSION_FLOAT_TO_SIGNED_INTEGER : IR_CONVERSION_FLOAT_TO_UNSIGNED_INTEGER;
+007704:     }
+007705:     else if (source_value->kind == IR_TYPE_POINTER && target_value->kind == IR_TYPE_POINTER)
+007706:     {
+007707:         operation = IR_CONVERSION_POINTER_REINTERPRET;
+007708:     }
+007709:     else if (source_value->kind == IR_TYPE_POINTER && target_value->kind == IR_TYPE_INTEGER)
+007710:     {
+007711:         operation = IR_CONVERSION_POINTER_TO_INTEGER;
+007712:     }
+007713:     else if (source_value->kind == IR_TYPE_INTEGER && target_value->kind == IR_TYPE_POINTER)
+007714:     {
+007715:         return c_ir_emit_integer_to_pointer(builder, value, target_type, source);
+007716:     }
+007717:     if (operation == IR_CONVERSION_COUNT)
+007718:     {
+007719:         builder->failure_message = string_format(builder->arena, S8("cannot convert IR type {u32} (kind {u32}) to IR type {u32} (kind {u32})"),
+007720:                                                  source_type.value, (u32)source_value->kind, target_type.value, (u32)target_value->kind);
+007721:         return IR_VALUE_ID_INVALID;
+007722:     }
+007723:     return c_ir_emit_cast_instruction(builder, value, target_type, operation, source);
+007724: }
+007725: 
+007726: // The initializer lowering below is intentionally defined much earlier than
+007727: // the shape-inference helpers.  Keep this declaration beside the value-cast
+007728: // API so brace-elision can ask whether a non-braced expression already has an
+007729: // aggregate type before descending into its first member.
+007730: BUSTER_C_INTERNAL bool c_ir_initializer_type_is_aggregate(IrType* type);
+007731: BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIrBuilder* builder, CScopeId scope, u32 start, u32 end);
+007732: 
+007733: BUSTER_C_INTERNAL IrValueId c_ir_emit_nullptr(CIntegerIrBuilder* builder, CToken token)
+007734: {
+007735:     // Built at pointer width rather than as an `int`, so the conversion below
+007736:     // is the bare INTEGER_TO_POINTER a null pointer constant deserves and not
+007737:     // a widening ahead of it: this runs on every `p == 0` and every `if (p)`.
+007738:     IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, builder->size_type);
+007739:     IrValueId result;
+007740:     if (zero.value == IR_ID_UNDERLYING_INVALID)
+007741:     {
+007742:         result = IR_VALUE_ID_INVALID;
+007743:     }
+007744:     else
+007745:     {
+007746:         result = c_ir_emit_integer_to_pointer(builder, zero, builder->nullptr_type, c_ir_token_source_range(builder, token));
+007747:     }
+007748: 
+007749:     return result;
+007750: }
+007751: 
+007752: BUSTER_C_INTERNAL IrValueId c_ir_decay_array(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type, IrSourceRange source);
+007753: BUSTER_C_INTERNAL IrValueId c_ir_emit_arrow_operand_from_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type,
+007754:                                                                 IrSourceRange source);
+007755: 
+007756: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 magnitude, bool is_negative, CToken token, IrTypeId type);
+007757: 
+007758: BUSTER_C_INTERNAL IrValueId c_ir_emit_binary_value(CIntegerIrBuilder* builder, IrValueId left, IrValueId right, IrTypeId type, IrBinaryOperation operation,
+007759:                                                      IrSourceRange source);
+007760: 
+007761: BUSTER_C_INTERNAL IrField* c_ir_bit_field_from_place(CIntegerIrBuilder* builder, IrValueId place);
+007762: 
+007763: BUSTER_C_INTERNAL IrValueId c_ir_emit_load_place_raw(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrSourceRange source);
+007764: 
+007765: // Do two types agree closely enough that a function prototype built from them
+007766: // is the same prototype? Identical ids always do. Beyond that only the coarse
+007767: // shape is compared -- the kind, and for the scalar kinds the width and
+007768: // signedness -- because two spellings of one aggregate can reach here as two
+007769: // ids and refusing them would reject valid code. This is the deliberate
+007770: // conservatism c_ir_function_prototypes_compatible documents.
+007771: BUSTER_C_INTERNAL bool c_ir_scalar_shapes_agree(CIntegerIrBuilder* builder, IrTypeId left, IrTypeId right)
+007772: {
+007773:     IrType* left_type = ir_type_from_id(&builder->program->types, left);
+007774:     IrType* right_type = ir_type_from_id(&builder->program->types, right);
+007775:     bool result = left.value == right.value;
+007776:     if (!result && left_type && right_type && left_type->kind == right_type->kind)
+007777:     {
+007778:         result = left_type->kind != IR_TYPE_INTEGER && left_type->kind != IR_TYPE_FLOAT && left_type->kind != IR_TYPE_BOOLEAN;
+007779:         result = result || (left_type->bit_width == right_type->bit_width && left_type->is_signed == right_type->is_signed &&
+007780:                             (left_type->kind != IR_TYPE_FLOAT || left_type->float_format == right_type->float_format));
+007781:     }
+007782: 
+007783:     return result;
+007784: }
+007785: 
+007786: // Whether a value may cross into an object of `target` without a cast, for the
+007787: // one class C makes an error of that this frontend used to accept in silence:
+007788: // two pointers to functions whose prototypes disagree (#830). Clang has made it
+007789: // an error by default since Clang 16 and GCC diagnoses it too, and the silence
+007790: // flipped autoconf probes that read the diagnostic as their answer -- CPython's
+007791: // readline check assigns `int(const char*, int)` to an `int(*)(void)` and
+007792: // concludes from the refusal that the hook takes no arguments.
+007793: //
+007794: // Only a mismatch both reference compilers reject is reported, and only when
+007795: // both sides are function pointers: a `void*` on either side is the idiom every
+007796: // dispatch table is built from, and an unprototyped `()` is compatible with a
+007797: // non-variadic prototype by C11 6.2.7p3 -- musl's `long __syscall_cp_asm();`
+007798: // beside its eight-parameter prototype is one function, not two. Within that,
+007799: // the parameter count, the variadic-ness, and the kind (and scalar width) of
+007800: // the return and of each parameter have to agree. Anything subtler is accepted:
+007801: // a false refusal would reject a translation unit clang compiles, which is a
+007802: // worse failure than the silence this replaces.
+007803: BUSTER_C_INTERNAL bool c_ir_function_prototypes_compatible(CIntegerIrBuilder* builder, IrTypeId left, IrTypeId right)
+007804: {
+007805:     IrType* left_type = ir_type_from_id(&builder->program->types, left);
+007806:     IrType* right_type = ir_type_from_id(&builder->program->types, right);
+007807:     bool result = true;
+007808:     if (left.value != right.value && left_type && right_type && left_type->kind == IR_TYPE_FUNCTION && right_type->kind == IR_TYPE_FUNCTION &&
+007809:         !left_type->is_unprototyped && !right_type->is_unprototyped)
+007810:     {
+007811:         result = left_type->parameter_count == right_type->parameter_count && left_type->is_variadic == right_type->is_variadic &&
+007812:                  c_ir_scalar_shapes_agree(builder, left_type->return_type, right_type->return_type);
+007813:         for (u32 index = 0; result && index < left_type->parameter_count; index += 1)
+007814:         {
+007815:             result = c_ir_scalar_shapes_agree(builder, left_type->parameter_types[index], right_type->parameter_types[index]);
+007816:         }
+007817:     }
+007818: 
+007819:     return result;
+007820: }
+007821: 
+007822: // The pointer wrapper around c_ir_function_prototypes_compatible: an
+007823: // assignment crosses two *pointers*, and only when both point at functions is
+007824: // there a prototype to compare.
+007825: BUSTER_C_INTERNAL bool c_ir_pointer_assignment_compatible(CIntegerIrBuilder* builder, IrTypeId target, IrTypeId source)
+007826: {
+007827:     IrType* target_type = ir_type_from_id(&builder->program->types, target);
+007828:     IrType* source_type = ir_type_from_id(&builder->program->types, source);
+007829:     bool result = true;
+007830:     if (target_type && source_type && target_type->kind == IR_TYPE_POINTER && source_type->kind == IR_TYPE_POINTER)
+007831:     {
+007832:         result = c_ir_function_prototypes_compatible(builder, target_type->element_type, source_type->element_type);
+007833:     }
+007834: 
+007835:     return result;
+007836: }
+007837: 
+007838: BUSTER_C_INTERNAL bool c_ir_emit_store_place(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, IrValueId value, IrSourceRange source)
+007839: {
+007840:     if (place.value >= builder->function->value_count || builder->function->values[place.value].category != IR_VALUE_PLACE)
+007841:     {
+007842:         return false;
+007843:     }
+007844:     if (builder->function->values[place.value].is_read_only)
+007845:     {
+007846:         builder->failure_message = S8("assignment operand is not a modifiable place");
+007847:         return false;
+007848:     }
+007849:     IrType* qualified_place_type = ir_type_from_id(&builder->program->types, type);
+007850:     bool atomic = qualified_place_type && qualified_place_type->is_atomic;
+007851:     if (atomic && c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, type))
+007852:     {
+007853:         builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point stores");
+007854:         return false;
+007855:     }
+007856:     // The stored value is converted to the unqualified type of the place, the
+007857:     // conversion C gives an assignment, which is also the type the loads above
+007858:     // produce. See c_ir_emit_load_place_raw for why `volatile` joins `_Atomic`
+007859:     // here.
+007860:     IrTypeId stored_type = qualified_place_type && (atomic || qualified_place_type->is_volatile) ? qualified_place_type->unqualified_type : type;
+007861:     if (value.value < builder->function->value_count)
+007862:     {
+007863:         IrType* source_type = ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type);
+007864:         IrType* target_type = ir_type_from_id(&builder->program->types, stored_type);
+007865:         if (source_type && source_type->kind == IR_TYPE_ARRAY && target_type && target_type->kind == IR_TYPE_POINTER)
+007866:         {
+007867:             value = c_ir_decay_array(builder, value, stored_type, source);
+007868:         }

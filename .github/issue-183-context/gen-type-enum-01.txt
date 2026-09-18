@@ -1,0 +1,186 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: C_TYPE_ENUM
+occurrence: 1/5
+line: 452
+
+000382:     Target target;
+000383:     IrTypeId scalar_types[C_TYPE_COUNT];
+000384:     // Largest u64 that fits the scalar integer type of each C kind, filled
+000385:     // when the type is created; zero means "not a cached integer kind" and
+000386:     // literal-fit queries take the type-table path instead.
+000387:     u64 literal_limits[C_TYPE_COUNT];
+000388: };
+000389: 
+000390: BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
+000391: {
+000392:     switch (kind)
+000393:     {
+000394:     case C_TYPE_VOID:
+000395:         return S8("void");
+000396:     case C_TYPE_BOOL:
+000397:         return S8("_Bool");
+000398:     case C_TYPE_CHAR:
+000399:         return S8("char");
+000400:     case C_TYPE_SIGNED_CHAR:
+000401:         return S8("signed char");
+000402:     case C_TYPE_UNSIGNED_CHAR:
+000403:         return S8("unsigned char");
+000404:     case C_TYPE_SHORT:
+000405:         return S8("short");
+000406:     case C_TYPE_UNSIGNED_SHORT:
+000407:         return S8("unsigned short");
+000408:     case C_TYPE_INT:
+000409:         return S8("int");
+000410:     case C_TYPE_UNSIGNED_INT:
+000411:         return S8("unsigned int");
+000412:     case C_TYPE_LONG:
+000413:         return S8("long");
+000414:     case C_TYPE_UNSIGNED_LONG:
+000415:         return S8("unsigned long");
+000416:     case C_TYPE_LONG_LONG:
+000417:         return S8("long long");
+000418:     case C_TYPE_UNSIGNED_LONG_LONG:
+000419:         return S8("unsigned long long");
+000420:     case C_TYPE_INT128:
+000421:         return S8("__int128");
+000422:     case C_TYPE_UNSIGNED_INT128:
+000423:         return S8("unsigned __int128");
+000424:     case C_TYPE_FLOAT16:
+000425:     case C_TYPE_BFLOAT16:
+000426:         return kind == C_TYPE_BFLOAT16 ? S8("__bf16") : S8("_Float16");
+000427:     case C_TYPE_FLOAT:
+000428:         return S8("float");
+000429:     case C_TYPE_DOUBLE:
+000430:         return S8("double");
+000431:     case C_TYPE_LONG_DOUBLE:
+000432:         return S8("long double");
+000433:     case C_TYPE_FLOAT16_COMPLEX:
+000434:         return S8("_Float16 _Complex");
+000435:     case C_TYPE_FLOAT_COMPLEX:
+000436:         return S8("float _Complex");
+000437:     case C_TYPE_DOUBLE_COMPLEX:
+000438:         return S8("double _Complex");
+000439:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+000440:         return S8("long double _Complex");
+000441:     case C_TYPE_VA_LIST:
+000442:         return S8("va_list");
+000443:     case C_TYPE_NULLPTR:
+000444:         return S8("nullptr_t");
+000445:     case C_TYPE_INVALID:
+000446:     case C_TYPE_POINTER:
+000447:     case C_TYPE_ARRAY:
+000448:     case C_TYPE_VECTOR:
+000449:     case C_TYPE_FUNCTION:
+000450:     case C_TYPE_STRUCT:
+000451:     case C_TYPE_UNION:
+000452:     case C_TYPE_ENUM:
+000453:     case C_TYPE_COUNT:
+000454:         return (String8){0};
+000455:     }
+000456:     return (String8){0};
+000457: }
+000458: 
+000459: BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
+000460: {
+000461:     TargetDataLayout layout = target_data_layout(target);
+000462:     *ir_kind = IR_TYPE_INTEGER;
+000463:     *bit_width = 0;
+000464:     *is_signed = false;
+000465:     *alignment = 0;
+000466:     switch (kind)
+000467:     {
+000468:     case C_TYPE_VOID:
+000469:         *ir_kind = IR_TYPE_VOID;
+000470:         return true;
+000471:     case C_TYPE_BOOL:
+000472:         *ir_kind = IR_TYPE_BOOLEAN;
+000473:         *bit_width = layout.boolean.bit_width;
+000474:         *alignment = layout.boolean.alignment;
+000475:         return true;
+000476:     case C_TYPE_CHAR:
+000477:         *bit_width = layout.plain_char.bit_width;
+000478:         *is_signed = layout.plain_char_is_signed;
+000479:         *alignment = layout.plain_char.alignment;
+000480:         return true;
+000481:     case C_TYPE_SIGNED_CHAR:
+000482:         *bit_width = layout.signed_char.bit_width;
+000483:         *is_signed = true;
+000484:         *alignment = layout.signed_char.alignment;
+000485:         return true;
+000486:     case C_TYPE_UNSIGNED_CHAR:
+000487:         *bit_width = layout.unsigned_char.bit_width;
+000488:         *alignment = layout.unsigned_char.alignment;
+000489:         return true;
+000490:     case C_TYPE_SHORT:
+000491:         *bit_width = layout.short_integer.bit_width;
+000492:         *is_signed = true;
+000493:         *alignment = layout.short_integer.alignment;
+000494:         return true;
+000495:     case C_TYPE_UNSIGNED_SHORT:
+000496:         *bit_width = layout.unsigned_short_integer.bit_width;
+000497:         *alignment = layout.unsigned_short_integer.alignment;
+000498:         return true;
+000499:     case C_TYPE_INT:
+000500:         *bit_width = layout.integer.bit_width;
+000501:         *is_signed = true;
+000502:         *alignment = layout.integer.alignment;
+000503:         return true;
+000504:     case C_TYPE_UNSIGNED_INT:
+000505:         *bit_width = layout.unsigned_integer.bit_width;
+000506:         *alignment = layout.unsigned_integer.alignment;
+000507:         return true;
+000508:     case C_TYPE_LONG:
+000509:         *bit_width = layout.long_integer.bit_width;
+000510:         *is_signed = true;
+000511:         *alignment = layout.long_integer.alignment;
+000512:         return true;
+000513:     case C_TYPE_UNSIGNED_LONG:
+000514:         *bit_width = layout.unsigned_long_integer.bit_width;
+000515:         *alignment = layout.unsigned_long_integer.alignment;
+000516:         return true;
+000517:     case C_TYPE_LONG_LONG:
+000518:         *bit_width = layout.long_long_integer.bit_width;
+000519:         *is_signed = true;
+000520:         *alignment = layout.long_long_integer.alignment;
+000521:         return true;
+000522:     case C_TYPE_UNSIGNED_LONG_LONG:
+000523:         *bit_width = layout.unsigned_long_long_integer.bit_width;
+000524:         *alignment = layout.unsigned_long_long_integer.alignment;
+000525:         return true;
+000526:     case C_TYPE_INT128:
+000527:         *bit_width = layout.integer128.bit_width;
+000528:         *is_signed = true;
+000529:         *alignment = layout.integer128.alignment;
+000530:         return true;
+000531:     case C_TYPE_UNSIGNED_INT128:
+000532:         *bit_width = layout.unsigned_integer128.bit_width;
+000533:         *alignment = layout.unsigned_integer128.alignment;
+000534:         return true;
+000535:     case C_TYPE_FLOAT16:
+000536:     case C_TYPE_BFLOAT16:
+000537:     {
+000538:         TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
+000539:         *ir_kind = IR_TYPE_FLOAT;
+000540:         *bit_width = narrow.bit_width;
+000541:         *alignment = narrow.alignment;
+000542:         return true;
+000543:     }
+000544:     case C_TYPE_FLOAT:
+000545:         *ir_kind = IR_TYPE_FLOAT;
+000546:         *bit_width = layout.float_type.bit_width;
+000547:         *alignment = layout.float_type.alignment;
+000548:         return true;
+000549:     case C_TYPE_DOUBLE:
+000550:         *ir_kind = IR_TYPE_FLOAT;
+000551:         *bit_width = layout.double_type.bit_width;
+000552:         *alignment = layout.double_type.alignment;
+000553:         return true;
+000554:     case C_TYPE_LONG_DOUBLE:
+000555:         *ir_kind = IR_TYPE_FLOAT;
+000556:         *bit_width = layout.long_double_type.bit_width;
+000557:         *alignment = layout.long_double_type.alignment;
+000558:         return true;
+000559:     case C_TYPE_VA_LIST:
+000560:         *ir_kind = IR_TYPE_VA_LIST;
+000561:         *bit_width = layout.va_list.bit_width;
+000562:         *alignment = layout.va_list.alignment;

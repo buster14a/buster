@@ -1,0 +1,286 @@
+path: src/buster/lib/compiler/frontend/c/c_parse.c
+needle: C_ENTITY_ENUMERATOR
+occurrence: 4/6
+line: 12866
+
+012746:     return C_ENTITY_ID_INVALID;
+012747: }
+012748: 
+012749: BUSTER_C_INTERNAL CEntityId c_parse_lookup_typedef_name_symbol(CParseResult* result, u32 symbol, String8 name, bool oldest);
+012750: 
+012751: BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest)
+012752: {
+012753:     return c_parse_lookup_typedef_name_symbol(result, c_parse_name_symbol(result, name), name, oldest);
+012754: }
+012755: 
+012756: BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_token(CParseResult* result, char8 const* spelling_base, CToken token, bool oldest)
+012757: {
+012758:     String8 name = c_token_spelling(spelling_base, token);
+012759:     return c_parse_lookup_typedef_name_symbol(result, c_parse_symbol_or_intern(result, token.symbol, name), name, oldest);
+012760: }
+012761: 
+012762: BUSTER_C_INTERNAL CEntityId c_parse_lookup_typedef_name_symbol(CParseResult* result, u32 symbol, String8 name, bool oldest)
+012763: {
+012764:     u32 bucket = (u32)c_parse_name_hash(symbol, name) & (result->entity_lookup_bucket_count - 1);
+012765:     CEntityId found = C_ENTITY_ID_INVALID;
+012766:     for (CEntityId entity = result->typedef_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID;
+012767:          entity = result->entities[entity.value].next_typedef_in_lookup)
+012768:     {
+012769:         if (string_equal(result->entities[entity.value].name, name))
+012770:         {
+012771:             found = entity;
+012772:             if (!oldest)
+012773:             {
+012774:                 break;
+012775:             }
+012776:         }
+012777:     }
+012778:     return found;
+012779: }
+012780: 
+012781: BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name_fallback(CParseResult* result, String8 name)
+012782: {
+012783:     if (result)
+012784:     {
+012785:         // A complete parse has a power-of-two bucket table and a terminated chain.
+012786:         // Hand-built or partially rolled-back results can omit either table, point
+012787:         // at an invalid entity, or leave a cycle. Prove the chain before entering
+012788:         // the canonical lookup, whose hot path intentionally assumes this shape.
+012789:         bool bucket_chain_valid = result->entities && result->typedef_lookup_buckets && result->entity_lookup_bucket_count &&
+012790:                                   (result->entity_lookup_bucket_count & (result->entity_lookup_bucket_count - 1)) == 0;
+012791:         if (bucket_chain_valid)
+012792:         {
+012793:             u32 bucket = (u32)c_parse_name_hash(c_parse_name_symbol(result, name), name) & (result->entity_lookup_bucket_count - 1);
+012794:             CEntityId entity = result->typedef_lookup_buckets[bucket];
+012795:             u32 steps = 0;
+012796:             while (entity.value != C_ID_UNDERLYING_INVALID)
+012797:             {
+012798:                 if (steps >= result->entity_count || entity.value >= result->entity_count)
+012799:                 {
+012800:                     bucket_chain_valid = false;
+012801:                     break;
+012802:                 }
+012803:                 CEntity* candidate = &result->entities[entity.value];
+012804:                 if (candidate->kind != C_ENTITY_TYPEDEF)
+012805:                 {
+012806:                     bucket_chain_valid = false;
+012807:                     break;
+012808:                 }
+012809:                 entity = candidate->next_typedef_in_lookup;
+012810:                 steps += 1;
+012811:             }
+012812:             if (bucket_chain_valid)
+012813:             {
+012814:                 // Keep the canonical newest-first lookup as the source of the
+012815:                 // result after validation; oldest=true preserves the historical
+012816:                 // ascending entity scan's first exact typedef.
+012817:                 return c_parse_lookup_typedef_name(result, name, true);
+012818:             }
+012819:         }
+012820: 
+012821:         // Preserve the original fallback for absent or malformed lookup metadata.
+012822:         // Ascending entity order is the language's oldest-typedef tie breaker.
+012823:         if (result->entities)
+012824:         {
+012825:             for (u32 entity_index = 0; entity_index < result->entity_count; entity_index += 1)
+012826:             {
+012827:                 CEntity* entity = &result->entities[entity_index];
+012828:                 if (entity->kind == C_ENTITY_TYPEDEF && string_equal(entity->name, name))
+012829:                 {
+012830:                     return (CEntityId){.value = entity_index};
+012831:                 }
+012832:             }
+012833:         }
+012834:     }
+012835: 
+012836:     return C_ENTITY_ID_INVALID;
+012837: }
+012838: 
+012839: BUSTER_C_INTERNAL CEntity* c_parse_first_constant_entity_symbol(CParseResult* result, u32 symbol, String8 name);
+012840: 
+012841: BUSTER_C_SHARED CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name)
+012842: {
+012843:     return c_parse_first_constant_entity_symbol(result, c_parse_name_symbol(result, name), name);
+012844: }
+012845: 
+012846: BUSTER_C_SHARED CEntity* c_parse_first_constant_entity_token(CParseResult* result, char8 const* spelling_base, CToken token)
+012847: {
+012848:     String8 name = c_token_spelling(spelling_base, token);
+012849:     return c_parse_first_constant_entity_symbol(result, c_parse_symbol_or_intern(result, token.symbol, name), name);
+012850: }
+012851: 
+012852: BUSTER_C_INTERNAL CEntity* c_parse_first_constant_entity_symbol(CParseResult* result, u32 symbol, String8 name)
+012853: {
+012854:     if (!result->name_lookup_buckets || !result->entity_lookup_bucket_count)
+012855:     {
+012856:         return 0;
+012857:     }
+012858:     u32 bucket = (u32)c_parse_name_hash(symbol, name) & (result->entity_lookup_bucket_count - 1);
+012859:     // The chain is newest-first; the last predicate match is the lowest entity
+012860:     // index, matching an ascending scan over the entity table.
+012861:     CEntity* first = 0;
+012862:     for (CEntityId entity = result->name_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID;
+012863:          entity = result->entities[entity.value].next_by_name)
+012864:     {
+012865:         CEntity* candidate = &result->entities[entity.value];
+012866:         if ((candidate->kind == C_ENTITY_ENUMERATOR || (candidate->is_constexpr && candidate->has_constant_value)) && string_equal(candidate->name, name))
+012867:         {
+012868:             first = candidate;
+012869:         }
+012870:     }
+012871:     return first;
+012872: }
+012873: 
+012874: BUSTER_C_SHARED bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect)
+012875: {
+012876:     if (c_parse_type_word_for_dialect(spelling, dialect) || c_parse_auto_type_word(spelling))
+012877:     {
+012878:         return true;
+012879:     }
+012880:     CEntityId entity = c_parse_lookup_entity(result, scope, spelling);
+012881:     return entity.value != C_ID_UNDERLYING_INVALID && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+012882: }
+012883: 
+012884: // The token form of c_parse_type_start with its work kept for the caller:
+012885: // the word bits decide for a keyword without a lookup, and a name's
+012886: // scope-chain answer is handed back so a caller that goes on to bind that
+012887: // same token does not look it up a second time.  `*type_word_out` reports
+012888: // that the keyword tests answered, in which case `*entity_out` is invalid.
+012889: BUSTER_C_INTERNAL bool c_parse_type_start_token_lookup(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CToken token,
+012890:                                                         bool* type_word_out, CEntityId* entity_out)
+012891: {
+012892:     bool starts_type;
+012893:     CEntityId entity = C_ENTITY_ID_INVALID;
+012894:     bool type_word = c_parse_type_word_for_dialect_token(preprocess, token) || c_parse_auto_type_word_token(preprocess, token);
+012895:     if (type_word)
+012896:     {
+012897:         starts_type = true;
+012898:     }
+012899:     else
+012900:     {
+012901:         entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+012902:         starts_type = entity.value != C_ID_UNDERLYING_INVALID && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+012903:     }
+012904:     *type_word_out = type_word;
+012905:     *entity_out = entity;
+012906:     return starts_type;
+012907: }
+012908: 
+012909: // The token form of c_parse_type_start: word tests by interned symbol id,
+012910: // entity lookup through the token's own symbol.
+012911: BUSTER_C_SHARED bool c_parse_type_start_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CToken token)
+012912: {
+012913:     bool type_word = false;
+012914:     CEntityId entity = C_ENTITY_ID_INVALID;
+012915:     return c_parse_type_start_token_lookup(result, preprocess, scope, token, &type_word, &entity);
+012916: }
+012917: 
+012918: BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index,
+012919:                                                       CEntityId entity);
+012920: 
+012921: BUSTER_C_INTERNAL void c_parse_bind_identifier(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index)
+012922: {
+012923:     CToken token = preprocess.tokens[token_index];
+012924:     c_parse_bind_identifier_entity(arena, result, preprocess, scope, token_index,
+012925:                                    c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token));
+012926: }
+012927: 
+012928: // Records the use of the identifier at `token_index` as resolving to
+012929: // `entity`, the answer of a lookup of that token in `scope` the caller
+012930: // already made, and diagnoses an unresolved name unless it is predefined.
+012931: BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 token_index,
+012932:                                                       CEntityId entity)
+012933: {
+012934:     CToken token = preprocess.tokens[token_index];
+012935:     bool first_use = token_index < result->identifier_use_by_token_capacity && !result->identifier_use_by_token_plus_one[token_index];
+012936:     BUSTER_VALIDATE(result->identifier_use_count < result->identifier_use_capacity);
+012937:     u32 use_index = result->identifier_use_count++;
+012938:     result->identifier_uses[use_index] = (CIdentifierUse){
+012939:         .token_index = token_index,
+012940:         .entity = entity,
+012941:         .scope = scope,
+012942:     };
+012943:     if (token_index < result->identifier_use_by_token_capacity && !result->identifier_use_by_token_plus_one[token_index])
+012944:     {
+012945:         result->identifier_use_by_token_plus_one[token_index] = use_index + 1;
+012946:     }
+012947:     // The predefined names -- __func__ and its GNU forms, the __builtin_ and
+012948:     // atomic families, GNU's complex-part operators, C23's true/false/nullptr
+012949:     // -- declare no entity, so the only question they answer is whether an
+012950:     // unresolved name is an error.  A name the scope chain resolved, which
+012951:     // is nearly every one, never reaches the ladder.
+012952:     if (entity.value == C_ID_UNDERLYING_INVALID)
+012953:     {
+012954:         String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+012955:         if (first_use && c_parse_bfloat16_builtin(spelling))
+012956:         {
+012957:             c_parse_position_index_append(arena, &result->bfloat16_builtin_calls, &result->bfloat16_builtin_call_count,
+012958:                                            &result->bfloat16_builtin_call_capacity, token_index);
+012959:         }
+012960:         bool predefined_function_name = string_equal(spelling, S8("__func__")) || string_equal(spelling, S8("__FUNCTION__")) ||
+012961:                                         string_equal(spelling, S8("__PRETTY_FUNCTION__")) || string_equal(spelling, S8("__builtin_va_start")) ||
+012962:                                         string_equal(spelling, S8("__va_start")) || string_equal(spelling, S8("__builtin_va_arg")) ||
+012963:                                         string_equal(spelling, S8("__builtin_va_copy")) || string_equal(spelling, S8("__builtin_va_end"));
+012964:         predefined_function_name |= string_starts_with_sequence(spelling, S8("__builtin_"));
+012965:         predefined_function_name |= string_starts_with_sequence(spelling, S8("__c11_atomic_"));
+012966:         // The GNU spelling of the same family, which takes ordinary pointers.
+012967:         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
+012968:         // userland reaches for it in preference to the C11 one.
+012969:         predefined_function_name |= string_starts_with_sequence(spelling, S8("__atomic_"));
+012970:         // Admit only the implemented legacy full barrier and NAND spellings.
+012971:         predefined_function_name |= string_equal(spelling, S8("__sync_synchronize")) ||
+012972:                                     string_equal(spelling, S8("__sync_fetch_and_nand")) ||
+012973:                                     string_equal(spelling, S8("__sync_nand_and_fetch"));
+012974:         // GNU's complex part operators are spelled as identifiers but name no
+012975:         // entity; the expression walker consumes them as prefix operators.
+012976:         predefined_function_name |= string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__real")) ||
+012977:                                     string_equal(spelling, S8("__imag__")) || string_equal(spelling, S8("__imag"));
+012978:         predefined_function_name |= c_preprocess_dialect_is_c23(preprocess.dialect) &&
+012979:                                     (string_equal(spelling, S8("true")) || string_equal(spelling, S8("false")) || string_equal(spelling, S8("nullptr")));
+012980:         if (!predefined_function_name)
+012981:         {
+012982:             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNDECLARED_IDENTIFIER,
+012983:                                string_format(arena, S8("use of undeclared identifier '{S8}'"), spelling));
+012984:         }
+012985:     }
+012986: }
+012987: 
+012988: BUSTER_C_INTERNAL bool c_parse_identifier_is_bound(CParseResult* result, u32 token_index)
+012989: {
+012990:     return c_parse_identifier_use_index(result, token_index) != C_ID_UNDERLYING_INVALID;
+012991: }
+012992: 
+012993: // One past the `__builtin_offsetof(type, designator)` group whose opening
+012994: // parenthesis is at `open`.  The designator names struct members rather than
+012995: // objects in scope, so an identifier binder walking a token range has to step
+012996: // over the whole group instead of resolving what is inside it.
+012997: BUSTER_C_INTERNAL u32 c_parse_builtin_offsetof_end(CPreprocessResult preprocess, u32 open, u32 end)
+012998: {
+012999:     u32 depth = 0;
+013000:     u32 index = open;
+013001:     while (index < end)
+013002:     {
+013003:         if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+013004:         {
+013005:             depth += 1;
+013006:         }
+013007:         else if (c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+013008:         {
+013009:             if (!depth)
+013010:             {
+013011:                 break;
+013012:             }
+013013:             depth -= 1;
+013014:             if (!depth)
+013015:             {
+013016:                 index += 1;
+013017:                 break;
+013018:             }
+013019:         }
+013020:         index += 1;
+013021:     }
+013022:     return index;
+013023: }
+013024: 
+013025: BUSTER_C_INTERNAL void c_parse_bind_array_bound_identifiers(Arena* arena, CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start,
+013026:                                                               u32 end)

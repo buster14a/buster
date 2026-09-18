@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 31/111
+line: 12308
+
+012238:         for (u64 index = 0; index < bytes.length; index += 1)
+012239:         {
+012240:             value = (value << 8) | bytes.pointer[index];
+012241:         }
+012242:         // A plain single-character constant has the value a plain char
+012243:         // object with that byte would have (C11 6.4.4.4p10): where the
+012244:         // target's plain char is signed, '\x80' is -128, and pickle's
+012245:         // opcode enum -- `PROTO = '\x80'` -- must agree with the signed
+012246:         // byte the unpickler switches on.  Multi-character constants keep
+012247:         // the concatenated spelling every compiler answers, and u8'' is
+012248:         // unsigned by type.
+012249:         if (!opening && bytes.length == 1 && target_data_layout(target).plain_char_is_signed && (value & 0x80))
+012250:         {
+012251:             value |= ~(u64)0xff;
+012252:         }
+012253:         *value_out = value;
+012254:         *kind_out = opening ? C_TYPE_UNSIGNED_CHAR : C_TYPE_INT;
+012255:         return true;
+012256:     }
+012257:     if (opening != 1)
+012258:     {
+012259:         return false;
+012260:     }
+012261:     u32 width = 0;
+012262:     CTypeKind kind = C_TYPE_INVALID;
+012263:     switch (token_spelling.pointer[0])
+012264:     {
+012265:     case 'u':
+012266:         width = 2;
+012267:         kind = C_TYPE_UNSIGNED_SHORT;
+012268:         break;
+012269:     case 'U':
+012270:         width = 4;
+012271:         kind = C_TYPE_UNSIGNED_INT;
+012272:         break;
+012273:     case 'L':
+012274:         width = target_uses_16_bit_wchar(target) ? 2 : 4;
+012275:         kind = target_uses_16_bit_wchar(target) ? C_TYPE_UNSIGNED_SHORT :
+012276:                target_uses_unsigned_wchar(target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+012277:         break;
+012278:     default:
+012279:         return false;
+012280:     }
+012281:     ByteSlice bytes = {0};
+012282:     u64 element_count = 0;
+012283:     if (!c_ir_decode_wide_quoted(arena, token_spelling, '\'', width, &bytes, &element_count) || element_count != 1 || bytes.length != width)
+012284:     {
+012285:         return false;
+012286:     }
+012287:     u64 value = 0;
+012288:     for (u32 index = 0; index < width; index += 1)
+012289:     {
+012290:         value |= (u64)bytes.pointer[index] << (index * 8);
+012291:     }
+012292:     *value_out = value;
+012293:     *kind_out = kind;
+012294:     return true;
+012295: }
+012296: 
+012297: BUSTER_C_INTERNAL IrValueId c_ir_emit_character(CIntegerIrBuilder* builder, CToken token)
+012298: {
+012299:     u64 value = 0;
+012300:     CTypeKind kind = C_TYPE_INVALID;
+012301:     IrValueId result;
+012302:     if (!c_ir_decode_character_value(builder->arena, builder->preprocess.spelling_base, token, builder->target, &value, &kind))
+012303:     {
+012304:         result = IR_VALUE_ID_INVALID;
+012305:     }
+012306:     else
+012307:     {
+012308:         result = c_ir_emit_integer_value_typed(builder, value, false, token, builder->scalar_types[kind]);
+012309:     }
+012310: 
+012311:     return result;
+012312: }
+012313: 
+012314: BUSTER_C_INTERNAL IrValueId c_ir_emit_string_contents_typed(CIntegerIrBuilder* builder, CToken token, CIrDecodedString decoded, IrTypeId requested_type)
+012315: {
+012316:     if (!builder->module || decoded.element_count == UINT64_MAX || !decoded.element_width)
+012317:     {
+012318:         return IR_VALUE_ID_INVALID;
+012319:     }
+012320:     u64 element_count = decoded.element_count + 1;
+012321:     if (element_count > UINT64_MAX / decoded.element_width)
+012322:     {
+012323:         return IR_VALUE_ID_INVALID;
+012324:     }
+012325:     u64 byte_length = element_count * decoded.element_width;
+012326:     IrTypeId element_type = builder->scalar_types[decoded.element_kind];
+012327:     IrType* literal_element = ir_type_from_id(&builder->program->types, element_type);
+012328:     if (!literal_element || literal_element->kind != IR_TYPE_INTEGER || literal_element->bit_width != decoded.element_width * 8)
+012329:     {
+012330:         return IR_VALUE_ID_INVALID;
+012331:     }
+012332:     IrTypeId array_type = IR_TYPE_ID_INVALID;
+012333:     IrType* requested = ir_type_from_id(&builder->program->types, requested_type);
+012334:     if (requested && requested->kind == IR_TYPE_ARRAY)
+012335:     {
+012336:         IrType* element = ir_type_from_id(&builder->program->types, requested->element_type);
+012337:         if (!element || element->kind != IR_TYPE_INTEGER || element->bit_width != decoded.element_width * 8 || decoded.element_count > requested->element_count)
+012338:         {
+012339:             return IR_VALUE_ID_INVALID;
+012340:         }
+012341:         element_count = requested->element_count;
+012342:         if (element_count > UINT64_MAX / decoded.element_width)
+012343:         {
+012344:             return IR_VALUE_ID_INVALID;
+012345:         }
+012346:         byte_length = element_count * decoded.element_width;
+012347:         array_type = requested_type;
+012348:     }
+012349:     u8* bytes = arena_allocate_zeroed(builder->arena, u8, byte_length);
+012350:     if (decoded.bytes.length)
+012351:     {
+012352:         memcpy(bytes, decoded.bytes.pointer, decoded.bytes.length);
+012353:     }
+012354:     if (array_type.value == IR_ID_UNDERLYING_INVALID)
+012355:     {
+012356:         array_type = ir_program_add_type(builder->program, (IrType){
+012357:                                                                .name = S8("C string literal"),
+012358:                                                                .element_type = element_type,
+012359:                                                                .return_type = IR_TYPE_ID_INVALID,
+012360:                                                                .layout =
+012361:                                                                    {
+012362:                                                                        .size = byte_length,
+012363:                                                                        .alignment = literal_element->layout.alignment,
+012364:                                                                        .resolved = true,
+012365:                                                                    },
+012366:                                                                .kind = IR_TYPE_ARRAY,
+012367:                                                                .element_count = element_count,
+012368:                                                            });
+012369:     }
+012370:     String8 name = string_format(builder->arena, S8(".L.cstr.{u32}"), builder->program->symbols.count);
+012371:     IrSourceRange source = c_ir_token_source_range(builder, token);
+012372:     IrSymbolId symbol = ir_program_add_symbol(builder->program, (IrSymbol){
+012373:                                                                     .name = name,
+012374:                                                                     .link_name = name,
+012375:                                                                     .source = source,
+012376:                                                                     .type = array_type,
+012377:                                                                     .kind = IR_SYMBOL_DATA,
+012378:                                                                     .linkage = IR_LINKAGE_INTERNAL,
+012379:                                                                     .is_definition = true,
+012380:                                                                 });
+012381:     ir_module_add_global(builder->arena, builder->module,
+012382:                          (IrGlobal){
+012383:                              .bytes =
+012384:                                  {
+012385:                                      .pointer = bytes,
+012386:                                      .length = byte_length,
+012387:                                  },
+012388:                              .symbol = symbol,
+012389:                              .initializer_symbol = IR_SYMBOL_ID_INVALID,
+012390:                              .type = array_type,
+012391:                              .source = source,
+012392:                              .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
+012393:                              .is_read_only = true,
+012394:                          });
+012395:     IrValueId place = ir_function_add_value(builder->arena, builder->function,
+012396:                                             (IrValue){
+012397:                                                 .canonical_type = array_type,
+012398:                                                 .definition = IR_INSTRUCTION_ID_INVALID,
+012399:                                                 .category = IR_VALUE_PLACE,
+012400:                                             });
+012401:     IrSourceRange instruction_source = source;
+012402:     IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_GLOBAL, array_type);
+012403:     instruction.symbol = symbol;
+012404:     instruction.result = place;
+012405:     IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+012406:     builder->function->values[place.value].definition = id;
+012407:     if (requested && requested->kind == IR_TYPE_ARRAY)
+012408:     {
+012409:         return c_ir_emit_load_place_raw(builder, place, array_type, source);
+012410:     }
+012411:     return place;
+012412: }
+012413: 
+012414: BUSTER_C_INTERNAL IrValueId c_ir_emit_string_range_typed(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId requested_type)
+012415: {
+012416:     CIrDecodedString decoded = {0};
+012417:     IrValueId result;
+012418:     if (!c_ir_decode_string_literal_range_for_target(builder->arena, builder->preprocess, builder->target, start, end, &decoded))
+012419:     {
+012420:         result = IR_VALUE_ID_INVALID;
+012421:     }
+012422:     else
+012423:     {
+012424:         result = c_ir_emit_string_contents_typed(builder, builder->preprocess.tokens[start], decoded, requested_type);
+012425:     }
+012426: 
+012427:     return result;
+012428: }
+012429: 
+012430: BUSTER_C_INTERNAL IrValueId c_ir_emit_function_name(CIntegerIrBuilder* builder, CToken token)
+012431: {
+012432:     // The quoted name lives outside the spelling space, so decode it through
+012433:     // a detached one-token view; the original token keeps carrying the
+012434:     // source range.
+012435:     String8 quoted = string_format(builder->arena, S8("\"{S8}\""), builder->function->name);
+012436:     CToken quoted_token = {
+012437:         .length = c_token_length_field(quoted.length),
+012438:         .kind = C_TOKEN_STRING_LITERAL,

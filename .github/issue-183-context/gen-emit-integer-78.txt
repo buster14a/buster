@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 78/111
+line: 22251
+
+022181:                                       : c_ir_emit_cast(builder, values[first + 1], pointer_type, source);
+022182:             if (operands[0].value == IR_ID_UNDERLYING_INVALID || operands[1].value == IR_ID_UNDERLYING_INVALID)
+022183:             {
+022184:                 return false;
+022185:             }
+022186:             IrValueId result = c_ir_add_result(builder, builder->bool_type);
+022187:             IrSourceRange instruction_source = source;
+022188:             IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_BINARY, builder->bool_type);
+022189:             instruction.operands = operands;
+022190:             instruction.operand_count = 2;
+022191:             instruction.binary_operation = operation == C_CONDITIONAL_EQUAL ? IR_BINARY_POINTER_EQUAL : IR_BINARY_POINTER_NOT_EQUAL;
+022192:             instruction.result = result;
+022193:             IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+022194:             builder->function->values[result.value].definition = id;
+022195:             result = c_ir_emit_cast(builder, result, builder->s32_type, source);
+022196:             if (result.value == IR_ID_UNDERLYING_INVALID)
+022197:             {
+022198:                 return false;
+022199:             }
+022200:             *value_count = first;
+022201:             values[(*value_count)++] = result;
+022202:             return true;
+022203:         }
+022204:         if (operation == C_CONDITIONAL_SUBTRACT && left_pointer_like && right_pointer_like)
+022205:         {
+022206:             if ((left_pointer && left->is_nullptr) || (right_pointer && right->is_nullptr))
+022207:             {
+022208:                 return false;
+022209:             }
+022210:             IrTypeId left_pointer_type = left_pointer ? left_type : c_ir_add_pointer_type(builder->program, builder->pointer_types, left->element_type);
+022211:             IrTypeId right_pointer_type = right_pointer ? right_type : c_ir_add_pointer_type(builder->program, builder->pointer_types, right->element_type);
+022212:             IrType* left_pointer_value = ir_type_from_id(&builder->program->types, left_pointer_type);
+022213:             IrType* right_pointer_value = ir_type_from_id(&builder->program->types, right_pointer_type);
+022214:             if (!left_pointer_value || !right_pointer_value || left_pointer_value->element_type.value != right_pointer_value->element_type.value)
+022215:             {
+022216:                 return false;
+022217:             }
+022218:             IrType* element = ir_type_from_id(&builder->program->types, left_pointer_value->element_type);
+022219:             if (!element || !element->layout.resolved || !element->layout.size)
+022220:             {
+022221:                 return false;
+022222:             }
+022223:             IrValueId pointer_values[2] = {
+022224:                 left_array ? c_ir_decay_array(builder, values[first], left_pointer_type, source) : values[first],
+022225:                 right_array ? c_ir_decay_array(builder, values[first + 1], right_pointer_type, source) : values[first + 1],
+022226:             };
+022227:             for (u32 operand_index = 0; operand_index < 2; operand_index += 1)
+022228:             {
+022229:                 pointer_values[operand_index] = c_ir_emit_cast(builder, pointer_values[operand_index], builder->ptrdiff_type, source);
+022230:                 if (pointer_values[operand_index].value == IR_ID_UNDERLYING_INVALID)
+022231:                 {
+022232:                     return false;
+022233:                 }
+022234:             }
+022235:             IrValueId result = c_ir_add_result(builder, builder->ptrdiff_type);
+022236:             IrSourceRange subtract_source = source;
+022237:             IrInstruction subtract = c_ir_instruction_initialize(IR_OPCODE_BINARY, builder->ptrdiff_type);
+022238:             subtract.operands = arena_allocate(builder->arena, IrValueId, 2);
+022239:             subtract.operands[0] = pointer_values[0];
+022240:             subtract.operands[1] = pointer_values[1];
+022241:             subtract.operand_count = 2;
+022242:             subtract.binary_operation = IR_BINARY_INTEGER_SUBTRACT;
+022243:             subtract.result = result;
+022244:             IrInstructionId subtract_id = c_ir_append_instruction(builder, subtract, subtract_source);
+022245:             builder->function->values[result.value].definition = subtract_id;
+022246:             CIrVlaValue shape = c_ir_vla_value(builder, values[first]);
+022247:             if (shape.counts || element->layout.size > 1)
+022248:             {
+022249:                 IrValueId divisor = shape.counts
+022250:                                         ? c_ir_emit_cast(builder, shape.sizes[shape.dimension + (u32)shape.array_lvalue], builder->ptrdiff_type, source)
+022251:                                         : c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->ptrdiff_type);
+022252:                 IrValueId quotient = c_ir_add_result(builder, builder->ptrdiff_type);
+022253:                 IrSourceRange divide_source = source;
+022254:                 IrInstruction divide = c_ir_instruction_initialize(IR_OPCODE_BINARY, builder->ptrdiff_type);
+022255:                 divide.operands = arena_allocate(builder->arena, IrValueId, 2);
+022256:                 divide.operands[0] = result;
+022257:                 divide.operands[1] = divisor;
+022258:                 divide.operand_count = 2;
+022259:                 divide.binary_operation = IR_BINARY_SIGNED_DIVIDE;
+022260:                 divide.result = quotient;
+022261:                 IrInstructionId divide_id = c_ir_append_instruction(builder, divide, divide_source);
+022262:                 builder->function->values[quotient.value].definition = divide_id;
+022263:                 result = quotient;
+022264:             }
+022265:             *value_count = first;
+022266:             values[(*value_count)++] = result;
+022267:             return true;
+022268:         }
+022269:         bool pointer_offset = (operation == C_CONDITIONAL_ADD && (left_pointer_like != right_pointer_like)) ||
+022270:                               (operation == C_CONDITIONAL_SUBTRACT && left_pointer_like && !right_pointer_like);
+022271:         if (pointer_offset)
+022272:         {
+022273:             if ((left_pointer && left->is_nullptr) || (right_pointer && right->is_nullptr))
+022274:             {
+022275:                 return false;
+022276:             }
+022277:             IrValueId base = left_pointer_like ? values[first] : values[first + 1];
+022278:             IrValueId index = left_pointer_like ? values[first + 1] : values[first];
+022279:             IrTypeId pointer_type = left_pointer    ? left_type
+022280:                                     : right_pointer ? right_type
+022281:                                     : left_array    ? c_ir_add_pointer_type(builder->program, builder->pointer_types, left->element_type)
+022282:                                                     : c_ir_add_pointer_type(builder->program, builder->pointer_types, right->element_type);
+022283:             if (operation == C_CONDITIONAL_SUBTRACT)
+022284:             {
+022285:                 IrTypeId index_type = builder->function->values[index.value].canonical_type;
+022286:                 IrType* index_type_value = ir_type_from_id(&builder->program->types, index_type);
+022287:                 if (index_type_value && index_type_value->kind == IR_TYPE_BOOLEAN)
+022288:                 {
+022289:                     index = c_ir_emit_cast(builder, index, builder->s32_type, source);
+022290:                     index_type = builder->s32_type;
+022291:                     index_type_value = ir_type_from_id(&builder->program->types, index_type);
+022292:                 }
+022293:                 if (index.value == IR_ID_UNDERLYING_INVALID || !index_type_value || index_type_value->kind != IR_TYPE_INTEGER)
+022294:                 {
+022295:                     return false;
+022296:                 }
+022297:                 // Negate at pointer width: a narrower index is extended by its own signedness first, so an
+022298:                 // unsigned index does not wrap to a huge positive offset when the index instruction zero-extends it.
+022299:                 index = c_ir_emit_cast(builder, index, builder->ptrdiff_type, source);
+022300:                 if (index.value == IR_ID_UNDERLYING_INVALID)
+022301:                 {
+022302:                     return false;
+022303:                 }
+022304:                 index_type = builder->ptrdiff_type;
+022305:                 IrValueId negated = c_ir_add_result(builder, index_type);
+022306:                 IrSourceRange negate_source = source;
+022307:                 IrInstruction negate = c_ir_instruction_initialize(IR_OPCODE_UNARY, index_type);
+022308:                 negate.operands = arena_allocate(builder->arena, IrValueId, 1);
+022309:                 negate.operands[0] = index;
+022310:                 negate.operand_count = 1;
+022311:                 negate.unary_operation = IR_UNARY_INTEGER_NEGATE;
+022312:                 negate.result = negated;
+022313:                 IrInstructionId negate_id = c_ir_append_instruction(builder, negate, negate_source);
+022314:                 builder->function->values[negated.value].definition = negate_id;
+022315:                 index = negated;
+022316:             }
+022317:             IrType* pointer = ir_type_from_id(&builder->program->types, pointer_type);
+022318:             IrValueId place = c_ir_emit_index_place(builder, base, index, source);
+022319:             CIrVlaValue shape = c_ir_vla_value(builder, place);
+022320:             IrValueId result = shape.counts && shape.array_lvalue ? c_ir_vla_address(builder, place, source)
+022321:                                : pointer ? c_ir_emit_address_of_place(builder, place, pointer->element_type, source) : IR_VALUE_ID_INVALID;
+022322:             if (result.value == IR_ID_UNDERLYING_INVALID)
+022323:             {
+022324:                 return false;
+022325:             }
+022326:             *value_count = first;
+022327:             values[(*value_count)++] = result;
+022328:             return true;
+022329:         }
+022330:         if (left_pointer_like || right_pointer_like)
+022331:         {
+022332:             return false;
+022333:         }
+022334:     }
+022335:     IrTypeId operation_type = c_ir_integer_promoted_value_type(builder, values[first]);
+022336:     IrType* operation_type_value = ir_type_from_id(&builder->program->types, operation_type);
+022337:     if ((operation_type_value && operation_type_value->is_complex) ||
+022338:         (operand_count == 2 && c_ir_value_complex_type(builder, values[first + 1])))
+022339:     {
+022340:         return c_ir_apply_complex_operation(builder, operation, values, value_count, first, operand_count, source);
+022341:     }
+022342:     IrTypeId vector_type = operation_type_value && operation_type_value->kind == IR_TYPE_VECTOR ? operation_type : IR_TYPE_ID_INVALID;
+022343:     if (operand_count == 2 && vector_type.value == IR_ID_UNDERLYING_INVALID)
+022344:     {
+022345:         IrTypeId right_type = c_ir_integer_promoted_value_type(builder, values[first + 1]);
+022346:         IrType* right_type_value = ir_type_from_id(&builder->program->types, right_type);
+022347:         if (right_type_value && right_type_value->kind == IR_TYPE_VECTOR)
+022348:         {
+022349:             vector_type = right_type;
+022350:         }
+022351:     }
+022352:     if (vector_type.value != IR_ID_UNDERLYING_INVALID)
+022353:     {
+022354:         return c_ir_apply_vector_operation(builder, unary, binary, values, value_count, first, operand_count, vector_type, source);
+022355:     }
+022356:     if (operation_type_value && operation_type_value->kind == IR_TYPE_BOOLEAN)
+022357:     {
+022358:         operation_type = builder->s32_type;
+022359:         operation_type_value = ir_type_from_id(&builder->program->types, operation_type);
+022360:     }
+022361:     if (!operation_type_value || (operation_type_value->kind != IR_TYPE_INTEGER && operation_type_value->kind != IR_TYPE_FLOAT))
+022362:     {
+022363:         return false;
+022364:     }
+022365:     if (operation_type_value->kind == IR_TYPE_INTEGER && operation_type_value->bit_width < 32)
+022366:     {
+022367:         operation_type = builder->s32_type;
+022368:         operation_type_value = ir_type_from_id(&builder->program->types, operation_type);
+022369:     }
+022370:     if (operand_count == 2)
+022371:     {
+022372:         IrTypeId right_type = c_ir_integer_promoted_value_type(builder, values[first + 1]);
+022373:         IrType* right_type_value = ir_type_from_id(&builder->program->types, right_type);
+022374:         if (right_type_value && right_type_value->kind == IR_TYPE_BOOLEAN)
+022375:         {
+022376:             right_type = builder->s32_type;
+022377:             right_type_value = ir_type_from_id(&builder->program->types, right_type);
+022378:         }
+022379:         if (!right_type_value || (right_type_value->kind != IR_TYPE_INTEGER && right_type_value->kind != IR_TYPE_FLOAT))
+022380:         {
+022381:             return false;

@@ -1,0 +1,286 @@
+path: src/buster/lib/compiler/frontend/c/c_parse.c
+needle: C_ENTITY_ENUMERATOR
+occurrence: 6/6
+line: 17249
+
+017129:             // whose own bound is inferred from its initializer counts too:
+017130:             // lowering infers the bound on the definition's type, so the
+017131:             // entity must share that type object to see the inference.
+017132:             if (entity_kind == C_ENTITY_OBJECT && existing->type.value < result.type_count && declaration->type.value < result.type_count)
+017133:             {
+017134:                 CType* existing_type = &result.types[existing->type.value];
+017135:                 CType* declared_type = &result.types[declaration->type.value];
+017136:                 if (existing_type->kind == C_TYPE_ARRAY && declared_type->kind == C_TYPE_ARRAY &&
+017137:                     existing_type->array_bound < result.array_bound_count && declared_type->array_bound < result.array_bound_count)
+017138:                 {
+017139:                     CArrayBound existing_bound = result.array_bounds[existing_type->array_bound];
+017140:                     CArrayBound declared_bound = result.array_bounds[declared_type->array_bound];
+017141:                     if (!existing_bound.token_count && !existing_bound.is_star && !existing_bound.has_inferred_count &&
+017142:                         (declared_bound.token_count || declaration->is_definition))
+017143:                     {
+017144:                         existing->type = declaration->type;
+017145:                     }
+017146:                 }
+017147:             }
+017148:             continue;
+017149:         }
+017150:         if (conflicting && !(kind == C_DECLARATION_FUNCTION && conflicting->kind == C_ENTITY_FUNCTION && overloadable))
+017151:         {
+017152:             declaration->entity = (CEntityId){
+017153:                 .value = (u32)(conflicting - result.entities),
+017154:             };
+017155:             c_parse_diagnostic(&result, declaration->location, C_DIAGNOSTIC_CONFLICTING_DECLARATION,
+017156:                                string_format(arena, S8("conflicting declaration of '{S8}' (previous type {u32}, new type {u32})"), declaration->name,
+017157:                                              conflicting->type.value, declaration->type.value));
+017158:             continue;
+017159:         }
+017160:         CEntityId entity = {
+017161:             .value = result.entity_count,
+017162:         };
+017163:         // A function filed from a type name has no function-name token; its
+017164:         // name is the object declarator's, which is the token the entity has
+017165:         // to point at.
+017166:         u32 declaration_name_token = kind == C_DECLARATION_FUNCTION && syntax_declaration->function_name_token < token_count
+017167:                                          ? syntax_declaration->function_name_token
+017168:                                          : syntax_declaration->name_token;
+017169:         bool is_thread_local = false;
+017170:         if (kind == C_DECLARATION_OBJECT &&
+017171:             c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
+017172:         {
+017173:             for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
+017174:             {
+017175:                 CToken token = preprocess.tokens[token_index];
+017176:                 is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&
+017177:                                    c_token_in_well_known_set(preprocess.spelling_base, token,
+017178:                                                              C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
+017179:             }
+017180:         }
+017181:         declaration->entity = entity;
+017182:         BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
+017183:         result.entities[result.entity_count++] = (CEntity){
+017184:             .name = declaration->name,
+017185:             .location = declaration->location,
+017186:             .type = declaration->type,
+017187:             .scope =
+017188:                 {
+017189:                     .value = 0,
+017190:                 },
+017191:             .next_in_scope = C_ENTITY_ID_INVALID,
+017192:             .declaration_index = result.declaration_count - 1,
+017193:             .declaration_token_plus_one = declaration_name_token < token_count ? declaration_name_token + 1 : 0,
+017194:             .alignment_start = declaration->alignment_start,
+017195:             .alignment_count = declaration->alignment_count,
+017196:             .kind = kind == C_DECLARATION_FUNCTION  ? C_ENTITY_FUNCTION
+017197:                     : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF
+017198:                                                     : C_ENTITY_OBJECT,
+017199:             .is_definition = declaration->is_definition,
+017200:             .is_thread_local = is_thread_local,
+017201:             .is_constexpr = declaration->is_constexpr,
+017202:         };
+017203:         // The name is that token's spelling, so its interned id is the
+017204:         // entity's; a declaration without a name token interns the empty
+017205:         // name as before.
+017206:         c_parse_scope_add_entity(&result,
+017207:                                  (CScopeId){
+017208:                                      .value = 0,
+017209:                                  },
+017210:                                  entity, declaration_name_token < token_count ? preprocess.tokens[declaration_name_token].symbol : 0);
+017211:     }
+017212:     if (result.enum_member_count)
+017213:     {
+017214:         CTypeId enum_integer_type = c_parse_add_type(&result, (CType){
+017215:                                                                   .element_type = C_TYPE_ID_INVALID,
+017216:                                                                   .return_type = C_TYPE_ID_INVALID,
+017217:                                                                   .array_bound = C_ARRAY_BOUND_INVALID,
+017218:                                                                   .kind = C_TYPE_INT,
+017219:                                                                   .is_complete = true,
+017220:                                                               });
+017221:         for (u32 member_index = 0; member_index < result.enum_member_count; member_index += 1)
+017222:         {
+017223:             CEnumMember* member = &result.enum_members[member_index];
+017224:             u32 member_symbol = c_parse_symbol_or_intern(&result, member->symbol, member->name);
+017225:             if (c_parse_lookup_entity_symbol(&result,
+017226:                                              (CScopeId){
+017227:                                                  .value = 0,
+017228:                                              },
+017229:                                              member_symbol, member->name)
+017230:                     .value != C_ID_UNDERLYING_INVALID)
+017231:             {
+017232:                 c_parse_diagnostic(&result, member->location, C_DIAGNOSTIC_REDEFINITION, S8("redefinition of enumerator"));
+017233:                 continue;
+017234:             }
+017235:             CEntityId entity = {
+017236:                 .value = result.entity_count,
+017237:             };
+017238:             BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
+017239:             result.entities[result.entity_count++] = (CEntity){
+017240:                 .name = member->name,
+017241:                 .location = member->location,
+017242:                 .type = enum_integer_type,
+017243:                 .scope =
+017244:                     {
+017245:                         .value = 0,
+017246:                     },
+017247:                 .next_in_scope = C_ENTITY_ID_INVALID,
+017248:                 .declaration_index = C_ID_UNDERLYING_INVALID,
+017249:                 .kind = C_ENTITY_ENUMERATOR,
+017250:                 .is_definition = true,
+017251:                 .constant_is_negative = member->is_negative,
+017252:                 .constant_value = member->value,
+017253:             };
+017254:             c_parse_scope_add_entity(&result,
+017255:                                      (CScopeId){
+017256:                                          .value = 0,
+017257:                                      },
+017258:                                      entity, member_symbol);
+017259:         }
+017260:     }
+017261:     // A file-scope declaration's initializer may define an aggregate the same
+017262:     // way a function body's expression does, and nothing else walks it. This
+017263:     // runs ahead of the array-bound inference below because a bound may be the
+017264:     // sizeof of such a definition.
+017265:     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
+017266:     {
+017267:         CDeclaration* declaration = &result.declarations[declaration_index];
+017268:         if (declaration->kind == C_DECLARATION_FUNCTION)
+017269:         {
+017270:             continue;
+017271:         }
+017272:         c_parse_bind_expression_aggregates(&machine, &result, preprocess,
+017273:                                            (CScopeId){
+017274:                                                .value = 0,
+017275:                                            },
+017276:                                            declaration->token_start, declaration->token_start + declaration->token_count);
+017277:     }
+017278:     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
+017279:     {
+017280:         CDeclaration* declaration = &result.declarations[declaration_index];
+017281:         if (!declaration->is_constexpr || declaration->kind != C_DECLARATION_OBJECT || declaration->entity.value >= result.entity_count)
+017282:         {
+017283:             continue;
+017284:         }
+017285:         // This walk is in declaration order: an earlier integer constexpr
+017286:         // has its value before a later object's bound is checked. File-scope
+017287:         // objects do not own a function scope, so use the lexical scope here.
+017288:         CDeclaration scoped_declaration = *declaration;
+017289:         scoped_declaration.scope = (CScopeId){.value = 0};
+017290:         c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, &scoped_declaration);
+017291:         u32 end = declaration->token_start + declaration->token_count;
+017292:         u32 initializer_start = end;
+017293:         u32 depth = 0;
+017294:         for (u32 token_index = declaration->token_start; token_index < end; token_index += 1)
+017295:         {
+017296:             CToken token = preprocess.tokens[token_index];
+017297:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+017298:                 c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+017299:             {
+017300:                 depth += 1;
+017301:             }
+017302:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+017303:                      c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+017304:             {
+017305:                 if (depth)
+017306:                 {
+017307:                     depth -= 1;
+017308:                 }
+017309:             }
+017310:             else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+017311:             {
+017312:                 initializer_start = token_index + 1;
+017313:                 break;
+017314:             }
+017315:         }
+017316:         u32 initializer_end = end;
+017317:         if (initializer_end > initializer_start && c_token_is_punctuator(&preprocess.tokens[initializer_end - 1], C_PUNCTUATOR_SEMICOLON))
+017318:         {
+017319:             initializer_end -= 1;
+017320:         }
+017321:         if (initializer_start < initializer_end)
+017322:         {
+017323:             c_parse_validate_constexpr_initializer(&machine, arena, &result, preprocess,
+017324:                                                    (CScopeId){
+017325:                                                        .value = 0,
+017326:                                                    },
+017327:                                                    declaration->entity, initializer_start, initializer_end);
+017328:         }
+017329:     }
+017330:     c_parse_infer_file_array_bounds(&machine, arena, preprocess, &result);
+017331:     for (CParserDeclaration* syntax_declaration = syntax.first_declaration; syntax_declaration; syntax_declaration = syntax_declaration->next)
+017332:     {
+017333:         if (syntax_declaration->kind != C_PARSER_DECLARATION_STATIC_ASSERT)
+017334:         {
+017335:             continue;
+017336:         }
+017337:         c_parse_static_assert_check(&machine, arena, preprocess, &result,
+017338:                                     (CDeclaration){
+017339:                                         .token_start = syntax_declaration->token_start,
+017340:                                         .token_count = syntax_declaration->token_count,
+017341:                                     },
+017342:                                     (CScopeId){
+017343:                                         .value = 0,
+017344:                                     });
+017345:     }
+017346:     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
+017347:     {
+017348:         // Every parameter and local the previous definition bound leaves the
+017349:         // array here, whichever way that iteration ended.
+017350:         c_parse_binding_unwind(&result, 0);
+017351:         result.binding_scope = (CScopeId){
+017352:             .value = 0,
+017353:         };
+017354:         CDeclaration* declaration = &result.declarations[declaration_index];
+017355:         if (declaration->kind != C_DECLARATION_FUNCTION)
+017356:         {
+017357:             continue;
+017358:         }
+017359:         CScopeId scope = {
+017360:             .value = result.scope_count,
+017361:         };
+017362:         declaration->scope = scope;
+017363:         BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
+017364:         CScope* function_scope = &result.scopes[result.scope_count++];
+017365:         *function_scope = (CScope){
+017366:             .parent =
+017367:                 {
+017368:                     .value = 0,
+017369:                 },
+017370:             .first_entity = C_ENTITY_ID_INVALID,
+017371:             .last_entity = C_ENTITY_ID_INVALID,
+017372:             .token_start = declaration->body_start,
+017373:             .token_end = declaration->body_start + declaration->body_token_count,
+017374:         };
+017375:         result.binding_scope = scope;
+017376:         for (u32 parameter_index = 0; parameter_index < declaration->parameter_count; parameter_index += 1)
+017377:         {
+017378:             CParameter* parameter = &result.parameters[declaration->parameter_start + parameter_index];
+017379:             // A parameter's array bounds are expressions in the declarator,
+017380:             // not part of the function body.  Bind them while the parameter
+017381:             // scope is being built, after the preceding parameters have been
+017382:             // added but before this parameter itself is visible: the scope of
+017383:             // a parameter name starts after its declarator, so `int a[a]`
+017384:             // must not accidentally resolve the inner `a` to itself.  Global
+017385:             // objects, functions, and enumerators are already in file scope;
+017386:             // c_parse_bind_auto_initializer_identifiers has the ordinary
+017387:             // expression filtering (member/tag names and offsetof) needed by
+017388:             // this token range as well.  Prototype-only declarations never
+017389:             // lower a bound, so leave their references out of the emitted
+017390:             // function reachability graph.
+017391:             for (CTypeId type_id = declaration->is_definition ? parameter->type : C_TYPE_ID_INVALID;
+017392:                  type_id.value < result.type_count && result.types[type_id.value].kind == C_TYPE_ARRAY;
+017393:                  type_id = result.types[type_id.value].element_type)
+017394:             {
+017395:                 CType array_type = result.types[type_id.value];
+017396:                 if (array_type.array_bound >= result.array_bound_count)
+017397:                 {
+017398:                     continue;
+017399:                 }
+017400:                 CArrayBound bound = result.array_bounds[array_type.array_bound];
+017401:                 u64 bound_end = (u64)bound.token_start + bound.token_count;
+017402:                 if (bound_end > preprocess.token_count)
+017403:                 {
+017404:                     bound_end = preprocess.token_count;
+017405:                 }
+017406:                 if (bound.token_start < bound_end)
+017407:                 {
+017408:                     c_parse_bind_auto_initializer_identifiers(arena, &result, preprocess, scope, bound.token_start, (u32)bound_end);
+017409:                 }

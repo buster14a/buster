@@ -1,0 +1,246 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_constant_identifier
+occurrence: 2/5
+line: 41918
+
+041838:     }
+041839:     if (folded)
+041840:     {
+041841:         if (leaf_class == C_IR_INITIALIZER_LEAF_INTEGER_TO_INTEGER)
+041842:         {
+041843:             c_ir_constant_initializer_store_integer_leaf(child, literal_type, integer, bytes);
+041844:         }
+041845:         else
+041846:         {
+041847:             CIrConstantValue source = {.integer = integer, .kind = C_IR_CONSTANT_INTEGER};
+041848:             u32 precision = child->bit_width == 16   ? (child->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? 8u : 11u)
+041849:                             : child->bit_width == 32 ? 24u
+041850:                                                      : 53u;
+041851:             f64 floating = c_ir_constant_integer_to_float(&source, literal_type, precision);
+041852:             c_ir_constant_initializer_store_float_leaf(child, floating, bytes);
+041853:         }
+041854:     }
+041855:     return folded;
+041856: }
+041857: 
+041858: // The FLOAT_TO_FLOAT arm.  An imaginary literal is left to the evaluator,
+041859: // which refuses it rather than folding its magnitude.
+041860: BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_float_leaf(CIntegerIrBuilder* builder, IrType* child, u32 start, u32 end, u8* bytes)
+041861: {
+041862:     CToken* tokens = builder->preprocess.tokens;
+041863:     bool negative = end - start == 2 && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_MINUS);
+041864:     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, tokens[end - 1]);
+041865:     String8 ignored_real_spelling = {0};
+041866:     f64 floating = 0.0;
+041867:     char8 suffix = 0;
+041868:     c_ir_float_suffix(spelling, &suffix);
+041869:     bool wide_source = (suffix == 'l' || suffix == 'L') && target_data_layout(builder->target).long_double_type.bit_width > 64;
+041870:     bool folded = !c_ir_number_imaginary_spelling(builder->arena, spelling, &ignored_real_spelling);
+041871:     if (folded && wide_source)
+041872:     {
+041873:         CIrConstantValue source = {0};
+041874:         CIrConstantValue converted = {0};
+041875:         folded = c_ir_constant_float_literal(builder, spelling, &source) && c_ir_constant_cast(builder, &source, child->id, &converted);
+041876:         floating = converted.floating;
+041877:     }
+041878:     else if (folded)
+041879:     {
+041880:         folded = c_ir_float_literal_value(spelling, &floating, &suffix);
+041881:     }
+041882:     if (folded)
+041883:     {
+041884:         c_ir_constant_initializer_store_float_leaf(child, negative ? -floating : floating, bytes);
+041885:     }
+041886:     return folded;
+041887: }
+041888: 
+041889: // The CHARACTER_TO_INTEGER arm: the constant's type is the one the evaluator
+041890: // gives it, int unless the prefix says otherwise.
+041891: BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_character_leaf(CIntegerIrBuilder* builder, IrType* child, u32 start, u32 end, u8* bytes)
+041892: {
+041893:     CToken* tokens = builder->preprocess.tokens;
+041894:     bool signed_prefix = end - start == 2;
+041895:     bool negative = signed_prefix && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_MINUS);
+041896:     u64 character = 0;
+041897:     CTypeKind kind = C_TYPE_INVALID;
+041898:     bool folded = c_ir_decode_character_value(builder->arena, builder->preprocess.spelling_base, tokens[end - 1], builder->target, &character, &kind);
+041899:     IrType* literal_type = 0;
+041900:     if (folded)
+041901:     {
+041902:         IrTypeId type = builder->scalar_types[kind];
+041903:         literal_type = ir_type_from_id(&builder->program->types, type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type);
+041904:         folded = literal_type != 0;
+041905:     }
+041906:     if (folded && signed_prefix)
+041907:     {
+041908:         folded = c_ir_constant_initializer_leaf_unary(builder, &literal_type, &character, negative);
+041909:     }
+041910:     if (folded)
+041911:     {
+041912:         c_ir_constant_initializer_store_integer_leaf(child, literal_type, character, bytes);
+041913:     }
+041914:     return folded;
+041915: }
+041916: 
+041917: // The IDENTIFIER_TO_INTEGER arm: an enumerator, a constexpr object or C23's
+041918: // `true`/`false`, resolved by c_ir_constant_identifier exactly as the
+041919: // evaluator resolves a lone identifier.  A name that resolves to anything
+041920: // but an integer constant -- an object, a function, `nullptr`, an unknown --
+041921: // is declined to the general folder, which refuses or folds it as before.
+041922: BUSTER_C_INTERNAL bool c_ir_constant_initializer_fold_identifier_leaf(CIntegerIrBuilder* builder, IrType* child, u32 start, u32 end, u8* bytes)
+041923: {
+041924:     CToken* tokens = builder->preprocess.tokens;
+041925:     bool signed_prefix = end - start == 2;
+041926:     bool negative = signed_prefix && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_MINUS);
+041927:     CIrConstantValue value = {0};
+041928:     bool folded = c_ir_constant_identifier(builder, end - 1, &value) && value.kind == C_IR_CONSTANT_INTEGER;
+041929:     IrType* constant_type = folded ? ir_type_from_id(&builder->program->types, value.type) : 0;
+041930:     u64 integer = value.integer;
+041931:     folded = constant_type != 0;
+041932:     if (folded && signed_prefix)
+041933:     {
+041934:         folded = c_ir_constant_initializer_leaf_unary(builder, &constant_type, &integer, negative);
+041935:     }
+041936:     if (folded)
+041937:     {
+041938:         c_ir_constant_initializer_store_integer_leaf(child, constant_type, integer, bytes);
+041939:     }
+041940:     return folded;
+041941: }
+041942: 
+041943: #if !BUSTER_OPTIMIZE
+041944: // The differential gate: a leaf an arm folded is folded again through the
+041945: // general folder into scratch, and the two answers must be the same bytes.
+041946: // Debug builds only -- the general fold is the cost the arms exist to
+041947: // remove, and the Release tree carries the tests.
+041948: BUSTER_C_INTERNAL void c_ir_constant_initializer_check_literal_leaf(CIntegerIrBuilder* builder, IrTypeId child_type, IrType* child, u32 start,
+041949:                                                                      u32 end, u8* bytes, u64 child_offset)
+041950: {
+041951:     u8 scratch[16] = {0};
+041952:     u32 scratch_relocation_count = 0;
+041953:     BUSTER_CHECK(child->layout.size <= sizeof(scratch));
+041954:     bool legacy_folded = c_ir_constant_initializer_bytes_legacy(builder, start, end, child_type, scratch, child->layout.size, child_offset, 0,
+041955:                                                                 &scratch_relocation_count, 0);
+041956:     BUSTER_CHECK(legacy_folded && memory_compare(scratch, bytes, child->layout.size));
+041957: }
+041958: #endif
+041959: 
+041960: BUSTER_C_INTERNAL bool c_ir_constant_initializer_context_step(CIntegerIrBuilder* builder, CIrConstantInitializerContext* context)
+041961: {
+041962:     CIrConstantInitializerFrame* frames = context->frames;
+041963:     CIrConstantInitializerContinuation* continuation_work = context->continuation_work;
+041964:     CIrConstantInitializerRange* range_work = context->range_work;
+041965:     u8* bytes = context->bytes;
+041966:     u64 byte_count = context->byte_count;
+041967:     IrGlobalRelocation* relocations = context->relocations;
+041968:     u32* relocation_count = context->relocation_count;
+041969:     u32 relocation_capacity = context->relocation_capacity;
+041970:     u32 capacity = context->frame_capacity;
+041971:     u32 frame_count = context->frame_count;
+041972:     u64 span = context->span;
+041973:     while (frame_count)
+041974:     {
+041975:         CIrConstantInitializerFrame* frame = frames + frame_count - 1;
+041976:         if (!c_initializer_consume_separator(builder->preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
+041977:         {
+041978:             return c_ir_constant_initializer_fail(builder, S8("invalid initializer separator"), frame->cursor);
+041979:         }
+041980:         bool designated = frame->cursor < frame->limit && (c_token_is_punctuator(&builder->preprocess.tokens[frame->cursor], C_PUNCTUATOR_LEFT_BRACKET) ||
+041981:                                                            c_token_is_punctuator(&builder->preprocess.tokens[frame->cursor], C_PUNCTUATOR_DOT));
+041982:         if (designated && frame->borrowed)
+041983:         {
+041984:             u32 designated_cursor = frame->cursor;
+041985:             while (frame_count && frames[frame_count - 1].borrowed)
+041986:             {
+041987:                 frame_count -= 1;
+041988:                 if (frame_count)
+041989:                 {
+041990:                     frames[frame_count - 1].cursor = designated_cursor;
+041991:                 }
+041992:             }
+041993:             if (!frame_count)
+041994:             {
+041995:                 return c_ir_constant_initializer_fail(builder, S8("invalid aggregate designator"), frame->cursor);
+041996:             }
+041997:             frame = frames + frame_count - 1;
+041998:             if (!c_initializer_consume_separator(builder->preprocess.tokens, frame->limit, &frame->cursor, frame->next_index))
+041999:             {
+042000:                 return c_ir_constant_initializer_fail(builder, S8("invalid initializer separator"), frame->cursor);
+042001:             }
+042002:             designated = frame->cursor < frame->limit && (c_token_is_punctuator(&builder->preprocess.tokens[frame->cursor], C_PUNCTUATOR_LEFT_BRACKET) ||
+042003:                                                           c_token_is_punctuator(&builder->preprocess.tokens[frame->cursor], C_PUNCTUATOR_DOT));
+042004:         }
+042005:         IrType* type = ir_type_from_id(&builder->program->types, frame->type);
+042006:         u64 slot_count = type ? c_ir_constant_initializer_slot_count(builder, type) : 0;
+042007:         if (!type || !type->layout.resolved || frame->cursor >= frame->limit || (frame->next_index >= slot_count && !designated))
+042008:         {
+042009:             if (!type || (!frame->borrowed && frame->cursor < frame->limit && frame->next_index >= slot_count))
+042010:             {
+042011:                 return c_ir_constant_initializer_fail(builder, S8("initializer has more elements than the aggregate can hold"), frame->cursor);
+042012:             }
+042013:             u32 cursor = frame->cursor;
+042014:             bool borrowed = frame->borrowed;
+042015:             frame_count -= 1;
+042016:             if (borrowed && frame_count) frames[frame_count - 1].cursor = cursor;
+042017:             continue;
+042018:         }
+042019:         CIrConstantInitializerDesignator designator = {0};
+042020:         if (!c_ir_constant_initializer_designator(builder, frame, continuation_work, (u32)(span + 1), range_work, (u32)(span + 1), &designator)) return false;
+042021:         u64 selected = designator.selected;
+042022:         u32 value_start = designator.value_start;
+042023:         if ((!designator.has_designator && designator.selected_end >= slot_count) ||
+042024:             (type && (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && designator.selected_end >= slot_count))
+042025:         {
+042026:             return c_ir_constant_initializer_fail(builder, S8("array designator index is outside the array bounds"), frame->cursor);
+042027:         }
+042028:         IrTypeId child_type = designator.value_type;
+042029:         IrType* child = ir_type_from_id(&builder->program->types, child_type);
+042030:         u64 child_offset = designator.value_offset;
+042031:         if (!child) return false;
+042032:         u32 value_end = c_ir_constant_initializer_value_end(builder, value_start, frame->limit);
+042033:         if (value_end <= value_start)
+042034:         {
+042035:             return c_ir_constant_initializer_fail(builder, S8("invalid aggregate initializer element"), value_start);
+042036:         }
+042037:         if (designator.range_count)
+042038:         {
+042039:             context->pending_range.designator = designator;
+042040:             context->pending_range.value_start = value_start;
+042041:             context->pending_range.value_end = value_end;
+042042:             context->frame_count = frame_count;
+042043:             context->step = C_IR_CONSTANT_INITIALIZER_CONTEXT_PUSH_RANGE;
+042044:             return true;
+042045:         }
+042046:         bool merge_union = designator.clear_union && frame->has_last_union && designator.clear_field != UINT32_MAX &&
+042047:                            frame->last_union_offset == designator.clear_offset && frame->last_union_field == designator.clear_field;
+042048:         bool clear_whole_union = designator.clear_union && !merge_union;
+042049:         u64 clear_offset = clear_whole_union ? designator.clear_offset : child_offset;
+042050:         u64 clear_size = clear_whole_union ? designator.clear_size : child->layout.size;
+042051:         bool clear_value = designator.has_designator && (clear_whole_union || !designator.value_field || !designator.value_field->is_bit_field);
+042052:         if (clear_value &&
+042053:             !c_ir_constant_initializer_clear_subobject(builder, bytes, byte_count, clear_offset, clear_size, 0, relocations, relocation_count, &context->relocation_extent))
+042054:         {
+042055:             return c_ir_constant_initializer_fail(builder, S8("designated initializer exceeds the target object"), value_start);
+042056:         }
+042057:         if (designator.clear_union)
+042058:         {
+042059:             frame->has_last_union = true;
+042060:             frame->last_union_offset = designator.clear_offset;
+042061:             frame->last_union_field = designator.clear_field;
+042062:         }
+042063:         else
+042064:         {
+042065:             frame->has_last_union = false;
+042066:         }
+042067:         bool aggregate = child && (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR || child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION);
+042068:         if (aggregate && child->is_complex &&
+042069:             !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
+042070:         {
+042071:             u32 compound_open = 0;
+042072:             u32 compound_close = 0;
+042073:             aggregate = c_ir_initializer_compound_literal_info(builder, value_start, value_end, &compound_open, &compound_close, 0, 0);
+042074:         }
+042075:         if (aggregate)
+042076:         {
+042077:             bool child_string_handled = false;
+042078:             if (!c_ir_constant_initializer_string_range(builder, value_start, value_end, child_type, bytes + child_offset,

@@ -1,0 +1,246 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_constant_identifier
+occurrence: 5/5
+line: 45939
+
+045859:                                            c_ir_constant_type_is_integer(literal));
+045860:                     if (scalar_literal)
+045861:                     {
+045862:                         CIrConstantValue body = {0};
+045863:                         if (!c_ir_query_constant(builder, literal_open + 1, literal_value_end, &body))
+045864:                         {
+045865:                             return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count,
+045866:                                                                   operator_count);
+045867:                         }
+045868:                         // The conversion happens once, at the literal's type.
+045869:                         // The destination's own is the one the callers already
+045870:                         // apply to whatever this evaluator hands back.
+045871:                         CIrConstantValue converted_literal = {0};
+045872:                         if (value_count >= capacity || !c_ir_constant_cast(builder, &body, literal_type, &converted_literal))
+045873:                         {
+045874:                             return false;
+045875:                         }
+045876:                         values[value_count++] = converted_literal;
+045877:                         expect_operand = false;
+045878:                         index = literal_close;
+045879:                         continue;
+045880:                     }
+045881:                 }
+045882:                 IrTypeId cast_type = IR_TYPE_ID_INVALID;
+045883:                 if (close < end)
+045884:                 {
+045885:                     c_ir_query_type_name(builder, index + 1, close, true, &cast_type);
+045886:                     if (builder->queries->has_request)
+045887:                     {
+045888:                         return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
+045889:                     }
+045890:                 }
+045891:                 if (cast_type.value != IR_ID_UNDERLYING_INVALID)
+045892:                 {
+045893:                     if (operator_count >= capacity) return false;
+045894:                     operators[operator_count++] = (CIrConstantOperator){.operation = C_CONDITIONAL_CAST, .cast_type = cast_type};
+045895:                     index = close;
+045896:                     expect_operand = true;
+045897:                     continue;
+045898:                 }
+045899:                 if (operator_count >= capacity) return false;
+045900:                 operators[operator_count++] = (CIrConstantOperator){.operation = C_CONDITIONAL_OPEN};
+045901:                 continue;
+045902:             }
+045903:             CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+045904:             if (c_conditional_operator(token, true, &operation))
+045905:             {
+045906:                 if (operator_count >= capacity) return false;
+045907:                 operators[operator_count++] = (CIrConstantOperator){.operation = operation};
+045908:                 continue;
+045909:             }
+045910:             if (token.kind == C_TOKEN_IDENTIFIER && index + 1 < end &&
+045911:                 c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+045912:             {
+045913:                 CEntityId entity_id = c_ir_constant_entity_at(builder, index);
+045914:                 u32 close = c_ir_matching_delimiter_cached(builder, index + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+045915:                 if (entity_id.value >= builder->parse.entity_count || builder->parse.entities[entity_id.value].kind != C_ENTITY_FUNCTION || close >= end)
+045916:                 {
+045917:                     return false;
+045918:                 }
+045919:                 IrTypeId return_type = builder->s32_type;
+045920:                 CEntity* entity = builder->parse.entities + entity_id.value;
+045921:                 if (entity->type.value < builder->parse.type_count)
+045922:                 {
+045923:                     IrTypeId function_type = builder->c_type_ir_map[entity->type.value];
+045924:                     IrType* function = ir_type_from_id(&builder->program->types, function_type);
+045925:                     if (function && function->kind == IR_TYPE_FUNCTION && function->return_type.value != IR_ID_UNDERLYING_INVALID)
+045926:                     {
+045927:                         return_type = function->return_type;
+045928:                     }
+045929:                 }
+045930:                 if (value_count >= capacity) return false;
+045931:                 values[value_count++] = (CIrConstantValue){.type = return_type, .kind = C_IR_CONSTANT_UNKNOWN};
+045932:                 index = close;
+045933:                 expect_operand = false;
+045934:                 continue;
+045935:             }
+045936:             if (token.kind == C_TOKEN_IDENTIFIER)
+045937:             {
+045938:                 CIrConstantValue value = {0};
+045939:                 if (!c_ir_constant_identifier(builder, index, &value)) return false;
+045940:                 while (index + 2 < end && c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_DOT) &&
+045941:                        builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)
+045942:                 {
+045943:                     if (!c_ir_constant_lvalue_field(builder, &value, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 2]))) return false;
+045944:                     index += 2;
+045945:                 }
+045946:                 if (value_count >= capacity) return false;
+045947:                 values[value_count++] = value;
+045948:                 expect_operand = false;
+045949:                 continue;
+045950:             }
+045951:             return false;
+045952:         }
+045953:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+045954:         {
+045955:             return false;
+045956:         }
+045957:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+045958:         {
+045959:             if (index + 1 >= end || builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER || !value_count) return false;
+045960:             // `p->m` is `(*p).m`, so a constant pointer becomes the lvalue it
+045961:             // points at before the member is selected. That is the portable
+045962:             // `offsetof` musl's <stddef.h> falls back to when the compiler
+045963:             // does not claim GCC 4 --
+045964:             // `((size_t)((char *)&(((type *)0)->member) - (char *)0))` -- and
+045965:             // it stands in static storage in `strerror`'s message index and
+045966:             // in `dynlink`'s MIN_TLS_ALIGN.
+045967:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW))
+045968:             {
+045969:                 CIrConstantValue* target = values + value_count - 1;
+045970:                 IrType* pointer = ir_type_from_id(&builder->program->types, target->type);
+045971:                 if (target->kind == C_IR_CONSTANT_POINTER && pointer && pointer->kind == IR_TYPE_POINTER)
+045972:                 {
+045973:                     target->type = pointer->element_type;
+045974:                     target->kind = C_IR_CONSTANT_LVALUE;
+045975:                 }
+045976:             }
+045977:             if (!c_ir_constant_lvalue_field(builder, &values[value_count - 1], c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]))) return false;
+045978:             index += 1;
+045979:             continue;
+045980:         }
+045981:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+045982:         {
+045983:             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+045984:             CIrConstantValue index_value = {0};
+045985:             builder->queries->value_count = value_start + value_count;
+045986:             builder->queries->operator_count = operator_start + operator_count;
+045987:             if (!value_count || close >= end || !c_ir_query_constant(builder, index + 1, close, &index_value) ||
+045988:                 index_value.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_index(builder, &values[value_count - 1], index_value.integer))
+045989:             {
+045990:                 return c_ir_constant_evaluate_suspend(builder, resume, index, expect_operand, value_start, operator_start, value_count, operator_count);
+045991:             }
+045992:             index = close;
+045993:             continue;
+045994:         }
+045995:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+045996:         {
+045997:             while (operator_count && operators[operator_count - 1].operation != C_CONDITIONAL_OPEN)
+045998:             {
+045999:                 if (!c_ir_constant_apply_operator(builder, operators[--operator_count], values, &value_count)) return false;
+046000:             }
+046001:             if (!operator_count) return false;
+046002:             operator_count -= 1;
+046003:             continue;
+046004:         }
+046005:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+046006:         {
+046007:             while (operator_count && operators[operator_count - 1].operation != C_CONDITIONAL_OPEN &&
+046008:                    operators[operator_count - 1].operation != C_CONDITIONAL_QUESTION && c_conditional_precedence(operators[operator_count - 1].operation) > 1)
+046009:             {
+046010:                 if (!c_ir_constant_apply_operator(builder, operators[--operator_count], values, &value_count)) return false;
+046011:             }
+046012:             operators[operator_count++] = (CIrConstantOperator){.operation = C_CONDITIONAL_QUESTION};
+046013:             expect_operand = true;
+046014:             continue;
+046015:         }
+046016:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+046017:         {
+046018:             while (operator_count && operators[operator_count - 1].operation != C_CONDITIONAL_QUESTION)
+046019:             {
+046020:                 if (operators[operator_count - 1].operation == C_CONDITIONAL_OPEN) return false;
+046021:                 if (!c_ir_constant_apply_operator(builder, operators[--operator_count], values, &value_count)) return false;
+046022:             }
+046023:             if (!operator_count) return false;
+046024:             operators[operator_count - 1].operation = C_CONDITIONAL_SELECT;
+046025:             expect_operand = true;
+046026:             continue;
+046027:         }
+046028:         CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+046029:         if (!c_conditional_operator(token, false, &operation)) return false;
+046030:         u32 precedence = c_conditional_precedence(operation);
+046031:         bool right_associative = operation == C_CONDITIONAL_COMMA ? false : false;
+046032:         while (operator_count && operators[operator_count - 1].operation != C_CONDITIONAL_OPEN &&
+046033:                operators[operator_count - 1].operation != C_CONDITIONAL_QUESTION &&
+046034:                (c_conditional_precedence(operators[operator_count - 1].operation) > precedence ||
+046035:                 (!right_associative && c_conditional_precedence(operators[operator_count - 1].operation) == precedence)))
+046036:         {
+046037:             if (!c_ir_constant_apply_operator(builder, operators[--operator_count], values, &value_count)) return false;
+046038:         }
+046039:         if (operator_count >= capacity) return false;
+046040:         operators[operator_count++] = (CIrConstantOperator){.operation = operation};
+046041:         expect_operand = true;
+046042:     }
+046043:     if (expect_operand)
+046044:     {
+046045:         return false;
+046046:     }
+046047:     while (operator_count)
+046048:     {
+046049:         CIrConstantOperator operation = operators[--operator_count];
+046050:         if (operation.operation == C_CONDITIONAL_OPEN || operation.operation == C_CONDITIONAL_QUESTION)
+046051:         {
+046052:             return false;
+046053:         }
+046054:         if (!c_ir_constant_apply_operator(builder, operation, values, &value_count)) return false;
+046055:     }
+046056:     if (value_count != 1)
+046057:     {
+046058:         return false;
+046059:     }
+046060:     *result_out = values[0];
+046061:     return result_out->kind != C_IR_CONSTANT_INVALID && result_out->kind != C_IR_CONSTANT_UNKNOWN;
+046062: }
+046063: 
+046064: BUSTER_C_INTERNAL bool c_ir_constant_evaluate_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out)
+046065: {
+046066:     if (!builder->queries)
+046067:     {
+046068:         return false;
+046069:     }
+046070:     CIrQueryMachine* machine = builder->queries;
+046071:     CIrQueryResume* resume = machine->resumes + (machine->frame_count - 1);
+046072:     u32 value_start = resume->valid ? resume->value_start : machine->value_count;
+046073:     u32 operator_start = resume->valid ? resume->operator_start : machine->operator_count;
+046074:     bool result = c_ir_constant_evaluate_impl(builder, start, end, result_out, value_start, operator_start, resume);
+046075:     // A pending request means this frame is suspended with its stack regions
+046076:     // reserved for the sub-query to build above; every other exit releases
+046077:     // them.
+046078:     if (!machine->has_request)
+046079:     {
+046080:         machine->value_count = value_start;
+046081:         machine->operator_count = operator_start;
+046082:     }
+046083:     return result;
+046084: }
+046085: 
+046086: BUSTER_C_INTERNAL bool c_ir_constant_evaluate(CIntegerIrBuilder* builder, u32 start, u32 end, CIrConstantValue* result_out)
+046087: {
+046088:     CIrQueryFrame result = {0};
+046089:     if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_CONSTANT}, &result) || !result.success)
+046090:     {
+046091:         return false;
+046092:     }
+046093:     *result_out = result.constant;
+046094:     return true;
+046095: }
+046096: 
+046097: BUSTER_C_INTERNAL bool c_ir_integer_constant_evaluate(Arena* arena, CIntegerIrBuilder* builder, u32 start, u32 end, u64* value_out)
+046098: {
+046099:     (void)arena;

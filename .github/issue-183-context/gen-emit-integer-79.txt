@@ -1,0 +1,206 @@
+path: src/buster/lib/compiler/frontend/c/c_gen.c
+needle: c_ir_emit_integer_value
+occurrence: 79/111
+line: 22771
+
+022701:         u32 operand_count = 2;
+022702:         result = c_ir_apply_operation(builder, operation, operands, &operand_count, source, value_type) && operand_count == 1;
+022703:         IrValueId updated = result ? c_ir_emit_cast(builder, operands[0], value_type, source) : IR_VALUE_ID_INVALID;
+022704:         result = result && updated.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, updated_slot, value_type, updated, source) &&
+022705:                  c_ir_emit_store_place(builder, scratch, value_type, updated, source);
+022706:     }
+022707:     IrValueId desired = result ? c_ir_emit_load_place(builder, scratch_bits, bits_type, source) : IR_VALUE_ID_INVALID;
+022708:     if (result && desired.value != IR_ID_UNDERLYING_INVALID)
+022709:     {
+022710:         IrValueId observed = c_ir_add_result(builder, bits_type);
+022711:         IrInstruction exchange = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE, bits_type);
+022712:         exchange.operands = arena_allocate(builder->arena, IrValueId, 3);
+022713:         exchange.operands[0] = object_bits;
+022714:         exchange.operands[1] = expected;
+022715:         exchange.operands[2] = desired;
+022716:         exchange.operand_count = 3;
+022717:         exchange.memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
+022718:         exchange.failure_memory_order = (u8)IR_MEMORY_ORDER_SEQUENTIAL;
+022719:         exchange.result = observed;
+022720:         builder->function->values[observed.value].definition = c_ir_append_instruction(builder, exchange, source);
+022721:         IrValueId settled = c_ir_emit_binary_value(builder, observed, expected, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
+022722:         IrBlockId targets[2] = {done_block, retry_block};
+022723:         result = settled.value != IR_ID_UNDERLYING_INVALID && c_ir_emit_store_place(builder, expected_slot, bits_type, observed, source) &&
+022724:                  c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &settled, 1, targets, 2, source) && c_ir_switch_block(builder, done_block);
+022725:     }
+022726:     else
+022727:     {
+022728:         result = false;
+022729:     }
+022730:     if (result)
+022731:     {
+022732:         IrValueId answered_previous = c_ir_emit_load_place(builder, previous_slot, value_type, source);
+022733:         IrValueId answered_updated = c_ir_emit_load_place(builder, updated_slot, value_type, source);
+022734:         result = answered_previous.value != IR_ID_UNDERLYING_INVALID && answered_updated.value != IR_ID_UNDERLYING_INVALID;
+022735:         if (result)
+022736:         {
+022737:             if (previous_out)
+022738:             {
+022739:                 *previous_out = answered_previous;
+022740:             }
+022741:             if (result_out)
+022742:             {
+022743:                 *result_out = answered_updated;
+022744:             }
+022745:         }
+022746:     }
+022747: 
+022748:     return result;
+022749: }
+022750: 
+022751: BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder, IrValueId place, IrTypeId type, CConditionalOperator operation,
+022752:                                                        IrValueId right, IrSourceRange source, IrValueId* previous_out, IrValueId* result_out)
+022753: {
+022754:     IrType* place_type = ir_type_from_id(&builder->program->types, type);
+022755:     bool atomic = place_type && place_type->is_atomic;
+022756:     // The operation consumes an unqualified value even when the destination
+022757:     // place is volatile. Loads and stores retain that place's access flags.
+022758:     IrTypeId value_type = place_type && (atomic || place_type->is_volatile) ? place_type->unqualified_type : type;
+022759:     IrType* unqualified = ir_type_from_id(&builder->program->types, value_type);
+022760:     bool pointer_arithmetic = unqualified && unqualified->kind == IR_TYPE_POINTER && (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT);
+022761:     IrValueId previous = IR_VALUE_ID_INVALID;
+022762:     IrValueId operation_right = right;
+022763:     if (pointer_arithmetic && atomic)
+022764:     {
+022765:         IrType* element = ir_type_from_id(&builder->program->types, unqualified->element_type);
+022766:         right = c_ir_emit_cast(builder, right, builder->ptrdiff_type, source);
+022767:         if (!element || !element->layout.resolved || !element->layout.size || right.value == IR_ID_UNDERLYING_INVALID)
+022768:         {
+022769:             return false;
+022770:         }
+022771:         IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->ptrdiff_type);
+022772:         right = c_ir_emit_binary_value(builder, right, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
+022773:     }
+022774:     else if (!pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
+022775:     {
+022776:         right = c_ir_emit_cast(builder, right, value_type, source);
+022777:         operation_right = right;
+022778:     }
+022779:     if (right.value == IR_ID_UNDERLYING_INVALID)
+022780:     {
+022781:         return false;
+022782:     }
+022783:     if (atomic && unqualified && unqualified->kind == IR_TYPE_FLOAT)
+022784:     {
+022785:         // No hardware has a floating-point atomic read-modify-write, so this
+022786:         // one is a compare-exchange loop over the object's bit pattern rather
+022787:         // than a single instruction.
+022788:         return c_ir_emit_atomic_float_update(builder, place, type, value_type, operation, operation_right, source, previous_out, result_out);
+022789:     }
+022790:     if (atomic)
+022791:     {
+022792:         IrAtomicOperation atomic_operation = IR_ATOMIC_OPERATION_COUNT;
+022793:         if (!unqualified || (unqualified->kind != IR_TYPE_INTEGER && !pointer_arithmetic) || !c_ir_atomic_operation(operation, &atomic_operation))
+022794:         {
+022795:             return false;
+022796:         }
+022797:         previous = c_ir_add_result(builder, value_type);
+022798:         IrValueId* operands = arena_allocate(builder->arena, IrValueId, 2);
+022799:         operands[0] = place;
+022800:         operands[1] = right;
+022801:         IrSourceRange instruction_source = source;
+022802:         IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE, value_type);
+022803:         instruction.operands = operands;
+022804:         instruction.operand_count = 2;
+022805:         instruction.memory_order = IR_MEMORY_ORDER_SEQUENTIAL;
+022806:         instruction.atomic_operation = (u8)atomic_operation;
+022807:         instruction.result = previous;
+022808:         IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+022809:         builder->function->values[previous.value].definition = id;
+022810:     }
+022811:     else
+022812:     {
+022813:         previous = c_ir_emit_load_place(builder, place, type, source);
+022814:     }
+022815:     IrValueId values[2] = {
+022816:         previous,
+022817:         operation_right,
+022818:     };
+022819:     u32 value_count = 2;
+022820:     if (previous.value == IR_ID_UNDERLYING_INVALID || !c_ir_apply_operation(builder, operation, values, &value_count, source, value_type) || value_count != 1 ||
+022821:         (!atomic && !c_ir_emit_store_place(builder, place, type, values[0], source)))
+022822:     {
+022823:         return false;
+022824:     }
+022825:     if (previous_out)
+022826:     {
+022827:         *previous_out = previous;
+022828:     }
+022829:     if (result_out)
+022830:     {
+022831:         // The value of `E op= x` is what E holds afterwards, in E's own type.
+022832:         // The operation runs in the promoted type, so a narrower object's
+022833:         // result comes back down here -- `(data[i] += 2) == 0` has to see the
+022834:         // stored byte, not the 256 the addition produced.
+022835:         if (!atomic && values[0].value < builder->function->value_count &&
+022836:             builder->function->values[values[0].value].canonical_type.value != value_type.value)
+022837:         {
+022838:             values[0] = c_ir_emit_cast(builder, values[0], value_type, source);
+022839:             if (values[0].value == IR_ID_UNDERLYING_INVALID)
+022840:             {
+022841:                 return false;
+022842:             }
+022843:         }
+022844:         *result_out = c_ir_bit_field_assignment_value(builder, place, values[0], source);
+022845:     }
+022846:     return true;
+022847: }
+022848: 
+022849: BUSTER_C_INTERNAL bool c_ir_compound_assignment_operator(CToken token, CConditionalOperator* operation)
+022850: {
+022851:     if (token.kind != C_TOKEN_PUNCTUATOR)
+022852:     {
+022853:         return false;
+022854:     }
+022855:     switch (token.punctuator)
+022856:     {
+022857:     case C_PUNCTUATOR_STAR_ASSIGN:
+022858:         *operation = C_CONDITIONAL_MULTIPLY;
+022859:         return true;
+022860:     case C_PUNCTUATOR_SLASH_ASSIGN:
+022861:         *operation = C_CONDITIONAL_DIVIDE;
+022862:         return true;
+022863:     case C_PUNCTUATOR_PERCENT_ASSIGN:
+022864:         *operation = C_CONDITIONAL_REMAINDER;
+022865:         return true;
+022866:     case C_PUNCTUATOR_PLUS_ASSIGN:
+022867:         *operation = C_CONDITIONAL_ADD;
+022868:         return true;
+022869:     case C_PUNCTUATOR_MINUS_ASSIGN:
+022870:         *operation = C_CONDITIONAL_SUBTRACT;
+022871:         return true;
+022872:     case C_PUNCTUATOR_SHIFT_LEFT_ASSIGN:
+022873:         *operation = C_CONDITIONAL_SHIFT_LEFT;
+022874:         return true;
+022875:     case C_PUNCTUATOR_SHIFT_RIGHT_ASSIGN:
+022876:         *operation = C_CONDITIONAL_SHIFT_RIGHT;
+022877:         return true;
+022878:     case C_PUNCTUATOR_AMPERSAND_ASSIGN:
+022879:         *operation = C_CONDITIONAL_BITWISE_AND;
+022880:         return true;
+022881:     case C_PUNCTUATOR_CARET_ASSIGN:
+022882:         *operation = C_CONDITIONAL_BITWISE_XOR;
+022883:         return true;
+022884:     case C_PUNCTUATOR_PIPE_ASSIGN:
+022885:         *operation = C_CONDITIONAL_BITWISE_OR;
+022886:         return true;
+022887:     default:
+022888:         return false;
+022889:     }
+022890: }
+022891: 
+022892: BUSTER_C_INTERNAL bool c_ir_assignment_operator(CToken token)
+022893: {
+022894:     CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+022895:     return c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN) || c_ir_compound_assignment_operator(token, &operation);
+022896: }
+022897: 
+022898: // Type-only queries also serve GNU `typeof` operands.  Keep the declaration
+022899: // near the type-name parser because stb_ds (and other GNU headers) use
+022900: // `__typeof__((object)->field)`, whose operand is a full expression rather
+022901: // than the identifier-only chain handled by the fast path below.
