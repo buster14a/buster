@@ -9,10 +9,12 @@
 // honest.
 //
 // The three formats spell "this definition may be dropped for another one"
-// differently — COFF selectany COMDAT, ELF STB_WEAK, Mach-O N_WEAK_DEF — and
-// all three read into ObjectSymbol.weak, which link_objects arbitrates on.
-// ELF and Mach-O write it back out; COFF cannot, because a COMDAT needs its
-// own section and this model merges sections by kind.
+// differently. ELF STB_WEAK and Mach-O N_WEAK_DEF read into ObjectSymbol.weak.
+// COFF first preserves each source section's COMDAT key, selection, parent,
+// byte range and relocation range in ObjectFile.comdats; link_objects resolves
+// those groups before ordinary weak/strong arbitration. ELF and Mach-O write
+// weak definitions back out. COFF still cannot synthesize them because a
+// COMDAT needs its own section and the producer model merges sections by kind.
 //
 // DWARF 4/5 section payloads are carried without parsing unit headers;
 // object_debug_section_kind_from_name defines the supported section family.
@@ -5475,24 +5477,15 @@ enum
     OBJECT_COFF_STORAGE_EXTERNAL = 2,
     OBJECT_COFF_STORAGE_STATIC = 3,
     OBJECT_COFF_STORAGE_WEAK_EXTERNAL = 105,
-    OBJECT_COFF_COMDAT_NONE = 0,
-    OBJECT_COFF_COMDAT_NO_DUPLICATES = 1,
-    OBJECT_COFF_COMDAT_ANY = 2,
-    OBJECT_COFF_COMDAT_SAME_SIZE = 3,
-    OBJECT_COFF_COMDAT_EXACT_MATCH = 4,
-    OBJECT_COFF_COMDAT_ASSOCIATIVE = 5,
-    OBJECT_COFF_COMDAT_LARGEST = 6,
     OBJECT_COFF_COMDAT_PENDING = 0xff,
 };
 
-// Every selection but NODUPLICATES lets the linker keep one definition and
-// drop the rest, so all of them become replaceable definitions.  SAME_SIZE
-// and EXACT_MATCH are not verified and LARGEST takes the first definition
-// rather than the biggest one: sections are merged by kind here, so no
-// per-COMDAT identity survives into the linker to compare or re-pick with.
+// Ordinary symbol arbitration still needs to know that a selected COMDAT
+// definition yields to a strong non-COMDAT definition. The dedicated COMDAT
+// phase decides which contribution survives before that arbitration runs.
 BUSTER_GLOBAL_LOCAL bool object_coff_comdat_is_replaceable(u8 selection)
 {
-    return selection >= OBJECT_COFF_COMDAT_ANY && selection <= OBJECT_COFF_COMDAT_LARGEST;
+    return selection >= OBJECT_COMDAT_SELECTION_ANY && selection <= OBJECT_COMDAT_SELECTION_LARGEST;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, Target target)
@@ -5577,6 +5570,34 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     if (read_ok)
     {
         section_comdat_selections = arena_allocate(arena, u8, section_count);
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+        }
+    }
+    u32* section_comdat_indices = 0;
+    if (read_ok)
+    {
+        section_comdat_indices = arena_allocate(arena, u32, section_count);
+        memset(section_comdat_indices, 0xff, (u64)section_count * sizeof(*section_comdat_indices));
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u16), BUSTER_ALIGN_OF(u16)))
+        {
+            read_ok = false;
+        }
+    }
+    u16* section_comdat_associations = 0;
+    if (read_ok)
+    {
+        section_comdat_associations = arena_allocate(arena, u16, section_count);
+        memset(section_comdat_associations, 0, (u64)section_count * sizeof(*section_comdat_associations));
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(ObjectComdat), BUSTER_ALIGN_OF(ObjectComdat)))
+        {
+            read_ok = false;
+        }
+    }
+    if (read_ok)
+    {
+        result.comdats = arena_allocate(arena, ObjectComdat, section_count);
     }
     if (read_ok)
     {
@@ -5643,7 +5664,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             if (read_ok)
             {
                 section_comdat_selections[section_index] =
-                    characteristics & OBJECT_COFF_SECTION_LINK_COMDAT ? OBJECT_COFF_COMDAT_PENDING : OBJECT_COFF_COMDAT_NONE;
+                    characteristics & OBJECT_COFF_SECTION_LINK_COMDAT ? OBJECT_COFF_COMDAT_PENDING : OBJECT_COMDAT_SELECTION_NONE;
             }
             bool is_thread_local = false;
             if (read_ok)
@@ -5750,6 +5771,19 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 {
                     base = aligned_base;
                 }
+            }
+            if (read_ok && section_comdat_selections[section_index] == OBJECT_COFF_COMDAT_PENDING)
+            {
+                u32 comdat_index = result.comdat_count++;
+                section_comdat_indices[section_index] = comdat_index;
+                result.comdats[comdat_index] = (ObjectComdat){
+                    .offset = base,
+                    .size = raw_size - prefix_size,
+                    .section = (u32)kind,
+                    .source_section = section_index,
+                    .associated = OBJECT_COMDAT_ASSOCIATED_NONE,
+                    .selection = OBJECT_COMDAT_SELECTION_NONE,
+                };
             }
             if (read_ok)
             {
@@ -5913,7 +5947,26 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 if (section_number > 0 && storage == OBJECT_COFF_STORAGE_STATIC && auxiliary_count &&
                     section_comdat_selections[section_number - 1] == OBJECT_COFF_COMDAT_PENDING)
                 {
-                    section_comdat_selections[section_number - 1] = bytes.pointer[source + COFF_SYMBOL_SIZE + 14];
+                    u16 section_index = (u16)section_number - 1;
+                    u8 selection = bytes.pointer[source + COFF_SYMBOL_SIZE + 14];
+                    if (selection >= OBJECT_COMDAT_SELECTION_NO_DUPLICATES && selection < OBJECT_COMDAT_SELECTION_COUNT)
+                    {
+                        section_comdat_selections[section_index] = selection;
+                        u32 comdat_index = section_comdat_indices[section_index];
+                        if (comdat_index == UINT32_MAX)
+                        {
+                            read_ok = false;
+                        }
+                        else
+                        {
+                            result.comdats[comdat_index].selection = (ObjectComdatSelection)selection;
+                            if (selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
+                                !object_read_u16(bytes, source + COFF_SYMBOL_SIZE + 12, &section_comdat_associations[section_index]))
+                            {
+                                read_ok = false;
+                            }
+                        }
+                    }
                 }
             }
             if (read_ok)
@@ -5993,14 +6046,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     if (read_ok)
                     {
                         destination_index = result.symbol_count++;
+                        u32 comdat_index = section_number ? section_comdat_indices[section_index] : UINT32_MAX;
                         result.symbols[destination_index] = (ObjectSymbol){
                             .name = string_duplicate_arena(arena, name, false),
                             .value = section_number ? symbol_base + symbol_value : 0,
                             .section = section_number ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
+                            .comdat = comdat_index == UINT32_MAX ? 0 : comdat_index + 1,
                             .kind = symbol_type & 0x20 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                             .global = storage == OBJECT_COFF_STORAGE_EXTERNAL || storage == OBJECT_COFF_STORAGE_WEAK_EXTERNAL,
                             .weak = section_number != 0 && object_coff_comdat_is_replaceable(section_comdat_selections[section_index]),
                         };
+                        if (comdat_index != UINT32_MAX && result.symbols[destination_index].global &&
+                            result.comdats[comdat_index].selection != OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
+                            !result.comdats[comdat_index].key.length)
+                        {
+                            result.comdats[comdat_index].key = result.symbols[destination_index].name;
+                        }
                         symbol_map[source_index] = destination_index;
                     }
                 }
@@ -6008,6 +6069,34 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             if (read_ok)
             {
                 source_index += (u32)auxiliary_count + 1;
+            }
+        }
+    }
+    if (read_ok)
+    {
+        for (u32 comdat_index = 0; comdat_index < result.comdat_count && read_ok; comdat_index += 1)
+        {
+            ObjectComdat* comdat = result.comdats + comdat_index;
+            if (comdat->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE)
+            {
+                u16 associated_section = section_comdat_associations[comdat->source_section];
+                if (!associated_section || associated_section > section_count ||
+                    section_comdat_indices[associated_section - 1] == UINT32_MAX ||
+                    section_comdat_indices[associated_section - 1] == comdat_index)
+                {
+                    read_ok = false;
+                }
+                else
+                {
+                    comdat->associated = section_comdat_indices[associated_section - 1];
+                }
+            }
+            else if (comdat->selection != OBJECT_COMDAT_SELECTION_NONE && !comdat->key.length)
+            {
+                // A COMDAT without an external leader cannot participate in
+                // key arbitration. Preserve the previous hard-definition
+                // behavior instead of silently discarding it.
+                comdat->selection = OBJECT_COMDAT_SELECTION_NONE;
             }
         }
     }
@@ -6035,6 +6124,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             if (section_kinds[section_index] == UINT32_MAX)
             {
                 continue;
+            }
+            u32 source_comdat_index = section_comdat_indices[section_index];
+            if (source_comdat_index != UINT32_MAX)
+            {
+                result.comdats[source_comdat_index].first_relocation = result.relocation_count;
             }
             for (u16 relocation_index = 0; relocation_index < relocation_count && read_ok; relocation_index += 1)
             {
@@ -6298,13 +6392,19 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 }
                 if (read_ok)
                 {
-                    result.relocations[result.relocation_count++] = (ObjectRelocation){
-                        .addend = addend,
-                        .offset = section_bases[section_index] + source_offset,
-                        .section = section_kinds[section_index],
-                        .symbol = symbol_map[source_symbol],
-                        .kind = kind,
-                    };
+                    u32 destination_relocation = result.relocation_count++;
+                        result.relocations[destination_relocation] = (ObjectRelocation){
+                            .addend = addend,
+                            .offset = section_bases[section_index] + source_offset,
+                            .section = section_kinds[section_index],
+                            .symbol = symbol_map[source_symbol],
+                            .comdat = source_comdat_index == UINT32_MAX ? 0 : source_comdat_index + 1,
+                            .kind = kind,
+                        };
+                        if (source_comdat_index != UINT32_MAX)
+                        {
+                            result.comdats[source_comdat_index].relocation_count += 1;
+                        }
                 }
             }
         }
