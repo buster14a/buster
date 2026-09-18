@@ -561,7 +561,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, codeview_test_u16(model_built.symbols.pointer + section.offset) == 0);
         }
     }
-    UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 3, 1, 2, 1);
+    // A model containing only locals must not create a zero-length
+    // DEBUG_S_SYMBOLS subsection: MSVC link.exe rejects that stream.
+    UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 2, 1, 2, 1);
     result.test_count += model_scope_links.test_count;
     result.succeeded_test_count += model_scope_links.succeeded_test_count;
     bool found_local = false;

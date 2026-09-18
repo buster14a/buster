@@ -343,8 +343,7 @@ BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, Debug
             {
                 u64 record = codeview_record_begin(symbols, S_DEFRANGE_SUBFIELD);
                 byte_writer_emit_u32_le(symbols, 0);
-                symbols->overflow |= piece->value_offset > UINT16_MAX;
-                byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);
+                byte_writer_emit_u32_le(symbols, piece->value_offset);
                 codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
                 byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));
                 codeview_record_end(symbols, record);
@@ -848,16 +847,23 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
 
         if (input.model && input.model->valid)
         {
-            u64 globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
+            u64 globals = 0;
             for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
             {
                 DebugVariable* variable = input.model->variables + variable_index;
                 if (variable->kind == DEBUG_VARIABLE_GLOBAL)
                 {
+                    if (!globals)
+                    {
+                        globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
+                    }
                     codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);
                 }
             }
-            codeview_subsection_end(&symbols, globals);
+            if (globals)
+            {
+                codeview_subsection_end(&symbols, globals);
+            }
         }
 
         // One symbols subsection and one lines subsection per function.
