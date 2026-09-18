@@ -153,6 +153,10 @@ struct GpuPipelineOptions
     String8* undefinitions;
     String8* extra_arguments;
     String8 output_path;
+    // Direct planner callers provide a directory whose ownership they have
+    // already established. gpu_pipeline_execute replaces this with a freshly
+    // and exclusively created per-invocation directory.
+    String8 temporary_directory;
     String8 sysroot;
     String8 cuda_path;
     String8 rocm_path;
@@ -202,6 +206,7 @@ struct GpuPipelinePlan
     String8* temporary_paths;
     String8 diagnostic;
     String8 output_path;
+    String8 temporary_directory;
     GpuOutputFormat output_format;
     GpuPipelineError error;
     u32 step_count;
@@ -226,6 +231,9 @@ struct GpuPipelineResult
     String8 diagnostic;
     String8 command;
     String8 log;
+    // Always names the private workspace created for this invocation. Unless
+    // save_temporaries was requested it has been removed before return.
+    String8 temporary_directory;
     ProcessResult process_result;
     GpuPipelineError error;
     u32 failed_step;
