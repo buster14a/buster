@@ -1,4 +1,4 @@
-name: PR 796 Windows CodeView diagnostic
+name: PR 796 Windows CodeView validation
 
 on:
   push:
@@ -15,17 +15,17 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  validate:
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
-      - name: Check out diagnostic revision
+      - name: Check out validation revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Reproduce and isolate the p2 CodeView link failure
+      - name: Validate the repaired p2 CodeView object
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -118,9 +118,8 @@ jobs:
           $P2 = Invoke-StrictLink 'p2' $SubjectP2 $ProgramP2
           $P2NoS = Invoke-StrictLink 'p2_no_debug_s' $SubjectP2NoS $ProgramP2NoS
           $P2NoT = Invoke-StrictLink 'p2_no_debug_t' $SubjectP2NoT $ProgramP2NoT
-          Write-Output "DIAGNOSTIC_RESULT p0=$P0 p2=$P2 p2_no_debug_s=$P2NoS p2_no_debug_t=$P2NoT"
+          Write-Output "VALIDATION_RESULT p0=$P0 p2=$P2 p2_no_debug_s=$P2NoS p2_no_debug_t=$P2NoT"
 
           if ($P0 -ne 0) { throw "p0 control failed with $P0" }
-          if ($P2 -eq 0) { throw 'p2 unexpectedly linked; the reproducer no longer exercises the failure' }
-          if ($P2NoS -ne 0) { throw "p2 without .debug`$S still failed with $P2NoS" }
-          Write-Output 'DIAGNOSTIC_COMPLETE'
+          if ($P2 -ne 0) { throw "repaired p2 object failed with $P2" }
+          Write-Output 'VALIDATION_COMPLETE'
