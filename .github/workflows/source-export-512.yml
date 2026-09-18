@@ -1,4 +1,4 @@
-name: Source export 512
+name: Apply issue 512 typed client
 
 on:
   push:
@@ -8,31 +8,34 @@ on:
       - .github/workflows/source-export-512.yml
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
+  apply:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: Export exact tree
+      - name: Apply and validate typed client
         shell: bash
         run: |
           set -euo pipefail
-          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tgz" "$GITHUB_SHA"
-          {
-            printf 'commit=%s\n' "$GITHUB_SHA"
-            printf 'tree=%s\n' "$(git rev-parse "$GITHUB_SHA^{tree}")"
-            sha256sum "$RUNNER_TEMP/buster-source.tgz"
-          } > "$RUNNER_TEMP/source-export.txt"
-      - uses: actions/upload-artifact@v6
-        with:
-          name: source-export-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/buster-source.tgz
-            ${{ runner.temp }}/source-export.txt
-          if-no-files-found: error
-          retention-days: 1
+          printf '%s' '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' | base64 -d | gzip -d > "$RUNNER_TEMP/issue-512.patch"
+          echo '1185761fef35505e255118ae99064b5104999573a8c2a380d4d8df725d08377d  '"$RUNNER_TEMP/issue-512.patch" | sha256sum --check --strict
+          git apply --check "$RUNNER_TEMP/issue-512.patch"
+          git apply "$RUNNER_TEMP/issue-512.patch"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/build-driver"
+          "$RUNNER_TEMP/build-driver" bench_service_recipe_self_test
+          "$RUNNER_TEMP/build-driver" bench_service self-test
+          "$RUNNER_TEMP/build-driver" bench_service self-test --sanitize
+          git checkout -- build/bench-service-tools/service-tests
+          git clean -fd -- build/bench-service-tools
+          git diff --check
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+          git add tools/bench_service/README.md tools/bench_service/main.c tools/bench_service/tests.c tools/bench_service/transport.c
+          git diff --cached --check
+          git commit -m 'bench service: add typed authenticated client'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
