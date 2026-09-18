@@ -53,6 +53,19 @@ boot_timeout_seconds=${BUSTER_IOS_BOOT_TIMEOUT_SECONDS:-180}
 install_timeout_seconds=${BUSTER_IOS_INSTALL_TIMEOUT_SECONDS:-120}
 codesign_timeout_seconds=${BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS:-60}
 shutdown_timeout_seconds=${BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS:-30}
+# GitHub's macOS 26 Apple-Silicon CoreSimulator can need substantially
+# longer than 30 seconds to quiesce after the full Debug+Release batch.
+# Preserve the tighter local/self-hosted budget and every explicit caller
+# override, but give the hosted arm64 lane enough time to complete an
+# orderly shutdown before the postcondition recovery path is needed.
+if [[ -z ${BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS:-} \
+    && ${GITHUB_ACTIONS:-false} == true \
+    && ${RUNNER_ENVIRONMENT:-} == github-hosted \
+    && ${RUNNER_OS:-} == macOS \
+    && ${RUNNER_ARCH:-} == ARM64 \
+    && ${BUSTER_IOS_ARCH:-arm64} == arm64 ]]; then
+    shutdown_timeout_seconds=90
+fi
 monitor_command_timeout_seconds=${BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS:-10}
 result_marker_success="BUSTER_IOS_RESULT: SUCCESS"
 result_marker_failure="BUSTER_IOS_RESULT: FAILURE"
