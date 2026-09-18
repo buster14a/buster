@@ -6000,9 +6000,8 @@ struct CPreprocessSourceFrame
     CPpClassMasks class_masks;
     String8 path;
     // Suppression keys are deliberately separate from diagnostic/source-map
-    // spellings. The resolved path is the current portable identity authority;
-    // a future physical-file identity can replace this key without changing
-    // which spelling users see.
+    // spellings. Filesystem frames carry descriptor identity while the resolved
+    // path remains what diagnostics and source maps show.
     CIncludeFileIdentity identity;
     String8 logical_path;
     s64 line_delta;
@@ -6074,16 +6073,22 @@ BUSTER_C_INTERNAL bool c_include_file_table_grow(CIncludeFileTable* table)
     return result;
 }
 
-// The existing include resolver's resolved spelling is the only portable key
-// available on this revision. This explicit constructor is the integration
-// seam for descriptor identity: after the shared file API lands, filesystem
-// includes can fill device/index/physical while builtin headers keep this path
-// fallback, without changing the table or any of its consumers.
-BUSTER_C_INTERNAL CIncludeFileIdentity c_include_file_path_identity(String8 path)
+// Filesystem includes use identity captured from the descriptor that supplied
+// their bytes. Builtin headers and non-filesystem namespaces retain a path key;
+// neither case changes the resolved spelling kept for diagnostics/source maps.
+BUSTER_C_INTERNAL CIncludeFileIdentity c_include_file_identity(String8 path, FileIdentity file_identity)
 {
     CIncludeFileIdentity result = {
         .path = path,
     };
+    if (file_identity.valid)
+    {
+        result = (CIncludeFileIdentity){
+            .device = file_identity.device,
+            .index = file_identity.index,
+            .physical = true,
+        };
+    }
     return result;
 }
 
@@ -8568,7 +8573,7 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
         .lex = root_lex,
         .class_masks = root_class_masks,
         .path = options.source_path.length ? options.source_path : S8("."),
-        .identity = c_include_file_path_identity(options.source_path.length ? options.source_path : S8(".")),
+        .identity = c_include_file_identity(options.source_path.length ? options.source_path : S8("."), (FileIdentity){0}),
         .logical_path = options.source_path.length ? options.source_path : S8("."),
         .line_start = true,
     };
@@ -8862,11 +8867,10 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
                         }
                         else
                         {
-                            // The resolved path is the current frontend identity
-                            // authority. Keep it distinct from the spelling so
-                            // descriptor identity can replace only this key when
-                            // the shared file layer exposes it.
-                            CIncludeFileIdentity include_identity = c_include_file_path_identity(include_path);
+                            // Identity comes from the descriptor that supplied
+                            // these bytes; the resolved spelling remains separate for
+                            // diagnostics, source maps and per-path attribution.
+                            CIncludeFileIdentity include_identity = c_include_file_identity(include_path, include_source_map.identity);
                             CIncludeFileEntry* include_file = 0;
                             CIncludeFileStatus include_file_status =
                                 c_include_file_entry(&include_files, include_identity, include_path, &include_file);
@@ -9306,6 +9310,9 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     result.detail->preprocessed.spelling_bytes = space->used;
     result.detail->lexed_files = metrics_files.rows;
     result.detail->lexed_file_count = metrics_files.count;
+#if BUSTER_INCLUDE_TESTS
+    result.detail->include_file_probe_count = include_files.probe_count;
+#endif
     // Origin recovery and publication both require the stable key order.
     c_source_map_sort(arena, map.regions, map.count);
     c_source_map_finish_origins(arena, &map, &file_table, &result);

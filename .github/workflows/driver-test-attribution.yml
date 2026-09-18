@@ -41,7 +41,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           python tools/ci_zig.py --target x86_64-windows --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
 
-      - name: Full combination matrix with fixture attribution
+      - name: Full combination matrix with fixture and child-process attribution
         id: combinations_windows
         shell: powershell
         env:
@@ -53,7 +53,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
           git rev-parse HEAD | Tee-Object -FilePath (Join-Path $Logs 'source-sha.txt')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion RUNNER_ARCH=$env:RUNNER_ARCH fixture_timing=$env:BUSTER_TEST_FIXTURE_TIMING" | Set-Content (Join-Path $Logs 'attribution-environment.txt')
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion RUNNER_ARCH=$env:RUNNER_ARCH fixture_timing=$env:BUSTER_TEST_FIXTURE_TIMING child_process_trace=wmi-v1" | Set-Content (Join-Path $Logs 'attribution-environment.txt')
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
           $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
@@ -81,9 +81,99 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$Driver`" test_differential --self-test 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'differential-self-test.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Build/configuration/sanitizer policy and concurrency remain in build.c.
-          cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'combinations.log')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # The watcher is diagnostic only. It records process start/stop events
+          # while the unmodified build driver owns all scheduling and test work.
+          $TracePath = Join-Path $Logs 'process-events.jsonl'
+          $WatcherLog = Join-Path $Logs 'process-watcher.log'
+          $StopPath = Join-Path $Logs 'process-watcher.stop'
+          Remove-Item -LiteralPath $TracePath, $WatcherLog, $StopPath -Force -ErrorAction SilentlyContinue
+          $Watcher = Start-Job -ArgumentList $TracePath, $StopPath -ScriptBlock {
+            param($TracePath, $StopPath)
+            $ErrorActionPreference = 'Stop'
+            $Starts = @{}
+            Register-WmiEvent -Class Win32_ProcessStartTrace -SourceIdentifier BusterProcessStart | Out-Null
+            Register-WmiEvent -Class Win32_ProcessStopTrace -SourceIdentifier BusterProcessStop | Out-Null
+            try {
+              while (-not (Test-Path -LiteralPath $StopPath)) {
+                $Event = Wait-Event -Timeout 1
+                while ($null -ne $Event) {
+                  $Instance = $Event.SourceEventArgs.NewEvent
+                  $PidValue = [uint32]$Instance.ProcessID
+                  $ParentPid = [uint32]$Instance.ParentProcessID
+                  $Name = [string]$Instance.ProcessName
+                  try {
+                    $When = [DateTime]::FromFileTimeUtc([int64]$Instance.TIME_CREATED)
+                  } catch {
+                    $When = [DateTime]::UtcNow
+                  }
+                  $CommandLine = $null
+                  $DurationMs = $null
+                  if ($Event.SourceIdentifier -eq 'BusterProcessStart') {
+                    $Starts[$PidValue] = $When
+                    if ($Name -match '^(ide|clang|clang\+\+|link|lld-link|gcc|zig|buster-.*)\.exe$') {
+                      try {
+                        $Process = Get-CimInstance Win32_Process -Filter "ProcessId = $PidValue" -ErrorAction Stop
+                        $CommandLine = [string]$Process.CommandLine
+                      } catch {
+                        $CommandLine = $null
+                      }
+                    }
+                    $Kind = 'start'
+                  } else {
+                    $Kind = 'stop'
+                    if ($Starts.ContainsKey($PidValue)) {
+                      $DurationMs = [Math]::Round(($When - $Starts[$PidValue]).TotalMilliseconds, 3)
+                      $Starts.Remove($PidValue)
+                    }
+                  }
+                  [ordered]@{
+                    schema = 'BUSTER_PROCESS_EVENT_V1'
+                    kind = $Kind
+                    timestamp_utc = $When.ToString('o')
+                    process_id = $PidValue
+                    parent_process_id = $ParentPid
+                    process_name = $Name
+                    duration_ms = $DurationMs
+                    exit_status = if ($Kind -eq 'stop') { [uint32]$Instance.ExitStatus } else { $null }
+                    command_line = $CommandLine
+                  } | ConvertTo-Json -Compress | Add-Content -LiteralPath $TracePath -Encoding UTF8
+                  Remove-Event -EventIdentifier $Event.EventIdentifier
+                  $Event = Get-Event | Select-Object -First 1
+                }
+              }
+            } finally {
+              Unregister-Event -SourceIdentifier BusterProcessStart -ErrorAction SilentlyContinue
+              Unregister-Event -SourceIdentifier BusterProcessStop -ErrorAction SilentlyContinue
+              Get-Event | Remove-Event -ErrorAction SilentlyContinue
+            }
+          }
+          Start-Sleep -Seconds 2
+          if ($Watcher.State -ne 'Running') {
+            Receive-Job -Job $Watcher -Keep | Out-File -LiteralPath $WatcherLog -Encoding utf8
+            throw "process watcher did not start: $($Watcher.State)"
+          }
+
+          $MatrixExit = 1
+          try {
+            # Prefix every completed output line with a UTC receive timestamp.
+            # A fixture's end timestamp minus its reported duration defines the
+            # interval used to attribute descendant process events.
+            cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1" |
+              ForEach-Object { "{0}`t{1}" -f [DateTime]::UtcNow.ToString('o'), [string]$_ } |
+              Tee-Object -FilePath (Join-Path $Logs 'combinations-timestamped.log')
+            $MatrixExit = $LASTEXITCODE
+          } finally {
+            New-Item -ItemType File -Force -Path $StopPath | Out-Null
+            Wait-Job -Job $Watcher -Timeout 30 | Out-Null
+            Receive-Job -Job $Watcher -Keep -ErrorAction Continue | Out-File -LiteralPath $WatcherLog -Encoding utf8
+            if ($Watcher.State -ne 'Completed') {
+              "watcher_state=$($Watcher.State)" | Add-Content -LiteralPath $WatcherLog
+              Stop-Job -Job $Watcher -ErrorAction SilentlyContinue
+            }
+            Remove-Job -Job $Watcher -Force -ErrorAction SilentlyContinue
+          }
+          if ($MatrixExit -ne 0) { exit $MatrixExit }
 
       - name: Matrix coverage and result
         if: ${{ always() && steps.checkout.outcome == 'success' }}
