@@ -1,4 +1,4 @@
-name: PR 796 Windows CodeView validation
+name: PR 796 Windows CodeView isolation
 
 on:
   push:
@@ -14,21 +14,146 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: pr-796-codeview-isolation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  validate:
+  isolate:
+    name: ${{ matrix.variant }}
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - baseline-32bit
+          - omit-locations
+          - omit-blocks
+          - omit-locations-and-blocks
+          - omit-piecewise
+          - omit-direct-ranges
+          - raw-addresses
+          - zero-secrel-addends
     steps:
-      - name: Check out validation revision
+      - name: Check out diagnostic revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Validate the repaired p2 CodeView object
+      - name: Apply isolated CodeView variant
         shell: powershell
+        env:
+          VARIANT: ${{ matrix.variant }}
         run: |
           $ErrorActionPreference = 'Stop'
+          @'
+          import os
+          from pathlib import Path
+
+          path = Path('src/buster/lib/compiler/codeview/codeview.c')
+          text = path.read_text(encoding='utf-8')
+          variant = os.environ['VARIANT']
+
+          wrong = '''                symbols->overflow |= piece->value_offset > UINT16_MAX;
+                          byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);
+          '''.replace('                          ', '                ')
+          correct = '                byte_writer_emit_u32_le(symbols, piece->value_offset);\n'
+          if text.count(wrong) != 1:
+              raise SystemExit(f'expected one 16-bit S_DEFRANGE_SUBFIELD layout, found {text.count(wrong)}')
+          text = text.replace(wrong, correct, 1)
+
+          def body_bounds(source: str, function: str) -> tuple[int, int]:
+              marker = f' {function}('
+              signature = source.find(marker)
+              if signature < 0:
+                  raise SystemExit(f'function not found: {function}')
+              opening = source.find('{', signature)
+              if opening < 0:
+                  raise SystemExit(f'opening brace not found: {function}')
+              depth = 0
+              for index in range(opening, len(source)):
+                  if source[index] == '{':
+                      depth += 1
+                  elif source[index] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          return opening, index
+              raise SystemExit(f'closing brace not found: {function}')
+
+          def insert_return(source: str, function: str) -> str:
+              opening, _ = body_bounds(source, function)
+              return source[:opening + 1] + '\n    return;' + source[opening + 1:]
+
+          if variant in {'omit-locations', 'omit-locations-and-blocks'}:
+              text = insert_return(text, 'codeview_emit_location_range')
+          if variant in {'omit-blocks', 'omit-locations-and-blocks'}:
+              text = insert_return(text, 'codeview_emit_scope_tree')
+          if variant in {'omit-piecewise', 'omit-direct-ranges'}:
+              opening, closing = body_bounds(text, 'codeview_emit_location_range')
+              body = text[opening:closing + 1]
+              if variant == 'omit-piecewise':
+                  old = 'else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)'
+                  new = 'else if (false && range->location.kind == DEBUG_LOCATION_PIECEWISE)'
+                  if body.count(old) != 1:
+                      raise SystemExit(f'piecewise branch count={body.count(old)}')
+                  body = body.replace(old, new, 1)
+              else:
+                  register = 'if (range->location.kind == DEBUG_LOCATION_REGISTER)'
+                  frame = 'else if (range->location.kind == DEBUG_LOCATION_FRAME)'
+                  if body.count(register) != 1 or body.count(frame) != 1:
+                      raise SystemExit(f'direct branch counts register={body.count(register)} frame={body.count(frame)}')
+                  body = body.replace(register, 'if (false && range->location.kind == DEBUG_LOCATION_REGISTER)', 1)
+                  body = body.replace(frame, 'else if (false && range->location.kind == DEBUG_LOCATION_FRAME)', 1)
+              text = text[:opening] + body + text[closing + 1:]
+          if variant == 'raw-addresses':
+              opening, closing = body_bounds(text, 'codeview_emit_function_address')
+              body = '''{
+              (void)relocations;
+              (void)relocation_count;
+              (void)relocation_capacity;
+              (void)function_index;
+              byte_writer_emit_u32_le(symbols, addend);
+              byte_writer_emit_u16_le(symbols, 1);
+          }'''.replace('              ', '    ')
+              text = text[:opening] + body + text[closing + 1:]
+          if variant == 'zero-secrel-addends':
+              opening, closing = body_bounds(text, 'codeview_emit_function_address')
+              body = text[opening:closing + 1]
+              old = 'byte_writer_emit_u32_le(symbols, addend);'
+              if body.count(old) != 1:
+                  raise SystemExit(f'addend write count={body.count(old)}')
+              body = body.replace(old, 'byte_writer_emit_u32_le(symbols, 0);', 1)
+              text = text[:opening] + body + text[closing + 1:]
+
+          path.write_text(text, encoding='utf-8')
+          print(f'prepared variant={variant}')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check
+          git diff -- src/buster/lib/compiler/codeview/codeview.c
+
+      - name: Build objects and capture linker evidence
+        shell: powershell
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Evidence = Join-Path $env:RUNNER_TEMP "pr-796-codeview-$env:VARIANT"
+          New-Item -ItemType Directory -Force -Path $Evidence | Out-Null
+          $Report = Join-Path $Evidence 'report.txt'
+          "variant=$env:VARIANT" | Set-Content -Path $Report
+          "head=$env:GITHUB_SHA" | Add-Content -Path $Report
+
+          function Record-Lines([object[]] $Lines) {
+            foreach ($Line in $Lines) {
+              $Text = [string]$Line
+              $Text | Add-Content -Path $Report
+              Write-Host $Text
+            }
+          }
+
           $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
           if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86/x64 tools were not found' }
@@ -39,29 +164,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $RuntimeDlls = @(Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse | Sort-Object FullName)
           if ($RuntimeDlls.Count -ne 1) { throw "Expected one ASan runtime under ${ResourceDir}; found $($RuntimeDlls.Count)" }
-          $RuntimeDir = Split-Path -Parent $RuntimeDlls[0].FullName
-          $env:PATH = "$RuntimeDir;$env:PATH"
-          Write-Output "asan_runtime=$($RuntimeDlls[0].FullName)"
+          $env:PATH = "$(Split-Path -Parent $RuntimeDlls[0].FullName);$env:PATH"
+          "asan_runtime=$($RuntimeDlls[0].FullName)" | Add-Content -Path $Report
 
-          $Driver = Join-Path $env:RUNNER_TEMP 'strict-build.exe'
-          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Driver = Join-Path $env:RUNNER_TEMP "strict-build-$env:VARIANT.exe"
+          $BuildOutput = @(& clang.exe -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o $Driver 2>&1)
+          $BuildExit = $LASTEXITCODE
+          Record-Lines $BuildOutput
+          if ($BuildExit -ne 0) { throw "build-driver compile failed with $BuildExit" }
           & $Driver generate --cc clang --ci --linker DEFAULT
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) { throw "generate failed with $LASTEXITCODE" }
           & $Driver build --config Release -t ide
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) { throw "ide build failed with $LASTEXITCODE" }
 
           $Ide = (Resolve-Path 'build\Release\ide.exe').Path
           $Include = (Resolve-Path 'tests\differential').Path
-          $Caller = Join-Path $env:RUNNER_TEMP 'abi-caller-sanitized.o'
-          $SubjectP0 = Join-Path $env:RUNNER_TEMP 'abi-p0.o'
-          $SubjectP2 = Join-Path $env:RUNNER_TEMP 'abi-p2.o'
-          $SubjectP2NoS = Join-Path $env:RUNNER_TEMP 'abi-p2-no-debug-s.o'
-          $SubjectP2NoT = Join-Path $env:RUNNER_TEMP 'abi-p2-no-debug-t.o'
-          $ProgramP0 = Join-Path $env:RUNNER_TEMP 'abi-p0-sanitized.exe'
-          $ProgramP2 = Join-Path $env:RUNNER_TEMP 'abi-p2-sanitized.exe'
-          $ProgramP2NoS = Join-Path $env:RUNNER_TEMP 'abi-p2-no-debug-s-sanitized.exe'
-          $ProgramP2NoT = Join-Path $env:RUNNER_TEMP 'abi-p2-no-debug-t-sanitized.exe'
+          $Caller = Join-Path $env:RUNNER_TEMP "abi-caller-$env:VARIANT.o"
+          $SubjectP0 = Join-Path $env:RUNNER_TEMP "abi-p0-$env:VARIANT.o"
+          $SubjectP2 = Join-Path $env:RUNNER_TEMP "abi-p2-$env:VARIANT.o"
+          $ProgramP0 = Join-Path $env:RUNNER_TEMP "abi-p0-$env:VARIANT.exe"
+          $ProgramP2 = Join-Path $env:RUNNER_TEMP "abi-p2-$env:VARIANT.exe"
+          $ProgramP2NoS = Join-Path $env:RUNNER_TEMP "abi-p2-no-debug-s-$env:VARIANT.exe"
+          $SubjectP2NoS = Join-Path $env:RUNNER_TEMP "abi-p2-no-debug-s-$env:VARIANT.o"
           $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
           if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
 
@@ -70,7 +194,7 @@ jobs:
           foreach ($LibraryPath in $LibraryPaths) { $CallerArgs += "-L$LibraryPath" }
           $CallerArgs += @('tests\differential\abi_host.c', '-c', '-o', $Caller)
           & clang.exe @CallerArgs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) { throw "caller compile failed with $LASTEXITCODE" }
 
           $Common = @(
             'cc', '-fregister-allocator=fast', '-fno-machine-fallback',
@@ -79,47 +203,65 @@ jobs:
           )
           foreach ($LibraryPath in $LibraryPaths) { $Common += "-L$LibraryPath" }
           & $Ide @Common '-fno-target-local-promotion' 'tests\differential\abi.c' '-c' '-o' $SubjectP0
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) { throw "p0 compile failed with $LASTEXITCODE" }
           & $Ide @Common '-ftarget-local-promotion' 'tests\differential\abi.c' '-c' '-o' $SubjectP2
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) { throw "p2 compile failed with $LASTEXITCODE" }
 
-          Write-Output '=== p0 sections/symbols/relocations/CodeView ==='
-          & llvm-readobj.exe --sections --symbols --relocations --codeview $SubjectP0
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Output '=== p2 sections/symbols/relocations/CodeView ==='
-          & llvm-readobj.exe --sections --symbols --relocations --codeview $SubjectP2
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item $SubjectP2 (Join-Path $Evidence 'abi-p2.o')
+          $ReadObj = @(& llvm-readobj.exe --file-headers --sections --symbols --relocations --codeview $SubjectP2 2>&1)
+          $ReadObjExit = $LASTEXITCODE
+          $ReadObj | Set-Content -Path (Join-Path $Evidence 'llvm-readobj.txt')
+          "llvm_readobj_exit=$ReadObjExit" | Add-Content -Path $Report
 
           Copy-Item $SubjectP2 $SubjectP2NoS
           & llvm-objcopy.exe --remove-section='.debug$S' $SubjectP2NoS
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item $SubjectP2 $SubjectP2NoT
-          & llvm-objcopy.exe --remove-section='.debug$T' $SubjectP2NoT
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE -ne 0) { throw "remove .debug`$S failed with $LASTEXITCODE" }
 
           function Invoke-StrictLink([string] $Label, [string] $Subject, [string] $Program) {
-            Write-Output "=== $Label ==="
+            "=== $Label ===" | Add-Content -Path $Report
             $LinkArgs = @() + $Sanitize
             foreach ($LibraryPath in $LibraryPaths) { $LinkArgs += "-L$LibraryPath" }
             $LinkArgs += @($Caller, $Subject, '-o', $Program)
-            & clang.exe -v @LinkArgs
+            $Output = @(& clang.exe -v @LinkArgs 2>&1)
             $ExitCode = $LASTEXITCODE
-            Write-Output "${Label}_link_exit=$ExitCode"
-            if ($ExitCode -eq 0) {
-              & $Program
-              $RunExit = $LASTEXITCODE
-              Write-Output "${Label}_run_exit=$RunExit"
-              return $RunExit
-            }
-            return $ExitCode
+            Record-Lines $Output
+            "${Label}_link_exit=$ExitCode" | Add-Content -Path $Report
+            if ($ExitCode -ne 0) { return [int]$ExitCode }
+            $RunOutput = @(& $Program 2>&1)
+            $RunExit = $LASTEXITCODE
+            Record-Lines $RunOutput
+            "${Label}_run_exit=$RunExit" | Add-Content -Path $Report
+            return [int]$RunExit
           }
 
-          $P0 = Invoke-StrictLink 'p0' $SubjectP0 $ProgramP0
-          $P2 = Invoke-StrictLink 'p2' $SubjectP2 $ProgramP2
-          $P2NoS = Invoke-StrictLink 'p2_no_debug_s' $SubjectP2NoS $ProgramP2NoS
-          $P2NoT = Invoke-StrictLink 'p2_no_debug_t' $SubjectP2NoT $ProgramP2NoT
-          Write-Output "VALIDATION_RESULT p0=$P0 p2=$P2 p2_no_debug_s=$P2NoS p2_no_debug_t=$P2NoT"
+          $P0 = [int](Invoke-StrictLink 'p0' $SubjectP0 $ProgramP0)
+          $P2 = [int](Invoke-StrictLink 'p2' $SubjectP2 $ProgramP2)
+          $P2NoS = [int](Invoke-StrictLink 'p2_no_debug_s' $SubjectP2NoS $ProgramP2NoS)
+          "RESULT p0=$P0 p2=$P2 p2_no_debug_s=$P2NoS" | Add-Content -Path $Report
+          "p0=$P0`np2=$P2`np2_no_debug_s=$P2NoS" | Set-Content -Path (Join-Path $Evidence 'status.txt')
 
-          if ($P0 -ne 0) { throw "p0 control failed with $P0" }
-          if ($P2 -ne 0) { throw "repaired p2 object failed with $P2" }
-          Write-Output 'VALIDATION_COMPLETE'
+      - name: Retain compact CodeView evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-796-codeview-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-796-codeview-${{ matrix.variant }}
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Enforce variant outcome
+        if: ${{ always() }}
+        shell: powershell
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $Status = Join-Path $env:RUNNER_TEMP "pr-796-codeview-$env:VARIANT\status.txt"
+          if (-not (Test-Path $Status)) { throw 'diagnostic did not produce status.txt' }
+          Get-Content $Status
+          $Values = @{}
+          foreach ($Line in Get-Content $Status) {
+            $Parts = $Line -split '=', 2
+            if ($Parts.Count -eq 2) { $Values[$Parts[0]] = [int]$Parts[1] }
+          }
+          if ($Values['p0'] -ne 0) { throw "p0 control failed with $($Values['p0'])" }
+          if ($Values['p2'] -ne 0) { throw "p2 failed with $($Values['p2'])" }
