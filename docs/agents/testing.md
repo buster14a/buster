@@ -115,6 +115,16 @@
   status propagation are covered by `python3 ios/hosted_signing_budget_test.py`
   in the mobile lifecycle workflow; actual Apple signing and simulator tests
   remain a distinct native CI gate.
+- For an invocation-owned GitHub-hosted macOS arm64 simulator, a true
+  shutdown-helper timeout is first reconciled against one bounded exact-UDID
+  state probe. If a successful payload still leaves that device non-Shutdown,
+  the launcher retries shutdown for that exact UDID once and requires a second
+  bounded probe to prove `Shutdown`. Retry rejection, ambiguous or malformed
+  identity evidence, a final non-Shutdown state, borrowed/explicit devices,
+  and every pre-existing payload failure remain failed. The retained recovery
+  receipt distinguishes this path from direct shutdown and the already-Shutdown
+  timeout reconciliation; `ios/hosted_signing_budget_test.py` covers both the
+  successful and fail-closed cases.
 - Android CI reports per-phase status lines that must be read together before
   treating a mobile job as green: `ANDROID_PAYLOAD_RESULT` (run_tests.sh, one
   per configuration with `config=`, `phase=` and the wrapper's exit `status=`),

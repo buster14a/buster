@@ -730,7 +730,11 @@ def _ios_runtime(lines: list[str], architecture: str, output_directory: Path) ->
         raise MobileCoverageError("iOS cleanup did not retain a canonical simulator UUID")
     if record["prior"] != "0" or record["result"] != "0":
         raise MobileCoverageError("iOS cleanup receipt follows a failed payload or cleanup")
-    if record["disposition"] not in ("direct-success", "verified-shutdown-after-timeout"):
+    if record["disposition"] not in (
+        "direct-success",
+        "verified-shutdown-after-timeout",
+        "recovered-shutdown-after-timeout",
+    ):
         raise MobileCoverageError("iOS cleanup disposition is not a verified shutdown")
     uses = [line for line in lines if line == f"Using simulator buster-ci ({udid})"]
     replacements = [
