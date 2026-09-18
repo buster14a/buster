@@ -1,0 +1,67 @@
+        PosixStringList argv = slice_string8_to_null_terminated_array_char(temp.arena, arguments);
+        PosixStringList envp = options.use_process_environment
+                                  ? program_state->input.raw_environment
+                                  : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN)
+                         ? EIO
+                         : posix_spawn(&pid, executable.pointer, &file_actions, &attributes, argv, envp);
+        if (status)
+        {
+            pid = -1;
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, (OsError){(u32)status});
+        }
+    }
+
+    for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+    {
+        if (pipe_created[stream])
+        {
+            bool input = stream == STANDARD_STREAM_INPUT;
+            u32 child_side = input ? 0 : 1;
+            u32 parent_side = input ? 1 : 0;
+            close(pipes[stream][child_side]);
+            pipes[stream][child_side] = -1;
+            if (pid == -1)
+            {
+                close(pipes[stream][parent_side]);
+                pipes[stream][parent_side] = -1;
+            }
+        }
+        for (u32 side = 0; side < 2; side += 1)
+        {
+            result.pipes[stream][side] = pipes[stream][side] >= 0 ? posix_fd_to_generic_fd(pipes[stream][side]) : 0;
+        }
+    }
+    if (attributes_ready)
+    {
+        posix_spawnattr_destroy(&attributes);
+    }
+    if (file_actions_ready)
+    {
+        posix_spawn_file_actions_destroy(&file_actions);
+    }
+    if (pid != -1)
+    {
+        result.handle = (OsProcessHandle*)(u64)pid;
+        result.process_group = options.new_process_group;
+    }
+#endif
+
+    if (program_flag_get(PROGRAM_FLAG_VERBOSE))
+    {
+        if (result.handle)
+        {
+            string_print(S8("Launched [{u64}]: \"{[]S8}\"\n"), result.handle, arguments);
+        }
+        else
+        {
+            SliceString8 printable_arguments = arguments.pointer ? arguments : (SliceString8){0};
+            string_print(S8("Failed to launch stage={u32} error=\"{EOs}\": \"{[]S8}\"\n"), (u32)result.failure, result.error,
+                         printable_arguments);
+        }
+    }
+
+    scratch_end(temp);
+    return result;
+}
+
