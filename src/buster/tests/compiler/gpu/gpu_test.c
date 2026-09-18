@@ -601,8 +601,11 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
             }
         }
         BUSTER_TEST(arguments, concurrent.arenas[0] != 0 && concurrent.arenas[1] != 0);
-        BUSTER_TEST(arguments, concurrent.results[0].error == GPU_PIPELINE_ERROR_NONE &&
-                                   concurrent.results[1].error == GPU_PIPELINE_ERROR_NONE);
+        for (u32 execution = 0; execution < BUSTER_ARRAY_LENGTH(concurrent.results); execution += 1)
+        {
+            BUSTER_TEST_RAW(arguments, concurrent.results[execution].error == GPU_PIPELINE_ERROR_NONE,
+                            concurrent.results[execution].diagnostic);
+        }
         BUSTER_TEST(arguments, concurrent.results[0].temporary_directory.length && concurrent.results[1].temporary_directory.length &&
                                    !string_equal(concurrent.results[0].temporary_directory, concurrent.results[1].temporary_directory));
         BUSTER_TEST(arguments, gpu_test_path_has_kind(concurrent.results[0].temporary_directory, OS_FILE_KIND_DIRECTORY) &&
