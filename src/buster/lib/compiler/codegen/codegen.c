@@ -2230,6 +2230,9 @@ BUSTER_GLOBAL_LOCAL void codegen_emit_u32(CodegenBuffer* buffer, u32 value)
     output[3] = (u8)(value >> 24);
 }
 
+// The native emitter no longer writes raw 64-bit scalars. Retain the
+// byte-writer boundary probe only in test-enabled builds.
+#if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL void codegen_emit_u64(CodegenBuffer* buffer, u64 value)
 {
     u8* output;
@@ -2247,7 +2250,6 @@ BUSTER_GLOBAL_LOCAL void codegen_emit_u64(CodegenBuffer* buffer, u64 value)
     output[7] = (u8)(value >> 56);
 }
 
-#if BUSTER_INCLUDE_TESTS
 void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value)
 {
     switch (byte_count)
