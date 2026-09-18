@@ -91,12 +91,30 @@ export CFLAGS=-Wno-invalid-feature-combination
 driver="${RUNNER_TEMP:-/tmp}/buster-build"
 out="$(mktemp -d)/differential"
 clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-"$driver" generate --cc clang --config Release --linker DEFAULT
+"$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
 "$driver" test_mode_matrix --config Release
 "$driver" test_differential --self-test
 "$driver" build --config Release -t ide
 "$driver" test_differential --ide build/Release/ide --out "$out" --sanitize-oracle --jobs 4
 ```
+
+The hosted native producer deliberately keeps the non-`--ci` Release policy:
+`-O3`, tests enabled, one unity translation unit and object, and frame pointers
+enabled. It opts out only of producer debug information. The normal mode setup
+and missing-cache recovery pass the same explicit
+`-DBUSTER_DEBUG_INFO=OFF` override. Local Release generation remains unchanged
+and therefore keeps debug information and frame pointers for profiling.
+
+The profile qualification probe requires invalid input to fail nonzero with a
+nonempty diagnostic; the production differential runner separately captures and
+compares compiler diagnostics. The native lane keeps raw logs, but it neither
+retains the producer executable or a core file nor symbolizes producer program
+counters after a crash. On Linux the installed non-sanitized crash handler
+reports the fatal signal, fault address and raw program counter before
+re-raising; macOS has no corresponding custom handler. The hosted profile
+therefore retains frame-pointer unwindability and symbols, while source-line
+DWARF remains a local profiling facility rather than retained native-CI failure
+evidence.
 
 Do not generate concurrently with another build in the same tree. This local
 sequence is a reproduction of successful execution; the workflow additionally
@@ -113,6 +131,9 @@ actual aggregate Bash body for all 625 combinations of four dependency groups
 across success, failure, cancellation, skipped and missing results. Timing tests
 reject absent, duplicate or unsuccessful jobs and absent native suite results.
 Workflow blob and runner labels continue to separate measurement cohorts.
+`tools/native_producer_profile_test.py` additionally locks the same explicit
+producer profile into normal setup and missing-cache recovery and rejects
+`--ci` or disabled frame pointers in either path.
 
 Before claiming a latency win, obtain at least three complete successful
 first-attempt runs per variant with equivalent source, coverage and runner

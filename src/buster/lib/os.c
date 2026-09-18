@@ -442,6 +442,50 @@ OsPrefaultTestCounters os_prefault_test_counters(void)
 {
     return os_prefault_test_state;
 }
+
+typedef struct OsResourceTestFailure OsResourceTestFailure;
+struct OsResourceTestFailure
+{
+    u64 calls_before_failure;
+    bool armed;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsResourceTestFailure
+    os_resource_test_failures[(u64)OS_RESOURCE_TEST_OPERATION_COUNT];
+
+void os_resource_test_fail_on_call(OsResourceTestOperation operation, u64 call_index)
+{
+    BUSTER_VALIDATE((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
+    os_resource_test_failures[(u64)operation] = (OsResourceTestFailure){
+        .calls_before_failure = call_index,
+        .armed = true,
+    };
+}
+
+void os_resource_test_clear(void)
+{
+    memset(os_resource_test_failures, 0, sizeof(os_resource_test_failures));
+}
+
+BUSTER_GLOBAL_LOCAL bool os_resource_test_should_fail(OsResourceTestOperation operation)
+{
+    BUSTER_VALIDATE((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
+    OsResourceTestFailure* failure = &os_resource_test_failures[(u64)operation];
+    bool result = false;
+    if (failure->armed)
+    {
+        if (failure->calls_before_failure)
+        {
+            failure->calls_before_failure -= 1;
+        }
+        else
+        {
+            failure->armed = false;
+            result = true;
+        }
+    }
+    return result;
+}
 #endif
 
 // Best-effort prefaulting of an already-committed range: it populates page
@@ -737,53 +781,70 @@ BUSTER_GLOBAL_LOCAL DWORD WINAPI windows_thread_entry_point(LPVOID argument)
 
 OsThreadHandle* os_thread_create(ThreadCreateOptions options)
 {
-    BUSTER_UNUSED(options);
-    OsEntity* result = os_entity_allocate(OS_ENTITY_KIND_THREAD);
-    result->thread.callback = options.callback;
-    result->thread.argument = options.argument;
-    // Counted before the thread exists rather than from inside it, so no
-    // window has the new thread running while the process still looks serial.
-    atomic_u64_increment(&os_live_thread_count);
-#if defined(__linux__) || defined(__APPLE__)
-    int create_result = pthread_create(&result->thread.handle, 0, &pthread_entry_point, result);
-    bool os_result = create_result == 0;
-    if (!os_result)
-    {
-        atomic_u64_decrement(&os_live_thread_count);
-        os_entity_release(result);
-        result = 0;
-    }
-#elif defined(_WIN32)
-    HANDLE handle = CreateThread(0, 0, &windows_thread_entry_point, result, 0, 0);
-    if (handle)
-    {
-        result->thread.handle = handle;
-    }
-    else
-    {
-        atomic_u64_decrement(&os_live_thread_count);
-        os_entity_release(result);
-        result = 0;
-    }
+    OsEntity* result = 0;
+    bool create_thread = true;
+#if BUSTER_INCLUDE_TESTS
+    create_thread = !os_resource_test_should_fail(OS_RESOURCE_TEST_THREAD_CREATE);
 #endif
+    if (create_thread)
+    {
+        result = os_entity_allocate(OS_ENTITY_KIND_THREAD);
+        result->thread.callback = options.callback;
+        result->thread.argument = options.argument;
+        // Counted before the thread exists rather than from inside it, so no
+        // window has the new thread running while the process still looks serial.
+        atomic_u64_increment(&os_live_thread_count);
+#if defined(__linux__) || defined(__APPLE__)
+        int create_result = pthread_create(&result->thread.handle, 0, &pthread_entry_point, result);
+        bool os_result = create_result == 0;
+        if (!os_result)
+        {
+            atomic_u64_decrement(&os_live_thread_count);
+            os_entity_release(result);
+            result = 0;
+        }
+#elif defined(_WIN32)
+        HANDLE handle = CreateThread(0, 0, &windows_thread_entry_point, result, 0, 0);
+        if (handle)
+        {
+            result->thread.handle = handle;
+        }
+        else
+        {
+            atomic_u64_decrement(&os_live_thread_count);
+            os_entity_release(result);
+            result = 0;
+        }
+#endif
+    }
     return (OsThreadHandle*)result;
 }
 
 bool os_thread_join(OsThreadHandle* handle)
 {
     OsEntity* entity = (OsEntity*)handle;
-
-    bool result;
-#if defined(__linux__) || defined(__APPLE__)
-    void* void_return_value = 0;
-    int join_result = pthread_join(entity->thread.handle, &void_return_value);
-    result = (join_result == 0);
-#elif defined(_WIN32)
-    DWORD wait_result = WaitForSingleObject(entity->thread.handle, INFINITE);
-    result = wait_result == WAIT_OBJECT_0;
-    CloseHandle(entity->thread.handle);
+    bool join_thread = true;
+#if BUSTER_INCLUDE_TESTS
+    join_thread = !os_resource_test_should_fail(OS_RESOURCE_TEST_THREAD_JOIN);
 #endif
-    os_entity_release(entity);
+
+    bool result = false;
+    if (join_thread)
+    {
+#if defined(__linux__) || defined(__APPLE__)
+        void* void_return_value = 0;
+        int join_result = pthread_join(entity->thread.handle, &void_return_value);
+        result = join_result == 0;
+#elif defined(_WIN32)
+        DWORD wait_result = WaitForSingleObject(entity->thread.handle, INFINITE);
+        result = wait_result == WAIT_OBJECT_0 && CloseHandle(entity->thread.handle);
+#endif
+    }
+    // A failed wait leaves the handle owned by the caller so cleanup can retry.
+    if (result)
+    {
+        os_entity_release(entity);
+    }
     return result;
 }
 
@@ -838,28 +899,36 @@ void os_mutex_destroy(OsMutexHandle* handle)
 OsBarrierHandle* os_barrier_create(u32 thread_count)
 {
     BUSTER_CHECK(thread_count >= 1);
-    OsEntity* result = os_entity_allocate(OS_ENTITY_KIND_BARRIER);
-    result->barrier.threshold = thread_count;
-    result->barrier.arrived = 0;
-    result->barrier.generation = 0;
-#if defined(__linux__) || defined(__APPLE__)
-    // The condition variable is only attempted once the mutex exists, and it
-    // unwinds the mutex when it fails; both failures leave `result` null.
-    if (pthread_mutex_init(&result->barrier.mutex, 0) != 0)
-    {
-        os_entity_release(result);
-        result = 0;
-    }
-    else if (pthread_cond_init(&result->barrier.condition, 0) != 0)
-    {
-        pthread_mutex_destroy(&result->barrier.mutex);
-        os_entity_release(result);
-        result = 0;
-    }
-#elif defined(_WIN32)
-    InitializeCriticalSection(&result->barrier.mutex);
-    InitializeConditionVariable(&result->barrier.condition);
+    OsEntity* result = 0;
+    bool create_barrier = true;
+#if BUSTER_INCLUDE_TESTS
+    create_barrier = !os_resource_test_should_fail(OS_RESOURCE_TEST_BARRIER_CREATE);
 #endif
+    if (create_barrier)
+    {
+        result = os_entity_allocate(OS_ENTITY_KIND_BARRIER);
+        result->barrier.threshold = thread_count;
+        result->barrier.arrived = 0;
+        result->barrier.generation = 0;
+#if defined(__linux__) || defined(__APPLE__)
+        // The condition variable is only attempted once the mutex exists, and it
+        // unwinds the mutex when it fails; both failures leave `result` null.
+        if (pthread_mutex_init(&result->barrier.mutex, 0) != 0)
+        {
+            os_entity_release(result);
+            result = 0;
+        }
+        else if (pthread_cond_init(&result->barrier.condition, 0) != 0)
+        {
+            pthread_mutex_destroy(&result->barrier.mutex);
+            os_entity_release(result);
+            result = 0;
+        }
+#elif defined(_WIN32)
+        InitializeCriticalSection(&result->barrier.mutex);
+        InitializeConditionVariable(&result->barrier.condition);
+#endif
+    }
 
     return (OsBarrierHandle*)result;
 }
@@ -4838,6 +4907,7 @@ ThreadContext* thread_context_allocate(void)
     for (u64 i = 0; i < SCRATCH_ARENA_COUNT; i += 1)
     {
         arenas[i] = arena_create((ArenaCreation){0});
+        BUSTER_CHECK_RAW(arenas[i] != 0);
     }
 
     ThreadContext* result = arena_allocate(arenas[0], ThreadContext, 1);
@@ -4991,6 +5061,13 @@ LaneRange lane_range(u64 item_count)
 }
 
 #if !BUSTER_SINGLE_THREADED
+typedef struct LaneStartupGate LaneStartupGate;
+struct LaneStartupGate
+{
+    OsMutexHandle* mutex;
+    bool cancelled;
+};
+
 typedef struct LanePersistentWorkerStart LanePersistentWorkerStart;
 struct LanePersistentWorkerStart
 {
@@ -5000,6 +5077,7 @@ struct LanePersistentWorkerStart
 
 struct LaneGang
 {
+    LaneStartupGate startup;
     OsBarrierHandle* dispatch_barrier;
     OsBarrierHandle* active_barrier;
     LanePersistentWorkerStart* starts;
@@ -5018,52 +5096,58 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType lane_persistent_worker_entry_point(void* ar
 {
     LanePersistentWorkerStart* start = (LanePersistentWorkerStart*)argument;
     LaneGang* gang = start->gang;
-    ThreadContext* thread_context = thread_context_selected();
-    os_thread_set_name(S8("lane_worker"));
-    for (;;)
+    os_mutex_lock(gang->startup.mutex);
+    bool cancelled = gang->startup.cancelled;
+    os_mutex_unlock(gang->startup.mutex);
+    if (!cancelled)
     {
-        os_barrier_wait(gang->dispatch_barrier);
-        if (gang->shutdown)
+        ThreadContext* thread_context = thread_context_selected();
+        os_thread_set_name(S8("lane_worker"));
+        for (;;)
         {
-            break;
-        }
-        if (start->lane_index < gang->active_count)
-        {
-            LaneContext saved_lane = thread_context->lane_context;
-            u64 saved_arena_positions[SCRATCH_ARENA_COUNT];
-            for (u64 arena_index = 0; arena_index < SCRATCH_ARENA_COUNT; arena_index += 1)
+            os_barrier_wait(gang->dispatch_barrier);
+            if (gang->shutdown)
             {
-                saved_arena_positions[arena_index] = thread_context->arenas[arena_index]->position;
+                break;
             }
-            thread_context->lane_context = (LaneContext){
-                .lane_index = start->lane_index,
-                .lane_count = gang->active_count,
-                .barrier = gang->active_barrier,
-                .broadcast_memory = &gang->broadcast_memory,
-            };
-            gang->callback(gang->argument);
-            thread_context->lane_context = saved_lane;
-            // A fresh worker context used to disappear after every lane_run.
-            // Reset resident worker scratch so callbacks retain that lifetime
-            // contract and cannot accumulate allocation across dispatches. A
-            // large high-water mark is unmapped as well; otherwise a long-lived
-            // IDE would retain one peak scratch commitment per resident lane.
-            for (u64 arena_index = 0; arena_index < SCRATCH_ARENA_COUNT; arena_index += 1)
+            if (start->lane_index < gang->active_count)
             {
-                Arena* scratch = thread_context->arenas[arena_index];
-                if (scratch->os_position - saved_arena_positions[arena_index] > BUSTER_MB(16))
+                LaneContext saved_lane = thread_context->lane_context;
+                u64 saved_arena_positions[SCRATCH_ARENA_COUNT];
+                for (u64 arena_index = 0; arena_index < SCRATCH_ARENA_COUNT; arena_index += 1)
                 {
-                    // arenas[0] owns ThreadContext itself, so preserve its
-                    // stable prefix and decommit only the unused tail.
-                    BUSTER_CHECK(arena_set_position_and_decommit(scratch, saved_arena_positions[arena_index]));
+                    saved_arena_positions[arena_index] = thread_context->arenas[arena_index]->position;
                 }
-                else
+                thread_context->lane_context = (LaneContext){
+                    .lane_index = start->lane_index,
+                    .lane_count = gang->active_count,
+                    .barrier = gang->active_barrier,
+                    .broadcast_memory = &gang->broadcast_memory,
+                };
+                gang->callback(gang->argument);
+                thread_context->lane_context = saved_lane;
+                // A fresh worker context used to disappear after every lane_run.
+                // Reset resident worker scratch so callbacks retain that lifetime
+                // contract and cannot accumulate allocation across dispatches. A
+                // large high-water mark is unmapped as well; otherwise a long-lived
+                // IDE would retain one peak scratch commitment per resident lane.
+                for (u64 arena_index = 0; arena_index < SCRATCH_ARENA_COUNT; arena_index += 1)
                 {
-                    arena_set_position(scratch, saved_arena_positions[arena_index]);
+                    Arena* scratch = thread_context->arenas[arena_index];
+                    if (scratch->os_position - saved_arena_positions[arena_index] > BUSTER_MB(16))
+                    {
+                        // arenas[0] owns ThreadContext itself, so preserve its
+                        // stable prefix and decommit only the unused tail.
+                        BUSTER_VALIDATE(arena_set_position_and_decommit(scratch, saved_arena_positions[arena_index]));
+                    }
+                    else
+                    {
+                        arena_set_position(scratch, saved_arena_positions[arena_index]);
+                    }
                 }
             }
+            os_barrier_wait(gang->dispatch_barrier);
         }
-        os_barrier_wait(gang->dispatch_barrier);
     }
 }
 
@@ -5072,28 +5156,73 @@ BUSTER_GLOBAL_LOCAL LaneGang* lane_gang_create(ThreadContext* owner, u64 count)
     BUSTER_CHECK(owner != 0);
     BUSTER_CHECK(count > 1 && count <= UINT32_MAX);
     BUSTER_CHECK(owner->lane_gang == 0 && owner->lane_arena == 0);
-    owner->lane_arena = arena_create((ArenaCreation){0});
-    BUSTER_CHECK(owner->lane_arena != 0);
-    Arena* arena = owner->lane_arena;
-    LaneGang* result = arena_allocate(arena, LaneGang, 1);
-    memset(result, 0, sizeof(*result));
-    result->capacity = count;
-    result->dispatch_barrier = os_barrier_create((u32)count);
-    BUSTER_CHECK(result->dispatch_barrier != 0);
-    result->starts = arena_allocate(arena, LanePersistentWorkerStart, count);
-    result->handles = arena_allocate(arena, OsThreadHandle*, count);
-    memset(result->handles, 0, sizeof(*result->handles) * count);
-    for (u64 lane = 1; lane < count; lane += 1)
+
+    LaneGang* result = 0;
+    Arena* arena = arena_create((ArenaCreation){0});
+    if (arena)
     {
-        result->starts[lane] = (LanePersistentWorkerStart){
-            .gang = result,
-            .lane_index = lane,
-        };
-        result->handles[lane] = os_thread_create((ThreadCreateOptions){
-            .callback = &lane_persistent_worker_entry_point,
-            .argument = &result->starts[lane],
-        });
-        BUSTER_CHECK(result->handles[lane] != 0);
+        LaneGang* gang = arena_allocate(arena, LaneGang, 1);
+        memset(gang, 0, sizeof(*gang));
+        gang->capacity = count;
+        gang->startup.mutex = os_mutex_create();
+        if (gang->startup.mutex)
+        {
+            gang->dispatch_barrier = os_barrier_create((u32)count);
+            u64 next_lane = 1;
+            bool complete = gang->dispatch_barrier != 0;
+            if (complete)
+            {
+                gang->starts = arena_allocate(arena, LanePersistentWorkerStart, count);
+                gang->handles = arena_allocate(arena, OsThreadHandle*, count);
+                memset(gang->handles, 0, sizeof(*gang->handles) * count);
+            }
+            // Allocation failure can enter the fatal reporter and perform
+            // diagnostic I/O. Finish allocations before locking the startup gate.
+            os_mutex_lock(gang->startup.mutex);
+            if (complete)
+            {
+                while (complete && next_lane < count)
+                {
+                    gang->starts[next_lane] = (LanePersistentWorkerStart){
+                        .gang = gang,
+                        .lane_index = next_lane,
+                    };
+                    gang->handles[next_lane] = os_thread_create((ThreadCreateOptions){
+                        .callback = &lane_persistent_worker_entry_point,
+                        .argument = &gang->starts[next_lane],
+                    });
+                    complete = gang->handles[next_lane] != 0;
+                    next_lane += complete;
+                }
+            }
+
+            gang->startup.cancelled = !complete;
+            if (complete)
+            {
+                owner->lane_arena = arena;
+                owner->lane_gang = gang;
+                result = gang;
+            }
+            os_mutex_unlock(gang->startup.mutex);
+
+            if (!complete)
+            {
+                for (u64 lane = 1; lane < next_lane; lane += 1)
+                {
+                    BUSTER_VALIDATE(os_thread_join(gang->handles[lane]));
+                }
+                if (gang->dispatch_barrier)
+                {
+                    os_barrier_destroy(gang->dispatch_barrier);
+                }
+                os_mutex_destroy(gang->startup.mutex);
+                BUSTER_VALIDATE(arena_destroy(arena, 1));
+            }
+        }
+        else
+        {
+            BUSTER_VALIDATE(arena_destroy(arena, 1));
+        }
     }
     return result;
 }
@@ -5109,13 +5238,14 @@ BUSTER_GLOBAL_LOCAL void lane_gang_destroy(LaneGang* gang)
     os_barrier_wait(gang->dispatch_barrier);
     for (u64 lane = 1; lane < gang->capacity; lane += 1)
     {
-        BUSTER_CHECK(os_thread_join(gang->handles[lane]));
+        BUSTER_VALIDATE(os_thread_join(gang->handles[lane]));
     }
     if (gang->active_barrier)
     {
         os_barrier_destroy(gang->active_barrier);
     }
     os_barrier_destroy(gang->dispatch_barrier);
+    os_mutex_destroy(gang->startup.mutex);
 }
 
 void lane_gang_release(ThreadContext* thread_context)
@@ -5126,7 +5256,7 @@ void lane_gang_release(ThreadContext* thread_context)
         thread_context->lane_gang = 0;
         Arena* lane_arena = thread_context->lane_arena;
         thread_context->lane_arena = 0;
-        BUSTER_CHECK(arena_destroy(lane_arena, 1));
+        BUSTER_VALIDATE(arena_destroy(lane_arena, 1));
     }
 }
 
@@ -5136,12 +5266,13 @@ BUSTER_GLOBAL_LOCAL void lane_gang_dispatch(ThreadContext* thread_context, LaneG
     BUSTER_CHECK(count > 1 && count <= gang->capacity);
     if (!gang->active_barrier || gang->active_count != count)
     {
+        OsBarrierHandle* replacement = os_barrier_create((u32)count);
+        BUSTER_VALIDATE(replacement != 0);
         if (gang->active_barrier)
         {
             os_barrier_destroy(gang->active_barrier);
         }
-        gang->active_barrier = os_barrier_create((u32)count);
-        BUSTER_CHECK(gang->active_barrier != 0);
+        gang->active_barrier = replacement;
     }
     gang->active_count = count;
     gang->broadcast_memory = 0;
@@ -5171,6 +5302,7 @@ BUSTER_GLOBAL_LOCAL void lane_gang_dispatch(ThreadContext* thread_context, LaneG
 typedef struct LaneFreshWorkerStart LaneFreshWorkerStart;
 struct LaneFreshWorkerStart
 {
+    LaneStartupGate* startup;
     LaneContext lane_context;
     ThreadCallback* callback;
     void* argument;
@@ -5179,53 +5311,164 @@ struct LaneFreshWorkerStart
 BUSTER_GLOBAL_LOCAL ThreadReturnType lane_fresh_worker_entry_point(void* argument)
 {
     LaneFreshWorkerStart* start = (LaneFreshWorkerStart*)argument;
-    thread_context_selected()->lane_context = start->lane_context;
-    start->callback(start->argument);
+    os_mutex_lock(start->startup->mutex);
+    bool cancelled = start->startup->cancelled;
+    os_mutex_unlock(start->startup->mutex);
+    if (!cancelled)
+    {
+        thread_context_selected()->lane_context = start->lane_context;
+        start->callback(start->argument);
+    }
 }
 
-BUSTER_GLOBAL_LOCAL void lane_run_fresh(ThreadContext* thread_context, u64 count, ThreadCallback* callback, void* argument)
+BUSTER_GLOBAL_LOCAL bool lane_run_fresh(ThreadContext* thread_context, u64 count, ThreadCallback* callback, void* argument)
 {
     TemporalArena temporary = scratch_begin(0, 0);
     u64 broadcast_memory = 0;
-    OsBarrierHandle* barrier = os_barrier_create((u32)count);
-    BUSTER_CHECK(barrier != 0);
-    LaneFreshWorkerStart* starts = arena_allocate(temporary.arena, LaneFreshWorkerStart, count);
-    OsThreadHandle** handles = arena_allocate(temporary.arena, OsThreadHandle*, count);
-    for (u64 lane = 1; lane < count; lane += 1)
+    LaneStartupGate startup = {.mutex = os_mutex_create()};
+    OsBarrierHandle* barrier = 0;
+    LaneFreshWorkerStart* starts = 0;
+    OsThreadHandle** handles = 0;
+    u64 next_lane = 1;
+    bool result = false;
+
+    if (startup.mutex)
     {
-        starts[lane] = (LaneFreshWorkerStart){
-            .lane_context =
-                {
-                    .lane_index = lane,
-                    .lane_count = count,
-                    .barrier = barrier,
-                    .broadcast_memory = &broadcast_memory,
-                },
-            .callback = callback,
-            .argument = argument,
-        };
-        handles[lane] = os_thread_create((ThreadCreateOptions){
-            .callback = &lane_fresh_worker_entry_point,
-            .argument = &starts[lane],
-        });
-        BUSTER_CHECK(handles[lane] != 0);
+        barrier = os_barrier_create((u32)count);
+        bool complete = barrier != 0;
+        if (complete)
+        {
+            starts = arena_allocate(temporary.arena, LaneFreshWorkerStart, count);
+            handles = arena_allocate(temporary.arena, OsThreadHandle*, count);
+            memset(handles, 0, sizeof(*handles) * count);
+        }
+        // Allocate before taking the startup gate: allocation failure may
+        // enter the fatal reporter, which performs blocking diagnostic I/O.
+        os_mutex_lock(startup.mutex);
+        if (complete)
+        {
+            while (complete && next_lane < count)
+            {
+                starts[next_lane] = (LaneFreshWorkerStart){
+                    .startup = &startup,
+                    .lane_context =
+                        {
+                            .lane_index = next_lane,
+                            .lane_count = count,
+                            .barrier = barrier,
+                            .broadcast_memory = &broadcast_memory,
+                        },
+                    .callback = callback,
+                    .argument = argument,
+                };
+                handles[next_lane] = os_thread_create((ThreadCreateOptions){
+                    .callback = &lane_fresh_worker_entry_point,
+                    .argument = &starts[next_lane],
+                });
+                complete = handles[next_lane] != 0;
+                next_lane += complete;
+            }
+        }
+
+        LaneContext saved = thread_context->lane_context;
+        startup.cancelled = !complete;
+        if (complete)
+        {
+            thread_context->lane_context = (LaneContext){
+                .lane_index = 0,
+                .lane_count = count,
+                .barrier = barrier,
+                .broadcast_memory = &broadcast_memory,
+            };
+        }
+        os_mutex_unlock(startup.mutex);
+
+        if (complete)
+        {
+            callback(argument);
+            for (u64 lane = 1; lane < count; lane += 1)
+            {
+                BUSTER_VALIDATE(os_thread_join(handles[lane]));
+            }
+            thread_context->lane_context = saved;
+            result = true;
+        }
+        else
+        {
+            for (u64 lane = 1; lane < next_lane; lane += 1)
+            {
+                BUSTER_VALIDATE(os_thread_join(handles[lane]));
+            }
+        }
+
+        if (barrier)
+        {
+            os_barrier_destroy(barrier);
+        }
+        os_mutex_destroy(startup.mutex);
     }
-    LaneContext saved = thread_context->lane_context;
-    thread_context->lane_context = (LaneContext){
-        .lane_index = 0,
-        .lane_count = count,
-        .barrier = barrier,
-        .broadcast_memory = &broadcast_memory,
-    };
-    callback(argument);
-    for (u64 lane = 1; lane < count; lane += 1)
-    {
-        BUSTER_CHECK(os_thread_join(handles[lane]));
-    }
-    thread_context->lane_context = saved;
-    os_barrier_destroy(barrier);
+
     scratch_end(temporary);
+    return result;
 }
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_resource_test_noop(void* argument)
+{
+    bool* called = (bool*)argument;
+    if (called)
+    {
+        *called = true;
+    }
+}
+
+bool os_resource_failure_self_test(void)
+{
+    ThreadContext* saved_context = thread_context_selected();
+    ThreadContext* owner = thread_context_allocate();
+    bool result = owner != 0;
+    if (result)
+    {
+        thread_context_select(owner);
+
+        os_resource_test_clear();
+        os_resource_test_fail_on_call(OS_RESOURCE_TEST_BARRIER_CREATE, 0);
+        LaneGang* gang = lane_gang_create(owner, 3);
+        result = gang == 0 && owner->lane_gang == 0 && owner->lane_arena == 0 && os_is_only_live_thread();
+
+        os_resource_test_clear();
+        os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_CREATE, 1);
+        gang = lane_gang_create(owner, 3);
+        result = result && gang == 0 && owner->lane_gang == 0 && owner->lane_arena == 0 && os_is_only_live_thread();
+
+        os_resource_test_clear();
+        bool callback_called = false;
+        os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_CREATE, 1);
+        bool fresh = lane_run_fresh(owner, 3, &os_resource_test_noop, &callback_called);
+        result = result && !fresh && !callback_called && os_is_only_live_thread();
+
+        os_resource_test_clear();
+        OsThreadHandle* handle = os_thread_create((ThreadCreateOptions){
+            .callback = &os_resource_test_noop,
+            .argument = 0,
+        });
+        result = result && handle != 0;
+        if (handle)
+        {
+            os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_JOIN, 0);
+            bool injected_join = os_thread_join(handle);
+            os_resource_test_clear();
+            bool retry_join = os_thread_join(handle);
+            result = result && !injected_join && retry_join && os_is_only_live_thread();
+        }
+
+        thread_context_release(owner);
+        thread_context_select(saved_context);
+    }
+    os_resource_test_clear();
+    return result;
+}
+#endif
 #endif
 
 void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument)
@@ -5261,14 +5504,14 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
     // region and would break the documented nested-gang behavior.
     else if (saved.lane_count > 1 || (thread_context->lane_gang && thread_context->lane_gang->running))
     {
-        lane_run_fresh(thread_context, count, callback, argument);
+        BUSTER_VALIDATE(lane_run_fresh(thread_context, count, callback, argument));
     }
     else
     {
         if (!thread_context->lane_gang || thread_context->lane_gang->capacity < count)
         {
             lane_gang_release(thread_context);
-            thread_context->lane_gang = lane_gang_create(thread_context, count);
+            BUSTER_VALIDATE(lane_gang_create(thread_context, count) != 0);
         }
         lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
     }

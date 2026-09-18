@@ -192,13 +192,13 @@ and the project-owned MinGW varargs adapter described below.
 
 The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
-`832084bc3910988879a4bc438bc1cd1aed3cf6323bba81901e03b88427924421`, materializer
+`36a0f58055ca3533aa69d5a8b0affd622c3aec0ae31f82598b80f403648645fa`, materializer
 receipt SHA-256
-`ef31646041447df7479269024b134ab0308a97e873a3d9e552ad9b2d4440bf43`, project
+`d544fcf1209fc7614fd05cfcbd76bbafe689ee1ce3359fb4fb4e7424dd03d334`, project
 closure SHA-256
-`461ea44b42f87a99b063d539ef83ff40d180c27ed73cbda6cd0466ba73df2d2a`, and
+`7f0b9d5db50780bcdc64f9edb2cae3c8d8c4d1e0b7db314a62a7891f07940353`, and
 materializer ledger SHA-256
-`1569ae79b280d5b565adb8860c7bbb14c5f016aaf448278ab83c108e9953f56c`.
+`567bed2641bf9a31a1790ed735eb9622735ede17b0b0e4886af2e551fa21fc8c`.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is

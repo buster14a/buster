@@ -10,13 +10,51 @@ BUSTER_GLOBAL_LOCAL u64 default_reserve_size = BUSTER_MB(256);
 BUSTER_GLOBAL_LOCAL u64 initial_size_granularity_factor = 4;
 BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position);
 #if BUSTER_INCLUDE_TESTS
-BUSTER_GLOBAL_LOCAL bool arena_fail_next_commit;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_reserve;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool arena_fail_next_commit;
+
+void arena_test_fail_next_reserve(void)
+{
+    arena_fail_next_reserve = true;
+}
 
 void arena_test_fail_next_commit(void)
 {
     arena_fail_next_commit = true;
 }
 #endif
+
+BUSTER_GLOBAL_LOCAL void* arena_reserve_attempt(void* base, u64 size, ProtectionFlags protection, MapFlags map)
+{
+    void* result = 0;
+#if BUSTER_INCLUDE_TESTS
+    if (arena_fail_next_reserve)
+    {
+        arena_fail_next_reserve = false;
+    }
+    else
+#endif
+    {
+        result = os_reserve(base, size, protection, map);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool arena_commit_attempt(void* address, u64 size, ProtectionFlags protection, bool prefault)
+{
+    bool result = false;
+#if BUSTER_INCLUDE_TESTS
+    if (arena_fail_next_commit)
+    {
+        arena_fail_next_commit = false;
+    }
+    else
+#endif
+    {
+        result = os_commit(address, size, protection, prefault);
+    }
+    return result;
+}
 
 BUSTER_GLOBAL_LOCAL u64 arena_os_position_after_commit(u64 requested_end, u64 reserved_size)
 {
@@ -62,19 +100,9 @@ void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
     u64 size_to_commit = target_committed_size - os_position;
     u8* commit_pointer = (u8*)arena + os_position;
 
-    bool commit_succeeded;
-#if BUSTER_INCLUDE_TESTS
-    if (arena_fail_next_commit)
-    {
-        arena_fail_next_commit = false;
-        commit_succeeded = false;
-    }
-    else
-#endif
-    {
-        commit_succeeded = os_commit(commit_pointer, size_to_commit,
-                                     (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute}, arena->flags.prefault_pages);
-    }
+    bool commit_succeeded = arena_commit_attempt(commit_pointer, size_to_commit,
+                                                    (ProtectionFlags){.read = 1, .write = 1, .execute = arena->flags.execute},
+                                                    arena->flags.prefault_pages);
     if (!commit_succeeded)
     {
         os_fail_message(S8("arena commit failed"));
@@ -316,7 +344,7 @@ Arena* arena_create(ArenaCreation original_creation)
             bool committed_enough = committed >= creation.initial_size;
             if (!committed_enough)
             {
-                committed_enough = os_commit(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false);
+                committed_enough = arena_commit_attempt(pooled, creation.initial_size, (ProtectionFlags){.read = 1, .write = 1}, false);
                 committed = arena_os_position_after_commit(creation.initial_size, individual_reserved_size);
             }
             if (committed_enough)
@@ -342,7 +370,7 @@ Arena* arena_create(ArenaCreation original_creation)
     {
         ProtectionFlags protection_flags = {.read = 1, .write = 1, .execute = creation.flags.execute};
         MapFlags map_flags = {.priv = 1, .anonymous = 1, .no_reserve = 1, .populate = 0};
-        result = (u8*)os_reserve(0, total_reserved_size, protection_flags, map_flags);
+        result = (u8*)arena_reserve_attempt(0, total_reserved_size, protection_flags, map_flags);
 
         if (result)
         {
@@ -352,7 +380,7 @@ Arena* arena_create(ArenaCreation original_creation)
 
                 // Only the commit decides whether this arena exists. The
                 // prefault request it carries is advisory and cannot fail it.
-                bool commit_result = os_commit(arena, creation.initial_size, protection_flags, creation.flags.prefault_pages);
+                bool commit_result = arena_commit_attempt(arena, creation.initial_size, protection_flags, creation.flags.prefault_pages);
                 if (commit_result)
                 {
                     *arena = (Arena){
