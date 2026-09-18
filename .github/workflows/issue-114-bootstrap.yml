@@ -6,43 +6,25 @@ on:
       - codex/issue-114
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release-validation:
+  export-source:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 10
     steps:
       - name: Check out branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: codex/issue-114
           fetch-depth: 0
-      - name: Apply staged source repair
-        run: |
-          python3 .github/issue-114-fix1.py
-          if ! git diff --quiet; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/buster/tests/compiler/link/link_test.c
-            git commit -m "test: fix COMDAT fixture slice expressions"
-            git push origin HEAD:codex/issue-114
-          fi
-      - name: Install mold
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes mold
-      - name: Validate repository patch
-        run: git diff --check origin/main...HEAD
-      - name: Bootstrap hosted build driver
-        run: |
-          mkdir -p build
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
-      - name: Configure Release tree
-        run: |
-          ./build/build generate
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
-      - name: Release test suite
-        run: ./build/build build --config Release -t test_all
-      - name: Release self-host fixed point
-        run: ./build/build test_self_host --config Release
+          persist-credentials: false
+      - name: Create repository bundle
+        run: git bundle create "$RUNNER_TEMP/buster-issue-114.bundle" HEAD refs/remotes/origin/main
+      - name: Upload repository bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: buster-issue-114-source
+          path: ${{ runner.temp }}/buster-issue-114.bundle
+          if-no-files-found: error
+          retention-days: 1
