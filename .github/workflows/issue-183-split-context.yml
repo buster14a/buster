@@ -1,0 +1,73 @@
+name: Issue 183 split context
+
+on:
+  push:
+    branches:
+      - fix/183-gnu17-enum-types
+    paths:
+      - .github/workflows/issue-183-split-context.yml
+
+permissions:
+  contents: write
+
+jobs:
+  split:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Split source contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          out = Path('.github/issue-183-context')
+          shutil.rmtree(out, ignore_errors=True)
+          out.mkdir(parents=True)
+          manifest = []
+
+          def emit(path: str, needle: str, before: int, after: int, prefix: str) -> None:
+              text = Path(path).read_text()
+              lines = text.splitlines()
+              hits = [i for i, line in enumerate(lines) if needle in line]
+              manifest.append(f'{path}: {needle!r}: {[i + 1 for i in hits]}')
+              for n, index in enumerate(hits, 1):
+                  lo = max(0, index - before)
+                  hi = min(len(lines), index + after + 1)
+                  body = [f'path: {path}', f'needle: {needle}', f'occurrence: {n}/{len(hits)}', f'line: {index + 1}', '']
+                  body.extend(f'{line_no + 1:06d}: {lines[line_no]}' for line_no in range(lo, hi))
+                  (out / f'{prefix}-{n:02d}.txt').write_text('\n'.join(body) + '\n')
+
+          emit('src/buster/lib/compiler/frontend/c/c_gen.c', 'C_ENTITY_ENUMERATOR', 90, 150, 'gen-entity-enumerator')
+          emit('src/buster/lib/compiler/frontend/c/c_gen.c', 'C_TYPE_ENUM', 70, 110, 'gen-type-enum')
+          emit('src/buster/lib/compiler/frontend/c/c_gen.c', 'c_ir_emit_integer_value', 70, 130, 'gen-emit-integer')
+          emit('src/buster/lib/compiler/frontend/c/c_gen.c', 'c_ir_constant_identifier', 80, 160, 'gen-constant-identifier')
+          emit('src/buster/lib/compiler/frontend/c/c_gen.c', 'enum_member_start', 80, 180, 'gen-enum-member')
+          emit('src/buster/lib/compiler/frontend/c/c_gen.c', 'constant_is_negative', 60, 100, 'gen-negative')
+          emit('src/buster/lib/compiler/frontend/c/c_parse.c', 'result->enum_members[result->enum_member_count++]', 220, 180, 'parse-enum-store')
+          emit('src/buster/lib/compiler/frontend/c/c_parse.c', 'C_ENTITY_ENUMERATOR', 120, 160, 'parse-entity-enumerator')
+          emit('src/buster/lib/compiler/frontend/c/c_parse.c', 'enum_underlying_type', 80, 130, 'parse-underlying')
+          emit('src/buster/lib/compiler/frontend/c/c_source.c', 'c_integer_expression_evaluate(', 260, 260, 'source-integer-evaluate')
+          emit('src/buster/lib/compiler/frontend/c/c_source.c', 'typedef struct CConditionalValue', 100, 220, 'source-conditional-value')
+          emit('src/buster/lib/compiler/frontend/c/c_source.c', 'c_conditional_number(', 90, 180, 'source-number')
+          emit('src/buster/lib/compiler/frontend/c/c.h', 'struct CEnumMember', 40, 80, 'header-enum-member')
+          emit('src/buster/lib/compiler/frontend/c/c.h', 'typedef enum CPreprocessDialect', 30, 80, 'header-dialect')
+          for path in ['tests/c/c-gnu.c', 'tests/c/c.c']:
+              if Path(path).exists():
+                  emit(path, '_Generic', 35, 65, Path(path).stem + '-generic')
+                  emit(path, 'enum ', 25, 50, Path(path).stem + '-enum')
+          (out / 'manifest.txt').write_text('\n'.join(manifest) + '\n')
+          PY
+          rm -f .github/issue-183-context.txt
+          git rm .github/workflows/issue-183-split-context.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-context
+          git commit -m "chore: split issue 183 source context"
+          git push origin HEAD:${GITHUB_REF_NAME}
