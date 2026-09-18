@@ -1545,6 +1545,19 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             // stays a hard definition rather than a silently dropped one.
             BUSTER_STRING_TEST(arguments, comdat.symbols[5].name, S8("pending"));
             BUSTER_TEST(arguments, comdat.symbols[5].global && !comdat.symbols[5].weak);
+            BUSTER_TEST(arguments, comdat.comdat_count == 3);
+            if (comdat.comdat_count == 3)
+            {
+                BUSTER_STRING_TEST(arguments, comdat.comdats[0].key, S8("any_one"));
+                BUSTER_TEST(arguments, comdat.comdats[0].selection == OBJECT_COMDAT_SELECTION_ANY &&
+                                       comdat.comdats[0].section == OBJECT_SECTION_READ_ONLY_DATA &&
+                                       comdat.symbols[2].comdat == 1);
+                BUSTER_STRING_TEST(arguments, comdat.comdats[1].key, S8("strict1"));
+                BUSTER_TEST(arguments, comdat.comdats[1].selection == OBJECT_COMDAT_SELECTION_NO_DUPLICATES &&
+                                       comdat.symbols[4].comdat == 2);
+                BUSTER_TEST(arguments, comdat.comdats[2].selection == OBJECT_COMDAT_SELECTION_NONE &&
+                                       comdat.symbols[5].comdat == 3);
+            }
         }
         arena_set_position(arguments->arena, comdat_scope.position);
     }

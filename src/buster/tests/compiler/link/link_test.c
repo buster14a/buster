@@ -44,6 +44,225 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_object_make(Arena* arena, Target target
     };
 }
 
+
+BUSTER_GLOBAL_LOCAL ObjectFile link_test_comdat_object(Arena* arena, Target target, ByteSlice text,
+                                                       ObjectSymbol* symbols, u32 symbol_count,
+                                                       ObjectRelocation* relocations, u32 relocation_count,
+                                                       ObjectComdat* comdats, u32 comdat_count)
+{
+    ObjectFile result = link_test_object_make(arena, target, text, symbols, symbol_count, relocations, relocation_count);
+    result.comdats = comdats;
+    result.comdat_count = comdat_count;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32 link_test_comdat_symbol_find(ObjectFile* object, String8 name)
+{
+    u32 result = UINT32_MAX;
+    for (u32 index = 0; object && result == UINT32_MAX && index < object->symbol_count; index += 1)
+    {
+        if (string_equal(object->symbols[index].name, name))
+        {
+            result = index;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ObjectFile link_test_single_comdat(Arena* arena, Target target, ByteSlice bytes, String8 key,
+                                                       ObjectComdatSelection selection, ObjectSymbol* symbols,
+                                                       u32 symbol_count, ObjectRelocation* relocations, u32 relocation_count)
+{
+    ObjectComdat* comdat = arena_allocate(arena, ObjectComdat, 1);
+    *comdat = (ObjectComdat){
+        .key = key,
+        .size = bytes.length,
+        .section = OBJECT_SECTION_TEXT,
+        .associated = OBJECT_COMDAT_ASSOCIATED_NONE,
+        .first_relocation = 0,
+        .relocation_count = relocation_count,
+        .selection = selection,
+    };
+    symbols[0].comdat = 1;
+    symbols[0].weak = selection != OBJECT_COMDAT_SELECTION_NO_DUPLICATES;
+    for (u32 index = 0; index < relocation_count; index += 1)
+    {
+        relocations[index].comdat = 1;
+    }
+    return link_test_comdat_object(arena, target, bytes, symbols, symbol_count, relocations, relocation_count, comdat, 1);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arena_create((ArenaCreation){0});
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS};
+    {
+        u8 left_bytes[] = {0x11, 0x12};
+        u8 right_bytes[] = {0x21, 0x22};
+        ObjectSymbol left_symbols[] = {{.name = S8("same"), .size = 2, .section = OBJECT_SECTION_TEXT,
+                                        .kind = OBJECT_SYMBOL_FUNCTION, .global = true}};
+        ObjectSymbol right_symbols[] = {{.name = S8("same"), .size = 2, .section = OBJECT_SECTION_TEXT,
+                                         .kind = OBJECT_SYMBOL_FUNCTION, .global = true}};
+        ObjectFile objects[] = {
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(left_bytes), S8("same"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
+                                    left_symbols, BUSTER_ARRAY_LENGTH(left_symbols), 0, 0),
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(right_bytes), S8("same"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
+                                    right_symbols, BUSTER_ARRAY_LENGTH(right_symbols), 0, 0),
+        };
+        LinkObjectResult linked = link_objects(arena, objects, BUSTER_ARRAY_LENGTH(objects), (LinkOptions){0});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE);
+        u32 symbol = link_test_comdat_symbol_find(&linked.object, S8("same"));
+        BUSTER_TEST(arguments, symbol != UINT32_MAX && linked.object.symbols[symbol].size == 2 &&
+                               linked.object.sections[OBJECT_SECTION_TEXT].data.pointer[linked.object.symbols[symbol].value] == 0x11);
+        arena_reset_to_start(arena);
+    }
+    {
+        u8 left_bytes[] = {1};
+        u8 right_bytes[] = {2, 3};
+        ObjectSymbol left_symbols[] = {{.name = S8("same_size_bad"), .size = 1, .section = OBJECT_SECTION_TEXT,
+                                        .kind = OBJECT_SYMBOL_DATA, .global = true}};
+        ObjectSymbol right_symbols[] = {{.name = S8("same_size_bad"), .size = 2, .section = OBJECT_SECTION_TEXT,
+                                         .kind = OBJECT_SYMBOL_DATA, .global = true}};
+        ObjectFile objects[] = {
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(left_bytes), S8("same_size_bad"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
+                                    left_symbols, 1, 0, 0),
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(right_bytes), S8("same_size_bad"), OBJECT_COMDAT_SELECTION_SAME_SIZE,
+                                    right_symbols, 1, 0, 0),
+        };
+        LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){0});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_COMDAT_SIZE_MISMATCH && string_equal(linked.symbol, S8("same_size_bad")));
+        arena_reset_to_start(arena);
+    }
+    {
+        u8 left_bytes[] = {4, 5};
+        u8 right_bytes[] = {4, 6};
+        ObjectSymbol left_symbols[] = {{.name = S8("exact_bad"), .size = 2, .section = OBJECT_SECTION_TEXT,
+                                        .kind = OBJECT_SYMBOL_DATA, .global = true}};
+        ObjectSymbol right_symbols[] = {{.name = S8("exact_bad"), .size = 2, .section = OBJECT_SECTION_TEXT,
+                                         .kind = OBJECT_SYMBOL_DATA, .global = true}};
+        ObjectFile objects[] = {
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(left_bytes), S8("exact_bad"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+                                    left_symbols, 1, 0, 0),
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(right_bytes), S8("exact_bad"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+                                    right_symbols, 1, 0, 0),
+        };
+        LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){0});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_COMDAT_EXACT_MATCH && string_equal(linked.symbol, S8("exact_bad")));
+        arena_reset_to_start(arena);
+    }
+    {
+        u8 bytes[] = {0, 0, 0, 0};
+        ObjectSymbol left_symbols[] = {
+            {.name = S8("exact_reloc"), .size = 4, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("target_a"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectSymbol right_symbols[] = {
+            {.name = S8("exact_reloc"), .size = 4, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("target_b"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectRelocation left_relocations[] = {{.section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE32}};
+        ObjectRelocation right_relocations[] = {{.section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE32}};
+        ObjectFile objects[] = {
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(bytes), S8("exact_reloc"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+                                    left_symbols, 2, left_relocations, 1),
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(bytes), S8("exact_reloc"), OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+                                    right_symbols, 2, right_relocations, 1),
+        };
+        LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){.allow_undefined_symbols = true});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_COMDAT_EXACT_MATCH);
+        arena_reset_to_start(arena);
+    }
+    for (u32 order = 0; order < 2; order += 1)
+    {
+        u8 small_bytes[] = {0x31};
+        u8 large_bytes[] = {0x42, 0x43, 0x44};
+        ObjectSymbol small_symbols[] = {{.name = S8("largest"), .size = 1, .section = OBJECT_SECTION_TEXT,
+                                         .kind = OBJECT_SYMBOL_DATA, .global = true}};
+        ObjectSymbol large_symbols[] = {{.name = S8("largest"), .size = 3, .section = OBJECT_SECTION_TEXT,
+                                         .kind = OBJECT_SYMBOL_DATA, .global = true}};
+        ObjectFile small = link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(small_bytes), S8("largest"), OBJECT_COMDAT_SELECTION_LARGEST,
+                                                    small_symbols, 1, 0, 0);
+        ObjectFile large = link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(large_bytes), S8("largest"), OBJECT_COMDAT_SELECTION_LARGEST,
+                                                    large_symbols, 1, 0, 0);
+        ObjectFile objects[2] = {order ? large : small, order ? small : large};
+        LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){0});
+        u32 symbol = link_test_comdat_symbol_find(&linked.object, S8("largest"));
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE && symbol != UINT32_MAX && linked.object.symbols[symbol].size == 3);
+        if (linked.error == LINK_ERROR_NONE && symbol != UINT32_MAX)
+        {
+            BUSTER_TEST(arguments, linked.object.sections[OBJECT_SECTION_TEXT].data.pointer[linked.object.symbols[symbol].value] == 0x42);
+        }
+        arena_reset_to_start(arena);
+    }
+    {
+        u8 left_bytes[] = {0x51, 0xa1};
+        u8 right_bytes[] = {0x62, 0x63, 0xb2};
+        ObjectSymbol left_symbols[] = {
+            {.name = S8("assoc_parent"), .size = 1, .section = OBJECT_SECTION_TEXT, .comdat = 1,
+             .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true},
+            {.name = S8("assoc_child"), .value = 1, .size = 1, .section = OBJECT_SECTION_TEXT, .comdat = 2,
+             .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true},
+            {.name = S8("loser_target"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectSymbol right_symbols[] = {
+            {.name = S8("assoc_parent"), .size = 2, .section = OBJECT_SECTION_TEXT, .comdat = 1,
+             .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true},
+            {.name = S8("assoc_child"), .value = 2, .size = 1, .section = OBJECT_SECTION_TEXT, .comdat = 2,
+             .kind = OBJECT_SYMBOL_DATA, .global = true, .weak = true},
+            {.name = S8("winner_target"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectRelocation left_relocations[] = {{.offset = 1, .section = OBJECT_SECTION_TEXT, .symbol = 2, .comdat = 2,
+                                                 .kind = OBJECT_RELOCATION_ABSOLUTE32}};
+        ObjectRelocation right_relocations[] = {{.offset = 2, .section = OBJECT_SECTION_TEXT, .symbol = 2, .comdat = 2,
+                                                  .kind = OBJECT_RELOCATION_ABSOLUTE32}};
+        ObjectComdat left_comdats[] = {
+            {.key = S8("assoc_parent"), .size = 1, .section = OBJECT_SECTION_TEXT, .associated = OBJECT_COMDAT_ASSOCIATED_NONE,
+             .selection = OBJECT_COMDAT_SELECTION_LARGEST},
+            {.offset = 1, .size = 1, .section = OBJECT_SECTION_TEXT, .associated = 0, .first_relocation = 0, .relocation_count = 1,
+             .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE},
+        };
+        ObjectComdat right_comdats[] = {
+            {.key = S8("assoc_parent"), .size = 2, .section = OBJECT_SECTION_TEXT, .associated = OBJECT_COMDAT_ASSOCIATED_NONE,
+             .selection = OBJECT_COMDAT_SELECTION_LARGEST},
+            {.offset = 2, .size = 1, .section = OBJECT_SECTION_TEXT, .associated = 0, .first_relocation = 0, .relocation_count = 1,
+             .selection = OBJECT_COMDAT_SELECTION_ASSOCIATIVE},
+        };
+        ObjectFile objects[] = {
+            link_test_comdat_object(arena, target, BUSTER_ARRAY_TO_SLICE(left_bytes), left_symbols, 3, left_relocations, 1, left_comdats, 2),
+            link_test_comdat_object(arena, target, BUSTER_ARRAY_TO_SLICE(right_bytes), right_symbols, 3, right_relocations, 1, right_comdats, 2),
+        };
+        LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){.allow_undefined_symbols = true});
+        u32 child = link_test_comdat_symbol_find(&linked.object, S8("assoc_child"));
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_NONE && child != UINT32_MAX && linked.object.relocation_count == 1);
+        if (linked.error == LINK_ERROR_NONE && child != UINT32_MAX)
+        {
+            BUSTER_TEST(arguments, linked.object.sections[OBJECT_SECTION_TEXT].data.pointer[linked.object.symbols[child].value] == 0xb2);
+            ObjectRelocation relocation = linked.object.relocations[0];
+            BUSTER_TEST(arguments, string_equal(linked.object.symbols[relocation.symbol].name, S8("winner_target")));
+        }
+        arena_reset_to_start(arena);
+    }
+    {
+        u8 bytes[] = {1};
+        ObjectSymbol left_symbols[] = {{.name = S8("mode_bad"), .size = 1, .section = OBJECT_SECTION_TEXT,
+                                        .kind = OBJECT_SYMBOL_DATA, .global = true}};
+        ObjectSymbol right_symbols[] = {{.name = S8("mode_bad"), .size = 1, .section = OBJECT_SECTION_TEXT,
+                                         .kind = OBJECT_SYMBOL_DATA, .global = true}};
+        ObjectFile objects[] = {
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(bytes), S8("mode_bad"), OBJECT_COMDAT_SELECTION_ANY,
+                                    left_symbols, 1, 0, 0),
+            link_test_single_comdat(arena, target, BUSTER_ARRAY_TO_SLICE(bytes), S8("mode_bad"), OBJECT_COMDAT_SELECTION_LARGEST,
+                                    right_symbols, 1, 0, 0),
+        };
+        LinkObjectResult linked = link_objects(arena, objects, 2, (LinkOptions){0});
+        BUSTER_TEST(arguments, linked.error == LINK_ERROR_COMDAT_SELECTION_MISMATCH);
+        arena_reset_to_start(arena);
+    }
+    arena_destroy(arena, 1);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_order(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3636,6 +3855,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult data_precedence = link_test_elf_data_precedence(arguments);
     result.succeeded_test_count += data_precedence.succeeded_test_count;
     result.test_count += data_precedence.test_count;
+    UnitTestResult comdat_selection = link_test_coff_comdat_selection(arguments);
+    result.succeeded_test_count += comdat_selection.succeeded_test_count;
+    result.test_count += comdat_selection.test_count;
     UnitTestResult initializer_order = link_test_initializer_order(arguments);
     result.succeeded_test_count += initializer_order.succeeded_test_count;
     result.test_count += initializer_order.test_count;
