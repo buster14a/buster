@@ -242,65 +242,55 @@ BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add(u64* capacity, u64 cou
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 function_count)
+BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_variable(u64* capacity, DebugModel* model,
+                                                                    DebugVariableId id)
 {
-    u64 capacity = 0;
-    if (!codeview_relocation_capacity_add(&capacity, (u64)function_count * 4))
+    if (!model || id >= model->variable_count || model->variables[id].kind == DEBUG_VARIABLE_GLOBAL)
     {
-        return UINT64_MAX;
+        return true;
     }
-    if (!model || !model->valid)
+    DebugVariable* variable = model->variables + id;
+    for (u32 location_index = 0; location_index < variable->location_count; location_index += 1)
     {
-        return capacity;
-    }
-    for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
-    {
-        if (model->variables[variable_index].kind == DEBUG_VARIABLE_GLOBAL && !codeview_relocation_capacity_add(&capacity, 2))
+        DebugLocationRange* range = variable->locations + location_index;
+        if (range->location.kind == DEBUG_LOCATION_REGISTER || range->location.kind == DEBUG_LOCATION_FRAME)
         {
-            return UINT64_MAX;
-        }
-    }
-    for (u32 scope_index = 0; scope_index < model->scope_count; scope_index += 1)
-    {
-        DebugScope* scope = model->scopes + scope_index;
-        if (scope->kind != DEBUG_SCOPE_FUNCTION && !codeview_relocation_capacity_add(&capacity, 2))
-        {
-            return UINT64_MAX;
-        }
-        for (u32 scope_variable = 0; scope_variable < scope->variable_count; scope_variable += 1)
-        {
-            DebugVariableId id = scope->variables[scope_variable];
-            if (id >= model->variable_count || model->variables[id].kind == DEBUG_VARIABLE_GLOBAL)
+            if (!codeview_relocation_capacity_add(capacity, 2))
             {
-                continue;
+                return false;
             }
-            DebugVariable* variable = model->variables + id;
-            for (u32 location_index = 0; location_index < variable->location_count; location_index += 1)
+        }
+        else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
+        {
+            for (u32 piece_index = 0; piece_index < range->location.piece_count; piece_index += 1)
             {
-                DebugLocationRange* range = variable->locations + location_index;
-                if (range->location.kind == DEBUG_LOCATION_REGISTER || range->location.kind == DEBUG_LOCATION_FRAME)
+                DebugLocationKind kind = range->location.pieces[piece_index].kind;
+                if ((kind == DEBUG_LOCATION_REGISTER || kind == DEBUG_LOCATION_FRAME) &&
+                    !codeview_relocation_capacity_add(capacity, 2))
                 {
-                    if (!codeview_relocation_capacity_add(&capacity, 2))
-                    {
-                        return UINT64_MAX;
-                    }
-                }
-                else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
-                {
-                    for (u32 piece_index = 0; piece_index < range->location.piece_count; piece_index += 1)
-                    {
-                        DebugLocationKind kind = range->location.pieces[piece_index].kind;
-                        if ((kind == DEBUG_LOCATION_REGISTER || kind == DEBUG_LOCATION_FRAME) &&
-                            !codeview_relocation_capacity_add(&capacity, 2))
-                        {
-                            return UINT64_MAX;
-                        }
-                    }
+                    return false;
                 }
             }
         }
     }
-    return capacity;
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_variables(u64* capacity, DebugModel* model,
+                                                                           DebugScope* scope)
+{
+    if (!scope)
+    {
+        return true;
+    }
+    for (u32 variable_index = 0; variable_index < scope->variable_count; variable_index += 1)
+    {
+        if (!codeview_relocation_capacity_add_variable(capacity, model, scope->variables[variable_index]))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, DebugLocationRange* range, u32 function_offset, u16 machine,
@@ -453,6 +443,75 @@ BUSTER_GLOBAL_LOCAL CodeviewScopeWalk codeview_scope_walk_make(Arena* arena, Deb
         }
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add_scope_tree(u64* capacity, DebugModel* model,
+                                                                      DebugScopeId root, CodeviewScopeWalk* walk)
+{
+    if (!capacity || !model || !walk || !walk->stack || root >= model->scope_count)
+    {
+        return false;
+    }
+    CodeviewScopeFrame* stack = walk->stack;
+    u32 stack_count = 1;
+    stack[0] = (CodeviewScopeFrame){.scope = root, .next_child = walk->first_child[root]};
+    while (stack_count)
+    {
+        CodeviewScopeFrame* frame = stack + stack_count - 1;
+        DebugScopeId child = frame->next_child;
+        if (child != DEBUG_SCOPE_INVALID)
+        {
+            frame->next_child = walk->next_sibling[child];
+            if (stack_count == model->scope_count ||
+                !codeview_relocation_capacity_add(capacity, 2) ||
+                !codeview_relocation_capacity_add_scope_variables(capacity, model, model->scopes + child))
+            {
+                return false;
+            }
+            stack[stack_count++] = (CodeviewScopeFrame){.scope = child, .next_child = walk->first_child[child]};
+        }
+        else
+        {
+            stack_count -= 1;
+        }
+    }
+    return true;
+}
+
+BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 function_count, CodeviewScopeWalk* walk)
+{
+    u64 capacity = 0;
+    if (!codeview_relocation_capacity_add(&capacity, (u64)function_count * 4))
+    {
+        return UINT64_MAX;
+    }
+    if (!model || !model->valid)
+    {
+        return capacity;
+    }
+    for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
+    {
+        if (model->variables[variable_index].kind == DEBUG_VARIABLE_GLOBAL &&
+            !codeview_relocation_capacity_add(&capacity, 2))
+        {
+            return UINT64_MAX;
+        }
+    }
+    u32 debug_function_count = BUSTER_MIN(function_count, model->function_count);
+    for (u32 function_index = 0; function_index < debug_function_count; function_index += 1)
+    {
+        DebugScopeId root = model->functions[function_index].scope;
+        if (root >= model->scope_count)
+        {
+            continue;
+        }
+        if (!codeview_relocation_capacity_add_scope_variables(&capacity, model, model->scopes + root) ||
+            !codeview_relocation_capacity_add_scope_tree(&capacity, model, root, walk))
+        {
+            return UINT64_MAX;
+        }
+    }
+    return capacity;
 }
 
 BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugModel* model, DebugScopeId root, u32 function_offset,
@@ -751,7 +810,15 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                                (u64)input.model->inline_site_count * 64 + 256;
         }
         ByteWriter symbols = byte_writer_make(arena_allocate(arena, u8, symbol_capacity), symbol_capacity);
-        u64 relocation_capacity = codeview_relocation_capacity(input.model, input.function_count);
+        // Count the same scope tree once per emitted function. Debug models may
+        // intentionally share a root scope, so a single model-wide scan can
+        // under-allocate the relocation array and invalidate the second use.
+        CodeviewScopeWalk scope_walk = {0};
+        if (input.model && input.model->valid && input.model->scope_count && input.function_count)
+        {
+            scope_walk = codeview_scope_walk_make(arena, input.model);
+        }
+        u64 relocation_capacity = codeview_relocation_capacity(input.model, input.function_count, &scope_walk);
     if (relocation_capacity == UINT64_MAX)
     {
         return result;
@@ -790,14 +857,6 @@ CodeviewResult codeview_build_legacy(Arena* arena, CodeviewInput input)
                 }
             }
             codeview_subsection_end(&symbols, globals);
-        }
-
-        // One scratch stack and one child index for the whole module, not a
-        // scope_count-sized bump allocation (and full-model scan) per function.
-        CodeviewScopeWalk scope_walk = {0};
-        if (input.model && input.model->valid && input.model->scope_count && input.function_count)
-        {
-            scope_walk = codeview_scope_walk_make(arena, input.model);
         }
 
         // One symbols subsection and one lines subsection per function.
