@@ -70,7 +70,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/issue-708"
           cmp baseline/tools/ci_zig.py candidate/tools/ci_zig.py
-          python baseline/tools/ci_zig.py --target x86_64-windows --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/issue-708/zig.log"
+          cmp baseline/.github/zig.json candidate/.github/zig.json
+          cd baseline
+          python tools/ci_zig.py --target x86_64-windows --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/issue-708/zig.log"
 
       - name: Paired full uninstrumented combination matrices
         shell: powershell
