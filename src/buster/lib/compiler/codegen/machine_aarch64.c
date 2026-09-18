@@ -274,7 +274,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_64_bit(IrProgram* program, IrTypeId
 // permits for every float passing site.
 BUSTER_GLOBAL_LOCAL bool machine_a64_type_is_float_scalar(IrType* type)
 {
-    return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64);
+    return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT &&
+           ((type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE) || type->bit_width == 32 || type->bit_width == 64);
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId type_id, Target target, IrAbiUse use, MachineA64ValueShape* shape)
@@ -1248,15 +1249,21 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_cast(MachineA64Selector* selector, I
         if (instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND || instruction->conversion_operation == IR_CONVERSION_FLOAT_TRUNCATE)
         {
             bool extend = instruction->conversion_operation == IR_CONVERSION_FLOAT_EXTEND;
-            bool shaped = source_type && source_type->kind == IR_TYPE_FLOAT &&
-                          source_type->bit_width == (extend ? 32u : 64u) && cast_target_type && cast_target_type->kind == IR_TYPE_FLOAT &&
-                          cast_target_type->bit_width == (extend ? 64u : 32u);
+            bool shaped = source_type && source_type->kind == IR_TYPE_FLOAT && cast_target_type && cast_target_type->kind == IR_TYPE_FLOAT &&
+                          source_type->float_format == IR_FLOAT_FORMAT_IEEE && cast_target_type->float_format == IR_FLOAT_FORMAT_IEEE &&
+                          (source_type->bit_width == 16 || source_type->bit_width == 32 || source_type->bit_width == 64) &&
+                          (cast_target_type->bit_width == 16 || cast_target_type->bit_width == 32 || cast_target_type->bit_width == 64) &&
+                          (extend ? source_type->bit_width < cast_target_type->bit_width : source_type->bit_width > cast_target_type->bit_width);
             if (shaped)
             {
                 u32 row = machine_a64_select_row(selector, (MachineInstruction){
                                                                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register),
                                                                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, source_register)},
-                                                               .opcode = (u16)(extend ? MACHINE_A64_CVT_F32_TO_F64 : MACHINE_A64_CVT_F64_TO_F32),
+                                                               .opcode = (u16)(source_type->bit_width == 16
+                                                                   ? (cast_target_type->bit_width == 32 ? MACHINE_A64_CVT_F16_TO_F32 : MACHINE_A64_CVT_F16_TO_F64)
+                                                                   : cast_target_type->bit_width == 16
+                                                                   ? (source_type->bit_width == 32 ? MACHINE_A64_CVT_F32_TO_F16 : MACHINE_A64_CVT_F64_TO_F16)
+                                                                   : extend ? MACHINE_A64_CVT_F32_TO_F64 : MACHINE_A64_CVT_F64_TO_F32),
                                                            });
                 machine_a64_define(selector, result_register, row);
                 selected = true;
@@ -5901,6 +5908,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
     (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+{
+    u32 suffix_count = function->block_count - function->entry.value;
+    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+}
+
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                bool assume_validated, bool preserve_debug_values)
 {
@@ -5908,7 +5921,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (arena && program && function && target.cpu_arch == CPU_ARCH_AARCH64 && function->state == IR_FUNCTION_LOWERED && function->block_count &&
-        function->entry.value == 0)
+        function->entry.value < function->block_count)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
@@ -6010,8 +6023,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             selector.value_stack_slots[value_index] = UINT32_MAX;
             selector.value_indirect_slots[value_index] = UINT32_MAX;
         }
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             u32 parameter_count = 0;
             IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
             for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -6104,6 +6118,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         bool returns_twice_free = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
+        if (function->entry.value)
+        {
+            selector.block_entries = arena_allocate(arena, u32, function->block_count);
+            selector.block_exits = arena_allocate(arena, u32, function->block_count);
+        }
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
@@ -6262,6 +6281,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             block_candidate_counts[block_index] = block_candidate_count;
         }
+        if (function->entry.value)
+        {
+            u32 next_block = 0;
+            for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+            {
+                u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+                u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+                selector.block_entries[block_index] = next_block;
+                selector.block_exits[block_index] = next_block + block_width - 1u;
+                next_block += block_width;
+            }
+            BUSTER_CHECK(next_block == expanded_blocks);
+        }
         selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);
@@ -6377,8 +6409,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         // Classification pass: direct locals become stack slots, every other
         // scalar result becomes a virtual register, in stable value-id order.
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
@@ -6739,8 +6772,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         u32 typed_instruction_count = 0;
         u32 simd_operation_count = 0;
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             selector.current_block = block_index;
             machine_builder_block_begin(&selector.builder);
@@ -6763,7 +6797,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
             }
             selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
-            if (block_index == 0)
+            if (block_index == function->entry.value)
             {
                 if (windows_variadic)
                 {
@@ -8800,9 +8834,9 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             capacity64 += 32 + 2u * (large_save_offset ? 16u : 4u);
             break;
         case MACHINE_A64_ATOMIC_RMW_PAIR:
-            // Two input loads, a pair loop with at most two arithmetic
+            // Two input loads, a pair loop with up to four NAND arithmetic
             // words, and two result stores. Every frame access may expand.
-            capacity64 += 20 + 4u * (large_save_offset ? 16u : 4u);
+            capacity64 += 28 + 4u * (large_save_offset ? 16u : 4u);
             break;
         case MACHINE_A64_ATOMIC_CAS_PAIR:
             // Expected/desired loads, compare and conditional replacement,
@@ -8810,8 +8844,8 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
             capacity64 += 28 + 6u * (large_save_offset ? 16u : 4u);
             break;
         case MACHINE_A64_ATOMIC_RMW:
-            // ld(a)xr, operation, st(l)xr, cbnz.
-            capacity64 += 16;
+            // ld(a)xr, operation, optional NAND inversion, st(l)xr, cbnz.
+            capacity64 += 20;
             break;
         case MACHINE_A64_CLEAR_INSTRUCTION_CACHE:
             // Two cache-maintenance loops, alignment, and barriers.
@@ -9314,8 +9348,16 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 break;
             case MACHINE_A64_CVT_F32_TO_F64:
             case MACHINE_A64_CVT_F64_TO_F32:
+            case MACHINE_A64_CVT_F16_TO_F32:
+            case MACHINE_A64_CVT_F16_TO_F64:
+            case MACHINE_A64_CVT_F32_TO_F16:
+            case MACHINE_A64_CVT_F64_TO_F16:
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_TO_VEC, operand_registers[1], 0, 0, 0);
-                machine_a64_emit(&encoder, instruction->opcode == MACHINE_A64_CVT_F32_TO_F64 ? 0x1e22c000u : 0x1e624000u);
+                machine_a64_emit(&encoder, instruction->opcode == MACHINE_A64_CVT_F16_TO_F32 ? 0x1ee24000u :
+                                          instruction->opcode == MACHINE_A64_CVT_F16_TO_F64 ? 0x1ee2c000u :
+                                          instruction->opcode == MACHINE_A64_CVT_F32_TO_F16 ? 0x1e23c000u :
+                                          instruction->opcode == MACHINE_A64_CVT_F64_TO_F16 ? 0x1e63c000u :
+                                          instruction->opcode == MACHINE_A64_CVT_F32_TO_F64 ? 0x1e22c000u : 0x1e624000u);
                 machine_a64_emit_generated_opcode(&encoder, MACHINE_A64_FMOV_FROM_VEC, operand_registers[0], 0, 0, 0);
                 break;
             case MACHINE_A64_CVT_I64_TO_F32:
@@ -9521,8 +9563,14 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                             machine_a64_emit(&encoder, UINT32_C(0xda0c01cc)); // sbc x12, x14, x12
                             break;
                         case IR_ATOMIC_BITWISE_AND:
+                        case IR_ATOMIC_BITWISE_NAND:
                             machine_a64_emit(&encoder, UINT32_C(0x8a0b012b));
                             machine_a64_emit(&encoder, UINT32_C(0x8a0c01cc));
+                            if ((instruction->payload >> MACHINE_A64_ATOMIC_PAIR_OPERATION_SHIFT) == IR_ATOMIC_BITWISE_NAND)
+                            {
+                                machine_a64_emit(&encoder, UINT32_C(0xaa2b03eb)); // mvn x11, x11
+                                machine_a64_emit(&encoder, UINT32_C(0xaa2c03ec)); // mvn x12, x12
+                            }
                             break;
                         case IR_ATOMIC_BITWISE_OR:
                             machine_a64_emit(&encoder, UINT32_C(0xaa0b012b));
@@ -9581,18 +9629,24 @@ MachineEncodeResult machine_encode_aarch64(Arena* arena, MachineFunction* functi
                 u32 rmw_size_bits = rmw_size == 2 ? 0x40000000u : rmw_size == 4 ? 0x80000000u : rmw_size == 8 ? 0xc0000000u : 0;
                 bool rmw_wide = rmw_size == 8;
                 u32 rmw_operation = (instruction->payload >> 8) & 0xffu;
+                u32 rmw_retry_offset = encoder.count;
                 machine_a64_emit(&encoder, ((instruction->payload & 0x10u) ? 0x085ffc00u : 0x085f7c00u) | rmw_size_bits | (MACHINE_A64_X10 << 5) |
                                                MACHINE_A64_X9);
                 u32 rmw_word = rmw_operation == IR_ATOMIC_ADD           ? (rmw_wide ? 0x8b0b012cu : 0x0b0b012cu)
                                : rmw_operation == IR_ATOMIC_SUBTRACT    ? (rmw_wide ? 0xcb0b012cu : 0x4b0b012cu)
-                               : rmw_operation == IR_ATOMIC_BITWISE_AND ? (rmw_wide ? 0x8a0b012cu : 0x0a0b012cu)
+                               : rmw_operation == IR_ATOMIC_BITWISE_AND || rmw_operation == IR_ATOMIC_BITWISE_NAND ? (rmw_wide ? 0x8a0b012cu : 0x0a0b012cu)
                                : rmw_operation == IR_ATOMIC_BITWISE_OR  ? (rmw_wide ? 0xaa0b012cu : 0x2a0b012cu)
                                : rmw_operation == IR_ATOMIC_BITWISE_XOR ? (rmw_wide ? 0xca0b012cu : 0x4a0b012cu)
                                                                         : (rmw_wide ? 0xaa0b03ecu : 0x2a0b03ecu);
                 machine_a64_emit(&encoder, rmw_word);
+                if (rmw_operation == IR_ATOMIC_BITWISE_NAND)
+                {
+                    machine_a64_emit(&encoder, rmw_wide ? UINT32_C(0xaa2c03ec) : UINT32_C(0x2a2c03ec)); // mvn x12/w12, x12/w12
+                }
                 machine_a64_emit(&encoder, ((instruction->payload & 0x20u) ? 0x0800fc00u : 0x08007c00u) | rmw_size_bits | (MACHINE_A64_X13 << 16) |
                                                (MACHINE_A64_X10 << 5) | MACHINE_A64_X12);
-                machine_a64_emit(&encoder, 0x35000000u | (0x7fffdu << 5) | MACHINE_A64_X13);
+                u32 rmw_retry_words = (rmw_retry_offset - encoder.count) / 4u;
+                machine_a64_emit(&encoder, 0x35000000u | ((rmw_retry_words & 0x7ffffu) << 5) | MACHINE_A64_X13);
             }
             break;
             case MACHINE_A64_ATOMIC_CAS:

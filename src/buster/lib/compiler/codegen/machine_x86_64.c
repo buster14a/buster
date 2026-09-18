@@ -626,7 +626,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_value_shape(IrProgram* program, IrTypeId ty
         };
         return true;
     }
-    if (type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64))
+    if (type && type->layout.resolved && type->kind == IR_TYPE_FLOAT &&
+        ((type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE) || type->bit_width == 32 || type->bit_width == 64))
     {
         *shape = (MachineX64ValueShape){
             .part_is_float = {1},
@@ -7145,6 +7146,14 @@ struct MachineX64CandidateRow
 
 #include <buster/lib/compiler/codegen/machine_x86_64_predicate.c>
 
+// Canonical block IDs need not start at the function entry. Preserve their
+// identity while publishing entry-first MIR and remapping every CFG edge.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+{
+    u32 suffix_count = function->block_count - function->entry.value;
+    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+}
+
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                               bool position_independent, bool assume_validated, bool predicate_residency,
                                                               bool preserve_debug_values, MachineSelectionModule* module)
@@ -7153,7 +7162,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (!arena || !program || !function || target.cpu_arch != CPU_ARCH_X86_64 || function->state != IR_FUNCTION_LOWERED || !function->block_count ||
-        function->entry.value != 0)
+        function->entry.value >= function->block_count)
     {
         return result;
     }
@@ -7272,8 +7281,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     selector.parameter_placements = signature_parameter_placements;
     selector.parameter_count = function_type->parameter_count;
     selector.argument_values = arena_allocate(arena, u32, function_type->parameter_count);
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         u32 parameter_count = 0;
         IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
         for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -7380,6 +7390,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     bool returns_twice_free = true;
     u32 walk_ordinal = 0;
     u32 expanded_blocks = 0;
+    if (function->entry.value)
+    {
+        selector.block_entries = arena_allocate(arena, u32, function->block_count);
+        selector.block_exits = arena_allocate(arena, u32, function->block_count);
+    }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -7530,6 +7545,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
         block_candidate_counts[block_index] = block_candidate_count;
     }
+    if (function->entry.value)
+    {
+        u32 next_block = 0;
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+        {
+            u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
+            u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+            selector.block_entries[block_index] = next_block;
+            selector.block_exits[block_index] = next_block + block_width - 1u;
+            next_block += block_width;
+        }
+        BUSTER_CHECK(next_block == expanded_blocks);
+    }
     // Block-parameter incoming values are uses on CFG edges rather than row
     // operands. Keep them visible to aliasing and branch fusion: in
     // particular, a comparison that also supplies a promoted local is not a
@@ -7640,8 +7668,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
     // Classification pass: direct locals become stack slots, every other
     // scalar result becomes a virtual register, in stable value-id order.
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         IrBlock* block = function->blocks + block_index;
         u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
         u32 block_first_row = block->first_instruction.value;
@@ -8039,8 +8068,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         selector.virtual_register_count ? (MachineVirtualRegister*)(selector.builder.virtual_registers.first + 1) : 0;
     u32 typed_instruction_count = 0;
     u32 simd_operation_count = 0;
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         IrBlock* block = function->blocks + block_index;
         selector.current_block = block_index;
         machine_builder_block_begin(&selector.builder);
@@ -8063,7 +8093,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
         selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
-        if (block_index == 0)
+        if (block_index == function->entry.value)
         {
             if (function_type->is_variadic && windows_abi)
             {
@@ -11664,6 +11694,7 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
     {S8_INITIALIZER("NOP"), 52},
     {S8_INITIALIZER("MUL"), 22},
     {S8_INITIALIZER("FLD"), 56},
+    {S8_INITIALIZER("NOT"), 81},
     {S8_INITIALIZER("CALL"), 21},
     {S8_INITIALIZER("IDIV"), 23},
     {S8_INITIALIZER("JNBE"), 24},
@@ -11725,9 +11756,9 @@ BUSTER_GLOBAL_LOCAL MachineX64ShapeMnemonic const machine_x64_shape_mnemonics[] 
 
 // First row of each length, indexed by length - 2, with a closing bound. There
 // Closing bound for each mnemonic length group.
-BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 26, 39, 63, 68, 73, 76, 78, 80};
+BUSTER_GLOBAL_LOCAL u8 const machine_x64_shape_mnemonic_spans[] = {0, 3, 27, 40, 64, 69, 74, 77, 79, 81};
 
-BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 80);
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonics) == 81);
 BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_shape_mnemonic_spans) ==
                 MACHINE_X64_SHAPE_MNEMONIC_MAX_LENGTH - MACHINE_X64_SHAPE_MNEMONIC_MIN_LENGTH + 2u);
 
@@ -12090,6 +12121,13 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_unary(void)
     // back to handwritten bytes, so registering it is what makes the row
     // reachable at all.
     (void)machine_x64_metadata_shape_cache_add(S8("MUL"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    // Atomic NAND expansions complement the proposed value at its actual
+    // width; prepare these shapes before the encoding workers start.
+    for (u32 width_index = 0; width_index < 4; width_index += 1)
+    {
+        operand = machine_x64_exact_gpr_operand(0, (u16)(8u << width_index));
+        (void)machine_x64_metadata_shape_cache_add(S8("NOT"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    }
     for (u32 register_index = 0; register_index < 16; register_index += 1)
     {
         operand = machine_x64_exact_gpr_operand(register_index, 64);
@@ -15593,10 +15631,14 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         {
                             String8 operation = atomic_operation == IR_ATOMIC_ADD           ? S8("ADD")
                                 : atomic_operation == IR_ATOMIC_SUBTRACT    ? S8("SUB")
-                                : atomic_operation == IR_ATOMIC_BITWISE_AND ? S8("AND")
+                                : atomic_operation == IR_ATOMIC_BITWISE_AND || atomic_operation == IR_ATOMIC_BITWISE_NAND ? S8("AND")
                                 : atomic_operation == IR_ATOMIC_BITWISE_OR  ? S8("OR")
                                 : S8("XOR");
                             (void)machine_x64_emit_metadata_registers(&encoder, operation, MACHINE_X64_R8, MACHINE_X64_RDX, (u16)(size * 8u), 0);
+                            if (atomic_operation == IR_ATOMIC_BITWISE_NAND)
+                            {
+                                (void)machine_x64_emit_metadata_register(&encoder, S8("NOT"), MACHINE_X64_R8, (u16)(size * 8u), 0);
+                            }
                         }
                         (void)machine_x64_emit_metadata_atomic_memory_register(&encoder, S8("CMPXCHG"), MACHINE_X64_RCX, MACHINE_X64_R8,
                                 (u16)(size * 8u), 0);
@@ -15704,7 +15746,7 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         u32 atomic_operation = instruction->payload >> 8;
                         String8 low_operation = atomic_operation == IR_ATOMIC_ADD           ? S8("ADD")
                             : atomic_operation == IR_ATOMIC_SUBTRACT    ? S8("SUB")
-                            : atomic_operation == IR_ATOMIC_BITWISE_AND ? S8("AND")
+                            : atomic_operation == IR_ATOMIC_BITWISE_AND || atomic_operation == IR_ATOMIC_BITWISE_NAND ? S8("AND")
                             : atomic_operation == IR_ATOMIC_BITWISE_OR  ? S8("OR")
                             : atomic_operation == IR_ATOMIC_BITWISE_XOR ? S8("XOR")
                             : atomic_operation == IR_ATOMIC_EXCHANGE    ? S8("MOV")
@@ -15724,6 +15766,11 @@ MachineEncodeResult machine_encode_x86_64(Arena* arena, MachineFunction* functio
                         (void)machine_x64_emit_metadata_registers(&encoder, S8("MOV"), MACHINE_X64_RCX, MACHINE_X64_RDX, 64, 0);
                         (void)machine_x64_emit_metadata_registers(&encoder, low_operation, MACHINE_X64_RBX, MACHINE_X64_R8, 64, 0);
                         (void)machine_x64_emit_metadata_registers(&encoder, high_operation, MACHINE_X64_RCX, MACHINE_X64_R9, 64, 0);
+                        if (atomic_operation == IR_ATOMIC_BITWISE_NAND)
+                        {
+                            (void)machine_x64_emit_metadata_register(&encoder, S8("NOT"), MACHINE_X64_RBX, 64, 0);
+                            (void)machine_x64_emit_metadata_register(&encoder, S8("NOT"), MACHINE_X64_RCX, 64, 0);
+                        }
                         (void)machine_x64_emit_metadata_atomic_memory(&encoder, S8("CMPXCHG16B"), address, 128, 0);
                         u32 retry_branch = encoder.count;
                         (void)machine_x64_emit_metadata_relative(&encoder, S8("JNE"), 0, 32, 0);

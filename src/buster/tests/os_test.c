@@ -4,6 +4,10 @@
 #include <buster/lib/os_internal.h>
 #include <buster/lib/time.h>
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+#include <stdio.h>
+#endif
+
 // Compile-only GCC/MSVC matrix rows must also enforce the host byte contract.
 BUSTER_CT_CHECK((char8)0xff == 0xff);
 BUSTER_CT_CHECK(sizeof(u32) == 4 && sizeof(u64) == 8);
@@ -27,10 +31,17 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_pool_entry(void* argument)
 {
     OsTestThreadPoolState* state = (OsTestThreadPoolState*)argument;
     Arena* pooled = arena_create((ArenaCreation){0});
-    BUSTER_CHECK(pooled != 0);
+    BUSTER_VALIDATE(pooled != 0);
     state->pooled_arena = pooled;
-    BUSTER_CHECK(arena_destroy(pooled, 1));
+    BUSTER_VALIDATE(arena_destroy(pooled, 1));
 }
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_resource_noop(void* argument)
+{
+    BUSTER_UNUSED(argument);
+}
+#endif
 #endif
 
 typedef struct OsTestLaneState OsTestLaneState;
@@ -122,6 +133,49 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_liveness(void* argument)
 }
 #endif
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
+typedef struct OsTestDirectoryDeleteRaceState OsTestDirectoryDeleteRaceState;
+struct OsTestDirectoryDeleteRaceState
+{
+    String8 child;
+    String8 parked;
+    String8 outside;
+    AtomicU64 start;
+    AtomicU64 stop;
+    AtomicU64 swaps;
+    u64 limit;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_directory_delete_race(void* argument)
+{
+    OsTestDirectoryDeleteRaceState* state = (OsTestDirectoryDeleteRaceState*)argument;
+    while (!state->start)
+    {
+    }
+    while (!state->stop && state->swaps < state->limit)
+    {
+        if (rename((const char*)state->child.pointer, (const char*)state->parked.pointer) == 0)
+        {
+            if (symlink((const char*)state->outside.pointer, (const char*)state->child.pointer) == 0)
+            {
+                atomic_u64_increment(&state->swaps);
+                poll(0, 0, 1);
+                (void)unlink((const char*)state->child.pointer);
+            }
+            (void)rename((const char*)state->parked.pointer, (const char*)state->child.pointer);
+            poll(0, 0, 1);
+        }
+        else
+        {
+            (void)unlink((const char*)state->child.pointer);
+            (void)rename((const char*)state->parked.pointer, (const char*)state->child.pointer);
+        }
+    }
+    (void)unlink((const char*)state->child.pointer);
+    (void)rename((const char*)state->parked.pointer, (const char*)state->child.pointer);
+}
+#endif
+
 typedef struct OsTestNestedLaneState OsTestNestedLaneState;
 struct OsTestNestedLaneState
 {
@@ -143,9 +197,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_inner_lane_gang(void* argument)
         // arenas. Generic OS-thread teardown must drain all of them before
         // the TLS pool root disappears.
         Arena* pooled = arena_create((ArenaCreation){0});
-        BUSTER_CHECK(pooled != 0);
+        BUSTER_VALIDATE(pooled != 0);
         state->inner_pooled_arenas[state->invocation][index] = pooled;
-        BUSTER_CHECK(arena_destroy(pooled, 1));
+        BUSTER_VALIDATE(arena_destroy(pooled, 1));
     }
 }
 
@@ -210,6 +264,42 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     BUSTER_UNUSED(arguments);
 
     UnitTestResult result = {0};
+
+#if !BUSTER_SINGLE_THREADED && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 resource_failure_mode = os_get_environment_variable(S8("BUSTER_OS_RESOURCE_FAILURE_MODE"));
+    if (resource_failure_mode.length)
+    {
+        os_resource_test_clear();
+        if (string_equal(resource_failure_mode, S8("barrier")) || string_equal(resource_failure_mode, S8("thread")))
+        {
+            ThreadContext* owner = thread_context_allocate();
+            BUSTER_VALIDATE(owner != 0);
+            thread_context_select(owner);
+            if (string_equal(resource_failure_mode, S8("barrier")))
+            {
+                os_resource_test_fail_on_call(OS_RESOURCE_TEST_BARRIER_CREATE, 0);
+            }
+            else
+            {
+                // Lane 1 starts successfully; lane 2 fails while lane 1 is
+                // still held behind the constructor's startup gate.
+                os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_CREATE, 1);
+            }
+            lane_run(3, &os_test_resource_noop, 0);
+        }
+        else if (string_equal(resource_failure_mode, S8("join")))
+        {
+            OsThreadHandle* handle = os_thread_create((ThreadCreateOptions){
+                .callback = &os_test_resource_noop,
+                .argument = 0,
+            });
+            BUSTER_VALIDATE(handle != 0);
+            os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_JOIN, 0);
+            BUSTER_VALIDATE(os_thread_join(handle));
+        }
+        os_fail_message(S8("resource failure injection was not observed"));
+    }
+#endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     // Symbol lookup accepts bounded String8 names. A readable suffix
@@ -1351,6 +1441,89 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     }
 #endif
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS && !BUSTER_SINGLE_THREADED
+    // A hostile peer repeatedly replaces a child directory with a link to an
+    // outside directory while deletion runs. The operation may report a race,
+    // but it must never resolve through the link or touch the outside file.
+    {
+        enum
+        {
+            OS_TEST_DIRECTORY_DELETE_RACE_ROUNDS = 8,
+            OS_TEST_DIRECTORY_DELETE_RACE_FILLERS = 64,
+            OS_TEST_DIRECTORY_DELETE_RACE_SWAPS = 32,
+        };
+        Arena* arena = arguments->arena;
+        u64 position = arena->position;
+        String8 outside = buster_test_temporary_path(arena, S8("buster-delete-race-outside"), S8(""));
+        String8 root = buster_test_temporary_path(arena, S8("buster-delete-race-root"), S8(""));
+        BUSTER_TEST(arguments, os_directory_delete(outside));
+        BUSTER_TEST(arguments, os_directory_delete(root));
+        BUSTER_TEST(arguments, os_make_directory_attempt(outside));
+        String8 outside_file = string_format_z(arena, S8("{S8}/survivor.txt"), outside);
+        BUSTER_TEST(arguments, file_write(outside_file, BUSTER_SLICE_TO_BYTE_SLICE(S8("outside must survive"))));
+        String8 outside_absolute = os_path_absolute(arena, outside, true);
+        BUSTER_TEST(arguments, outside_absolute.length != 0);
+
+        bool survivor_present = outside_absolute.length != 0;
+        u64 swap_count = 0;
+        for (u32 round = 0; round < OS_TEST_DIRECTORY_DELETE_RACE_ROUNDS && survivor_present; round += 1)
+        {
+            BUSTER_TEST(arguments, os_directory_delete(root));
+            BUSTER_TEST(arguments, os_make_directory_attempt(root));
+            String8 child = string_format_z(arena, S8("{S8}/child"), root);
+            String8 parked = string_format_z(arena, S8("{S8}/parked"), root);
+            BUSTER_TEST(arguments, os_make_directory_attempt(child));
+            BUSTER_TEST(arguments,
+                        file_write(string_format_z(arena, S8("{S8}/inside.txt"), child),
+                                   BUSTER_SLICE_TO_BYTE_SLICE(S8("inside"))));
+            for (u32 index = 0; index < OS_TEST_DIRECTORY_DELETE_RACE_FILLERS; index += 1)
+            {
+                String8 filler = string_format_z(arena, S8("{S8}/filler-{u32}.txt"), root, index);
+                BUSTER_TEST(arguments, file_write(filler, BUSTER_SLICE_TO_BYTE_SLICE(S8("filler"))));
+            }
+
+            OsTestDirectoryDeleteRaceState state = {
+                .child = child,
+                .parked = parked,
+                .outside = outside_absolute,
+                .limit = OS_TEST_DIRECTORY_DELETE_RACE_SWAPS,
+            };
+            OsThreadHandle* thread = os_thread_create((ThreadCreateOptions){
+                .callback = &os_test_directory_delete_race,
+                .argument = &state,
+            });
+            BUSTER_TEST(arguments, thread != 0);
+            if (thread)
+            {
+                atomic_u64_increment(&state.start);
+                u32 wait_count = 0;
+                while (!state.swaps && wait_count < 1000)
+                {
+                    poll(0, 0, 1);
+                    wait_count += 1;
+                }
+                BUSTER_TEST(arguments, state.swaps != 0);
+                (void)os_directory_delete(root);
+                atomic_u64_increment(&state.stop);
+                BUSTER_TEST(arguments, os_thread_join(thread));
+                swap_count += state.swaps;
+            }
+
+            OsFileDescriptor* survivor = os_file_open(outside_file, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+            survivor_present = survivor != 0;
+            BUSTER_TEST(arguments, survivor_present);
+            if (survivor)
+            {
+                BUSTER_TEST(arguments, os_file_close(survivor));
+            }
+            BUSTER_TEST(arguments, os_directory_delete(root));
+        }
+        BUSTER_TEST(arguments, swap_count >= OS_TEST_DIRECTORY_DELETE_RACE_ROUNDS);
+        BUSTER_TEST(arguments, os_directory_delete(outside));
+        arena_set_position(arena, position);
+    }
+#endif
+
 #if defined(_WIN32)
     // Regression: the tick-to-nanosecond conversion overflowed u64 for
     // intervals over ~30 minutes at a 10 MHz QueryPerformanceCounter rate.
@@ -1408,6 +1581,59 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
 #endif
     }
+
+#if !BUSTER_SINGLE_THREADED
+    // Directly exercise partial persistent and nested-gang construction plus a
+    // retryable injected join. No worker, OS entity, or owner state may remain.
+    BUSTER_TEST(arguments, os_resource_failure_self_test());
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // The same failures must take an always-defined fatal path in optimized
+    // builds. Deadlock is a failure too, so every child has a deadline.
+    {
+        String8 modes[] = {S8("barrier"), S8("thread"), S8("join")};
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
+        {
+            SliceString8 inherited_keys = program_state->input.environment_keys;
+            SliceString8 inherited_values = program_state->input.environment_values;
+            String8* keys = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
+            String8* values = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
+            keys[0] = S8("BUSTER_OS_RESOURCE_FAILURE_MODE");
+            values[0] = modes[mode_index];
+            keys[1] = S8("BUSTER_TEST_JOBS");
+            values[1] = S8("1");
+            u64 count = 2;
+            for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+            {
+                if (!string_equal(inherited_keys.pointer[inherited], keys[0]) &&
+                    !string_equal(inherited_keys.pointer[inherited], keys[1]))
+                {
+                    keys[count] = inherited_keys.pointer[inherited];
+                    values[count] = inherited_values.pointer[inherited];
+                    count += 1;
+                }
+            }
+
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                        (SliceString8){keys, count}, (SliceString8){values, count},
+                                                        (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                String8 error = {
+                    .pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                    .length = wait.streams[STANDARD_STREAM_ERROR].length,
+                };
+                BUSTER_TEST(arguments, !wait.timed_out);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+                BUSTER_TEST(arguments, string_first_sequence(error, S8("validation failed")) != BUSTER_STRING_NO_MATCH);
+            }
+        }
+    }
+#endif
+#endif
 
     // lane_range must hand out contiguous shares that cover the input exactly,
     // with sizes differing by at most one item. The context is faked per lane

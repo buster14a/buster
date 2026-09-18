@@ -131,6 +131,7 @@ typedef enum IrAtomicOperation
     IR_ATOMIC_BITWISE_OR,
     IR_ATOMIC_BITWISE_XOR,
     IR_ATOMIC_EXCHANGE,
+    IR_ATOMIC_BITWISE_NAND,
     IR_ATOMIC_OPERATION_COUNT,
 } IrAtomicOperation;
 

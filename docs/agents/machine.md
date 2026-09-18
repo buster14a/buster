@@ -767,3 +767,17 @@ reserved X16/X17 carry the count and data. CBNZ preserves flags. Pointer operand
 are captured before either cursor is overwritten, and the encoder reserves a
 constant 128-byte capacity for this form. Smaller copies retain inline accesses.
 The same memory effects and source/destination ownership apply in every allocator.
+
+## MIR-only cutover boundary
+
+Native module generation removes the direct canonical emitter body and its
+unreferenced private helper chain atomically with dispatch. Failed generation
+publishes no code/data images, entries, relocations, unwind descriptors or debug
+rows; diagnostics and attempted-work counters remain available. The external
+archived reference remains the differential oracle. Issue #514 retains cleanup
+of legacy result fields, public helper interfaces and documentation.
+
+Native selectors accept any valid canonical entry block. They emit that block
+first, remap expanded MIR block ranges and CFG edges, and capture arguments in
+the actual entry. The canonical-entry regression retains all block rotations,
+re-publishes the CFG after mutation, and checks every allocator spelling.

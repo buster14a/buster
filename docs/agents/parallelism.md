@@ -29,7 +29,10 @@
   item, never by completion order — so the self-hosting fixed point stays
   byte-identical at any lane count. `lane_run` keeps a persistent worker gang
   on the calling thread context and reuses it across phases; do not add phase-
-  local thread creation. Variable-duration work uses an atomic take-index,
+  local thread creation. Gang construction is transactional: new workers stay
+  behind a startup gate until every barrier and thread exists, and a partial
+  construction is cancelled, joined, and destroyed before owner state is
+  published. Variable-duration work uses an atomic take-index,
   writes function- or item-local fragments into stable source-indexed slots,
   and merges them only after a lane barrier.
 - **A global built on first use is prewarmed, never raced.** Several hot
@@ -81,3 +84,7 @@ IR source cursors, module line suppression and inline-assembly symbol changes
 are shared within a TU. Serial table prewarm does not remove these dependencies.
 `compiler_parallel_prewarm()` is the complete native-C prewarm entry for a
 caller launching an external gang; idle persistent workers still count as live.
+
+Lane startup allocates worker records and handle storage before acquiring the
+startup gate. Allocation failures may enter the fatal diagnostic path, so the
+gate protects thread publication and cancellation without enclosing allocation.

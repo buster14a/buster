@@ -147,10 +147,18 @@ struct CodegenCanonicalCallArgument
     // piece_size zero.
     u32 windows_piece_size;
     u32 windows_register_piece_count;
+    // A GNU vector whose logical width is not a power of two scalarizes on
+    // Win64 whenever its padded storage does not fit one native vector
+    // register. Each logical lane consumes one ordinary positional argument
+    // slot; the leading lanes use registers and the tail continues in
+    // eightbyte stack slots.
+    u32 windows_scalar_lane_size;
+    u32 windows_register_lane_count;
     u8 float_register;
     bool aggregate;
     bool on_stack;
     bool windows_indirect;
+    bool windows_scalar_float;
     bool system_v_aggregate;
 };
 
@@ -168,15 +176,14 @@ struct CodegenCanonicalCallLayout
     u32 windows_stack_size;
     u32 windows_copy_storage_size;
     // A hidden-pointer result whose type wants more than the sixteen bytes a
-    // frame slot is aligned to bounces through this outgoing-area slot: the
-    // callee is entitled to store through the pointer with alignment-checking
-    // moves (clang writes a wide vector back with vmovaps), so the caller
-    // hands it a rounded-up address and copies the bytes into the result's
-    // frame slot after the call. Zero size means the frame slot is handed
-    // over directly.
-    u32 windows_result_copy_offset;
-    u32 windows_result_copy_size;
-    u32 windows_result_copy_alignment;
+    // canonical frame address can promise bounces through this outgoing-area
+    // slot. Both x86-64 conventions let a callee use alignment-checking moves
+    // through the hidden pointer, so the caller hands it a suitably aligned
+    // address and copies the bytes into the result's frame slot after the
+    // call. Zero size means the frame slot is handed over directly.
+    u32 result_copy_offset;
+    u32 result_copy_size;
+    u32 result_copy_alignment;
     u32 simulated_registers;
     u32 simulated_float_registers;
     bool stack_padding;

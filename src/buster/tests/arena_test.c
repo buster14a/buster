@@ -127,6 +127,37 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
     }
 #endif
 
+    // Reservation and initial commitment are explicit construction
+    // failures. Each one-shot seam is consumed once, leaves no arena
+    // published, and a subsequent creation succeeds normally.
+    {
+        ArenaCreation creation = {
+            .reserved_size = BUSTER_MB(1),
+            .initial_size = BUSTER_KB(64),
+            .flags = {.no_pool = 1},
+        };
+
+        arena_test_fail_next_reserve();
+        Arena* reserve_failure = arena_create(creation);
+        BUSTER_TEST(arguments, reserve_failure == 0);
+        Arena* reserve_recovery = arena_create(creation);
+        BUSTER_TEST(arguments, reserve_recovery != 0);
+        if (reserve_recovery)
+        {
+            BUSTER_TEST(arguments, arena_destroy(reserve_recovery, 1));
+        }
+
+        arena_test_fail_next_commit();
+        Arena* commit_failure = arena_create(creation);
+        BUSTER_TEST(arguments, commit_failure == 0);
+        Arena* commit_recovery = arena_create(creation);
+        BUSTER_TEST(arguments, commit_recovery != 0);
+        if (commit_recovery)
+        {
+            BUSTER_TEST(arguments, arena_destroy(commit_recovery, 1));
+        }
+    }
+
     // Companion to the reserved_size bound: filling an arena up to its
     // reservation stays within bounds and keeps working. Requests past
     // reserved_size abort via BUSTER_VALIDATE, so they cannot be observed

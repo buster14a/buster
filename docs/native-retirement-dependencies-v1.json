@@ -450,15 +450,15 @@
       "source": "src/buster/lib/arena.c",
       "provenance": "repo:src/buster/lib/arena.c",
       "destination": "dependencies/project-include/buster/lib/arena.c",
-      "bytes": 27775,
-      "sha256": "132b9e8a83f97a55d9f4c622b9beb10a8f98e9728ed10f34639a383caaadb5b9"
+      "bytes": 28590,
+      "sha256": "fae5febf6548c59109e67ab0ed1176dbfc70b0c2229da211d5c41dc75f97f594"
     },
     {
       "source": "src/buster/lib/arena.h",
       "provenance": "repo:src/buster/lib/arena.h",
       "destination": "dependencies/project-include/buster/lib/arena.h",
-      "bytes": 13324,
-      "sha256": "7426e7ea9c1ba0d4831f7dd0ae4267c684c835099edc9c961bf11c446d7462f4"
+      "bytes": 13379,
+      "sha256": "686212dc6501ebb211545c84420844f983dd9f556102166720c551ea62b3ca6b"
     },
     {
       "source": "src/buster/lib/base.h",
@@ -499,8 +499,8 @@
       "source": "src/buster/lib/compiler/ir/ir.h",
       "provenance": "repo:src/buster/lib/compiler/ir/ir.h",
       "destination": "dependencies/project-include/buster/lib/compiler/ir/ir.h",
-      "bytes": 46721,
-      "sha256": "788529876cb23af30c58e077d862059c0bbe3e029501288f688e29762d519c1f"
+      "bytes": 46749,
+      "sha256": "3b64d4badfc1ba4971ddec4db2add02bbf51fae747ed593898c5f6319b897b5a"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_cfg.c",
@@ -618,22 +618,22 @@
       "source": "src/buster/lib/os.c",
       "provenance": "repo:src/buster/lib/os.c",
       "destination": "dependencies/project-include/buster/lib/os.c",
-      "bytes": 198024,
-      "sha256": "d317f5d28483f920a5992692d9bb7000d78daa272d91db95b0f74ecfa01f5fde"
+      "bytes": 213394,
+      "sha256": "bace5a00127579de0114bfd2c4bdba3b53f75463e60ac90213973b1d9cbbddcf"
     },
     {
       "source": "src/buster/lib/os.h",
       "provenance": "repo:src/buster/lib/os.h",
       "destination": "dependencies/project-include/buster/lib/os.h",
-      "bytes": 27802,
-      "sha256": "2ef27f88506e94d6db7fbf85f5afc32936e6124fd96796d59eceb31fb4cbf032"
+      "bytes": 28262,
+      "sha256": "c272e20bbebaa2161057455bca6a6d93cf9f6bbe6d7800df83c4baefd47aea67"
     },
     {
       "source": "src/buster/lib/os_internal.h",
       "provenance": "repo:src/buster/lib/os_internal.h",
       "destination": "dependencies/project-include/buster/lib/os_internal.h",
-      "bytes": 2936,
-      "sha256": "0df0906ee1d4dac28ec03ba1b3a1682de250042640633238b364a1f8dd2dc2fa"
+      "bytes": 3522,
+      "sha256": "099ed9aa484064b15332d1201b4c87dd8b3c731748c19d48d608128f00220759"
     },
     {
       "source": "src/buster/lib/simd.h",
