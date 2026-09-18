@@ -139,8 +139,26 @@ typedef enum ObjectRelocationKind
     // introduced for __tls_get_addr and which every interposable direct call
     // takes under -fPIC.
     OBJECT_RELOCATION_X86_64_GOTPCREL,
+    // The psABI's relaxable spellings of the same reference.
+    // R_X86_64_GOTPCRELX promises the producer wrote a form a linker may
+    // convert and that the site carries no REX prefix; R_X86_64_REX_GOTPCRELX
+    // promises the same for a site with exactly one. Both the promise and the
+    // prefix width are what let a linker rewrite the instruction instead of
+    // patching its displacement, so neither collapses into the plain form
+    // above, which carries no promise at all.
+    OBJECT_RELOCATION_X86_64_GOTPCRELX,
+    OBJECT_RELOCATION_X86_64_REX_GOTPCRELX,
+    // R_X86_64_CODE_4_GOTPCRELX: the relaxable REX2 spelling.  The
+    // instruction begins four bytes before its relocated field.
+    OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX,
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
+
+// The four x86-64 GOT spellings share every rule but relaxation: one
+// rip-relative 32-bit field, a -4 addend, and a value taken from the slot
+// holding the symbol's address. Ask this instead of naming all three
+// wherever only that shared contract matters.
+BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
 
 // Apply the ordinary Windows ARM64 PAGEBASE_REL21/PAGEOFFSET_12A contract to
 // one canonical instruction.  The reader removes COFF's inline addend; the

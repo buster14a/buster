@@ -4974,7 +4974,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_test_pic_arguments(Arena* arena
     bool gnu = string_equal(compiler_id, S8("GNU"));
     if (compiler.length && output.length && (clang || gnu))
     {
-        enum { PIC_ARGUMENT_CAPACITY = 12 };
+        enum { PIC_ARGUMENT_CAPACITY = 14 };
         result.pointer = arena_allocate(arena, String8, PIC_ARGUMENT_CAPACITY);
         result.pointer[result.length++] = compiler;
         if (arg1.length)
@@ -4993,6 +4993,10 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_test_pic_arguments(Arena* arena
             result.pointer[result.length++] = S8("-fno-pie");
         }
         result.pointer[result.length++] = S8("-g0");
+        // Optimized, because that is where both compilers narrow an address
+        // to 32 bits and emit the GOT loads with no REX prefix -- the
+        // R_X86_64_GOTPCRELX shapes this linker converts to an immediate.
+        result.pointer[result.length++] = S8("-O2");
         result.pointer[result.length++] = S8("-c");
         result.pointer[result.length++] = S8("-o");
         result.pointer[result.length++] = output;
@@ -5006,15 +5010,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
 {
     UnitTestResult result = {0};
     TemporalArena temporary = arena_begin_temporal(arguments->arena);
-    String8 gnu_no_pic[] = {S8("compiler with spaces"), S8("-nostdinc"), S8("-fno-pic"), S8("-fno-pie"), S8("-g0"),
+    String8 gnu_no_pic[] = {S8("compiler with spaces"), S8("-nostdinc"), S8("-fno-pic"), S8("-fno-pie"), S8("-g0"), S8("-O2"),
                            S8("-c"), S8("-o"), S8("output with spaces.o"), S8("tests/basic_c_pic.c")};
-    String8 gnu_pic[] = {S8("compiler with spaces"), S8("-nostdinc"), S8("-fPIC"), S8("-g0"),
+    String8 gnu_pic[] = {S8("compiler with spaces"), S8("-nostdinc"), S8("-fPIC"), S8("-g0"), S8("-O2"),
                         S8("-c"), S8("-o"), S8("output with spaces.o"), S8("tests/basic_c_pic.c")};
     String8 clang_no_pic[] = {S8("compiler with spaces"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"),
-                             S8("-fno-pic"), S8("-fno-pie"), S8("-g0"), S8("-c"), S8("-o"),
+                             S8("-fno-pic"), S8("-fno-pie"), S8("-g0"), S8("-O2"), S8("-c"), S8("-o"),
                              S8("output with spaces.o"), S8("tests/basic_c_pic.c")};
     String8 clang_pic[] = {S8("compiler with spaces"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("-nostdinc"),
-                          S8("-fPIC"), S8("-g0"), S8("-c"), S8("-o"), S8("output with spaces.o"), S8("tests/basic_c_pic.c")};
+                          S8("-fPIC"), S8("-g0"), S8("-O2"), S8("-c"), S8("-o"), S8("output with spaces.o"), S8("tests/basic_c_pic.c")};
     SliceString8 expected[] = {(SliceString8)BUSTER_ARRAY_TO_SLICE(gnu_no_pic), (SliceString8)BUSTER_ARRAY_TO_SLICE(gnu_pic),
                               (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_no_pic), (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_pic)};
     String8 families[] = {S8("GNU"), S8("Clang"), S8("AppleClang"), S8("MSVC"), S8("unknown"), S8("")};
@@ -8154,7 +8158,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     continue;
                 }
                 String8 name = pic_model_object.symbols[relocation->symbol].name;
-                bool got = relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL;
+                bool got = object_relocation_kind_is_x86_got(relocation->kind);
                 global_through_got = global_through_got || (got && string_equal(name, S8("buster_pic_model_global")));
                 external_through_got = external_through_got || (got && string_equal(name, S8("buster_pic_model_external")));
                 function_address_through_got = function_address_through_got || (got && string_equal(name, S8("buster_pic_model_callee")));
@@ -8181,7 +8185,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 ObjectRelocationKind kind = pic_model_default.object.relocations[relocation_index].kind;
                 default_indirect_found =
-                    default_indirect_found || kind == OBJECT_RELOCATION_X86_64_GOTPCREL || kind == OBJECT_RELOCATION_X86_64_PLT32;
+                    default_indirect_found || object_relocation_kind_is_x86_got(kind) || kind == OBJECT_RELOCATION_X86_64_PLT32;
             }
             BUSTER_TEST(arguments, !default_indirect_found);
             scratch_end(pic_model_temporary);
@@ -8191,10 +8195,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         // Keep one real external-compiler fixture in the driver suite.  The
         // indexed non-PIC load exercises R_X86_64_32S; the -fPIC form is the
-        // REX_GOTPCRELX family, which this reader takes as one GOT kind and
-        // this linker resolves the way it resolves its own -fPIC output --
-        // by relaxing each load back into the address it would have computed,
-        // because a static image binds every name in it.  Keep debug sections
+        // REX_GOTPCRELX family, whose kind tells this linker the site carries
+        // one REX prefix, and it resolves the object the way it resolves its
+        // own -fPIC output -- by relaxing each load back into the address it
+        // would have computed, because a static image binds every name in
+        // it.  Keep debug sections
         // out of this fixture: newer compiler .debug_addr/.debug_str_offsets
         // sections are outside this object's intentionally narrow
         // debug-section model.
@@ -8258,7 +8263,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             bool got_indirect_found = false;
             for (u32 relocation_index = 0; relocation_index < pic.relocation_count; relocation_index += 1)
             {
-                got_indirect_found = got_indirect_found || pic.relocations[relocation_index].kind == OBJECT_RELOCATION_X86_64_GOTPCREL;
+                got_indirect_found = got_indirect_found || object_relocation_kind_is_x86_got(pic.relocations[relocation_index].kind);
             }
             BUSTER_TEST(arguments, pic.error == OBJECT_ERROR_NONE && got_indirect_found);
             file_map_unmap(pic_map);
