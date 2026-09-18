@@ -64,6 +64,10 @@ jobs:
             tools/analyzer_selection_test.py | LC_ALL=C sort)"
           test "$actual_paths" = "$expected_paths"
           git diff --cached --check
+          git config user.name 'OpenAI'
+          git config user.email 'support@openai.com'
+          git commit -m 'ci: freeze analyzer reference provenance (#603)'
+          test "$(git rev-list --count "$BASE_SHA..HEAD")" = 1
 
           python3 -m py_compile tools/analyzer_reference.py tools/analyzer_selection_test.py
           python3 tools/analyzer_selection_test.py -v
