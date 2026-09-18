@@ -33,16 +33,18 @@ jobs:
 
           path = Path('.github/workflows/ci.yml')
           text = path.read_text(encoding='utf-8')
-          old = r'''          printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection" >> "$GITHUB_ENV"
-          printf 'ANALYZER_COMPARISON_REASON=%s\n' "$reason" >> "$GITHUB_ENV"
-          printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\n' "$reference_materialized" >> "$GITHUB_ENV"
-'''
-          new = r'''          {
-            printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection"
-            printf 'ANALYZER_COMPARISON_REASON=%s\n' "$reason"
-            printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\n' "$reference_materialized"
-          } >> "$GITHUB_ENV"
-'''
+          old = (
+              "          printf 'ANALYZER_COMPARISON_SELECTION=%s\\n' \"$selection\" >> \"$GITHUB_ENV\"\n"
+              "          printf 'ANALYZER_COMPARISON_REASON=%s\\n' \"$reason\" >> \"$GITHUB_ENV\"\n"
+              "          printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\\n' \"$reference_materialized\" >> \"$GITHUB_ENV\"\n"
+          )
+          new = (
+              "          {\n"
+              "            printf 'ANALYZER_COMPARISON_SELECTION=%s\\n' \"$selection\"\n"
+              "            printf 'ANALYZER_COMPARISON_REASON=%s\\n' \"$reason\"\n"
+              "            printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\\n' \"$reference_materialized\"\n"
+              "          } >> \"$GITHUB_ENV\"\n"
+          )
           count = text.count(old)
           if count != 1:
               raise SystemExit(f'expected one analyzer export block, found {count}')
