@@ -1,0 +1,126 @@
+name: PR 796 Windows CodeView diagnostic
+
+on:
+  push:
+    branches:
+      - fix/786-native-retirement-closure
+    paths:
+      - .github/workflows/pr-796-windows-codeview-diagnostic.yml
+      - src/buster/lib/compiler/codeview/codeview.c
+      - src/buster/lib/compiler/object/object.c
+      - src/buster/tests/compiler/codeview/codeview_test.c
+      - src/buster/tests/compiler/codegen/codegen_test.c
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out diagnostic revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Reproduce and isolate the p2 CodeView link failure
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86/x64 tools were not found' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+
+          $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $RuntimeDlls = @(Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse | Sort-Object FullName)
+          if ($RuntimeDlls.Count -ne 1) { throw "Expected one ASan runtime under ${ResourceDir}; found $($RuntimeDlls.Count)" }
+          $RuntimeDir = Split-Path -Parent $RuntimeDlls[0].FullName
+          $env:PATH = "$RuntimeDir;$env:PATH"
+          Write-Output "asan_runtime=$($RuntimeDlls[0].FullName)"
+
+          $Driver = Join-Path $env:RUNNER_TEMP 'strict-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Ide = (Resolve-Path 'build\Release\ide.exe').Path
+          $Include = (Resolve-Path 'tests\differential').Path
+          $Caller = Join-Path $env:RUNNER_TEMP 'abi-caller-sanitized.o'
+          $SubjectP0 = Join-Path $env:RUNNER_TEMP 'abi-p0.o'
+          $SubjectP2 = Join-Path $env:RUNNER_TEMP 'abi-p2.o'
+          $SubjectP2NoS = Join-Path $env:RUNNER_TEMP 'abi-p2-no-debug-s.o'
+          $SubjectP2NoT = Join-Path $env:RUNNER_TEMP 'abi-p2-no-debug-t.o'
+          $ProgramP0 = Join-Path $env:RUNNER_TEMP 'abi-p0-sanitized.exe'
+          $ProgramP2 = Join-Path $env:RUNNER_TEMP 'abi-p2-sanitized.exe'
+          $ProgramP2NoS = Join-Path $env:RUNNER_TEMP 'abi-p2-no-debug-s-sanitized.exe'
+          $ProgramP2NoT = Join-Path $env:RUNNER_TEMP 'abi-p2-no-debug-t-sanitized.exe'
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
+
+          $Sanitize = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
+          $CallerArgs = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char') + $Sanitize + @("-I$Include")
+          foreach ($LibraryPath in $LibraryPaths) { $CallerArgs += "-L$LibraryPath" }
+          $CallerArgs += @('tests\differential\abi_host.c', '-c', '-o', $Caller)
+          & clang.exe @CallerArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Common = @(
+            'cc', '-fregister-allocator=fast', '-fno-machine-fallback',
+            '-fno-canonical-local-promotion', '-fno-frontend-ssa', '-fverify-codegen',
+            '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', "-I$Include"
+          )
+          foreach ($LibraryPath in $LibraryPaths) { $Common += "-L$LibraryPath" }
+          & $Ide @Common '-fno-target-local-promotion' 'tests\differential\abi.c' '-c' '-o' $SubjectP0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Ide @Common '-ftarget-local-promotion' 'tests\differential\abi.c' '-c' '-o' $SubjectP2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Write-Output '=== p0 sections/symbols/relocations/CodeView ==='
+          & llvm-readobj.exe --sections --symbols --relocations --codeview $SubjectP0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output '=== p2 sections/symbols/relocations/CodeView ==='
+          & llvm-readobj.exe --sections --symbols --relocations --codeview $SubjectP2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Copy-Item $SubjectP2 $SubjectP2NoS
+          & llvm-objcopy.exe --remove-section='.debug$S' $SubjectP2NoS
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item $SubjectP2 $SubjectP2NoT
+          & llvm-objcopy.exe --remove-section='.debug$T' $SubjectP2NoT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          function Invoke-StrictLink([string] $Label, [string] $Subject, [string] $Program) {
+            Write-Output "=== $Label ==="
+            $LinkArgs = @() + $Sanitize
+            foreach ($LibraryPath in $LibraryPaths) { $LinkArgs += "-L$LibraryPath" }
+            $LinkArgs += @($Caller, $Subject, '-o', $Program)
+            & clang.exe -v @LinkArgs
+            $ExitCode = $LASTEXITCODE
+            Write-Output "${Label}_link_exit=$ExitCode"
+            if ($ExitCode -eq 0) {
+              & $Program
+              $RunExit = $LASTEXITCODE
+              Write-Output "${Label}_run_exit=$RunExit"
+              return $RunExit
+            }
+            return $ExitCode
+          }
+
+          $P0 = Invoke-StrictLink 'p0' $SubjectP0 $ProgramP0
+          $P2 = Invoke-StrictLink 'p2' $SubjectP2 $ProgramP2
+          $P2NoS = Invoke-StrictLink 'p2_no_debug_s' $SubjectP2NoS $ProgramP2NoS
+          $P2NoT = Invoke-StrictLink 'p2_no_debug_t' $SubjectP2NoT $ProgramP2NoT
+          Write-Output "DIAGNOSTIC_RESULT p0=$P0 p2=$P2 p2_no_debug_s=$P2NoS p2_no_debug_t=$P2NoT"
+
+          if ($P0 -ne 0) { throw "p0 control failed with $P0" }
+          if ($P2 -eq 0) { throw 'p2 unexpectedly linked; the reproducer no longer exercises the failure' }
+          if ($P2NoS -ne 0) { throw "p2 without .debug`$S still failed with $P2NoS" }
+          Write-Output 'DIAGNOSTIC_COMPLETE'
