@@ -30,7 +30,7 @@ jobs:
           @'
           from pathlib import Path
 
-          def replace_once(text, old, new, name):
+          def one(text, old, new, name):
               count = text.count(old)
               if count != 1:
                   raise SystemExit(f"{name}: expected one match, found {count}")
@@ -38,77 +38,41 @@ jobs:
 
           codeview_path = Path("src/buster/lib/compiler/codeview/codeview.c")
           text = codeview_path.read_text()
-          text = replace_once(
-              text,
-              """// Address-bearing CodeView records contain a section-relative offset
-          // and section index.  Both are COFF relocation inputs.  Keep the
-          // function-relative byte position as the SECREL32 addend and bind
-          // both relocations to the function's object symbol.
-          """,
-              """// Defrange and lexical-block addresses are section-relative.  COFF
-          // requires their paired relocations to name the text section symbol;
-          // the absolute section offset is retained as the SECREL32 addend.
-          """,
-              "helper comment",
-          )
-          text = replace_once(
-              text,
-              """    if (!symbols || !relocations || !relocation_count || *relocation_count > relocation_capacity ||
-                  relocation_capacity - *relocation_count < 2)
-              {
-          """,
-              """    (void)function_index;
-              if (!symbols || !relocations || !relocation_count || *relocation_count > relocation_capacity ||
-                  relocation_capacity - *relocation_count < 2)
-              {
-          """,
-              "unused function index",
-          )
           helper_start = text.index("BUSTER_GLOBAL_LOCAL void codeview_emit_function_address")
           helper_end = text.index("BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add", helper_start)
           helper = text[helper_start:helper_end]
+          helper = one(
+              helper,
+              """{
+              if (!symbols || !relocations || !relocation_count || *relocation_count > relocation_capacity ||""",
+              """{
+              (void)function_index;
+              if (!symbols || !relocations || !relocation_count || *relocation_count > relocation_capacity ||""",
+              "unused function index",
+          )
           if helper.count(".function = function_index,") != 2:
               raise SystemExit("function-address helper did not contain two function targets")
           helper = helper.replace(".function = function_index,", ".function = UINT32_MAX,")
           text = text[:helper_start] + helper + text[helper_end:]
-          text = replace_once(
+          text = one(
               text,
               """    u32 start = range->start >= function_offset ? range->start - function_offset : 0;
-              u32 length = range->end - range->start;
-          """,
+              u32 length = range->end - range->start;""",
               """    (void)function_offset;
               u32 start = range->start;
-              u32 length = range->end - range->start;
-          """,
+              u32 length = range->end - range->start;""",
               "whole range start",
           )
-          text = replace_once(
-              text,
-              """            u32 piece_start = range->start >= function_offset ? range->start - function_offset : 0;
-          """,
-              """            u32 piece_start = range->start;
-          """,
-              "piece range start",
-          )
-          text = replace_once(
-              text,
-              """                u32 start = scope->start >= function_offset ? scope->start - function_offset : 0;
-          """,
-              """                u32 start = scope->start;
-          """,
-              "lexical block start",
-          )
+          text = one(text, "u32 piece_start = range->start >= function_offset ? range->start - function_offset : 0;",
+                     "u32 piece_start = range->start;", "piece range start")
+          text = one(text, "u32 start = scope->start >= function_offset ? scope->start - function_offset : 0;",
+                     "u32 start = scope->start;", "lexical block start")
           codeview_path.write_text(text)
 
           object_path = Path("src/buster/lib/compiler/object/object.c")
           text = object_path.read_text()
-          text = replace_once(
-              text,
-              """    bool name_index_initialized = false;
-              for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
-          """,
-              """    bool name_index_initialized = false;
-              u32 text_symbol = UINT32_MAX;
+          marker = "    bool name_index_initialized = false;\n"
+          insertion = marker + """    u32 text_symbol = UINT32_MAX;
               for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
               {
                   CodeviewRelocation relocation = built.relocations[relocation_index];
@@ -123,27 +87,15 @@ jobs:
                       break;
                   }
               }
-              for (u32 relocation_index = 0; relocation_index < built.relocation_count; relocation_index += 1)
-          """,
-              "text symbol creation",
-          )
-          text = replace_once(
+          """
+          text = one(text, marker, insertion, "text symbol creation")
+          text = one(text, "u32 symbol_index = relocation.function;",
+                     "u32 symbol_index = relocation.function == UINT32_MAX && !relocation.symbol_name.length ? text_symbol : relocation.function;",
+                     "text symbol selection")
+          text = one(
               text,
-              """        u32 symbol_index = relocation.function;
-              if (relocation.symbol_name.length)
-          """,
-              """        u32 symbol_index = relocation.function == UINT32_MAX && !relocation.symbol_name.length ? text_symbol : relocation.function;
-              if (relocation.symbol_name.length)
-          """,
-              "text symbol selection",
-          )
-          text = replace_once(
-              text,
-              """                                                             (windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0));
-          """,
-              """                                                             (windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0) +
-                                                               (codeview.valid ? 1 : 0));
-          """,
+              "(windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0));",
+              "(windows_unwind.function_count ? 1 : 0) + (module->position_independent ? 1 : 0) + (codeview.valid ? 1 : 0));",
               "symbol capacity",
           )
           object_path.write_text(text)
