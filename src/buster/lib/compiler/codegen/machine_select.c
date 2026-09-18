@@ -710,7 +710,10 @@ MachineTypeClass* machine_type_classes_build(Arena* arena, IrTypeTable const* ty
         u32 flags = 0;
         flags |= resolved ? MACHINE_TYPE_CLASS_RESOLVED : 0;
         flags |= resolved && scalar_kind && type->layout.size <= 8 ? MACHINE_TYPE_CLASS_SCALAR_REGISTER : 0;
-        flags |= type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64) ? MACHINE_TYPE_CLASS_FLOAT_SCALAR : 0;
+        flags |= type->kind == IR_TYPE_FLOAT &&
+                         ((type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE) || type->bit_width == 32 || type->bit_width == 64)
+                     ? MACHINE_TYPE_CLASS_FLOAT_SCALAR
+                     : 0;
         flags |= resolved && type->kind == IR_TYPE_VECTOR && type->layout.size == 64 ? MACHINE_TYPE_CLASS_VECTOR_REGISTER : 0;
         flags |= type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION || (type->kind == IR_TYPE_INTEGER && type->bit_width > 32)
                      ? MACHINE_TYPE_CLASS_WIDE

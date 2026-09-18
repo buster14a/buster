@@ -401,7 +401,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_atomic_pair_updates(UnitTest
             for (u32 order = 0; order < BUSTER_ARRAY_LENGTH(order_flags); order += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                bool compare_exchange = operation >= IR_ATOMIC_OPERATION_COUNT;
+                bool compare_exchange = operation >= BUSTER_ARRAY_LENGTH(builtins) - 2;
                 String8 source = compare_exchange
                     ? string_format(temporary.arena, S8("typedef unsigned __int128 U; int update(_Atomic(U)* cell, U* expected, U const* value) {{ "
                                                         "return __c11_atomic_{S8}(cell, expected, *value, {u32}, {u32}); }"),
@@ -6530,7 +6530,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // check the full domain so adding or dropping membership fails locally.
     // These are scheduler obligations, not a census of hardware memory or
     // vector instructions: explicit virtual vector dataflow needs no chain.
-    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 302);
+    BUSTER_CT_CHECK(MACHINE_OPCODE_COUNT == 306);
     u8 const schedule_memberships[MACHINE_OPCODE_COUNT] = {
         [MACHINE_X64_F80_BINARY] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
         [MACHINE_X64_F80_NEGATE] = MACHINE_SCHEDULE_UNIT_BARRIER | MACHINE_SCHEDULE_UNIT_MEMORY,
@@ -6672,6 +6672,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         [MACHINE_A64_FCMP_SET] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_F32_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_F64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F16_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F16_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F32_TO_F16] = MACHINE_SCHEDULE_UNIT_VECTOR,
+        [MACHINE_A64_CVT_F64_TO_F16] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_I64_TO_F32] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_I64_TO_F64] = MACHINE_SCHEDULE_UNIT_VECTOR,
         [MACHINE_A64_CVT_F32_TO_I64] = MACHINE_SCHEDULE_UNIT_VECTOR,
@@ -7015,7 +7019,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_NONE] == 4);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_DIRECT] == 103);
     BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_FAMILY] == 66);
-    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 129);
+    BUSTER_TEST(arguments, recipe_counts[MACHINE_EMIT_RECIPE_CATEGORY_EXPANSION] == 133);
     BUSTER_TEST(arguments, machine_opcode_emit_recipe(MACHINE_OPCODE_COUNT) == MACHINE_EMIT_RECIPE_INVALID);
 
     // Equal recipe indices in different categories are distinct identities.
@@ -7261,7 +7265,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 263);
+    // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes.
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 267);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate

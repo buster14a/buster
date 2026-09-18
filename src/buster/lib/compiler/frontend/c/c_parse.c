@@ -1077,6 +1077,47 @@ BUSTER_C_INTERNAL void c_parse_validate_flexible_array_members(CParseResult* res
     }
 }
 
+BUSTER_C_SHARED bool c_vector_type_layout(Target target, u64 element_size, u32 logical_byte_size, u64* element_count_out,
+                                          u64* storage_size_out, u32* alignment_out)
+{
+    bool valid = element_size && logical_byte_size && storage_size_out && alignment_out && logical_byte_size % element_size == 0;
+    u64 element_count = 0;
+    u64 storage_size = 0;
+    if (valid)
+    {
+        element_count = logical_byte_size / element_size;
+        storage_size = next_power_of_two(logical_byte_size);
+        valid = element_count && storage_size && storage_size <= UINT32_MAX / 8u;
+    }
+    if (valid)
+    {
+        if (element_count_out)
+        {
+            *element_count_out = element_count;
+        }
+        u32 alignment = (u32)storage_size;
+        bool padded = storage_size != logical_byte_size;
+        // Keep the established power-of-two vector layout unchanged. For the
+        // newly admitted padded GNU shape, Clang caps natural alignment at
+        // sixteen on AArch64. Darwin x86-64 caps it at the enabled vector
+        // register width; the other x86-64 ABIs retain storage alignment.
+        if (padded && target.cpu_arch == CPU_ARCH_AARCH64)
+        {
+            alignment = BUSTER_MIN(alignment, 16u);
+        }
+        else if (padded && target.cpu_arch == CPU_ARCH_X86_64 &&
+                 (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS))
+        {
+            u32 maximum = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) ? 64u :
+                          target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX) ? 32u : 16u;
+            alignment = BUSTER_MIN(alignment, maximum);
+        }
+        *storage_size_out = storage_size;
+        *alignment_out = alignment;
+    }
+    return valid;
+}
+
 BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out)
 {
     TargetDataLayout layout = target_data_layout(target);
@@ -1649,18 +1690,16 @@ BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* ar
             }
             if (type.kind == C_TYPE_VECTOR)
             {
-                if (type.element_type.value >= type_count || !resolved[type.element_type.value] || !type.vector_byte_size ||
-                    !sizes[type.element_type.value] || type.vector_byte_size % sizes[type.element_type.value])
+                u64 storage_size = 0;
+                u32 vector_alignment = 0;
+                if (type.element_type.value >= type_count || !resolved[type.element_type.value] ||
+                    !c_vector_type_layout(preprocess.target, sizes[type.element_type.value], type.vector_byte_size, 0, &storage_size,
+                                          &vector_alignment))
                 {
                     continue;
                 }
-                u64 element_count = type.vector_byte_size / sizes[type.element_type.value];
-                if (!element_count || (element_count & (element_count - 1)))
-                {
-                    continue;
-                }
-                sizes[type_index] = type.vector_byte_size;
-                alignments[type_index] = type.vector_byte_size;
+                sizes[type_index] = storage_size;
+                alignments[type_index] = vector_alignment;
                 provisional[type_index] = provisional[type.element_type.value];
                 resolved[type_index] = true;
                 if (type_index == requested.value)
@@ -12928,9 +12967,10 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         // CPython's configure probes it for HAVE_BUILTIN_ATOMIC and most Linux
         // userland reaches for it in preference to the C11 one.
         predefined_function_name |= string_starts_with_sequence(spelling, S8("__atomic_"));
-        // GCC's legacy full barrier is the one __sync builtin the compiler
-        // implements; SQLite reaches for it in sqlite3MemoryBarrier.
-        predefined_function_name |= string_equal(spelling, S8("__sync_synchronize"));
+        // Admit only the implemented legacy full barrier and NAND spellings.
+        predefined_function_name |= string_equal(spelling, S8("__sync_synchronize")) ||
+                                    string_equal(spelling, S8("__sync_fetch_and_nand")) ||
+                                    string_equal(spelling, S8("__sync_nand_and_fetch"));
         // GNU's complex part operators are spelled as identifiers but name no
         // entity; the expression walker consumes them as prefix operators.
         predefined_function_name |= string_equal(spelling, S8("__real__")) || string_equal(spelling, S8("__real")) ||

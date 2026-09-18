@@ -999,6 +999,10 @@ BUSTER_GLOBAL_LOCAL MachineOpcodeInfo const machine_opcode_infos[MACHINE_OPCODE_
     },
     [MACHINE_A64_CVT_F32_TO_F64] = MACHINE_INFO_FLOAT_MOVE(),
     [MACHINE_A64_CVT_F64_TO_F32] = MACHINE_INFO_FLOAT_MOVE(),
+    [MACHINE_A64_CVT_F16_TO_F32] = MACHINE_INFO_FLOAT_MOVE(),
+    [MACHINE_A64_CVT_F16_TO_F64] = MACHINE_INFO_FLOAT_MOVE(),
+    [MACHINE_A64_CVT_F32_TO_F16] = MACHINE_INFO_FLOAT_MOVE(),
+    [MACHINE_A64_CVT_F64_TO_F16] = MACHINE_INFO_FLOAT_MOVE(),
     [MACHINE_A64_CVT_I64_TO_F32] = MACHINE_INFO_FLOAT_MOVE(),
     [MACHINE_A64_CVT_I64_TO_F64] = MACHINE_INFO_FLOAT_MOVE(),
     [MACHINE_A64_CVT_F32_TO_I64] = MACHINE_INFO_FLOAT_MOVE(),
@@ -1546,6 +1550,10 @@ BUSTER_GLOBAL_LOCAL MachineEmitRecipeId const machine_opcode_emit_recipes[MACHIN
     [MACHINE_A64_INLINE_EFFECTS_MEMORY] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 84,
     [MACHINE_A64_INLINE_EFFECTS_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 85,
     [MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 86,
+    [MACHINE_A64_CVT_F16_TO_F32] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 87,
+    [MACHINE_A64_CVT_F16_TO_F64] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 88,
+    [MACHINE_A64_CVT_F32_TO_F16] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 89,
+    [MACHINE_A64_CVT_F64_TO_F16] = MACHINE_EMIT_RECIPE_EXPANSION_BASE + 90,
     [MACHINE_X64_KMOV_FROM_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 50,
     [MACHINE_X64_KMOV_TO_GENERAL] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 51,
     [MACHINE_X64_KMOV] = MACHINE_EMIT_RECIPE_FAMILY_BASE + 52,
@@ -5205,6 +5213,25 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
 #include <buster/lib/compiler/codegen/register_allocator_predicate.c>
 
+BUSTER_GLOBAL_LOCAL bool machine_function_has_padded_vector(IrProgram* program, IrFunction* function)
+{
+    bool result = false;
+    if (program && function && function->values)
+    {
+        for (u32 value_index = 0; value_index < function->value_count && !result; value_index += 1)
+        {
+            IrType* type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
+            IrType* element = type && type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, type->element_type) : 0;
+            if (element && element->layout.resolved && element->layout.size && type->layout.resolved &&
+                type->element_count <= UINT64_MAX / element->layout.size)
+            {
+                result = type->element_count * element->layout.size != type->layout.size;
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                                     bool assume_validated, bool position_independent, bool predicate_residency,
                                                                                     bool preserve_debug_values, MachineSelectionModule* module)
@@ -5213,7 +5240,10 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
     if (arena && program && function)
     {
         IrValidationResult publication = ir_function_publish_cfg(program->arena, function);
-        if (publication.error == IR_VALIDATION_NONE)
+        // Padded GNU vectors retain a logical lane count smaller than their
+        // frame image. The canonical emitter owns their lane-wise semantics
+        // and target ABI legalization until MIR carries that distinction.
+        if (publication.error == IR_VALIDATION_NONE && !machine_function_has_padded_vector(program, function))
         {
             switch (target.cpu_arch)
             {

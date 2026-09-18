@@ -274,6 +274,10 @@ BUSTER_C_EXTERN String8 c_semantic_call_arity_message(Arena* arena, String8 name
 BUSTER_C_EXTERN CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
                                                                       CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out);
+// GNU vectors retain their written lane count while object size rounds to
+// the next power of two. Alignment follows the target vector ABI.
+BUSTER_C_EXTERN bool c_vector_type_layout(Target target, u64 element_size, u32 logical_byte_size, u64* element_count_out,
+                                          u64* storage_size_out, u32* alignment_out);
 // `_Atomic T`'s size and alignment, given T's own; both layout engines ask it
 // (see c_atomic_promoted_layout in c_parse.c).
 BUSTER_C_EXTERN void c_atomic_promoted_layout(u32 atomic_max_width, u64* size, u32* alignment);
