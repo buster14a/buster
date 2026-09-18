@@ -1,9 +1,15 @@
 // Linux/POSIX scaling probe for the production scheduler line-mark repair.
-// One large block publishes one mark per instruction and forces an accepted,
-// heavily permuted schedule. Build commands and paired measurements live in
-// the corresponding performance audit.
+// The schedule mode drives the accepted machine_schedule_function path with
+// one mark per instruction. Optional remap modes isolate the ordered fast path,
+// the sixteen-mark crossover, and large disordered repair without timer noise.
 #define _POSIX_C_SOURCE 200809L
 #include <buster/lib/compiler/codegen/machine.h>
+#ifndef BUSTER_LINE_MARK_HELPER_BENCH
+#define BUSTER_LINE_MARK_HELPER_BENCH 1
+#endif
+#if BUSTER_LINE_MARK_HELPER_BENCH
+#include <buster/lib/compiler/codegen/machine_schedule_internal.h>
+#endif
 #include <buster/lib/arena.h>
 #include <errno.h>
 #include <stdio.h>
@@ -23,6 +29,20 @@ BUSTER_GLOBAL_LOCAL unsigned long long machine_line_mark_bench_now(void)
         abort();
     }
     return (unsigned long long)time.tv_sec * 1000000000ull + (unsigned long long)time.tv_nsec;
+}
+
+BUSTER_GLOBAL_LOCAL bool machine_line_mark_parse(char const* text, unsigned long minimum, unsigned long maximum,
+                                                 unsigned long* value)
+{
+    char* end = 0;
+    errno = 0;
+    unsigned long parsed = strtoul(text, &end, 10);
+    bool valid = errno == 0 && text[0] && end && !*end && parsed >= minimum && parsed <= maximum;
+    if (valid)
+    {
+        *value = parsed;
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL MachineFunction machine_line_mark_bench_function(Arena* arena, u32 leaf_count)
@@ -96,70 +116,177 @@ BUSTER_GLOBAL_LOCAL u64 machine_line_mark_hash(MachineLineMark const* marks, u32
     return hash;
 }
 
-int main(int argc, char** argv)
+BUSTER_GLOBAL_LOCAL int machine_line_mark_schedule(Arena* arena, u32 leaf_count, u32 samples, u32 batch)
 {
-    unsigned long values[2] = {16384, 11};
-    int status = argc > 3;
-    for (int argument = 1; argument < argc && argument <= 2; argument += 1)
+    int status = 0;
+    MachineFunction function = machine_line_mark_bench_function(arena, leaf_count);
+    MachineVerifyResult verified = machine_verify_function(&function);
+    status |= verified.error != MACHINE_VERIFY_NONE;
+    machine_opcode_rows_prewarm();
+    u64 input_end = arena->position;
+    u64 expected_hash = 0;
+    for (u32 sample = 0; sample < samples + 1; sample += 1)
     {
-        char* end = 0;
-        errno = 0;
-        values[argument - 1] = strtoul(argv[argument], &end, 10);
-        status |= errno != 0 || !argv[argument][0] || !end || *end != 0;
-    }
-    status |= values[0] < 32 || values[0] > 65536 || (values[0] & (values[0] - 1)) != 0;
-    status |= values[1] < 1 || values[1] > 10000;
-    if (status)
-    {
-        fprintf(stderr, "usage: %s [power-of-two leaves:32..65536] [repeats:1..10000]\n", argv[0]);
-    }
-    else
-    {
-        u32 leaf_count = (u32)values[0];
-        u32 repeats = (u32)values[1];
-        ThreadContext* thread_context = thread_context_allocate();
-        thread_context_select(thread_context);
-        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1)});
-        MachineFunction function = machine_line_mark_bench_function(arena, leaf_count);
-        MachineVerifyResult verified = machine_verify_function(&function);
-        status |= verified.error != MACHINE_VERIFY_NONE;
-        machine_opcode_rows_prewarm();
-        u64 input_end = arena->position;
-        u64 expected_hash = 0;
-        for (u32 repeat = 0; repeat < repeats + 1; repeat += 1)
+        MachineScheduleResult scheduled = {0};
+        unsigned long long start = machine_line_mark_bench_now();
+        for (u32 iteration = 0; iteration < batch; iteration += 1)
         {
             arena_set_position(arena, input_end);
-            unsigned long long start = machine_line_mark_bench_now();
-            MachineScheduleResult scheduled = machine_schedule_function(arena, &function);
-            unsigned long long finish = machine_line_mark_bench_now();
-            u32 permuted = 0;
-            u64 displacement = 0;
-            bool exact = scheduled.moved && scheduled.function.line_mark_count == function.instruction_count;
-            for (u32 row = 0; exact && row < scheduled.function.line_mark_count; row += 1)
-            {
-                MachineLineMark mark = scheduled.function.line_marks[row];
-                exact = mark.row == row && mark.instruction < function.instruction_count &&
-                        memcmp(scheduled.function.instructions + row, function.instructions + mark.instruction,
-                               sizeof(MachineInstruction)) == 0;
-                permuted += mark.instruction != row;
-                displacement += mark.instruction > row ? mark.instruction - row : row - mark.instruction;
-            }
-            for (u32 row = 0; exact && row < function.instruction_count; row += 1)
-            {
-                exact = function.line_marks[row].row == row && function.line_marks[row].instruction == row;
-            }
-            u64 hash = exact ? machine_line_mark_hash(scheduled.function.line_marks, scheduled.function.line_mark_count) : 0;
-            expected_hash = repeat ? expected_hash : hash;
-            status |= !exact || hash != expected_hash || permuted < function.instruction_count / 2;
-            if (repeat)
-            {
-                printf("leaves=%u rows=%u schedule_ns=%llu retained_bytes=%llu permuted=%u displacement=%llu hash=%016llx\n",
-                       leaf_count, function.instruction_count, finish - start, (unsigned long long)(arena->position - input_end),
-                       permuted, (unsigned long long)displacement, (unsigned long long)hash);
-            }
+            scheduled = machine_schedule_function(arena, &function);
         }
-        arena_destroy(arena, 1);
-        thread_context_release(thread_context);
+        unsigned long long finish = machine_line_mark_bench_now();
+        u32 permuted = 0;
+        u64 displacement = 0;
+        bool exact = scheduled.moved && scheduled.function.line_mark_count == function.instruction_count;
+        for (u32 row = 0; exact && row < scheduled.function.line_mark_count; row += 1)
+        {
+            MachineLineMark mark = scheduled.function.line_marks[row];
+            exact = mark.row == row && mark.instruction < function.instruction_count &&
+                    memcmp(scheduled.function.instructions + row, function.instructions + mark.instruction,
+                           sizeof(MachineInstruction)) == 0;
+            permuted += mark.instruction != row;
+            displacement += mark.instruction > row ? mark.instruction - row : row - mark.instruction;
+        }
+        for (u32 row = 0; exact && row < function.instruction_count; row += 1)
+        {
+            exact = function.line_marks[row].row == row && function.line_marks[row].instruction == row;
+        }
+        u64 hash = exact ? machine_line_mark_hash(scheduled.function.line_marks, scheduled.function.line_mark_count) : 0;
+        expected_hash = sample ? expected_hash : hash;
+        status |= !exact || hash != expected_hash || permuted < function.instruction_count / 2;
+        if (sample)
+        {
+            printf("mode=schedule leaves=%u rows=%u batch=%u schedule_ns=%llu retained_bytes=%llu "
+                   "permuted=%u displacement=%llu hash=%016llx\n",
+                   leaf_count, function.instruction_count, batch, (finish - start) / batch,
+                   (unsigned long long)(arena->position - input_end), permuted,
+                   (unsigned long long)displacement, (unsigned long long)hash);
+        }
     }
+    return status;
+}
+
+#if BUSTER_LINE_MARK_HELPER_BENCH
+BUSTER_GLOBAL_LOCAL int machine_line_mark_remap(Arena* arena, char const* mode, u32 mark_count, u32 samples, u32 batch)
+{
+    int status = 0;
+    MachineLineMark* marks = arena_allocate(arena, MachineLineMark, mark_count ? mark_count : 1);
+    u32* new_rows = arena_allocate(arena, u32, mark_count ? mark_count : 1);
+    u32* inverse_rows = arena_allocate(arena, u32, mark_count ? mark_count : 1);
+    bool reverse = strcmp(mode, "remap-reverse") == 0;
+    bool nearly = strcmp(mode, "remap-nearly") == 0;
+    for (u32 index = 0; index < mark_count; index += 1)
+    {
+        marks[index] = (MachineLineMark){.row = index, .instruction = index};
+        new_rows[index] = reverse ? mark_count - 1 - index : index;
+    }
+    if (nearly && mark_count > 1)
+    {
+        u32 swap = new_rows[mark_count - 2];
+        new_rows[mark_count - 2] = new_rows[mark_count - 1];
+        new_rows[mark_count - 1] = swap;
+    }
+    for (u32 index = 0; index < mark_count; index += 1)
+    {
+        inverse_rows[new_rows[index]] = index;
+    }
+
+    u64 input_end = arena->position;
+    arena_allocate(arena, MachineLineMark, mark_count ? mark_count : 1);
+    u64 retained_end = arena->position;
+    arena_set_position(arena, input_end);
+    u64 expected_hash = 0;
+    for (u32 sample = 0; sample < samples + 1; sample += 1)
+    {
+        MachineLineMark* result = 0;
+        unsigned long long start = machine_line_mark_bench_now();
+        for (u32 iteration = 0; iteration < batch; iteration += 1)
+        {
+            arena_set_position(arena, input_end);
+            result = machine_schedule_remap_line_marks(arena, arena, marks, mark_count, new_rows, mark_count);
+        }
+        unsigned long long finish = machine_line_mark_bench_now();
+        u32 permuted = 0;
+        u64 displacement = 0;
+        bool exact = result != 0 && arena->position == retained_end;
+        for (u32 row = 0; exact && row < mark_count; row += 1)
+        {
+            exact = result[row].row == row && result[row].instruction == inverse_rows[row];
+            permuted += inverse_rows[row] != row;
+            displacement += inverse_rows[row] > row ? inverse_rows[row] - row : row - inverse_rows[row];
+        }
+        for (u32 index = 0; exact && index < mark_count; index += 1)
+        {
+            exact = marks[index].row == index && marks[index].instruction == index;
+        }
+        u64 hash = exact ? machine_line_mark_hash(result, mark_count) : 0;
+        expected_hash = sample ? expected_hash : hash;
+        status |= !exact || hash != expected_hash;
+        if (sample)
+        {
+            printf("mode=%s marks=%u batch=%u remap_ns=%llu retained_bytes=%llu "
+                   "permuted=%u displacement=%llu hash=%016llx\n",
+                   mode, mark_count, batch, (finish - start) / batch,
+                   (unsigned long long)(arena->position - input_end), permuted,
+                   (unsigned long long)displacement, (unsigned long long)hash);
+        }
+    }
+    return status;
+}
+#endif
+
+int main(int argc, char** argv)
+{
+    char const* mode = "schedule";
+    int value_argument = 1;
+    if (argc > 1 && (argv[1][0] < '0' || argv[1][0] > '9'))
+    {
+        mode = argv[1];
+        value_argument = 2;
+    }
+    bool schedule = strcmp(mode, "schedule") == 0;
+#if BUSTER_LINE_MARK_HELPER_BENCH
+    bool remap = strcmp(mode, "remap-ordered") == 0 || strcmp(mode, "remap-reverse") == 0 ||
+                 strcmp(mode, "remap-nearly") == 0;
+#else
+    bool remap = false;
+#endif
+    unsigned long values[3] = {schedule ? 16384ul : 65536ul, 11, 1};
+    int value_count = argc - value_argument;
+    bool valid = (schedule || remap) && value_count >= 0 && value_count <= 3;
+    for (int index = 0; valid && index < value_count; index += 1)
+    {
+        unsigned long maximum = index == 0 ? (schedule ? 65536ul : 1048576ul) : (index == 1 ? 10000ul : 1000000ul);
+        unsigned long minimum = index == 0 ? (schedule ? 32ul : 1ul) : 1ul;
+        valid = machine_line_mark_parse(argv[value_argument + index], minimum, maximum, values + index);
+    }
+    if (schedule)
+    {
+        valid = valid && !(values[0] & (values[0] - 1));
+    }
+    if (!valid)
+    {
+        fprintf(stderr, "usage: %s [schedule] [power-of-two leaves:32..65536] [samples:1..10000] [batch:1..1000000]\n",
+                argv[0]);
+#if BUSTER_LINE_MARK_HELPER_BENCH
+        fprintf(stderr, "       %s remap-{ordered,reverse,nearly} [marks:1..1048576] [samples:1..10000] "
+                        "[batch:1..1000000]\n",
+                argv[0]);
+#endif
+        return 2;
+    }
+
+    ThreadContext* thread_context = thread_context_allocate();
+    thread_context_select(thread_context);
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1)});
+    int status = schedule ? machine_line_mark_schedule(arena, (u32)values[0], (u32)values[1], (u32)values[2]) : 0;
+#if BUSTER_LINE_MARK_HELPER_BENCH
+    if (remap)
+    {
+        status = machine_line_mark_remap(arena, mode, (u32)values[0], (u32)values[1], (u32)values[2]);
+    }
+#endif
+    arena_destroy(arena, 1);
+    thread_context_release(thread_context);
     return status;
 }
