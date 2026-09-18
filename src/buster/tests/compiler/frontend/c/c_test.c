@@ -13538,6 +13538,66 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
     }
     scratch_end(generic_temporary);
     {
+        TemporalArena ordinary_enum_temporary = scratch_begin(0, 0);
+        CPreprocessResult ordinary_enum_tokens = c_preprocess(
+            ordinary_enum_temporary.arena, S8("enum { ORDINARY_ENUM = 41 + 1 };\n"), (CPreprocessOptions){0});
+        BUSTER_TEST(arguments, ordinary_enum_tokens.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, ordinary_enum_tokens.token_count <= UINT32_MAX))
+        {
+            BUSTER_TEST(arguments,
+                        c_test_parse_generic_constant_tokens_alias(ordinary_enum_tokens, 0,
+                                                                   (u32)ordinary_enum_tokens.token_count));
+        }
+        CParseResult ordinary_enum_parse = c_parse(ordinary_enum_temporary.arena, ordinary_enum_tokens);
+        BUSTER_TEST(arguments, ordinary_enum_parse.diagnostic_count == 0);
+        scratch_end(ordinary_enum_temporary);
+
+        String8 generic_constant_source =
+            S8("static int unselected(void) { return 99; }\n"
+               "_Static_assert(_Generic((float)0, float: 1, default: unselected()), \"generic static assertion\");\n"
+               "enum { GENERIC_ENUM = _Generic(1, int: 3, default: unselected()) };\n"
+               "static int generic_array[_Generic((double)0, int: unselected(), default: 2)];\n"
+               "static int generic_value = _Generic((float)0, float: 5, default: unselected());\n"
+               "static int generic_default = _Generic((double)0, int: unselected(), default: 11);\n"
+               "static int generic_nested = _Generic(1, int: _Generic(1.0, double: 13, default: unselected()), default: unselected());\n"
+               "int generic_case(int value) { switch (value) { case _Generic(1, int: 7, default: unselected()): return GENERIC_ENUM; default: return 0; } }\n"
+               "int generic_constants(void) { return (int)(sizeof(generic_array) / sizeof(generic_array[0])) + generic_value + generic_default + generic_nested + generic_case(7); }\n");
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena generic_constant_temporary = scratch_begin(0, 0);
+            CPreprocessResult generic_constant_tokens =
+                c_preprocess(generic_constant_temporary.arena, generic_constant_source, (CPreprocessOptions){0});
+            CParseResult generic_constant_parse = c_parse(generic_constant_temporary.arena, generic_constant_tokens);
+            CIRLowerResult generic_constant_ir = c_lower_to_ir_with_options(
+                generic_constant_temporary.arena, S8("generic-constant-expression.c"), generic_constant_tokens,
+                generic_constant_parse, target_native, (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+            BUSTER_TEST(arguments, generic_constant_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, generic_constant_parse.diagnostic_count == 0);
+            BUSTER_TEST(arguments, generic_constant_ir.diagnostic_count == 0);
+            if (generic_constant_ir.program)
+            {
+                BUSTER_TEST(arguments,
+                            ir_validate_canonical_module(generic_constant_ir.program, generic_constant_ir.program->modules).error ==
+                                IR_VALIDATION_NONE);
+            }
+            scratch_end(generic_constant_temporary);
+        }
+        TemporalArena unselected_generic_constant_temporary = scratch_begin(0, 0);
+        CPreprocessResult unselected_generic_constant_tokens = c_preprocess(
+            unselected_generic_constant_temporary.arena,
+            S8("_Static_assert(_Generic(1, int: 1, default: missing_identifier), \"unselected association\");\n"),
+            (CPreprocessOptions){0});
+        CParseResult unselected_generic_constant_parse =
+            c_parse(unselected_generic_constant_temporary.arena, unselected_generic_constant_tokens);
+        CIRLowerResult unselected_generic_constant_ir = c_lower_to_ir(
+            unselected_generic_constant_temporary.arena, S8("unselected-generic-constant-expression.c"),
+            unselected_generic_constant_tokens, unselected_generic_constant_parse, target_native);
+        BUSTER_TEST(arguments, unselected_generic_constant_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, unselected_generic_constant_parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, unselected_generic_constant_ir.diagnostic_count == 0);
+        scratch_end(unselected_generic_constant_temporary);
+    }
+    {
         TemporalArena nullptr_temporary = scratch_begin(0, 0);
         CPreprocessResult nullptr_tokens = c_preprocess(nullptr_temporary.arena,
                                                         S8("typedef typeof(nullptr) nullptr_t;"

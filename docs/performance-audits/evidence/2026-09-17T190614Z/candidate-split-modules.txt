@@ -1,0 +1,2 @@
+TEST_MODULE_TIMING index=29 module=x86_64_metadata_tests duration_ns=691249991 passed=1617 failed=0 assertions=1617 status=pass
+TEST_MODULE_TIMING index=33 module=x86_64_completion_census_tests duration_ns=1089304040 passed=34046 failed=0 assertions=34046 status=pass

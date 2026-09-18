@@ -21,6 +21,51 @@ BUSTER_GLOBAL_LOCAL char bq_test_executable[BQ_PATH_CAP + 1];
 #endif
 #define BQ_CHECK(expression) do { bq_test_assertions += 1; if (!(expression)) { bq_test_failures += 1; fprintf(stderr, "QUEUE_TEST failure line=%d: %s\n", __LINE__, #expression); } } while (0)
 
+BUSTER_GLOBAL_LOCAL bool bq_test_file_sha256(char const* path, char output[SHA256_HEX_CAPACITY])
+{
+    FILE* file = path ? fopen(path, "rb") : NULL;
+    Sha256 digest;
+    bool ok = file != NULL;
+    if (ok) sha256_init(&digest);
+    u8 bytes[4096];
+    while (ok)
+    {
+        size_t count = fread(bytes, 1, sizeof(bytes), file);
+        if (count) sha256_add(&digest, bytes, count);
+        if (count != sizeof(bytes))
+        {
+            ok = !ferror(file);
+            break;
+        }
+    }
+    if (ok) sha256_finish_hex(&digest, (char8*)output);
+    if (file && fclose(file) != 0) ok = false;
+    if (!ok) output[0] = 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_test_profile_sha256(char const* profile, char const* key,
+                                                 char output[SHA256_HEX_CAPACITY])
+{
+    char const* value = profile && key ? strstr(profile, key) : NULL;
+    u32 key_length = key ? (u32)strlen(key) : 0;
+    bool ok = value && (value == profile || value[-1] == '\n');
+    if (ok) value += key_length;
+    for (u32 index = 0; ok && index < SHA256_HEX_CAPACITY - 1; index += 1)
+        ok = (value[index] >= '0' && value[index] <= '9') || (value[index] >= 'a' && value[index] <= 'f');
+    if (ok) ok = value[SHA256_HEX_CAPACITY - 1] == '\n';
+    if (ok)
+    {
+        memcpy(output, value, SHA256_HEX_CAPACITY - 1);
+        output[SHA256_HEX_CAPACITY - 1] = 0;
+    }
+    else
+    {
+        output[0] = 0;
+    }
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL BqRequest bq_test_request(u32 number, bool failure)
 {
     char key[32];
@@ -80,6 +125,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
     fields[2] = S8("fake-success-v1");
     fields[3] = fields[4] = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     BQ_CHECK(bq_request_make(fields, &malformed) == BQ_OK);
+    fields[2] = S8("native-retirement-performance-v1");
+    BQ_CHECK(bq_recipe_from_name(fields[2]) == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED &&
+             bq_recipe_blocked(bq_recipe_from_name(fields[2])) &&
+             !bq_recipe_admitted(bq_recipe_from_name(fields[2])) &&
+             bq_request_make(fields, &malformed) == BQ_BAD_REQUEST);
+    fields[2] = S8("fake-success-v1");
     fields[0] = (String8){0};
     BQ_CHECK(bq_request_make(fields, &malformed) == BQ_BAD_REQUEST);
     u64 value = 0;
@@ -99,9 +150,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
     {
         fclose(attributes_file);
     }
-    char const rule[] = "tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf";
-    bool rule_found = false;
-    for (u32 start = 0; attributes_complete && !rule_found && start < attributes_size;)
+    char const* rules[] = {
+        "tools/bench_service/profiles/validate-buster-v1.recipe text eol=lf",
+        "tools/bench_service/profiles/native-retirement-performance-v1.blocked text eol=lf",
+    };
+    bool rules_found[BUSTER_ARRAY_LENGTH(rules)] = {0};
+    for (u32 start = 0; attributes_complete && start < attributes_size;)
     {
         u32 end = start;
         while (end < attributes_size && attributes[end] != '\n')
@@ -109,17 +163,49 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
             end += 1;
         }
         u32 content_end = end > start && attributes[end - 1] == '\r' ? end - 1 : end;
-        rule_found = content_end - start == sizeof(rule) - 1 && !memcmp(attributes + start, rule, sizeof(rule) - 1);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rules); index += 1)
+        {
+            u32 rule_length = (u32)strlen(rules[index]);
+            if (content_end - start == rule_length && !memcmp(attributes + start, rules[index], rule_length))
+                rules_found[index] = true;
+        }
         start = end < attributes_size ? end + 1 : end;
     }
-    BQ_CHECK(attributes_complete && rule_found);
-    FILE* profile = fopen("tools/bench_service/profiles/validate-buster-v1.recipe", "rb");
-    char recipe[sizeof(bq_real_recipe)] = {0};
-    BQ_CHECK(profile && fread(recipe, 1, sizeof(recipe), profile) == sizeof(bq_real_recipe) - 1 &&
-             !memcmp(recipe, bq_real_recipe, sizeof(bq_real_recipe)));
-    if (profile)
+    BQ_CHECK(attributes_complete && rules_found[0] && rules_found[1]);
+    BqRecipe recipes[] = {BQ_RECIPE_VALIDATE_BUSTER, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(recipes); index += 1)
     {
-        fclose(profile);
+        BqRecipeFiles files;
+        String8 expected = bq_recipe_profile(recipes[index]);
+        bool described = bq_recipe_files(recipes[index], &files);
+        char path[BQ_PATH_CAP + 1];
+        int path_length = described ? snprintf(path, sizeof(path), "tools/bench_service/profiles/%s", files.profile) : -1;
+        FILE* profile = path_length > 0 && (u32)path_length < sizeof(path) ? fopen(path, "rb") : NULL;
+        u8* bytes = expected.length ? malloc((size_t)expected.length + 1) : NULL;
+        size_t count = profile && bytes ? fread(bytes, 1, (size_t)expected.length + 1, profile) : 0;
+        BQ_CHECK(described && expected.length > 0 && profile && bytes && count == expected.length &&
+                 !memcmp(bytes, expected.pointer, expected.length) &&
+                 (recipes[index] == BQ_RECIPE_VALIDATE_BUSTER ? !strcmp(files.command, "bench_service_recipe") :
+                                                               !files.command[0]));
+        free(bytes);
+        if (profile) fclose(profile);
+    }
+    struct BqPinnedFile
+    {
+        char const* key;
+        char const* path;
+    } pins[] = {
+        {"contract-sha256=", "docs/native-retirement-performance-contract.md"},
+        {"support-declaration-sha256=", "docs/native-retirement-support-v1.tsv"},
+        {"binding-validator-sha256=", "tools/native_retirement_performance_binding.py"},
+        {"statistics-sha256=", "tools/throughput/retirement_stats.h"},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pins); index += 1)
+    {
+        char expected[SHA256_HEX_CAPACITY], actual[SHA256_HEX_CAPACITY];
+        BQ_CHECK(bq_test_profile_sha256(bq_native_retirement_blocked_profile, pins[index].key, expected) &&
+                 bq_test_file_sha256(pins[index].path, actual) &&
+                 !memcmp(expected, actual, SHA256_HEX_CAPACITY));
     }
 #ifdef _WIN32
     BQ_CHECK(bq_open(&queue, ".") == BQ_UNSUPPORTED);
@@ -128,13 +214,18 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
     BqWorkerConfig worker = {0};
     u64 worker_id = UINT64_MAX;
     BQ_CHECK(bq_worker_run(&queue, &worker, &worker_id) == BQ_UNSUPPORTED && worker_id == 0);
-    BQ_CHECK(bq_worker_unit(S8("/unsupported"), S8("1"), S8("2"), S8("/workspace"),
+    BQ_CHECK(bq_worker_unit(S8("/unsupported"), S8("1"), S8("2"), S8("validate-buster-v1"), S8("/workspace"),
                              S8("1111111111111111111111111111111111111111"),
                              S8("2222222222222222222222222222222222222222"), S8("/workspace/result")) == BQ_UNSUPPORTED);
 #else
     char boot_id[BQ_WORKER_BOOT_CAP];
     BQ_CHECK(bq_worker_read_regular("/proc/sys/kernel/random/boot_id", boot_id, sizeof(boot_id)) &&
              bq_worker_boot_valid(boot_id));
+    BQ_CHECK(bq_worker_unit(S8("/unsupported"), S8("1"), S8("2"),
+                             S8("native-retirement-performance-v1"), S8("/workspace"),
+                             S8("1111111111111111111111111111111111111111"),
+                             S8("2222222222222222222222222222222222222222"),
+                             S8("/workspace/result")) == BQ_BAD_REQUEST);
     char field[4] = {0};
     BQ_CHECK(bq_worker_copy_field(field, sizeof(field), "abc") == 3 && !strcmp(field, "abc"));
     BQ_CHECK(bq_worker_copy_field(field, sizeof(field), "abcd") == -1 && !field[0]);
@@ -406,7 +497,7 @@ BUSTER_GLOBAL_LOCAL bool bq_material_test_begin(BqMaterialFixture* fixture, u32 
         snprintf(recipe, sizeof(recipe), "%s/validate-buster-v1.recipe", recipes);
         ok = mkdir(recipes, 0700) == 0 &&
              (defect == 6 ? mkfifo(recipe, 0400) == 0 :
-              bq_test_write_path(recipe, defect == 4 ? "bad-recipe\n" : bq_real_recipe, 0400)) &&
+              bq_test_write_path(recipe, defect == 4 ? "bad-recipe\n" : bq_validate_buster_profile, 0400)) &&
              bq_test_source(fixture->installed, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base-source\n", defect) &&
              bq_test_source(fixture->installed, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "candidate-source\n", 0) &&
              chmod(recipes, 0500) == 0;
@@ -1715,7 +1806,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     BQ_CHECK(bq_transport_queue_admissible(&incompatible));
 #ifdef __linux__
     BQ_CHECK(strstr(bq_capabilities_v2, "local-recipes=fake-success-v1,fake-failure-v1") != NULL);
-    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1 workload=not-admitted") != NULL);
+    BQ_CHECK(strstr(bq_capabilities_v2, "service-recipes=validate-buster-v1 blocked-recipes=native-retirement-performance-v1") != NULL);
+    BQ_CHECK(strstr(bq_capabilities_v2, "retirement=blocked") != NULL);
     char close_root[BQ_PATH_CAP + 1] = "/tmp/buster-transport-close-XXXXXX";
     bool close_root_ok = bq_test_mkdtemp_physical(close_root, sizeof(close_root));
     BQ_CHECK(close_root_ok);
@@ -2183,7 +2275,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     BqError error = BQ_OK;
     fake->starts += 1;
-    fake->argv_valid = count == 52 && !strcmp(argv[0], BQ_SYSTEMD_RUN) && !strcmp(argv[1], "--quiet") &&
+    fake->argv_valid = count == 53 && !strcmp(argv[0], BQ_SYSTEMD_RUN) && !strcmp(argv[1], "--quiet") &&
         !strcmp(argv[2], "--wait") && !strcmp(argv[3], "--service-type=exec") &&
         !strcmp(argv[4], "--uid=buster-bench") && !strcmp(argv[5], "--gid=buster-bench") &&
         !strncmp(argv[6], "--unit=buster-bench-", 20) &&
@@ -2208,9 +2300,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
         !strcmp(argv[39], "--property=SystemCallArchitectures=native") && !strcmp(argv[40], "--property=SystemCallFilter=@system-service") &&
         !strcmp(argv[41], "--property=SystemCallErrorNumber=EPERM") && !strcmp(argv[42], "--property=PrivateNetwork=yes") &&
         !strcmp(argv[43], BQ_WORKER_EXECUTABLE) && !strcmp(argv[44], "worker-unit") && argv[45][0] == '/' &&
-        !strcmp(argv[46], "1") && argv[47][0] && argv[48][0] == '/' && !strstr(argv[48], "/job-1-attempt-") &&
-        strlen(argv[49]) == 64 && strlen(argv[50]) == 64 && argv[51][0] == '/' &&
-        strstr(argv[51], "/results/job-1-attempt-") != NULL && strstr(argv[51], "/result") != NULL &&
+        !strcmp(argv[46], "1") && argv[47][0] && !strcmp(argv[48], "validate-buster-v1") &&
+        argv[49][0] == '/' && !strstr(argv[49], "/job-1-attempt-") &&
+        strlen(argv[50]) == 64 && strlen(argv[51]) == 64 && argv[52][0] == '/' &&
+        strstr(argv[52], "/results/job-1-attempt-") != NULL && strstr(argv[52], "/result") != NULL &&
         bq_test_worker_probe_locked(fixture->lease);
     fake->inherited_lease = -1;
     snprintf(fake->observed.unit, sizeof(fake->observed.unit), "%s", argv[6] + 7);
@@ -2243,7 +2336,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
             close(fake->queue->lock_fd);
             close(fake->queue->journal_fd);
             execl(bq_test_executable, bq_test_executable, "fixed-recipe-helper", marker,
-                  argv[46], argv[47], argv[48], argv[49], argv[50], argv[51], NULL);
+                  argv[46], argv[47], argv[48], argv[49], argv[50], argv[51], argv[52], NULL);
             _exit(127);
         }
         if (fake->detached < 0) error = BQ_IO;
@@ -3426,15 +3519,16 @@ BUSTER_GLOBAL_LOCAL bool bq_test_fixed_recipe_wait_reaped(char const* marker)
 BUSTER_GLOBAL_LOCAL int bq_test_fixed_recipe_helper(int argc, char** argv)
 {
     u64 job = 0, token = 0;
-    bool valid = argc == 9 && !strcmp(argv[1], "fixed-recipe-helper") && argv[2][0] == '/' &&
+    bool valid = argc == 10 && !strcmp(argv[1], "fixed-recipe-helper") && argv[2][0] == '/' &&
                  bq_decimal(argv[3], true, &job) && bq_decimal(argv[4], true, &token) &&
-                 argv[5][0] == '/' && strlen(argv[6]) == 64 && strlen(argv[7]) == 64 && argv[8][0] == '/';
+                 !strcmp(argv[5], "validate-buster-v1") && argv[6][0] == '/' &&
+                 strlen(argv[7]) == 64 && strlen(argv[8]) == 64 && argv[9][0] == '/';
     char body[512];
     int length = valid ? snprintf(body, sizeof(body),
-                                  "pid=%ld\nrecipe=validate-buster-v1\njob=%" PRIu64 "\ntoken=%" PRIu64
+                                  "pid=%ld\nrecipe=%s\njob=%" PRIu64 "\ntoken=%" PRIu64
                                   "\nbase=%.64s\ncandidate=%.64s\nresult=%s\n",
-                                  (long)getpid(), (uint64_t)job, (uint64_t)token,
-                                  argv[6], argv[7], argv[8]) : -1;
+                                  (long)getpid(), argv[5], (uint64_t)job, (uint64_t)token,
+                                  argv[7], argv[8], argv[9]) : -1;
     valid = valid && length > 0 && (u32)length < sizeof(body) && bq_test_write_path(argv[2], body, 0400);
     while (valid) pause();
     int result = valid ? 0 : 1;
@@ -4351,7 +4445,7 @@ int main(int argc, char** argv)
 {
     int result;
 #ifdef __linux__
-    bool helper = argc == 9 && !strcmp(argv[1], "fixed-recipe-helper");
+    bool helper = argc == 10 && !strcmp(argv[1], "fixed-recipe-helper");
     result = helper ? bq_test_fixed_recipe_helper(argc, argv) : bq_test_run_all(argc, argv);
 #else
     result = bq_test_run_all(argc, argv);

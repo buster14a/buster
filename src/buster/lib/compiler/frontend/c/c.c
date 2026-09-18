@@ -9,6 +9,7 @@
 #include "c_source.c"
 #include "c_parse.c"
 #include "c_gen.c"
+#undef ir_function_add_instruction
 CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target,
                                      CIRLowerOptions options)
 {
