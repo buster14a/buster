@@ -401,7 +401,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_atomic_pair_updates(UnitTest
             for (u32 order = 0; order < BUSTER_ARRAY_LENGTH(order_flags); order += 1)
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                bool compare_exchange = operation >= IR_ATOMIC_OPERATION_COUNT;
+                bool compare_exchange = operation >= BUSTER_ARRAY_LENGTH(builtins) - 2;
                 String8 source = compare_exchange
                     ? string_format(temporary.arena, S8("typedef unsigned __int128 U; int update(_Atomic(U)* cell, U* expected, U const* value) {{ "
                                                         "return __c11_atomic_{S8}(cell, expected, *value, {u32}, {u32}); }"),
@@ -7261,7 +7261,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
-    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 263);
+    // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes.
+    BUSTER_TEST(arguments, metadata_shape_cache.prepared_rows == 267);
     BUSTER_TEST(arguments, metadata_shape_cache.invalid_rows == 0);
 
     // Canonical metadata authorities and neutral patch helpers are separate
