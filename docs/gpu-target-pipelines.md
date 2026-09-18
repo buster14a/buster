@@ -204,6 +204,12 @@ directory. Concurrent identical invocations therefore have disjoint
 namespaces, and cleanup removes only the directory whose creation this
 invocation successfully claimed.
 
+The concurrent ownership regression shares its input and parent directory while
+assigning one final output to each invocation. Both outputs must be valid and
+survive either workspace's cleanup. Multiple callers replacing one named output
+can receive a platform publication error, including Windows access denial; owned
+temporary directories do not promise that every competing publication succeeds.
+
 Without `--save-temps`, the owned directory is removed after success and after
 all executor-observed failure paths. With `--save-temps`, it is retained on
 both success and failure. The driver reports its exact location as `GPU
