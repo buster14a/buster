@@ -12010,95 +12010,6 @@ bool buster_x86_metadata_emit_forwarding(u8* output, u32 capacity, BusterX86Meta
     return result;
 }
 
-// The closed GOT-load relaxation family: MOV r64,[RIP+disp32] -> LEA.
-// Derive both shapes and their field contracts from checked metadata. Linkers
-// supply only a bounded section and the relocation offset, never opcode bits.
-// Broader immediate/branch GOTPCRELX conversions remain a separate policy (#78).
-enum { BUSTER_X86_GOT_LOAD_SIZE = 7, BUSTER_X86_GOT_LOAD_REGISTERS = 16 };
-BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_got_load[BUSTER_X86_GOT_LOAD_REGISTERS][BUSTER_X86_GOT_LOAD_SIZE];
-BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_got_address[BUSTER_X86_GOT_LOAD_REGISTERS][BUSTER_X86_GOT_LOAD_SIZE];
-BUSTER_GLOBAL_LOCAL BusterX86MetadataRelocation buster_x86_metadata_got_field;
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_prepared;
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_valid;
-
-BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_prepare(void)
-{
-    if (!buster_x86_metadata_got_prepared)
-    {
-        BUSTER_CHECK_SERIAL_INITIALIZATION();
-        buster_x86_metadata_prewarm();
-        bool valid = true;
-        BusterX86MetadataRelocation field = {0};
-        for (u16 reg = 0; valid && reg < BUSTER_X86_GOT_LOAD_REGISTERS; reg += 1)
-        {
-            BusterX86MetadataPhysicalOperand operands[2] = {
-                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = 64,
-                 .reg = {.index = reg, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR}},
-                {.kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = 64,
-                 .memory = {.has_symbol = true, .symbol = S8("got_target"), .rip_relative = true,
-                            .has_displacement = true, .address_size = 64, .scale = 1}},
-            };
-            for (u32 output = 0; valid && output < 2; output += 1)
-            {
-                BusterX86MetadataRelocation relocation = {0};
-                BusterX86MetadataEmitResult emitted = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
-                    .physical = {.mnemonic = output ? S8("LEA") : S8("MOV"), .operands = operands, .operand_count = 2,
-                                 .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64},
-                    .output = output ? buster_x86_metadata_got_address[reg] : buster_x86_metadata_got_load[reg],
-                    .output_capacity = BUSTER_X86_GOT_LOAD_SIZE, .relocations = &relocation, .relocation_capacity = 1,
-                });
-                valid = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.byte_count == BUSTER_X86_GOT_LOAD_SIZE &&
-                        emitted.relocation_count == 1 && relocation.kind == BUSTER_X86_METADATA_RELOCATION_PC32 &&
-                        relocation.width == sizeof(s32) && relocation.offset == emitted.byte_count - relocation.width &&
-                        relocation.addend == -(s64)relocation.width;
-                if (valid && (reg || output))
-                {
-                    valid = relocation.offset == field.offset && relocation.width == field.width &&
-                            relocation.kind == field.kind && relocation.addend == field.addend;
-                }
-                field = relocation;
-            }
-        }
-        if (valid)
-        {
-            field.symbol = (String8){0};
-            buster_x86_metadata_got_field = field;
-        }
-        buster_x86_metadata_got_valid = valid;
-        buster_x86_metadata_got_prepared = true;
-    }
-    return buster_x86_metadata_got_valid;
-}
-
-bool buster_x86_metadata_relax_got_load(u8* section, u64 field_offset, u64 section_size)
-{
-    bool result = false;
-    if (section && field_offset <= section_size && buster_x86_metadata_got_prepare())
-    {
-        BusterX86MetadataRelocation field = buster_x86_metadata_got_field;
-        if (field.offset <= field_offset && field.width <= section_size - field_offset)
-        {
-            u8* sequence = section + field_offset - field.offset;
-            for (u32 reg = 0; !result && reg < BUSTER_X86_GOT_LOAD_REGISTERS; reg += 1)
-            {
-                // REX.X/B are ignored by both RIP-relative forms. Accept the
-                // historical redundant bits but never transfer them to an
-                // operand with another role; the replacement is canonical.
-                bool matched = (sequence[0] & 0xfcu) == buster_x86_metadata_got_load[reg][0] &&
-                               memcmp(sequence + 1, buster_x86_metadata_got_load[reg] + 1, field.offset - 1) == 0;
-                if (matched)
-                {
-                    // Leave the displacement untouched for the object-format
-                    // relocation writer. No byte is changed before validation.
-                    memcpy(sequence, buster_x86_metadata_got_address[reg], field.offset);
-                    result = true;
-                }
-            }
-        }
-    }
-    return result;
-}
-
 // Executable byte padding is a derived single-byte NOP recipe. Do not call
 // the general encoder for every padding byte: prepare once, bulk-fill later.
 BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_nop_byte;
@@ -12135,6 +12046,419 @@ bool buster_x86_metadata_fill_nops(u8* output, u64 count)
     return result;
 }
 
+// The GOT-reference relaxation vocabulary. A GOT load naming a symbol this
+// image defines becomes the direct instruction the psABI conversion table
+// (B.2) names for it: the address itself, that address as an absolute
+// immediate, or a direct branch. Both the source form and its replacement are
+// derived from checked metadata, and a row survives only when the replacement
+// fills the source's exact byte count with its own relocated field at the
+// same offset, so the patch site never moves. A shorter replacement is
+// left-padded with the derived one-byte NOP rather than shifting the field.
+// Linkers supply a bounded section, the field offset, the relocation's addend
+// and the psABI spelling that named the site; never opcode bits.
+//
+// That spelling is what makes the vocabulary decidable. A relocation names a
+// field, not an instruction boundary, so the bytes in front of the field
+// belong to this instruction only because the producer's promise says how
+// many there are: R_X86_64_REX_GOTPCRELX carries one REX prefix,
+// R_X86_64_GOTPCRELX carries none, and reading either shape as the other
+// silently rewrites a different instruction. Plain R_X86_64_GOTPCREL
+// promises nothing at all and is therefore never decoded. This compiler emits
+// the unambiguous REX spelling for its own MOV-r64 GOT loads.
+enum
+{
+    BUSTER_X86_GOT_FIELD_WIDTH = 4,
+    // Every source form here spends one opcode byte and one ModRM byte in
+    // front of its displacement.  REX adds one byte and REX2 adds two.
+    BUSTER_X86_GOT_PREFIX_MIN = 2,
+    BUSTER_X86_GOT_PREFIX_MAX = 4,
+    BUSTER_X86_GOT_PREFIX_KINDS = BUSTER_X86_GOT_PREFIX_MAX - BUSTER_X86_GOT_PREFIX_MIN + 1,
+    BUSTER_X86_GOT_REGISTERS = 16,
+    BUSTER_X86_GOT_APX_FIRST_REGISTER = 16,
+    // MOV, the eight ALU operations, and TEST, each at 32/64 bits where
+    // applicable.  CALL/JMP/PUSH have no EGPR operand and are not CODE_4 rows.
+    BUSTER_X86_GOT_APX_CLASS_COUNT = 20,
+    BUSTER_X86_GOT_SCRATCH = 16,
+};
+
+enum
+{
+    // OP reg, [RIP + got]
+    BUSTER_X86_GOT_SHAPE_DESTINATION,
+    // OP [RIP + got], reg
+    BUSTER_X86_GOT_SHAPE_SOURCE,
+    // OP [RIP + got]
+    BUSTER_X86_GOT_SHAPE_SINGLE,
+};
+
+enum
+{
+    // reg, [RIP + symbol]: the address the slot would have held.
+    BUSTER_X86_GOT_DIRECT_ADDRESS,
+    // imm32: that address written into the instruction.
+    BUSTER_X86_GOT_DIRECT_IMMEDIATE,
+    // rel32: the branch the indirect one would have taken.
+    BUSTER_X86_GOT_DIRECT_RELATIVE,
+};
+
+typedef struct BusterX86MetadataGotClass BusterX86MetadataGotClass;
+struct BusterX86MetadataGotClass
+{
+    String8 source_mnemonic;
+    String8 direct_mnemonic;
+    u8 shape;
+    u8 direct;
+    u8 operand_width;
+    u8 patch;
+};
+
+// The psABI table, as source and replacement operand shapes rather than
+// opcode bytes. The memory-source ALU forms and TEST answer with the same
+// address as an immediate; the indirect branches answer with a direct one.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataGotClass const buster_x86_metadata_got_classes[] = {
+    {S8_INITIALIZER("MOV"), S8_INITIALIZER("LEA"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_ADDRESS, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_PC32},
+    {S8_INITIALIZER("MOV"), S8_INITIALIZER("MOV"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("ADD"), S8_INITIALIZER("ADD"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("ADD"), S8_INITIALIZER("ADD"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("OR"), S8_INITIALIZER("OR"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("OR"), S8_INITIALIZER("OR"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("ADC"), S8_INITIALIZER("ADC"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("ADC"), S8_INITIALIZER("ADC"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("SBB"), S8_INITIALIZER("SBB"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("SBB"), S8_INITIALIZER("SBB"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("AND"), S8_INITIALIZER("AND"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("AND"), S8_INITIALIZER("AND"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("SUB"), S8_INITIALIZER("SUB"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("SUB"), S8_INITIALIZER("SUB"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("XOR"), S8_INITIALIZER("XOR"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("XOR"), S8_INITIALIZER("XOR"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("CMP"), S8_INITIALIZER("CMP"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("CMP"), S8_INITIALIZER("CMP"), BUSTER_X86_GOT_SHAPE_DESTINATION, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("TEST"), S8_INITIALIZER("TEST"), BUSTER_X86_GOT_SHAPE_SOURCE, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 32,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("TEST"), S8_INITIALIZER("TEST"), BUSTER_X86_GOT_SHAPE_SOURCE, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+    {S8_INITIALIZER("CALL"), S8_INITIALIZER("CALL"), BUSTER_X86_GOT_SHAPE_SINGLE, BUSTER_X86_GOT_DIRECT_RELATIVE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_PC32},
+    {S8_INITIALIZER("JMP"), S8_INITIALIZER("JMP"), BUSTER_X86_GOT_SHAPE_SINGLE, BUSTER_X86_GOT_DIRECT_RELATIVE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_PC32},
+    {S8_INITIALIZER("PUSH"), S8_INITIALIZER("PUSH"), BUSTER_X86_GOT_SHAPE_SINGLE, BUSTER_X86_GOT_DIRECT_IMMEDIATE, 64,
+     BUSTER_X86_METADATA_GOT_PATCH_ABSOLUTE32},
+};
+
+enum
+{
+    // One row per register for a class with a register operand, one for a
+    // class without. Not BUSTER_ARRAY_LENGTH: its sizeof((x)[0]) spelling
+    // silently leaves the enumerator undeclared in this compiler's own
+    // frontend (#763), and the table's bound has to be a constant.
+    BUSTER_X86_GOT_CAPACITY = sizeof(buster_x86_metadata_got_classes) / sizeof(buster_x86_metadata_got_classes[0]) * BUSTER_X86_GOT_REGISTERS,
+};
+
+// One recognized shape: the bytes in front of the relocated field and the
+// bytes that replace them. mask covers the REX bits a RIP-relative form
+// ignores, so a producer's redundant prefix still matches while the
+// replacement stays the independently derived canonical one.
+typedef struct BusterX86MetadataGotEntry BusterX86MetadataGotEntry;
+struct BusterX86MetadataGotEntry
+{
+    u8 source[BUSTER_X86_GOT_PREFIX_MAX];
+    u8 direct[BUSTER_X86_GOT_PREFIX_MAX];
+    u8 mask;
+    u8 patch;
+};
+
+// Rows are grouped by how many bytes precede the field, because that is what
+// a site's psABI spelling fixes. The first class fills the leading rows of
+// its own group and plain GOTPCREL sees only those.
+BUSTER_GLOBAL_LOCAL BusterX86MetadataGotEntry buster_x86_metadata_got_entries[BUSTER_X86_GOT_PREFIX_KINDS][BUSTER_X86_GOT_CAPACITY];
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_got_counts[BUSTER_X86_GOT_PREFIX_KINDS];
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_got_load_count;
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_got_load_slot;
+// Deriving a row costs an encoder emission, so the two tiers are prepared
+// apart: an image whose GOT references are all plain R_X86_64_GOTPCREL --
+// this compiler's own -fPIC output -- derives the closed family alone, and
+// pays for the rest only when an object actually carries a relaxable
+// spelling. The closed family leads its group, so the relaxable tier is
+// derived after it and never instead of it.
+enum
+{
+    BUSTER_X86_GOT_PREPARE_LOAD = 1 << 0,
+    BUSTER_X86_GOT_PREPARE_RELAXABLE = 1 << 1,
+    BUSTER_X86_GOT_PREPARE_ALL = BUSTER_X86_GOT_PREPARE_LOAD | BUSTER_X86_GOT_PREPARE_RELAXABLE,
+};
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_got_prepared;
+BUSTER_GLOBAL_LOCAL u8 buster_x86_metadata_got_valid;
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand buster_x86_metadata_got_register(u16 index, u16 width)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER, .width = width,
+        .reg = {.index = index, .width = width, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+    };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand buster_x86_metadata_got_memory(u16 width)
+{
+    return (BusterX86MetadataPhysicalOperand){
+        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY, .width = width,
+        .memory = {.has_symbol = true, .symbol = S8("got_target"), .rip_relative = true,
+                   .has_displacement = true, .address_size = 64, .scale = 1},
+    };
+}
+
+BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand buster_x86_metadata_got_direct_operand(u8 direct, u16 width)
+{
+    BusterX86MetadataPhysicalOperand result = buster_x86_metadata_got_memory(width);
+    if (direct != BUSTER_X86_GOT_DIRECT_ADDRESS)
+    {
+        result = (BusterX86MetadataPhysicalOperand){
+            .kind = direct == BUSTER_X86_GOT_DIRECT_RELATIVE ? BUSTER_X86_METADATA_PHYSICAL_OPERAND_RELATIVE
+                                                             : BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
+            .width = BUSTER_X86_GOT_FIELD_WIDTH * 8, .has_symbol = true, .symbol = S8("got_target"),
+        };
+    }
+    return result;
+}
+
+// One derived form plus the single symbolic field it must carry. The field
+// has to end the instruction, which is what lets a replacement of the same
+// length keep the relocation offset the linker already holds.
+//
+// Selection scans a mnemonic's candidates and is the expensive half, so a
+// class selects once and every register of it emits through that form. The
+// caller selects on the highest register, whose operands need every REX bit
+// the class can use: a form that encodes that one encodes the rest, and a
+// shorter accumulator form, which would not, is never chosen. Where the SDM
+// has both, this is the encoding LLVM writes and GNU as does not.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_form(String8 mnemonic, BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
+                                                      u32* form_id, u8* output, u32* size, BusterX86MetadataRelocation* field)
+{
+    bool apx = false;
+    for (u32 operand_index = 0; operand_index < operand_count; operand_index += 1)
+    {
+        apx = apx || (operands[operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+                      operands[operand_index].reg.index >= BUSTER_X86_GOT_APX_FIRST_REGISTER);
+    }
+    String8 apx_features[1] = {S8("APX_F")};
+    BusterX86MetadataPhysicalQuery query = {
+        .mnemonic = mnemonic, .operands = operands, .operand_count = operand_count,
+        .features = {.names = apx ? apx_features : 0, .count = apx ? 1u : 0u},
+        .address_size = 64, .execution_mode = BUSTER_X86_METADATA_EXECUTION_MODE_64,
+    };
+    if (*form_id == UINT32_MAX)
+    {
+        *form_id = buster_x86_metadata_select_form(query).form_id;
+    }
+    BusterX86MetadataRelocation relocation = {0};
+    BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+        .physical = query, .form_id = *form_id, .output = output, .output_capacity = BUSTER_X86_GOT_SCRATCH,
+        .relocations = &relocation, .relocation_capacity = 1,
+    });
+    bool result = emitted.status == BUSTER_X86_METADATA_ENCODE_SUCCESS && emitted.relocation_count == 1 &&
+                  relocation.width == BUSTER_X86_GOT_FIELD_WIDTH && emitted.byte_count >= relocation.width &&
+                  relocation.offset == emitted.byte_count - relocation.width;
+    if (result)
+    {
+        *size = emitted.byte_count;
+        *field = relocation;
+    }
+    return result;
+}
+
+// Two rows in one group may never accept the same bytes: a site names one
+// field, so a second reading of it would be a different instruction written
+// over the first. Masks make each row a set of first bytes, and two sets meet
+// exactly where the bits both rows check agree.
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_distinct(u32 slot, BusterX86MetadataGotEntry const* candidate, u32 prefix)
+{
+    bool result = true;
+    for (u32 index = 0; result && index < buster_x86_metadata_got_counts[slot]; index += 1)
+    {
+        BusterX86MetadataGotEntry const* entry = &buster_x86_metadata_got_entries[slot][index];
+        u8 shared = (u8)(entry->mask & candidate->mask);
+        result = (u8)(entry->source[0] & shared) != (u8)(candidate->source[0] & shared) ||
+                 memcmp(entry->source + 1, candidate->source + 1, prefix - 1) != 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_nop_prepare(void);
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_prepare_class(u32 class_index, u32 register_first, u32 register_count)
+{
+    bool valid = class_index < BUSTER_ARRAY_LENGTH(buster_x86_metadata_got_classes) && register_count &&
+                 register_first <= 32 && register_count <= 32 - register_first;
+    if (valid)
+    {
+        BusterX86MetadataGotClass entry_class = buster_x86_metadata_got_classes[class_index];
+        u32 operand_count = entry_class.shape == BUSTER_X86_GOT_SHAPE_SINGLE ? 1 : 2;
+        u32 instances = entry_class.shape == BUSTER_X86_GOT_SHAPE_SINGLE ? 1 : register_count;
+        u16 width = entry_class.operand_width;
+        u32 source_form = UINT32_MAX;
+        u32 direct_form = UINT32_MAX;
+        s64 addend = -(s64)BUSTER_X86_GOT_FIELD_WIDTH;
+        // Highest register first: that instance selects both forms for the
+        // whole register group and therefore requires every prefix bit the
+        // remaining instances may need.
+        for (u32 instance = instances; valid && instance > 0; instance -= 1)
+        {
+            u32 reg = entry_class.shape == BUSTER_X86_GOT_SHAPE_SINGLE ? 0 : register_first + instance - 1;
+            BusterX86MetadataPhysicalOperand source_operands[2] = {buster_x86_metadata_got_memory(width), {0}};
+            BusterX86MetadataPhysicalOperand direct_operands[2] = {buster_x86_metadata_got_direct_operand(entry_class.direct, width), {0}};
+            if (entry_class.shape == BUSTER_X86_GOT_SHAPE_DESTINATION)
+            {
+                source_operands[0] = buster_x86_metadata_got_register((u16)reg, width);
+                source_operands[1] = buster_x86_metadata_got_memory(width);
+                direct_operands[0] = source_operands[0];
+                direct_operands[1] = buster_x86_metadata_got_direct_operand(entry_class.direct, width);
+            }
+            else if (entry_class.shape == BUSTER_X86_GOT_SHAPE_SOURCE)
+            {
+                source_operands[1] = buster_x86_metadata_got_register((u16)reg, width);
+                direct_operands[0] = source_operands[1];
+                direct_operands[1] = buster_x86_metadata_got_direct_operand(entry_class.direct, width);
+            }
+            u8 source_bytes[BUSTER_X86_GOT_SCRATCH] = {0};
+            u8 direct_bytes[BUSTER_X86_GOT_SCRATCH] = {0};
+            u32 source_size = 0;
+            u32 direct_size = 0;
+            BusterX86MetadataRelocation source_field = {0};
+            BusterX86MetadataRelocation direct_field = {0};
+            valid = buster_x86_metadata_got_form(entry_class.source_mnemonic, source_operands, operand_count, &source_form, source_bytes,
+                                                 &source_size, &source_field) &&
+                    buster_x86_metadata_got_form(entry_class.direct_mnemonic, direct_operands, operand_count, &direct_form, direct_bytes,
+                                                 &direct_size, &direct_field);
+            valid = valid && source_field.kind == BUSTER_X86_METADATA_RELOCATION_PC32 && source_field.addend == addend &&
+                    source_field.offset >= BUSTER_X86_GOT_PREFIX_MIN && source_field.offset <= BUSTER_X86_GOT_PREFIX_MAX &&
+                    direct_size <= source_size;
+            u32 prefix = valid ? source_field.offset : 0;
+            u32 pad = valid ? source_size - direct_size : 0;
+            valid = valid && direct_field.offset + pad == prefix &&
+                    direct_field.kind == (entry_class.patch == BUSTER_X86_METADATA_GOT_PATCH_PC32
+                                              ? (u8)BUSTER_X86_METADATA_RELOCATION_PC32
+                                              : (u8)BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32) &&
+                    direct_field.addend == (entry_class.patch == BUSTER_X86_METADATA_GOT_PATCH_PC32 ? addend : 0);
+            if (valid)
+            {
+                u32 slot = prefix - BUSTER_X86_GOT_PREFIX_MIN;
+                BusterX86MetadataGotEntry entry = {0};
+                memcpy(entry.source, source_bytes, prefix);
+                memset(entry.direct, buster_x86_metadata_nop_byte, pad);
+                memcpy(entry.direct + pad, direct_bytes, prefix - pad);
+                // REX.X/B are ignored by RIP-relative addressing.  REX2 rows
+                // stay exact: accepting noncanonical payload bits is optional,
+                // while reading outside the promised four bytes is not.
+                bool rex = prefix == 3 && (source_bytes[0] & 0xf0u) == 0x40u;
+                entry.mask = rex ? (u8)0xfcu : (u8)0xffu;
+                entry.patch = entry_class.patch;
+                bool closed_load = class_index == 0 && reg < BUSTER_X86_GOT_APX_FIRST_REGISTER;
+                valid = buster_x86_metadata_got_counts[slot] < BUSTER_X86_GOT_CAPACITY &&
+                        buster_x86_metadata_got_distinct(slot, &entry, prefix) &&
+                        (!closed_load || !buster_x86_metadata_got_load_count || buster_x86_metadata_got_load_slot == slot);
+                if (valid)
+                {
+                    buster_x86_metadata_got_entries[slot][buster_x86_metadata_got_counts[slot]] = entry;
+                    buster_x86_metadata_got_counts[slot] += 1;
+                    if (closed_load)
+                    {
+                        buster_x86_metadata_got_load_slot = (u8)slot;
+                        buster_x86_metadata_got_load_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_got_prepare(u8 requested)
+{
+    requested = (u8)(requested | ((requested & BUSTER_X86_GOT_PREPARE_RELAXABLE) ? BUSTER_X86_GOT_PREPARE_LOAD : 0));
+    u8 missing = (u8)(requested & (u8)~buster_x86_metadata_got_prepared);
+    if (missing)
+    {
+        BUSTER_CHECK_SERIAL_INITIALIZATION();
+        buster_x86_metadata_prewarm();
+        bool valid = buster_x86_metadata_nop_prepare() &&
+                     (!(requested & BUSTER_X86_GOT_PREPARE_LOAD) || (missing & BUSTER_X86_GOT_PREPARE_LOAD) ||
+                      (buster_x86_metadata_got_valid & BUSTER_X86_GOT_PREPARE_LOAD));
+        if (valid && (missing & BUSTER_X86_GOT_PREPARE_LOAD))
+        {
+            valid = buster_x86_metadata_got_prepare_class(0, 0, BUSTER_X86_GOT_REGISTERS);
+            buster_x86_metadata_got_valid |= valid ? BUSTER_X86_GOT_PREPARE_LOAD : 0;
+        }
+        if (valid && (missing & BUSTER_X86_GOT_PREPARE_RELAXABLE))
+        {
+            for (u32 class_index = 1; valid && class_index < BUSTER_ARRAY_LENGTH(buster_x86_metadata_got_classes); class_index += 1)
+            {
+                valid = buster_x86_metadata_got_prepare_class(class_index, 0, BUSTER_X86_GOT_REGISTERS);
+            }
+            for (u32 class_index = 0; valid && class_index < BUSTER_X86_GOT_APX_CLASS_COUNT; class_index += 1)
+            {
+                valid = buster_x86_metadata_got_prepare_class(class_index, BUSTER_X86_GOT_APX_FIRST_REGISTER, BUSTER_X86_GOT_REGISTERS);
+            }
+        }
+        buster_x86_metadata_got_valid |= valid ? missing : 0;
+        buster_x86_metadata_got_prepared |= missing;
+    }
+    return (buster_x86_metadata_got_valid & requested) == requested;
+}
+
+BusterX86MetadataGotPatch buster_x86_metadata_relax_got_reference(BusterX86MetadataGotSite site, u8* section, u64 field_offset, u64 section_size,
+                                                                 s64 addend)
+{
+    BusterX86MetadataGotPatch result = BUSTER_X86_METADATA_GOT_PATCH_NONE;
+    // Plain R_X86_64_GOTPCREL does not promise an instruction boundary.
+    // Refusing it is the only safe choice without materializing a real GOT
+    // slot: no byte before its field is inspected or written.
+    bool relaxable = site == BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX ||
+                     site == BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX ||
+                     site == BUSTER_X86_METADATA_GOT_SITE_CODE_4_GOTPCRELX;
+    if (section && relaxable && field_offset <= section_size && BUSTER_X86_GOT_FIELD_WIDTH <= section_size - field_offset &&
+        buster_x86_metadata_got_prepare(BUSTER_X86_GOT_PREPARE_RELAXABLE))
+    {
+        u32 prefix = site == BUSTER_X86_METADATA_GOT_SITE_GOTPCRELX ? 2u
+                     : site == BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX ? 3u
+                                                                          : 4u;
+        u32 slot = prefix - BUSTER_X86_GOT_PREFIX_MIN;
+        if (field_offset >= prefix)
+        {
+            u8* sequence = section + field_offset - prefix;
+            for (u32 index = 0; result == BUSTER_X86_METADATA_GOT_PATCH_NONE && index < buster_x86_metadata_got_counts[slot]; index += 1)
+            {
+                BusterX86MetadataGotEntry const* entry = &buster_x86_metadata_got_entries[slot][index];
+                bool matched = (u8)(sequence[0] & entry->mask) == entry->source[0] &&
+                               memcmp(sequence + 1, entry->source + 1, prefix - 1) == 0;
+                if (matched && (entry->patch == BUSTER_X86_METADATA_GOT_PATCH_PC32 || addend == -(s64)BUSTER_X86_GOT_FIELD_WIDTH))
+                {
+                    memcpy(sequence, entry->direct, prefix);
+                    result = (BusterX86MetadataGotPatch)entry->patch;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // The complete walk: every form normalized, pattern-parsed, operand-viewed and
 // fact-filled, for a caller about to run a gang whose lanes may query any
 // form -- the test harness and opt-in parallel native C driver. Serial
@@ -12158,7 +12482,7 @@ void buster_x86_metadata_prewarm_all_forms(void)
         }
         (void)buster_x86_metadata_tls_prepare(BUSTER_X86_TLS_PREPARE_ALL);
         (void)buster_x86_metadata_forwarding_prepare();
-        (void)buster_x86_metadata_got_prepare();
+        (void)buster_x86_metadata_got_prepare(BUSTER_X86_GOT_PREPARE_ALL);
         (void)buster_x86_metadata_nop_prepare();
         buster_x86_metadata_all_forms_prepared = true;
     }
@@ -12180,7 +12504,7 @@ u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void)
     buster_x86_metadata_prewarm_all_forms();
     u64 unprepared = (u64)(buster_x86_metadata_tls_prepared != BUSTER_X86_TLS_PREPARE_ALL);
     unprepared += (u64)!buster_x86_metadata_forwarding_prepared;
-    unprepared += (u64)!buster_x86_metadata_got_prepared;
+    unprepared += (u64)(buster_x86_metadata_got_prepared != BUSTER_X86_GOT_PREPARE_ALL);
     unprepared += (u64)!buster_x86_metadata_nop_prepared;
     for (u32 form_id = 0; form_id < BUSTER_X86_GENERATED_FORM_COUNT; form_id += 1)
     {
