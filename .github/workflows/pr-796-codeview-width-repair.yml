@@ -1,0 +1,82 @@
+name: PR 796 CodeView subfield width repair
+
+on:
+  push:
+    branches:
+      - fix/786-native-retirement-closure
+    paths:
+      - .github/workflows/pr-796-codeview-width-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/786-native-retirement-closure
+          fetch-depth: 0
+
+      - name: Restore the specified S_DEFRANGE_SUBFIELD layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          emitter = Path('src/buster/lib/compiler/codeview/codeview.c')
+          text = emitter.read_text()
+          old = '''                byte_writer_emit_u32_le(symbols, 0);
+                          byte_writer_emit_u32_le(symbols, piece->value_offset);
+                          codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
+          '''
+          # Keep indentation matching exact repository bytes rather than relying
+          # on a formatter in this repair-only workflow.
+          old = old.replace('                          ', '                ')
+          new = '''                byte_writer_emit_u32_le(symbols, 0);
+                          symbols->overflow |= piece->value_offset > UINT16_MAX;
+                          byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);
+                          codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
+          '''.replace('                          ', '                ')
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one frame-piece CodeView layout, found {text.count(old)}')
+          emitter.write_text(text.replace(old, new, 1))
+
+          consumer = Path('src/buster/tests/compiler/codegen/codegen_test.c')
+          text = consumer.read_text()
+          old = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 18)
+                          {
+                              // offsetInParent is 32 bits; the relocated address starts after it.
+                              memcpy(&range_start, bytes.pointer + record + 12, 4);
+                              memcpy(&range_length, bytes.pointer + record + 18, 2);
+                          }
+          '''.replace('                          ', '                ')
+          new = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
+                          {
+                              // S_DEFRANGE_SUBFIELD stores OffsetInParent as 16 bits.
+                              memcpy(&range_start, bytes.pointer + record + 10, 4);
+                              memcpy(&range_length, bytes.pointer + record + 16, 2);
+                          }
+          '''.replace('                          ', '                ')
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one masked 32-bit parser layout, found {text.count(old)}')
+          consumer.write_text(text.replace(old, new, 1))
+          PY
+
+          git diff --check
+          grep -F 'byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);' src/buster/lib/compiler/codeview/codeview.c
+          grep -F 'record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16' src/buster/tests/compiler/codegen/codegen_test.c
+
+      - name: Commit repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/lib/compiler/codeview/codeview.c src/buster/tests/compiler/codegen/codegen_test.c
+          git commit -m 'fix(codeview): restore subfield offset width'
+          git push origin HEAD:fix/786-native-retirement-closure
