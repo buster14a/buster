@@ -7,9 +7,9 @@ matrix. It complements the strict coverage floor and the native
 differential runner; it does not replace either or authorize backend retirement.
 
 The admitted input inventory is
-[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 558
-explicit SHA-256 rows bind every tracked test byte at the approval point: 410
-subject inputs (404 supported-object subjects and 6 registered non-object
+[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 559
+explicit SHA-256 rows bind every tracked test byte at the approval point: 411
+subject inputs (405 supported-object subjects and 6 registered non-object
 controls), 12 registered rejection controls, 72 support files and 64
 dormant custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
@@ -17,8 +17,8 @@ is therefore a reviewed support decision, not an automatic side effect of adding
 a fixture. Merging a contract change is the maintainer approval record.
 
 The September 17, 2026 integration retains every subject admitted by the
-current support ledger. The integrated profile has 558 inputs,
-410 subjects, 19,680 groups and 78,720 rows: 404 supported-object
+current support ledger. The integrated profile has 559 inputs,
+411 subjects, 19,728 groups and 78,912 rows: 405 supported-object
 subjects plus 6 registered non-object controls. The original 192-row
 historical gap ledger and the original 341 applicability classifications remain
 explicit and source-bound. Eighteen additional source-bound target exclusions
@@ -184,21 +184,21 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 558 input rows, 410 subject inputs (404 supported-object subjects and six
-non-object controls), 78,720 support-contract identities,
+the 559 input rows, 411 subject inputs (405 supported-object subjects and six
+non-object controls), 78,912 support-contract identities,
 or the support ledger bytes and digests. These are historical replay dispositions. The current full census supplies
 the authenticated 692-record project closure, including the target SDK headers
 and the project-owned MinGW varargs adapter described below.
 
 The binding values are frozen in both the C producer and the independent
 validator: descriptor SHA-256
-`d4ffce559c12a3201420c75347e4ff3ce48832a0e4987c95b5539346033433ab`, materializer
+`98796526583f1c046a8bb652cbd630d5074838d5222967d0786d1e17df4f8dce`, materializer
 receipt SHA-256
-`250416ef64fc90d9697ee6e6bc2d55c8ce95d0fa68805b714c9c2c8347313bd7`, project
+`7dbc08e32d824c06524e8c42b8b4d36e10984d6941eb5f17608a504655a868f8`, project
 closure SHA-256
-`51532fcbff545f42308672151b2046a99fce49a460cecda6f65d1859c5e8013b`, and
+`3a02113955e887b744df7b1a225f44033a8c39fd523405cd17f26f4222006cee`, and
 materializer ledger SHA-256
-`0c0f0ec8768957d93573a04f8712e37df2fadbc9647113bf6578b7dfdc300bcd`.
+`c63e7c379569078490ab5cc5a6075dde62e24d09038bcc30bab8d78f306b41f3`.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is
@@ -387,7 +387,7 @@ zero-artifact/zero-counter shape; malformed status, process, fallback, object
 or telemetry evidence remains fatal, and a caller-supplied disposition cannot
 select the skip path. A production manifest is admitted only as
 `profile=full-census`: it must bind
-the exact 558-input/410-subject/78,720-row, four-shard population. The producer
+the exact 559-input/411-subject/78,912-row, four-shard population. The producer
 also copies `docs/native-retirement-supported-gaps-v1.tsv` into the evidence
 directory and binds its SHA-256 in the manifest. The validator checks that
 authenticated seven-column ledger, including all 192 immutable row identities,
@@ -400,7 +400,7 @@ For the full profile it must contain the exact authenticated 374 fixture/target
 entries, each tied to the subject's input SHA-256 and a source-reviewed reason.
 Only this projection can classify a target-specific residual as
 `platform-inapplicable` or `unavailable`; a result disposition, row count,
-fallback counter or diagnostic cannot forge applicability. Every 78,720 row
+fallback counter or diagnostic cannot forge applicability. Every 78,912 row
 identity and input byte remains in the manifest and validation partition.
 The six whole-fixture non-object controls are authenticated by the support
 contract instead of receiving row outcome classes in this fixture/target
@@ -589,7 +589,7 @@ as its source and driver registration state; its census rows retain that
 platform ownership, and the native driver continues to build and execute it
 with the host compiler. The ARM64 floating-state observer uses `unsigned long
 long` for its 64-bit system-register operands, including LLP64 Windows.
-Every original fixture and all 78,720 row identities remain present.
+Every original fixture and all 78,912 row identities remain present.
 
 Main's Android x86-64 ABI repair selects binary128 long double. Format-specific
 fixtures now test `__LDBL_MANT_DIG__`, retaining the complete x87 bodies on x87

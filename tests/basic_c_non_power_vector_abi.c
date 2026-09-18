@@ -16,6 +16,12 @@ typedef double F64x12 __attribute__((vector_size(96)));
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 #define NON_POWER_VECTOR_ALIGNMENT(size) ((size) > 16 ? 16 : (size))
+#elif defined(__APPLE__) && defined(__AVX512F__)
+#define NON_POWER_VECTOR_ALIGNMENT(size) ((size) > 64 ? 64 : (size))
+#elif defined(__APPLE__) && defined(__AVX__)
+#define NON_POWER_VECTOR_ALIGNMENT(size) ((size) > 32 ? 32 : (size))
+#elif defined(__APPLE__)
+#define NON_POWER_VECTOR_ALIGNMENT(size) ((size) > 16 ? 16 : (size))
 #else
 #define NON_POWER_VECTOR_ALIGNMENT(size) (size)
 #endif

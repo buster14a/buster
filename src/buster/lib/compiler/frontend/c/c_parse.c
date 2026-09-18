@@ -1099,11 +1099,18 @@ BUSTER_C_SHARED bool c_vector_type_layout(Target target, u64 element_size, u32 l
         bool padded = storage_size != logical_byte_size;
         // Keep the established power-of-two vector layout unchanged. For the
         // newly admitted padded GNU shape, Clang caps natural alignment at
-        // sixteen on AArch64. x86-64 Darwin, ELF, Windows, wasm, RISC-V, and
-        // BPF retain the rounded storage alignment.
+        // sixteen on AArch64. Darwin x86-64 caps it at the enabled vector
+        // register width; the other x86-64 ABIs retain storage alignment.
         if (padded && target.cpu_arch == CPU_ARCH_AARCH64)
         {
             alignment = BUSTER_MIN(alignment, 16u);
+        }
+        else if (padded && target.cpu_arch == CPU_ARCH_X86_64 &&
+                 (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS))
+        {
+            u32 maximum = target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512F) ? 64u :
+                          target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX) ? 32u : 16u;
+            alignment = BUSTER_MIN(alignment, maximum);
         }
         *storage_size_out = storage_size;
         *alignment_out = alignment;
