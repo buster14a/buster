@@ -1,0 +1,245 @@
+name: PR 796 CodeView isolation v2
+
+on:
+  push:
+    branches:
+      - fix/786-native-retirement-closure
+    paths:
+      - .github/workflows/pr-796-codeview-isolation-v2.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-796-codeview-isolation-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isolate:
+    name: ${{ matrix.variant }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - baseline-32bit
+          - omit-locations
+          - raw-addresses
+          - text-anchor-addresses
+          - omit-empty-globals
+          - omit-locations-and-empty-globals
+    steps:
+      - name: Check out diagnostic revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Apply isolated CodeView variant
+        shell: powershell
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import os
+          from pathlib import Path
+
+          path = Path('src/buster/lib/compiler/codeview/codeview.c')
+          text = path.read_text(encoding='utf-8')
+          variant = os.environ['VARIANT']
+
+          wrong = '''                symbols->overflow |= piece->value_offset > UINT16_MAX;
+                          byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);
+          '''.replace('                          ', '                ')
+          correct = '                byte_writer_emit_u32_le(symbols, piece->value_offset);\n'
+          if text.count(wrong) != 1:
+              raise SystemExit(f'expected one 16-bit S_DEFRANGE_SUBFIELD layout, found {text.count(wrong)}')
+          text = text.replace(wrong, correct, 1)
+
+          def bounds(source: str, function: str) -> tuple[int, int]:
+              marker = f' {function}('
+              signature = source.find(marker)
+              if signature < 0:
+                  raise SystemExit(f'function not found: {function}')
+              opening = source.find('{', signature)
+              depth = 0
+              for index in range(opening, len(source)):
+                  if source[index] == '{':
+                      depth += 1
+                  elif source[index] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          return opening, index
+              raise SystemExit(f'closing brace not found: {function}')
+
+          def insert_return(source: str, function: str) -> str:
+              opening, _ = bounds(source, function)
+              return source[:opening + 1] + '\n    return;' + source[opening + 1:]
+
+          if variant in {'omit-locations', 'omit-locations-and-empty-globals'}:
+              text = insert_return(text, 'codeview_emit_location_range')
+
+          if variant == 'raw-addresses':
+              opening, closing = bounds(text, 'codeview_emit_function_address')
+              body = '''{
+              (void)relocations;
+              (void)relocation_count;
+              (void)relocation_capacity;
+              (void)function_index;
+              byte_writer_emit_u32_le(symbols, addend);
+              byte_writer_emit_u16_le(symbols, 1);
+          }'''.replace('              ', '    ')
+              text = text[:opening] + body + text[closing + 1:]
+
+          if variant == 'text-anchor-addresses':
+              opening, closing = bounds(text, 'codeview_emit_location_range')
+              body = text[opening:closing + 1]
+              body = body.replace('u32 start = range->start >= function_offset ? range->start - function_offset : 0;',
+                                  'u32 start = range->start;')
+              body = body.replace('u32 piece_start = range->start >= function_offset ? range->start - function_offset : 0;',
+                                  'u32 piece_start = range->start;')
+              body = body.replace('relocation_capacity, function_index, start);',
+                                  'relocation_capacity, 0, start);')
+              body = body.replace('relocation_capacity, function_index, piece_start);',
+                                  'relocation_capacity, 0, piece_start);')
+              text = text[:opening] + body + text[closing + 1:]
+
+              opening, closing = bounds(text, 'codeview_emit_scope_tree')
+              body = text[opening:closing + 1]
+              body = body.replace('u32 start = scope->start >= function_offset ? scope->start - function_offset : 0;',
+                                  'u32 start = scope->start;')
+              body = body.replace('relocation_capacity, function_index, start);',
+                                  'relocation_capacity, 0, start);')
+              text = text[:opening] + body + text[closing + 1:]
+
+          if variant in {'omit-empty-globals', 'omit-locations-and-empty-globals'}:
+              begin = text.index('        if (input.model && input.model->valid)\n        {\n            u64 globals = codeview_subsection_begin')
+              end = text.index('        // One symbols subsection and one lines subsection per function.', begin)
+              text = text[:begin] + text[end:]
+
+          path.write_text(text, encoding='utf-8')
+          print(f'prepared variant={variant}')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check
+
+      - name: Build and run strict p0/p2 links
+        shell: powershell
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Evidence = Join-Path $env:RUNNER_TEMP "pr-796-codeview-v2-$env:VARIANT"
+          New-Item -ItemType Directory -Force -Path $Evidence | Out-Null
+          $Report = Join-Path $Evidence 'report.txt'
+          "variant=$env:VARIANT" | Set-Content $Report
+          "head=$env:GITHUB_SHA" | Add-Content $Report
+
+          function Record([object[]] $Lines) {
+            foreach ($Line in $Lines) {
+              $Text = [string]$Line
+              $Text | Add-Content $Report
+              Write-Host $Text
+            }
+          }
+
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio tools not found' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+
+          $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+          $Runtime = @(Get-ChildItem $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse)
+          if ($Runtime.Count -ne 1) { throw "expected one ASan runtime, found $($Runtime.Count)" }
+          $env:PATH = "$(Split-Path -Parent $Runtime[0].FullName);$env:PATH"
+
+          $Driver = Join-Path $env:RUNNER_TEMP "strict-build-$env:VARIANT.exe"
+          & clang.exe -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o $Driver
+          if ($LASTEXITCODE -ne 0) { throw "driver compile failed: $LASTEXITCODE" }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { throw "generate failed: $LASTEXITCODE" }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { throw "ide build failed: $LASTEXITCODE" }
+
+          $Ide = (Resolve-Path 'build\Release\ide.exe').Path
+          $Include = (Resolve-Path 'tests\differential').Path
+          $Caller = Join-Path $env:RUNNER_TEMP "caller-$env:VARIANT.o"
+          $P0Object = Join-Path $env:RUNNER_TEMP "p0-$env:VARIANT.o"
+          $P2Object = Join-Path $env:RUNNER_TEMP "p2-$env:VARIANT.o"
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length })
+          $Sanitize = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
+
+          $CallerArgs = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char') + $Sanitize + @("-I$Include")
+          foreach ($LibraryPath in $LibraryPaths) { $CallerArgs += "-L$LibraryPath" }
+          $CallerArgs += @('tests\differential\abi_host.c', '-c', '-o', $Caller)
+          & clang.exe @CallerArgs
+          if ($LASTEXITCODE -ne 0) { throw "caller compile failed: $LASTEXITCODE" }
+
+          $Common = @('cc', '-fregister-allocator=fast', '-fno-machine-fallback', '-fno-canonical-local-promotion', '-fno-frontend-ssa', '-fverify-codegen', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', "-I$Include")
+          foreach ($LibraryPath in $LibraryPaths) { $Common += "-L$LibraryPath" }
+          & $Ide @Common '-fno-target-local-promotion' 'tests\differential\abi.c' '-c' '-o' $P0Object
+          if ($LASTEXITCODE -ne 0) { throw "p0 compile failed: $LASTEXITCODE" }
+          & $Ide @Common '-ftarget-local-promotion' 'tests\differential\abi.c' '-c' '-o' $P2Object
+          if ($LASTEXITCODE -ne 0) { throw "p2 compile failed: $LASTEXITCODE" }
+          Copy-Item $P0Object (Join-Path $Evidence 'p0.o')
+          Copy-Item $P2Object (Join-Path $Evidence 'p2.o')
+
+          function Link-One([string] $Label, [string] $Object) {
+            $Program = Join-Path $env:RUNNER_TEMP "$Label-$env:VARIANT.exe"
+            $Args = @() + $Sanitize
+            foreach ($LibraryPath in $LibraryPaths) { $Args += "-L$LibraryPath" }
+            $Args += @($Caller, $Object, '-o', $Program)
+            $SavedPreference = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $Output = @(& clang.exe @Args 2>&1)
+            $Code = $LASTEXITCODE
+            $ErrorActionPreference = $SavedPreference
+            "=== $Label ===" | Add-Content $Report
+            Record $Output
+            "${Label}_link_exit=$Code" | Add-Content $Report
+            if ($Code -eq 0) {
+              $SavedPreference = $ErrorActionPreference
+              $ErrorActionPreference = 'Continue'
+              $RunOutput = @(& $Program 2>&1)
+              $RunCode = $LASTEXITCODE
+              $ErrorActionPreference = $SavedPreference
+              Record $RunOutput
+              "${Label}_run_exit=$RunCode" | Add-Content $Report
+              return [int]$RunCode
+            }
+            return [int]$Code
+          }
+
+          [int]$P0 = Link-One 'p0' $P0Object
+          [int]$P2 = Link-One 'p2' $P2Object
+          "RESULT p0=$P0 p2=$P2" | Add-Content $Report
+          "p0=$P0`np2=$P2" | Set-Content (Join-Path $Evidence 'status.txt')
+
+      - name: Upload compact report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-796-codeview-v2-${{ matrix.variant }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr-796-codeview-v2-${{ matrix.variant }}
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Enforce outcome
+        if: ${{ always() }}
+        shell: powershell
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $Status = Join-Path $env:RUNNER_TEMP "pr-796-codeview-v2-$env:VARIANT\status.txt"
+          if (-not (Test-Path $Status)) { throw 'missing status.txt' }
+          Get-Content $Status
+          $Values = @{}
+          foreach ($Line in Get-Content $Status) {
+            $Parts = $Line -split '=', 2
+            $Values[$Parts[0]] = [int]$Parts[1]
+          }
+          if ($Values['p0'] -ne 0) { throw "p0 failed: $($Values['p0'])" }
+          if ($Values['p2'] -ne 0) { throw "p2 failed: $($Values['p2'])" }
