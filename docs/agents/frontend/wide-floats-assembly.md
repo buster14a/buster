@@ -8,9 +8,10 @@ x87 and byte-eight bit 63 for binary128. It does not widen or narrow a value
 before observing the sign. This preserves signaling NaNs, signed zero and
 floating exception state. `basic_c_signbit_images.c` and its independent host
 observer cover those images across the native target/mode/frontend/PIC matrix.
-AArch64 binary128 widening uses ordinary MIR frame images; see the machine
-guide for its exact conversion and native floating-environment checks. This
-does not claim binary128 scalar ABI or arithmetic support.
+AArch64 binary128 widening and scalar transport use ordinary MIR frame
+images; see the machine guide for their exact conversion and ABI-boundary
+checks. Arithmetic, comparison, truth conversion and general narrowing remain
+separately unsupported.
 The host FENV fixture in `tests/host_aarch64_float_to_f128.c` uses ordinary
 GNU inline asm for `mrs`/`msr` reads and writes of `fpsr`/`fpcr`; the baseline
 AArch64 inline-assembly vocabulary selects these checked system-register rows
@@ -81,7 +82,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   static BF16 initializers use this path. An explicit cast to `double` still
   deliberately rounds to binary64. The binary128 rational converter uses a
   two-limb quotient, not a host extended type or a new numeric dependency.
-  This does not add native BF16 arithmetic/ABI or binary128 scalar ABI support.
+  This does not add native BF16 arithmetic/ABI or binary128 arithmetic support.
 
   `c_parse_bfloat16_builtin` carries the LLVM18 BF16/AVX-NE-CONVERT signatures
   and the select/FMA dependencies used by the pristine resource headers.
@@ -94,6 +95,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   native intrinsic lowering. `c_test_bfloat16_semantic_acceptance` covers
   source-format rounding on six layouts in both frontend forms, mixed-format
   identity, positive/negative builtin operands, and deep nested calls.
+- **Base AAPCS64 `long double` is IEEE binary128 and supports scalar
+  transport.** A scalar argument or result is one complete sixteen-byte image
+  in a Q register; after V0-V7 are exhausted, named arguments occupy their
+  sixteen-byte-aligned stack slot. Canonical and MIR backends keep the value
+  slot-backed internally and bridge only at the ABI edges, so assignment,
+  literal return, direct/indirect calls and mixed Clang/Buster linkage preserve
+  every payload bit, including negative zero. `c_ir_signature_type_supported`
+  admits only the exact scalar shape proven by `ir_type_abi_value`; aggregates,
+  variadic wide parameters, arithmetic, comparisons, truth conversion and
+  general conversions remain behind their existing structured rejections.
+  `basic_c_aarch64_binary128_transport.c` covers Q0/Q1, ninth-argument stack
+  spill and both mixed-compiler directions on native Linux AArch64, with strict
+  no-fallback compilation across the AAPCS64 target/mode/frontend/PIC matrix.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
   Transport, the four arithmetic operators, negation, the six comparisons,
   truth conversion, and the conversions to and from the narrower floats and

@@ -1221,6 +1221,18 @@ BUSTER_C_INTERNAL bool c_ir_target_supports_f80(Target target)
            layout.long_double_type.alignment == 16;
 }
 
+// Base AAPCS64 long double is IEEE binary128. This predicate deliberately
+// admits only the exact scalar representation whose shared ABI classification
+// is one sixteen-byte vector-file part; arithmetic and conversions remain
+// independently gated by their lowering paths.
+BUSTER_C_INTERNAL bool c_ir_target_supports_f128_transport(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    return target.cpu_arch == CPU_ARCH_AARCH64 && ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_AAPCS64 &&
+           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 &&
+           layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16;
+}
+
 // A wide value is safe for the canonical x86 backend only when the existing
 // SysV classifier proves the complete value is the two-part x87 return shape.
 // This intentionally asks the classifier rather than walking fields here:
@@ -1304,7 +1316,14 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
     IrAbiValue abi = ir_type_abi_value(program, type_id, convention, result_type ? IR_ABI_USE_RESULT : IR_ABI_USE_ARGUMENT);
     if (c_ir_type_contains_wide_float(program, wide_float_cache, type_id))
     {
-        if (c_ir_type_is_f80_x87_shape(program, wide_float_cache, type_id, target))
+        if (c_ir_target_supports_f128_transport(target) && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && !type->is_atomic)
+        {
+            if (abi.memory || abi.indirect || abi.part_count != 1 || abi.parts[0].abi_class != IR_ABI_CLASS_VECTOR || abi.parts[0].size != 16)
+            {
+                return false;
+            }
+        }
+        else if (c_ir_type_is_f80_x87_shape(program, wide_float_cache, type_id, target))
         {
             // SysV passes both scalar f80 and ABI-proven wrappers by value in
             // a sixteen-byte stack slot.  Results come back as the x87 pair.
@@ -11066,6 +11085,28 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_f80_constant_bits(CIntegerIrBuilder* build
     return result;
 }
 
+BUSTER_C_INTERNAL IrValueId c_ir_emit_f128_constant_bits(CIntegerIrBuilder* builder, IrSourceRange source, String8 literal, u64 low, u64 high)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    IrType* type = ir_type_from_id(&builder->program->types, builder->long_double_type);
+    if (type && c_ir_target_supports_f128_transport(builder->target) && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 &&
+        type->layout.size == 16 && type->layout.alignment == 16)
+    {
+        result = c_ir_add_result(builder, builder->long_double_type);
+        u64* immediate = arena_allocate(builder->arena, u64, 2);
+        immediate[0] = low;
+        immediate[1] = high;
+        IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_CONSTANT_FLOAT, builder->long_double_type);
+        instruction.immediates = immediate;
+        instruction.immediate_count = 2;
+        instruction.result = result;
+        IrInstructionId id = c_ir_append_instruction(builder, instruction, source);
+        ir_instruction_extra_ensure(builder->arena, builder->function, id)->literal = literal;
+        builder->function->values[result.value].definition = id;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder, String8 spelling, IrSourceRange source)
 {
     char8 suffix = 0;
@@ -11103,6 +11144,16 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_float_spelling(CIntegerIrBuilder* builder,
             return IR_VALUE_ID_INVALID;
         }
         return c_ir_emit_f80_constant_bits(builder, source, spelling, significand, sign_exponent);
+    }
+    if (type_value->bit_width == 128 && c_ir_target_supports_f128_transport(builder->target))
+    {
+        CIrConstantValue constant = {0};
+        IrValueId result = IR_VALUE_ID_INVALID;
+        if (c_ir_constant_float_literal(builder, spelling, &constant) && constant.kind == C_IR_CONSTANT_FLOAT)
+        {
+            result = c_ir_emit_f128_constant_bits(builder, source, spelling, constant.integer, constant.integer_high);
+        }
+        return result;
     }
     if (type_value->bit_width > 64)
     {
@@ -22462,8 +22513,18 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
                     IrInstruction* constant = builder->function->instructions + definition.value;
                     if (constant->opcode == IR_OPCODE_CONSTANT_FLOAT && constant->immediate_count == 2 && constant->immediates)
                     {
-                        IrValueId negated = c_ir_emit_f80_constant_bits(builder, source, ir_instruction_extra(builder->function, definition).literal,
-                                                                         constant->immediates[0], (u16)(constant->immediates[1] ^ UINT64_C(0x8000)));
+                        IrType* constant_type = ir_type_from_id(&builder->program->types, constant->canonical_type);
+                        IrValueId negated = IR_VALUE_ID_INVALID;
+                        if (constant_type && constant_type->bit_width == 80)
+                        {
+                            negated = c_ir_emit_f80_constant_bits(builder, source, ir_instruction_extra(builder->function, definition).literal,
+                                                                  constant->immediates[0], (u16)(constant->immediates[1] ^ UINT64_C(0x8000)));
+                        }
+                        else if (constant_type && constant_type->bit_width == 128)
+                        {
+                            negated = c_ir_emit_f128_constant_bits(builder, source, ir_instruction_extra(builder->function, definition).literal,
+                                                                   constant->immediates[0], constant->immediates[1] ^ UINT64_C(0x8000000000000000));
+                        }
                         if (negated.value != IR_ID_UNDERLYING_INVALID)
                         {
                             *value_count = first;

@@ -302,6 +302,25 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
         };
         return true;
     }
+    if (type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && type->layout.size == 16 &&
+        ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_AAPCS64)
+    {
+        // Binary128 is an ordinary sixteen-byte Q-register image at AAPCS64
+        // boundaries, but the machine IR keeps it in a complete stack slot.
+        // Aggregate-like placement also preserves the full aligned stack image
+        // after the eight vector argument registers are exhausted.
+        *shape = (MachineA64ValueShape){
+            .part_is_float = {1},
+            .part_sizes = {16},
+            .part_count = 1,
+            .byte_size = 16,
+            .exact_byte_size = 16,
+            .aggregate = true,
+            .vector = true,
+            .stack_aligned = true,
+        };
+        return true;
+    }
     // A bare 128-bit integer is the AAPCS64 even-aligned X pair — the same
     // two INTEGER parts a sixteen-byte wrapped pair builds — carried by the
     // aggregate machinery over the value's 16-byte slot, exactly like the
@@ -978,19 +997,24 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_constant(MachineA64Selector* selecto
         machine_a64_define(selector, result_register, row);
         selected = true;
     }
-    else if (instruction->opcode == IR_OPCODE_CONSTANT_INTEGER && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
-             instruction->result.value < function->value_count && selector->value_stack_slots[instruction->result.value] != UINT32_MAX)
+    else if ((instruction->opcode == IR_OPCODE_CONSTANT_INTEGER || instruction->opcode == IR_OPCODE_CONSTANT_FLOAT) &&
+             instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count &&
+             selector->value_stack_slots[instruction->result.value] != UINT32_MAX)
     {
-        // A 128-bit integer constant is slot-backed like every i128 value.
-        // The second eightbyte is the canonical emitters' selection: an
-        // explicit second immediate when the frontend recorded one,
-        // otherwise the negated low half's sign fill.
+        // Wide scalar constants are slot-backed like every i128/f128 value.
+        // Integer constants retain their signed-immediate convention; a
+        // binary128 floating constant already carries its exact two target
+        // image limbs in canonical low/high order.
         IrType* constant_type = ir_type_from_id(&program->types, instruction->canonical_type);
-        if (constant_type && constant_type->kind == IR_TYPE_INTEGER && constant_type->bit_width == 128)
+        bool integer128 = constant_type && constant_type->kind == IR_TYPE_INTEGER && constant_type->bit_width == 128;
+        bool float128 = constant_type && constant_type->kind == IR_TYPE_FLOAT && constant_type->bit_width == 128 &&
+                        instruction->immediate_count == 2;
+        if (integer128 || float128)
         {
             u32 result_slot = selector->value_stack_slots[instruction->result.value];
-            u64 low = instruction->immediate_is_negative ? 0 - instruction->immediates[0] : instruction->immediates[0];
-            u64 high = instruction->immediate_count > 1 ? instruction->immediates[1] : instruction->immediate_is_negative ? UINT64_MAX : 0;
+            u64 low = integer128 && instruction->immediate_is_negative ? 0 - instruction->immediates[0] : instruction->immediates[0];
+            u64 high = float128 || instruction->immediate_count > 1 ? instruction->immediates[1]
+                                                                    : instruction->immediate_is_negative ? UINT64_MAX : 0;
             u64 halves[2] = {low, high};
             for (u32 half_index = 0; half_index < 2; half_index += 1)
             {
@@ -6482,7 +6506,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                           instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE || instruction->opcode == IR_OPCODE_CALL ||
                           instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
                           instruction->opcode == IR_OPCODE_VA_ARG || instruction->opcode == IR_OPCODE_CAST ||
-                          instruction->opcode == IR_OPCODE_CONSTANT_INTEGER ||
+                          instruction->opcode == IR_OPCODE_CONSTANT_INTEGER || instruction->opcode == IR_OPCODE_CONSTANT_FLOAT ||
                           ((instruction->opcode == IR_OPCODE_BINARY || instruction->opcode == IR_OPCODE_UNARY) && value_type &&
                            (value_type->kind == IR_TYPE_VECTOR || (value_type->kind == IR_TYPE_INTEGER && value_type->bit_width == 128)))) &&
                          value_type && value_type->layout.resolved && value_type->layout.size <= UINT32_MAX - 7 &&
@@ -6503,8 +6527,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                     {
                         slot_size = 16;
                     }
+                    bool wide_float = value_type->kind == IR_TYPE_FLOAT && value_type->bit_width == 128;
                     selector.value_stack_slots[instruction->result.value] = machine_a64_append_slot(
-                        &selector, slot_size, value_type->kind == IR_TYPE_VECTOR ? 16u : 8u);
+                        &selector, slot_size, value_type->kind == IR_TYPE_VECTOR || wide_float ? 16u : 8u);
                 }
             }
         }

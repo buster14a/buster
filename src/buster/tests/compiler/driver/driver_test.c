@@ -3411,6 +3411,125 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
     return result;
 }
 
+// AAPCS64 binary128 transport is a deliberately narrower contract than full
+// scalar arithmetic. Keep every allocator/frontend/PIC cell strict, execute the
+// native Linux image, and prove both mixed-compiler directions in one focused
+// representative cell.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transport(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("aarch64-linux"), S8("aarch64-linux-android"), S8("aarch64-unknown-uefi")};
+    String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 positions[] = {S8("-fno-pic"), S8("-fPIC")};
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && BUSTER_LINUX && !BUSTER_ANDROID
+    String8 host_objects[2];
+    bool host_compiled[2];
+    for (u32 direction = 0; direction < 2; direction += 1)
+    {
+        host_objects[direction] = buster_test_temporary_path(arguments->arena,
+            direction ? S8("buster-f128-transport-host-library") : S8("buster-f128-transport-host-client"), S8(".o"));
+        String8 command[12];
+        u32 count = 0;
+        command[count++] = S8(BUSTER_HOST_C_COMPILER);
+        if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { command[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+        command[count++] = S8("-O0");
+        command[count++] = S8("-fno-inline");
+        command[count++] = direction ? S8("-DBUSTER_F128_TRANSPORT_LIBRARY=1") : S8("-DBUSTER_F128_TRANSPORT_CLIENT=1");
+        command[count++] = S8("-c");
+        command[count++] = S8("tests/basic_c_aarch64_binary128_transport.c");
+        command[count++] = S8("-o");
+        command[count++] = host_objects[direction];
+        ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count},
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        host_compiled[direction] = spawned.handle && os_process_wait_sync(arguments->arena, spawned).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, host_compiled[direction]);
+    }
+#endif
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128-transport"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], positions[position],
+                        S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output,
+                        S8("tests/basic_c_aarch64_binary128_transport.c")};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
+                        temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("f128 transport {S8} {S8} {S8} {S8}: {S8}"),
+                        targets[target], modes[mode], frontends[frontend], positions[position], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == 6 &&
+                        compiled.codegen_statistics.fallback_function_count == 0, description);
+#if BUSTER_CPU_ARCH_AARCH64 && BUSTER_LINUX && !BUSTER_ANDROID
+                    if (target == 0 && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128-transport-run"), S8(".elf"));
+                        String8 native_command[] = {modes[mode], frontends[frontend], positions[position], S8("-fno-machine-fallback"),
+                            S8("-fverify-codegen"), S8("-o"), executable, S8("tests/basic_c_aarch64_binary128_transport.c")};
+                        CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(
+                            temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                        native_invocation.reject_machine_fallback = true;
+                        CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                        BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                        if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                        }
+                    }
+#endif
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && BUSTER_LINUX && !BUSTER_ANDROID
+                    if (target == 0 && mode == 0 && frontend == 1 && position == 0)
+                    {
+                        for (u32 direction = 0; direction < 2; direction += 1)
+                        {
+                            String8 mixed_object = buster_test_temporary_path(temporary.arena, S8("buster-f128-transport-mixed"), S8(".o"));
+                            String8 mixed[] = {S8("-c"), S8("-g0"), modes[mode], frontends[frontend], positions[position],
+                                S8("-fno-machine-fallback"), S8("-fverify-codegen"),
+                                direction ? S8("-DBUSTER_F128_TRANSPORT_CLIENT=1") : S8("-DBUSTER_F128_TRANSPORT_LIBRARY=1"),
+                                S8("tests/basic_c_aarch64_binary128_transport.c"), S8("-o"), mixed_object};
+                            CompilerDriverInvocation mixed_invocation = compiler_driver_parse_arguments(
+                                temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed));
+                            mixed_invocation.reject_machine_fallback = true;
+                            CompilerDriverResult mixed_result = compiler_driver_execute_invocation(temporary.arena, mixed_invocation);
+                            BUSTER_TEST_RAW(arguments, mixed_result.error == COMPILER_DRIVER_ERROR_NONE && mixed_result.has_object &&
+                                mixed_result.codegen_statistics.fallback_function_count == 0, mixed_result.diagnostic);
+                            if (mixed_result.error == COMPILER_DRIVER_ERROR_NONE && host_compiled[direction])
+                            {
+                                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-f128-transport-mixed-run"), S8(".elf"));
+                                String8 link[10];
+                                u32 count = 0;
+                                link[count++] = S8(BUSTER_HOST_C_COMPILER);
+                                if (S8(BUSTER_HOST_C_COMPILER_ARG1).length) { link[count++] = S8(BUSTER_HOST_C_COMPILER_ARG1); }
+                                link[count++] = S8("-no-pie");
+                                link[count++] = mixed_object;
+                                link[count++] = host_objects[direction];
+                                link[count++] = S8("-o");
+                                link[count++] = executable;
+                                ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = link, .length = count},
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                bool linked = spawned.handle && os_process_wait_sync(temporary.arena, spawned).result == PROCESS_RESULT_SUCCESS;
+                                BUSTER_TEST(arguments, linked);
+                                if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                            }
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Keep the complete conversion fixture strict on all desktop AArch64 targets.
 // Foreign object success is not execution evidence; native hosts run it too.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_i128(UnitTestArguments* arguments)
@@ -7088,6 +7207,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_i128_divide);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_binary128_transport);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_i128_to_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
