@@ -1,0 +1,100 @@
+            creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
+        }
+        BOOL created = FALSE;
+        if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN))
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_process_spawn_injected_error());
+        }
+        else
+        {
+            created = CreateProcessW(application.pointer, command_line, 0, 0, inherited_handle_count != 0, creation_flags, environment, 0,
+                                     &startup_info.StartupInfo, &process_information);
+            if (!created)
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_get_last_error());
+            }
+        }
+        if (created)
+        {
+            result.handle = (OsProcessHandle*)process_information.hProcess;
+            CloseHandle(process_information.hThread);
+        }
+    }
+
+    if (attribute_list_ready)
+    {
+        DeleteProcThreadAttributeList(attribute_list);
+    }
+    for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+    {
+        if (duplicated_standard[stream])
+        {
+            CloseHandle(duplicated_standard[stream]);
+        }
+        if (pipe_created[stream])
+        {
+            u32 child_side = stream == STANDARD_STREAM_INPUT ? 0 : 1;
+            u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
+            CloseHandle(result.pipes[stream][child_side]);
+            result.pipes[stream][child_side] = 0;
+            if (!result.handle)
+            {
+                CloseHandle(result.pipes[stream][parent_side]);
+                result.pipes[stream][parent_side] = 0;
+            }
+        }
+    }
+#elif BUSTER_ANDROID
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_UNSUPPORTED, os_process_spawn_unsupported_error());
+    }
+#else
+    pid_t pid = -1;
+    int pipes[STANDARD_STREAM_COUNT][2];
+    bool pipe_created[STANDARD_STREAM_COUNT] = {0};
+    for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+    {
+        pipes[stream][0] = -1;
+        pipes[stream][1] = -1;
+    }
+
+    posix_spawn_file_actions_t file_actions;
+    posix_spawnattr_t attributes;
+    bool file_actions_ready = false;
+    bool attributes_ready = false;
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_FILE_ACTIONS_INIT) ? EIO : posix_spawn_file_actions_init(&file_actions);
+        if (status)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_FILE_ACTIONS_INIT, (OsError){(u32)status});
+        }
+        else
+        {
+            file_actions_ready = true;
+        }
+    }
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_ATTRIBUTES_INIT) ? EIO : posix_spawnattr_init(&attributes);
+        if (status)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_ATTRIBUTES_INIT, (OsError){(u32)status});
+        }
+        else
+        {
+            attributes_ready = true;
+        }
+    }
+
+    for (StandardStream stream = 0; result.failure == PROCESS_SPAWN_FAILURE_NONE && stream < STANDARD_STREAM_COUNT; stream += 1)
+    {
+        if (options.capture & ((u64)1 << stream))
+        {
+            int status;
+            if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_PIPE))
+            {
+                status = EIO;
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE, (OsError){(u32)status});
+            }
