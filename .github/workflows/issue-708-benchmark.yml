@@ -19,8 +19,19 @@ jobs:
   benchmark:
     if: >-
       ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
-          (github.head_ref == 'bench/708-baseline' || github.head_ref == 'fix/708-native-frame-link-cache') }}
-    name: Windows x86-64 uninstrumented benchmark
+          github.head_ref == 'bench/708-baseline' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        arm: [baseline, candidate]
+        trial: [1, 2, 3]
+        include:
+          - arm: baseline
+            revision: f7c4e868d6c90d6b4331a8be84fbfb2d8ae02a47
+          - arm: candidate
+            revision: 72dca9502cdc880c74cf3df0abc93476980b32a6
+    name: Windows benchmark ${{ matrix.arm }} trial ${{ matrix.trial }}
     runs-on: windows-2025
     timeout-minutes: 300
     steps:
@@ -29,6 +40,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ matrix.revision }}
 
       - name: Install verified Zig
         id: zig
@@ -43,6 +55,8 @@ jobs:
         shell: powershell
         env:
           VS_COMPONENT: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+          BUSTER_BENCHMARK_ARM: ${{ matrix.arm }}
+          BUSTER_BENCHMARK_TRIAL: ${{ matrix.trial }}
         run: |
           $ErrorActionPreference = 'Stop'
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
@@ -83,6 +97,8 @@ jobs:
           [ordered]@{
             schema = 'ISSUE_708_BENCHMARK_RESULT_V1'
             source_sha = (git rev-parse HEAD).Trim()
+            arm = $env:BUSTER_BENCHMARK_ARM
+            trial = [int]$env:BUSTER_BENCHMARK_TRIAL
             started_utc = $Started.ToString('o')
             finished_utc = $Finished.ToString('o')
             duration_seconds = [Math]::Round(($Finished - $Started).TotalSeconds, 3)
@@ -108,7 +124,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: issue-708-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: issue-708-${{ matrix.arm }}-${{ matrix.trial }}-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
           if-no-files-found: warn
           retention-days: 14
