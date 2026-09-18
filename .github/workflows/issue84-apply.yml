@@ -26,7 +26,7 @@ jobs:
           {
             cat tools/issue84_apply.[0-9][0-9] > tools/issue84_apply.py
             cat tools/issue84_spawn.[0-9][0-9] > tools/issue84_spawn_impl.txt
-            printf '%s  %s\n' c39ea6f8125dd85d4237e8ba117c79e8682b3f38235ae5e736910cc8b77a721a tools/issue84_apply.py | sha256sum --check --strict
+            printf '%s  %s\n' a6abd87f95ced2bda6f8046ac8064b5b745c6be0bb7cc01f8e5ec264b17526a0 tools/issue84_apply.py | sha256sum --check --strict
             printf '%s  %s\n' e2112fb6cde8e23a2833290dbb975d883cc31b310e2d8d9443fa007f49edc1fd tools/issue84_spawn_impl.txt | sha256sum --check --strict
             python3 -m py_compile tools/issue84_apply.py
             python3 tools/issue84_apply.py
