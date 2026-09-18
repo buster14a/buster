@@ -1,4 +1,4 @@
-name: PR 796 CodeView subfield width repair
+name: Finalize PR 796 CodeView repair
 
 on:
   push:
@@ -10,18 +10,22 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: pr-796-finalize-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   repair:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - name: Check out PR branch
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: fix/786-native-retirement-closure
           fetch-depth: 0
 
-      - name: Restore the specified S_DEFRANGE_SUBFIELD layout
+      - name: Apply the minimal CodeView compatibility repair
         shell: bash
         run: |
           set -euo pipefail
@@ -29,54 +33,110 @@ jobs:
           from pathlib import Path
 
           emitter = Path('src/buster/lib/compiler/codeview/codeview.c')
-          text = emitter.read_text()
-          old = '''                byte_writer_emit_u32_le(symbols, 0);
-                          byte_writer_emit_u32_le(symbols, piece->value_offset);
-                          codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
-          '''
-          # Keep indentation matching exact repository bytes rather than relying
-          # on a formatter in this repair-only workflow.
-          old = old.replace('                          ', '                ')
-          new = '''                byte_writer_emit_u32_le(symbols, 0);
-                          symbols->overflow |= piece->value_offset > UINT16_MAX;
+          text = emitter.read_text(encoding='utf-8')
+
+          wrong_subfield = '''                symbols->overflow |= piece->value_offset > UINT16_MAX;
                           byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);
-                          codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
           '''.replace('                          ', '                ')
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one frame-piece CodeView layout, found {text.count(old)}')
-          emitter.write_text(text.replace(old, new, 1))
+          correct_subfield = '                byte_writer_emit_u32_le(symbols, piece->value_offset);\n'
+          if text.count(wrong_subfield) != 1:
+              raise SystemExit(f'expected one narrowed S_DEFRANGE_SUBFIELD field, found {text.count(wrong_subfield)}')
+          text = text.replace(wrong_subfield, correct_subfield, 1)
+
+          eager_globals = '''            u64 globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
+                          for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
+                          {
+                              DebugVariable* variable = input.model->variables + variable_index;
+                              if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+                              {
+                                  codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);
+                              }
+                          }
+                          codeview_subsection_end(&symbols, globals);
+          '''.replace('                          ', '            ')
+          lazy_globals = '''            u64 globals = 0;
+                          for (u32 variable_index = 0; variable_index < input.model->variable_count; variable_index += 1)
+                          {
+                              DebugVariable* variable = input.model->variables + variable_index;
+                              if (variable->kind == DEBUG_VARIABLE_GLOBAL)
+                              {
+                                  if (!globals)
+                                  {
+                                      globals = codeview_subsection_begin(&symbols, DEBUG_S_SYMBOLS);
+                                  }
+                                  codeview_emit_global_variable(&symbols, input.model, variable, result.relocations, &result.relocation_count);
+                              }
+                          }
+                          if (globals)
+                          {
+                              codeview_subsection_end(&symbols, globals);
+                          }
+          '''.replace('                          ', '            ')
+          if text.count(eager_globals) != 1:
+              raise SystemExit(f'expected one eager globals subsection, found {text.count(eager_globals)}')
+          text = text.replace(eager_globals, lazy_globals, 1)
+          emitter.write_text(text, encoding='utf-8')
 
           consumer = Path('src/buster/tests/compiler/codegen/codegen_test.c')
-          text = consumer.read_text()
-          old = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 18)
-                          {
-                              // offsetInParent is 32 bits; the relocated address starts after it.
-                              memcpy(&range_start, bytes.pointer + record + 12, 4);
-                              memcpy(&range_length, bytes.pointer + record + 18, 2);
-                          }
-          '''.replace('                          ', '                ')
-          new = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
+          text = consumer.read_text(encoding='utf-8')
+          wrong_parser = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
                           {
                               // S_DEFRANGE_SUBFIELD stores OffsetInParent as 16 bits.
                               memcpy(&range_start, bytes.pointer + record + 10, 4);
                               memcpy(&range_length, bytes.pointer + record + 16, 2);
                           }
           '''.replace('                          ', '                ')
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one masked 32-bit parser layout, found {text.count(old)}')
-          consumer.write_text(text.replace(old, new, 1))
+          correct_parser = '''                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 18)
+                          {
+                              // offsetInParent is 32 bits; the relocated address starts after it.
+                              memcpy(&range_start, bytes.pointer + record + 12, 4);
+                              memcpy(&range_length, bytes.pointer + record + 18, 2);
+                          }
+          '''.replace('                          ', '                ')
+          if text.count(wrong_parser) != 1:
+              raise SystemExit(f'expected one narrowed parser layout, found {text.count(wrong_parser)}')
+          consumer.write_text(text.replace(wrong_parser, correct_parser, 1), encoding='utf-8')
+
+          tests = Path('src/buster/tests/compiler/codeview/codeview_test.c')
+          text = tests.read_text(encoding='utf-8')
+          old_expectation = '    UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 3, 1, 2, 1);\n'
+          new_expectation = '''    // A model containing only locals must not create a zero-length
+              // DEBUG_S_SYMBOLS subsection: MSVC link.exe rejects that stream.
+              UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 2, 1, 2, 1);
+          '''.replace('              ', '    ')
+          if text.count(old_expectation) != 1:
+              raise SystemExit(f'expected one model subsection assertion, found {text.count(old_expectation)}')
+          tests.write_text(text.replace(old_expectation, new_expectation, 1), encoding='utf-8')
           PY
 
-          git diff --check
-          grep -F 'byte_writer_emit_u16_le(symbols, (u16)piece->value_offset);' src/buster/lib/compiler/codeview/codeview.c
-          grep -F 'record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16' src/buster/tests/compiler/codegen/codegen_test.c
+          git rm -f \
+            .github/workflows/pr-796-codeview-link-diagnostic.yml \
+            .github/workflows/pr-796-codeview-width-repair.yml \
+            .github/workflows/pr-796-windows-codeview-diagnostic.yml \
+            .github/workflows/pr-796-codeview-isolation-v2.yml
 
-      - name: Commit repair
+          git diff --check
+          python3 tests/ci_tools_test.py -v
+          grep -F 'byte_writer_emit_u32_le(symbols, piece->value_offset);' src/buster/lib/compiler/codeview/codeview.c
+          grep -F 'record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 18' src/buster/tests/compiler/codegen/codegen_test.c
+          grep -F 'model_built, 2, 1, 2, 1' src/buster/tests/compiler/codeview/codeview_test.c
+          test -z "$(find .github/workflows -maxdepth 1 -type f -name 'pr-796-*' -print)"
+
+      - name: Build and run the CodeView-bearing unit suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/pr-796-tests.log"
+          grep -E 'module=codeview_tests .*failed=0 .*status=pass' "$RUNNER_TEMP/pr-796-tests.log"
+
+      - name: Commit the production fix and remove diagnostics
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/buster/lib/compiler/codeview/codeview.c src/buster/tests/compiler/codegen/codegen_test.c
-          git commit -m 'fix(codeview): restore subfield offset width'
+          git add -A
+          git commit -m 'fix(codeview): omit empty global symbol subsections'
           git push origin HEAD:fix/786-native-retirement-closure
