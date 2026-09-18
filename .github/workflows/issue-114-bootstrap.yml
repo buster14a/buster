@@ -18,6 +18,10 @@ jobs:
         with:
           ref: codex/issue-114
           fetch-depth: 0
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
       - name: Validate repository patch
         run: git diff --check origin/main...HEAD
       - name: Bootstrap hosted build driver
