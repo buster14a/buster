@@ -2234,7 +2234,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                             entry->object_length == object_bytes.length)
                                         {
                                             ByteSlice cached_bytes = file_read(temporary.arena, entry->object_path, (FileReadOptions){0});
-                                            if (cached_bytes.pointer && memcmp(cached_bytes.pointer, object_bytes.pointer, object_bytes.length) == 0)
+                                            if (cached_bytes.pointer && cached_bytes.length == object_bytes.length &&
+                                                memcmp(cached_bytes.pointer, object_bytes.pointer, object_bytes.length) == 0)
                                             {
                                                 cached = entry;
                                                 break;
