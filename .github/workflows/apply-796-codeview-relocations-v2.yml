@@ -1,0 +1,445 @@
+name: Apply PR 796 CodeView relocation repair v2
+
+on:
+  push:
+    branches:
+      - fix/786-native-retirement-closure
+    paths:
+      - .github/workflows/apply-796-codeview-relocations-v2.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apply-796-codeview-relocations-v2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    permissions:
+      contents: write
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repair revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Apply and publish relocation repair
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, name: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{name}: expected one match, found {count}")
+              return text.replace(old, new, 1)
+
+          def replace_n(text: str, old: str, new: str, expected: int, name: str) -> str:
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{name}: expected {expected} matches, found {count}")
+              return text.replace(old, new)
+
+          def replace_between(text: str, start: str, end: str, replacement: str, name: str) -> str:
+              begin = text.find(start)
+              if begin < 0:
+                  raise SystemExit(f"{name}: start marker not found")
+              finish = text.find(end, begin + len(start))
+              if finish < 0:
+                  raise SystemExit(f"{name}: end marker not found")
+              return text[:begin] + replacement + text[finish:]
+
+          source_path = Path("src/buster/lib/compiler/codeview/codeview.c")
+          source = source_path.read_text()
+
+          register_target = '''BUSTER_GLOBAL_LOCAL u32 codeview_model_register_target(u16 machine)
+          {
+              return machine == CODEVIEW_MACHINE_ARM64 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+          }
+          '''
+          relocation_helpers = register_target + r'''
+          // CodeView address-bearing records carry a section-relative offset and
+          // section index.  In an object file both fields are linker inputs, not
+          // final literals: retain the function-relative byte offset as the
+          // SECREL32 addend and bind both relocations to the function symbol.
+          BUSTER_GLOBAL_LOCAL void codeview_emit_function_address(ByteWriter* symbols, CodeviewRelocation* relocations, u32* relocation_count,
+                                                                  u64 relocation_capacity, u32 function_index, u32 addend)
+          {
+              if (!symbols || !relocations || !relocation_count || *relocation_count > relocation_capacity ||
+                  relocation_capacity - *relocation_count < 2)
+              {
+                  if (symbols)
+                  {
+                      symbols->overflow = true;
+                  }
+                  return;
+              }
+              relocations[(*relocation_count)++] = (CodeviewRelocation){
+                  .offset = symbols->count,
+                  .function = function_index,
+                  .kind = CODEVIEW_RELOCATION_SECREL32,
+              };
+              byte_writer_emit_u32_le(symbols, addend);
+              relocations[(*relocation_count)++] = (CodeviewRelocation){
+                  .offset = symbols->count,
+                  .function = function_index,
+                  .kind = CODEVIEW_RELOCATION_SECTION16,
+              };
+              byte_writer_emit_u16_le(symbols, 0);
+          }
+
+          BUSTER_GLOBAL_LOCAL bool codeview_relocation_capacity_add(u64* capacity, u64 count)
+          {
+              bool valid = capacity && count <= UINT32_MAX && *capacity <= UINT32_MAX - count;
+              if (valid)
+              {
+                  *capacity += count;
+              }
+              return valid;
+          }
+
+          BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 function_count)
+          {
+              u64 capacity = 0;
+              if (!codeview_relocation_capacity_add(&capacity, (u64)function_count * 4))
+              {
+                  return UINT64_MAX;
+              }
+              if (!model || !model->valid)
+              {
+                  return capacity;
+              }
+              for (u32 variable_index = 0; variable_index < model->variable_count; variable_index += 1)
+              {
+                  if (model->variables[variable_index].kind == DEBUG_VARIABLE_GLOBAL && !codeview_relocation_capacity_add(&capacity, 2))
+                  {
+                      return UINT64_MAX;
+                  }
+              }
+              for (u32 scope_index = 0; scope_index < model->scope_count; scope_index += 1)
+              {
+                  DebugScope* scope = model->scopes + scope_index;
+                  if (scope->kind != DEBUG_SCOPE_FUNCTION && !codeview_relocation_capacity_add(&capacity, 2))
+                  {
+                      return UINT64_MAX;
+                  }
+                  for (u32 scope_variable = 0; scope_variable < scope->variable_count; scope_variable += 1)
+                  {
+                      DebugVariableId id = scope->variables[scope_variable];
+                      if (id >= model->variable_count || model->variables[id].kind == DEBUG_VARIABLE_GLOBAL)
+                      {
+                          continue;
+                      }
+                      DebugVariable* variable = model->variables + id;
+                      for (u32 location_index = 0; location_index < variable->location_count; location_index += 1)
+                      {
+                          DebugLocationRange* range = variable->locations + location_index;
+                          if (range->location.kind == DEBUG_LOCATION_REGISTER || range->location.kind == DEBUG_LOCATION_FRAME)
+                          {
+                              if (!codeview_relocation_capacity_add(&capacity, 2))
+                              {
+                                  return UINT64_MAX;
+                              }
+                          }
+                          else if (range->location.kind == DEBUG_LOCATION_PIECEWISE)
+                          {
+                              for (u32 piece_index = 0; piece_index < range->location.piece_count; piece_index += 1)
+                              {
+                                  u32 kind = range->location.pieces[piece_index].kind;
+                                  if ((kind == DEBUG_LOCATION_REGISTER || kind == DEBUG_LOCATION_FRAME) &&
+                                      !codeview_relocation_capacity_add(&capacity, 2))
+                                  {
+                                      return UINT64_MAX;
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+              return capacity;
+          }
+          '''
+          source = replace_once(source, register_target, relocation_helpers, "relocation helpers")
+
+          source = replace_once(
+              source,
+              '''BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, DebugLocationRange* range, u32 function_offset, u16 machine)
+          ''',
+              '''BUSTER_GLOBAL_LOCAL void codeview_emit_location_range(ByteWriter* symbols, DebugLocationRange* range, u32 function_offset, u16 machine,
+                                                                       u32 function_index, CodeviewRelocation* relocations, u32* relocation_count,
+                                                                       u64 relocation_capacity)
+          ''',
+              "location-range signature",
+          )
+
+          source = replace_n(
+              source,
+              '''        byte_writer_emit_u32_le(symbols, start);
+                      byte_writer_emit_u16_le(symbols, 1);
+                      byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));''',
+              '''        codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);
+                      byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(length, UINT16_MAX));''',
+              2,
+              "whole-value defrange addresses",
+          )
+          source = replace_n(
+              source,
+              '''                byte_writer_emit_u32_le(symbols, piece_start);
+                              byte_writer_emit_u16_le(symbols, 1);
+                              byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));''',
+              '''                codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, piece_start);
+                              byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece_length, UINT16_MAX));''',
+              2,
+              "piecewise defrange addresses",
+          )
+          source = replace_once(
+              source,
+              '''                byte_writer_emit_u16_le(symbols, (u16)BUSTER_MIN(piece->value_offset, UINT16_MAX));
+                              codeview_emit_function_address''',
+              '''                byte_writer_emit_u32_le(symbols, piece->value_offset);
+                              codeview_emit_function_address''',
+              "subfield offset width",
+          )
+
+          source = replace_once(
+              source,
+              '''BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(ByteWriter* symbols, DebugModel* model, DebugVariable* variable, u32 function_offset,
+                                                                    u16 machine)
+          ''',
+              '''BUSTER_GLOBAL_LOCAL void codeview_emit_debug_variable(ByteWriter* symbols, DebugModel* model, DebugVariable* variable, u32 function_offset,
+                                                                    u16 machine, u32 function_index, CodeviewRelocation* relocations,
+                                                                    u32* relocation_count, u64 relocation_capacity)
+          ''',
+              "debug-variable signature",
+          )
+          source = replace_once(
+              source,
+              '''                codeview_emit_location_range(symbols, variable->locations + location_index, function_offset, machine);''',
+              '''                codeview_emit_location_range(symbols, variable->locations + location_index, function_offset, machine, function_index,
+                                                       relocations, relocation_count, relocation_capacity);''',
+              "location-range call",
+          )
+
+          source = replace_once(
+              source,
+              '''BUSTER_GLOBAL_LOCAL void codeview_emit_scope_variables(ByteWriter* symbols, DebugModel* model, DebugScope* scope, u32 function_offset,
+                                                                     u16 machine)
+          ''',
+              '''BUSTER_GLOBAL_LOCAL void codeview_emit_scope_variables(ByteWriter* symbols, DebugModel* model, DebugScope* scope, u32 function_offset,
+                                                                     u16 machine, u32 function_index, CodeviewRelocation* relocations,
+                                                                     u32* relocation_count, u64 relocation_capacity)
+          ''',
+              "scope-variables signature",
+          )
+          source = replace_once(
+              source,
+              '''            codeview_emit_debug_variable(symbols, model, model->variables + id, function_offset, machine);''',
+              '''            codeview_emit_debug_variable(symbols, model, model->variables + id, function_offset, machine, function_index,
+                                                   relocations, relocation_count, relocation_capacity);''',
+              "debug-variable call",
+          )
+
+          source = replace_once(
+              source,
+              '''BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugModel* model, DebugScopeId root, u32 function_offset, u16 machine,
+                                                                CodeviewScopeWalk* walk)
+          ''',
+              '''BUSTER_GLOBAL_LOCAL void codeview_emit_scope_tree(ByteWriter* symbols, DebugModel* model, DebugScopeId root, u32 function_offset, u16 machine,
+                                                                CodeviewScopeWalk* walk, u32 function_index, CodeviewRelocation* relocations,
+                                                                u32* relocation_count, u64 relocation_capacity)
+          ''',
+              "scope-tree signature",
+          )
+          source = replace_once(
+              source,
+              '''                byte_writer_emit_u32_le(symbols, scope->start >= function_offset ? scope->start - function_offset : 0);
+                              byte_writer_emit_u16_le(symbols, 1);''',
+              '''                u32 start = scope->start >= function_offset ? scope->start - function_offset : 0;
+                              codeview_emit_function_address(symbols, relocations, relocation_count, relocation_capacity, function_index, start);''',
+              "block address",
+          )
+          source = replace_once(
+              source,
+              '''                codeview_emit_scope_variables(symbols, model, scope, function_offset, machine);''',
+              '''                codeview_emit_scope_variables(symbols, model, scope, function_offset, machine, function_index, relocations,
+                                                        relocation_count, relocation_capacity);''',
+              "nested scope-variable call",
+          )
+
+          source = replace_once(
+              source,
+              '''        u64 relocation_capacity = (u64)input.function_count * 4;
+                  if (input.model && input.model->valid)
+                  {
+                      relocation_capacity += (u64)input.model->variable_count * 2;
+                  }
+                  result.relocations = arena_allocate(arena, CodeviewRelocation, relocation_capacity);''',
+              '''        u64 relocation_capacity = codeview_relocation_capacity(input.model, input.function_count);
+                  if (relocation_capacity == UINT64_MAX)
+                  {
+                      return result;
+                  }
+                  result.relocations = arena_allocate(arena, CodeviewRelocation, relocation_capacity ? relocation_capacity : 1);''',
+              "relocation capacity allocation",
+          )
+          source = replace_once(
+              source,
+              '''                    codeview_emit_scope_variables(&symbols, input.model, input.model->scopes + debug_function->scope, function->code_offset, input.machine);
+                              codeview_emit_scope_tree(&symbols, input.model, debug_function->scope, function->code_offset, input.machine, &scope_walk);''',
+              '''                    codeview_emit_scope_variables(&symbols, input.model, input.model->scopes + debug_function->scope, function->code_offset,
+                                                         input.machine, function_index, result.relocations, &result.relocation_count, relocation_capacity);
+                              codeview_emit_scope_tree(&symbols, input.model, debug_function->scope, function->code_offset, input.machine, &scope_walk,
+                                                       function_index, result.relocations, &result.relocation_count, relocation_capacity);''',
+              "build scope calls",
+          )
+          source = replace_once(
+              source,
+              '''        *relocation_count += 1;
+                  }
+                  byte_writer_emit_u16_le(symbols, 1);
+                  codeview_emit_name(symbols, variable->name);''',
+              '''        *relocation_count += 1;
+                  }
+                  byte_writer_emit_u16_le(symbols, 0);
+                  codeview_emit_name(symbols, variable->name);''',
+              "global section addend",
+          )
+          source_path.write_text(source)
+
+          tests_path = Path("src/buster/tests/compiler/codeview/codeview_test.c")
+          tests = tests_path.read_text()
+          tests = replace_between(
+              tests,
+              "    DebugLocationRange model_locations[] = {",
+              "    DebugVariableId model_variable_ids[] = {0};",
+              '''    DebugLocationRange model_locations[] = {
+                  {.start = 64, .end = 76, .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX}},
+                  {.start = 76, .end = 88, .location = {.kind = DEBUG_LOCATION_PIECEWISE, .pieces = model_pieces, .piece_count = BUSTER_ARRAY_LENGTH(model_pieces)}},
+                  {.start = 88, .end = 96, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
+              };
+          ''',
+              "model locations",
+          )
+          tests = replace_between(
+              tests,
+              "    DebugScope model_scopes[] = {",
+              "    DebugFunction model_functions[] = {",
+              '''    DebugScope model_scopes[] = {
+                  {
+                      .parent = DEBUG_SCOPE_INVALID,
+                      .kind = DEBUG_SCOPE_FUNCTION,
+                      .start = 64,
+                      .end = 96,
+                  },
+                  {
+                      .parent = 0,
+                      .kind = DEBUG_SCOPE_LEXICAL,
+                      .start = 68,
+                      .end = 92,
+                  },
+                  {
+                      .parent = 1,
+                      .kind = DEBUG_SCOPE_LEXICAL,
+                      .start = 72,
+                      .end = 88,
+                      // Promotion-like location transitions sit inside both lexical
+                      // scopes, exercising relocations around every defrange record.
+                      .variables = model_variable_ids,
+                      .variable_count = BUSTER_ARRAY_LENGTH(model_variable_ids),
+                  },
+              };
+          ''',
+              "model scopes",
+          )
+          tests = replace_between(
+              tests,
+              "    DebugFunction model_functions[] = {",
+              "    DebugInlineSite model_inline_sites[] = {",
+              '''    DebugFunction model_functions[] = {
+                  {
+                      .name = S8("model_function"),
+                      .declaration = {.source = 0, .line = 1, .column = 1},
+                      .symbol = {.value = 0},
+                      .type = 1,
+                      .scope = 0,
+                      .code_offset = 64,
+                      .code_size = 32,
+                  },
+              };
+          ''',
+              "model functions",
+          )
+          tests = replace_between(
+              tests,
+              "    DebugInlineSite model_inline_sites[] = {",
+              "    DebugModel model = {",
+              '''    DebugInlineSite model_inline_sites[] = {
+                  {
+                      .function = model_functions,
+                      .call_site = {.source = 0, .line = 8, .column = 9},
+                      .start = 68,
+                      .end = 84,
+                      .has_ranges = true,
+                  },
+              };
+          ''',
+              "model inline sites",
+          )
+          tests = replace_between(
+              tests,
+              "    DwarfFunction model_function = {",
+              "    DwarfLineEntry model_line =",
+              '''    DwarfFunction model_function = {
+                  .name = S8("model_function"),
+                  .code_offset = 64,
+                  .code_size = 32,
+                  .file = 0,
+                  .line = 1,
+              };
+          ''',
+              "model dwarf function",
+          )
+          tests = replace_once(
+              tests,
+              '''    DwarfLineEntry model_line = {.code_offset = 0, .file = 0, .line = 1, .column = 1};''',
+              '''    DwarfLineEntry model_line = {.code_offset = 64, .file = 0, .line = 1, .column = 1};''',
+              "model line",
+          )
+          tests = replace_once(
+              tests,
+              '''    BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);''',
+              '''    BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);
+              BUSTER_TEST(arguments, model_built.relocation_count == 16);
+              for (u32 relocation_index = 0; relocation_index + 1 < model_built.relocation_count; relocation_index += 2)
+              {
+                  CodeviewRelocation address = model_built.relocations[relocation_index];
+                  CodeviewRelocation section = model_built.relocations[relocation_index + 1];
+                  BUSTER_TEST(arguments, address.kind == CODEVIEW_RELOCATION_SECREL32 && section.kind == CODEVIEW_RELOCATION_SECTION16);
+                  BUSTER_TEST(arguments, address.function == 0 && section.function == 0 && section.offset == address.offset + 4);
+                  BUSTER_TEST(arguments, address.offset + 6 <= model_built.symbols.length);
+                  if (address.offset + 6 <= model_built.symbols.length)
+                  {
+                      BUSTER_TEST(arguments, codeview_test_u32(model_built.symbols.pointer + address.offset) <= 24);
+                      BUSTER_TEST(arguments, codeview_test_u16(model_built.symbols.pointer + section.offset) == 0);
+                  }
+              }''',
+              "model relocation assertions",
+          )
+          tests_path.write_text(tests)
+          PY
+
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/buster/lib/compiler/codeview/codeview.c src/buster/tests/compiler/codeview/codeview_test.c
+          git rm .github/workflows/apply-796-codeview-relocations.yml .github/workflows/apply-796-codeview-relocations-v2.yml
+          git commit -m "fix(codeview): relocate local live ranges"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
