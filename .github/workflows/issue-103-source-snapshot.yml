@@ -21,13 +21,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD 'HEAD^{tree}' > issue-103-source-identity.txt
-          tar --exclude=.git --exclude=issue-103-source.tar.gz -czf issue-103-source.tar.gz .
+          mkdir -p "$RUNNER_TEMP/issue-103-source"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/issue-103-source/identity.txt"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/issue-103-source/source.tar.gz" HEAD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: issue-103-source-${{ github.sha }}
-          path: |
-            issue-103-source.tar.gz
-            issue-103-source-identity.txt
+          path: ${{ runner.temp }}/issue-103-source
           retention-days: 1
           if-no-files-found: error
