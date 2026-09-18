@@ -3418,6 +3418,115 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transport(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 source_path = buster_test_temporary_path(
+    arguments->arena, S8("buster-a64-f128-transport-source"), S8(".c"));
+    String8 source = S8(
+        "// Scalar IEEE binary128 transport at base AAPCS64 boundaries. This fixture\n"
+        "// intentionally performs no binary128 arithmetic or comparison: it verifies\n"
+        "// the complete sixteen-byte image through definitions, direct and indirect\n"
+        "// calls, Q0/Q1 placement, the ninth-argument stack slot, assignment and return.\n"
+        "#if __LDBL_MANT_DIG__ == 113\n"
+        "\n"
+        "typedef unsigned long long F128Word;\n"
+        "typedef union F128Image F128Image;\n"
+        "union F128Image\n"
+        "{\n"
+        "    long double value;\n"
+        "    F128Word words[2];\n"
+        "};\n"
+        "\n"
+        "typedef long double (*F128Unary)(long double);\n"
+        "\n"
+        "#ifdef BUSTER_F128_TRANSPORT_CLIENT\n"
+        "long double f128_transport_identity(long double value);\n"
+        "long double f128_transport_assignment(long double value);\n"
+        "long double f128_transport_one(void);\n"
+        "long double f128_transport_second(long double first, long double second);\n"
+        "long double f128_transport_ninth(long double a0, long double a1, long double a2, long double a3, long double a4,\n"
+        "                                long double a5, long double a6, long double a7, long double a8);\n"
+        "#else\n"
+        "long double f128_transport_identity(long double value)\n"
+        "{\n"
+        "    return value;\n"
+        "}\n"
+        "\n"
+        "long double f128_transport_assignment(long double value)\n"
+        "{\n"
+        "    long double copy = value;\n"
+        "    return copy;\n"
+        "}\n"
+        "\n"
+        "long double f128_transport_one(void)\n"
+        "{\n"
+        "    return 1.0L;\n"
+        "}\n"
+        "\n"
+        "long double f128_transport_second(long double first, long double second)\n"
+        "{\n"
+        "    (void)first;\n"
+        "    return second;\n"
+        "}\n"
+        "\n"
+        "long double f128_transport_ninth(long double a0, long double a1, long double a2, long double a3, long double a4,\n"
+        "                                long double a5, long double a6, long double a7, long double a8)\n"
+        "{\n"
+        "    (void)a0;\n"
+        "    (void)a1;\n"
+        "    (void)a2;\n"
+        "    (void)a3;\n"
+        "    (void)a4;\n"
+        "    (void)a5;\n"
+        "    (void)a6;\n"
+        "    (void)a7;\n"
+        "    return a8;\n"
+        "}\n"
+        "#endif\n"
+        "\n"
+        "#ifndef BUSTER_F128_TRANSPORT_LIBRARY\n"
+        "#define F128_CHECK(expression, expected_low, expected_high, code) \\\n"
+        "    do \\\n"
+        "    { \\\n"
+        "        F128Image observed; \\\n"
+        "        observed.value = (expression); \\\n"
+        "        if (!result && (observed.words[0] != (expected_low) || observed.words[1] != (expected_high))) result = (code); \\\n"
+        "    } while (0)\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    F128Image first = {.words = {0x0123456789abcdefULL, 0x4000123456789abcULL}};\n"
+        "    F128Image second = {.words = {0xfedcba9876543210ULL, 0x3ffe23456789abcdULL}};\n"
+        "    F128Image negative_zero = {.words = {0, 0x8000000000000000ULL}};\n"
+        "    F128Image ninth = {.words = {0x0badf00dcafebeefULL, 0x4001abcddcba1234ULL}};\n"
+        "\n"
+        "    F128_CHECK(f128_transport_identity(first.value), first.words[0], first.words[1], 1);\n"
+        "    F128_CHECK(f128_transport_assignment(negative_zero.value), negative_zero.words[0], negative_zero.words[1], 2);\n"
+        "    F128_CHECK(f128_transport_one(), 0, 0x3fff000000000000ULL, 3);\n"
+        "    F128_CHECK(f128_transport_second(first.value, second.value), second.words[0], second.words[1], 4);\n"
+        "\n"
+        "    F128Unary indirect = f128_transport_identity;\n"
+        "    F128_CHECK(indirect(second.value), second.words[0], second.words[1], 5);\n"
+        "\n"
+        "    F128_CHECK(f128_transport_ninth(first.value, second.value, negative_zero.value, first.value, second.value,\n"
+        "                                   negative_zero.value, first.value, second.value, ninth.value),\n"
+        "               ninth.words[0], ninth.words[1], 6);\n"
+        "    return result;\n"
+        "}\n"
+        "#endif\n"
+        "\n"
+        "#else\n"
+        "#ifndef BUSTER_F128_TRANSPORT_LIBRARY\n"
+        "int main(void)\n"
+        "{\n"
+        "    return 0;\n"
+        "}\n"
+        "#endif\n"
+        "#endif\n"
+    );
+    if (!BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        return result;
+    }
     String8 targets[] = {S8("aarch64-linux"), S8("aarch64-linux-android"), S8("aarch64-unknown-uefi")};
     String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
     String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
@@ -3437,7 +3546,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
         command[count++] = S8("-fno-inline");
         command[count++] = direction ? S8("-DBUSTER_F128_TRANSPORT_LIBRARY=1") : S8("-DBUSTER_F128_TRANSPORT_CLIENT=1");
         command[count++] = S8("-c");
-        command[count++] = S8("tests/basic_c_aarch64_binary128_transport.c");
+        command[count++] = source_path;
         command[count++] = S8("-o");
         command[count++] = host_objects[direction];
         ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count},
@@ -3458,7 +3567,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
                     String8 output = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128-transport"), S8(".o"));
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend], positions[position],
                         S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output,
-                        S8("tests/basic_c_aarch64_binary128_transport.c")};
+                        source_path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(
                         temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                     invocation.reject_machine_fallback = true;
@@ -3473,7 +3582,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
                     {
                         String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-a64-f128-transport-run"), S8(".elf"));
                         String8 native_command[] = {modes[mode], frontends[frontend], positions[position], S8("-fno-machine-fallback"),
-                            S8("-fverify-codegen"), S8("-o"), executable, S8("tests/basic_c_aarch64_binary128_transport.c")};
+                            S8("-fverify-codegen"), S8("-o"), executable, source_path};
                         CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(
                             temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
                         native_invocation.reject_machine_fallback = true;
@@ -3494,7 +3603,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
                             String8 mixed[] = {S8("-c"), S8("-g0"), modes[mode], frontends[frontend], positions[position],
                                 S8("-fno-machine-fallback"), S8("-fverify-codegen"),
                                 direction ? S8("-DBUSTER_F128_TRANSPORT_CLIENT=1") : S8("-DBUSTER_F128_TRANSPORT_LIBRARY=1"),
-                                S8("tests/basic_c_aarch64_binary128_transport.c"), S8("-o"), mixed_object};
+                                source_path, S8("-o"), mixed_object};
                             CompilerDriverInvocation mixed_invocation = compiler_driver_parse_arguments(
                                 temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed));
                             mixed_invocation.reject_machine_fallback = true;
@@ -3527,6 +3636,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_binary128_transp
             }
         }
     }
+    BUSTER_TEST(arguments, os_file_delete(source_path));
     return result;
 }
 

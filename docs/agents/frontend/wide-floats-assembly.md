@@ -105,7 +105,7 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   admits only the exact scalar shape proven by `ir_type_abi_value`; aggregates,
   variadic wide parameters, arithmetic, comparisons, truth conversion and
   general conversions remain behind their existing structured rejections.
-  `basic_c_aarch64_binary128_transport.c` covers Q0/Q1, ninth-argument stack
+  `compiler_driver_test_aarch64_binary128_transport` covers Q0/Q1, ninth-argument stack
   spill and both mixed-compiler directions on native Linux AArch64, with strict
   no-fallback compilation across the AAPCS64 target/mode/frontend/PIC matrix.
 - **`long double` is 80-bit x87 on System V x86-64, and it is memory-only.**
