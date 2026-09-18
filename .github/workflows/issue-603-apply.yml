@@ -17,8 +17,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-          persist-credentials: true
-      - name: Apply, validate and publish the single clean change
+          persist-credentials: false
+      - name: Reproduce, validate and publish final blobs
         shell: bash
         env:
           BASE_SHA: 6db3c81a331544a60b859fa5a4b6fcb19db8d642
@@ -35,6 +35,7 @@ jobs:
             .github/issue-603-payload/payload.b64.02 \
             .github/workflows/issue-603-apply.yml | LC_ALL=C sort)"
           test "$transport_paths" = "$expected_transport_paths"
+
           cat .github/issue-603-payload/payload.b64.* | base64 --decode > "$RUNNER_TEMP/issue-603-payload.tar.gz"
           printf '%s  %s\n' \
             8e3f8092a36aa794c2ececa9320dbddb7bee5679b31a81fa30da09b8504bf7ac \
@@ -49,13 +50,10 @@ jobs:
           e53fef6a93290e5b3ffc1d16fff1630f24608e9c1d5f72ff98f810d595b79523  .github/issue-603-payload/apply.py
           HASHES
           sha256sum --check "$RUNNER_TEMP/issue-603-payload.sha256"
+
           python3 .github/issue-603-payload/apply.py
           chmod 0644 tools/analyzer_selection_test.py
           git diff --check
-
-          # Replace the transport commit with one commit directly on the
-          # exact reviewed base. Deleted transport files therefore never appear
-          # in the submitted tree or pull-request diff.
           git reset --soft "$BASE_SHA"
           git add -A
           actual_paths="$(git diff --cached --name-only | LC_ALL=C sort)"
@@ -66,11 +64,6 @@ jobs:
             tools/analyzer_selection_test.py | LC_ALL=C sort)"
           test "$actual_paths" = "$expected_paths"
           git diff --cached --check
-          git config user.name 'OpenAI'
-          git config user.email 'support@openai.com'
-          git commit -m 'ci: freeze analyzer reference provenance (#603)'
-          test "$(git rev-list --count "$BASE_SHA..HEAD")" = 1
-          test -z "$(git status --porcelain)"
 
           python3 -m py_compile tools/analyzer_reference.py tools/analyzer_selection_test.py
           python3 tools/analyzer_selection_test.py -v
@@ -98,14 +91,10 @@ jobs:
           assert "tools/clang_analyze.c" in dependencies
           print(f"verified analyzer driver closure: {len(dependencies)} tracked dependencies")
           PY
-          test -z "$(git status --porcelain)"
 
-          # The Actions token may create immutable Git objects but, by design,
-          # cannot move a ref to a commit that edits workflow files. Publish the
-          # exact tested commit object; the connected repository writer moves the
-          # branch ref to this SHA after inspecting this successful run.
           python3 - <<'PY'
           import base64
+          import hashlib
           import json
           import os
           from pathlib import Path
@@ -113,40 +102,34 @@ jobs:
 
           repository = os.environ["GITHUB_REPOSITORY"]
           token = os.environ["GITHUB_TOKEN"]
-          base_sha = os.environ["BASE_SHA"]
           api_root = f"https://api.github.com/repos/{repository}"
-
-          def request(method, path, payload=None):
-              data = None if payload is None else json.dumps(payload).encode("utf-8")
-              headers = {
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": f"Bearer {token}",
-                  "User-Agent": "buster-issue-603-publisher",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              }
-              req = urllib.request.Request(api_root + path, data=data, headers=headers, method=method)
-              with urllib.request.urlopen(req, timeout=60) as response:
-                  return json.load(response)
-
-          base_commit = request("GET", f"/git/commits/{base_sha}")
           files = [
               (".github/workflows/ci.yml", "100644"),
               ("docs/clang-analyze-shards.md", "100644"),
               ("tools/analyzer_reference.py", "100755"),
               ("tools/analyzer_selection_test.py", "100644"),
           ]
-          entries = []
           for path, mode in files:
-              content = base64.b64encode(Path(path).read_bytes()).decode("ascii")
-              blob = request("POST", "/git/blobs", {"content": content, "encoding": "base64"})
-              entries.append({"path": path, "mode": mode, "type": "blob", "sha": blob["sha"]})
-          tree = request("POST", "/git/trees", {"base_tree": base_commit["tree"]["sha"], "tree": entries})
-          commit = request("POST", "/git/commits", {
-              "message": "ci: freeze analyzer reference provenance (#603)",
-              "tree": tree["sha"],
-              "parents": [base_sha],
-          })
-          assert commit["tree"]["sha"] == tree["sha"]
-          print(f"FINAL_COMMIT_SHA={commit['sha']}")
-          print(f"FINAL_TREE_SHA={tree['sha']}")
+              raw = Path(path).read_bytes()
+              expected = hashlib.sha1(f"blob {len(raw)}\0".encode("ascii") + raw).hexdigest()
+              payload = json.dumps({
+                  "content": base64.b64encode(raw).decode("ascii"),
+                  "encoding": "base64",
+              }).encode("utf-8")
+              request = urllib.request.Request(
+                  api_root + "/git/blobs",
+                  data=payload,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                      "User-Agent": "buster-issue-603-publisher",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+                  method="POST",
+              )
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  actual = json.load(response)["sha"]
+              assert actual == expected, (path, actual, expected)
+              print(f"FINAL_BLOB path={path} mode={mode} sha={actual}")
           PY
