@@ -5061,7 +5061,6 @@ BUSTER_GLOBAL_LOCAL bool lane_run_fresh(ThreadContext* thread_context, u64 count
 
     if (startup.mutex)
     {
-        os_mutex_lock(startup.mutex);
         barrier = os_barrier_create((u32)count);
         bool complete = barrier != 0;
         if (complete)
@@ -5069,6 +5068,12 @@ BUSTER_GLOBAL_LOCAL bool lane_run_fresh(ThreadContext* thread_context, u64 count
             starts = arena_allocate(temporary.arena, LaneFreshWorkerStart, count);
             handles = arena_allocate(temporary.arena, OsThreadHandle*, count);
             memset(handles, 0, sizeof(*handles) * count);
+        }
+        // Allocate before taking the startup gate: allocation failure may
+        // enter the fatal reporter, which performs blocking diagnostic I/O.
+        os_mutex_lock(startup.mutex);
+        if (complete)
+        {
             while (complete && next_lane < count)
             {
                 starts[next_lane] = (LaneFreshWorkerStart){

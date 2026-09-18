@@ -32,10 +32,12 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_pool_entry(void* argument)
     BUSTER_VALIDATE(arena_destroy(pooled, 1));
 }
 
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_resource_noop(void* argument)
 {
     BUSTER_UNUSED(argument);
 }
+#endif
 #endif
 
 typedef struct OsTestLaneState OsTestLaneState;
