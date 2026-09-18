@@ -45,13 +45,9 @@
 // in both directions before, which agreed with itself and with nothing else.
 
 #ifndef C_ABI_FULL
-// GNU vectors retain non-power-of-two logical lane counts while their object
-// image rounds to the next power of two. The measured SysV and Win64 x86-64
-// contracts are implemented; every other architecture keeps the family gated
-// until its distinct call and return rules are oracled.
-#if !defined(__x86_64__) && !defined(_M_X64)
+// Non-power-of-two lane counts are rejected as function parameter and return
+// types.
 #define ZIG_NO_NON_POW2_VECTORS
-#endif
 // Vectors wider than 64 bytes cross the boundary on Win64 x86-64 only:
 // that convention legalizes them the way clang and MSVC do (one indirect
 // reference per register-sized piece for an argument, up to four direct
