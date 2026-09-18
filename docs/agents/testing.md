@@ -206,6 +206,10 @@ The argument-policy regression runs on every test host; real ELF fixture
 compilation, relocation inspection, linking and execution are native Linux
 x86-64 checks. They preserve signed absolute `R_X86_64_32S` and GOTPCREL
 coverage; the indexed fixture makes both GCC and Clang produce those forms.
+The fixture is compiled `-O2`, because that is where both narrow an address to
+32 bits and emit a GOT load with no REX prefix -- the `R_X86_64_GOTPCRELX`
+shapes the linker converts to an absolute immediate rather than to an address
+computation.
 For x86-64 Linux, the native linker removes an undefined
 `_GLOBAL_OFFSET_TABLE_` marker only when no relocation or explicit entry request
 uses it. It copies the symbol/relocation view before remapping indices, preserving
