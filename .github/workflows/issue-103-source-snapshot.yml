@@ -1,0 +1,33 @@
+name: Issue 103 source snapshot
+
+on:
+  push:
+    branches:
+      - codex/103-line-mark-acceptance-20260918
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Archive exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD 'HEAD^{tree}' > issue-103-source-identity.txt
+          tar --exclude=.git --exclude=issue-103-source.tar.gz -czf issue-103-source.tar.gz .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-103-source-${{ github.sha }}
+          path: |
+            issue-103-source.tar.gz
+            issue-103-source-identity.txt
+          retention-days: 1
+          if-no-files-found: error
