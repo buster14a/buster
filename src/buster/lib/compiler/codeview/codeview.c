@@ -289,7 +289,7 @@ BUSTER_GLOBAL_LOCAL u64 codeview_relocation_capacity(DebugModel* model, u32 func
                 {
                     for (u32 piece_index = 0; piece_index < range->location.piece_count; piece_index += 1)
                     {
-                        u32 kind = range->location.pieces[piece_index].kind;
+                        DebugLocationKind kind = range->location.pieces[piece_index].kind;
                         if ((kind == DEBUG_LOCATION_REGISTER || kind == DEBUG_LOCATION_FRAME) &&
                             !codeview_relocation_capacity_add(&capacity, 2))
                         {
