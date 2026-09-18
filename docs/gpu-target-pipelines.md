@@ -196,9 +196,30 @@ binary artifacts are checked for their expected container signature:
 - `DXBC` container signature for DXIL;
 - a textual PTX header for PTX.
 
-Temporary files are removed after success or failure unless `--save-temps` is
-present. A missing executable is reported as a tool-not-found GPU driver error,
-not as a native compilation failure.
+Every execution exclusively creates an owner-only sibling directory named
+`.buster-gpu-<pid>-<counter>.temps/` beside the explicit output, or beside the
+first input when no output was named. Every compiler-generated intermediate,
+including the final artifact before validation, is placed inside that
+directory. Concurrent identical invocations therefore have disjoint
+namespaces, and cleanup removes only the directory whose creation this
+invocation successfully claimed.
+
+Without `--save-temps`, the owned directory is removed after success and after
+all executor-observed failure paths. With `--save-temps`, it is retained on
+both success and failure. The driver reports its exact location as `GPU
+temporary files: <path>`, and the API returns the same path in
+`GpuPipelineResult.temporary_directory`. A process killed outside the executor
+can leave a recognizable `.buster-gpu-*.temps` directory, but a later run
+never adopts or deletes it.
+
+A named final artifact is copied from the private directory to an exclusively
+created same-directory `.buster-staging-<pid>-<counter>.tmp` only after format
+validation, then published with the platform atomic replacement primitive.
+Failures before replacement leave an existing regular output byte-identical
+and a missing output absent. Symbolic links, directories, devices, and other
+non-regular destinations are refused rather than followed, removed, or
+overwritten. A missing executable is reported as a tool-not-found GPU driver
+error, not as a native compilation failure.
 
 Real ecosystem acceptance is a separate opt-in native harness:
 `./build.sh test_gpu_toolchains --profile amdgcn-llvm18 --out build/gpu-check-1`.

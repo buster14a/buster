@@ -1504,6 +1504,9 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
         // instruction -- but the printer is exhaustive over the vocabulary
         // and an assembler reading this back needs the modifier.
         case OBJECT_RELOCATION_X86_64_GOTPCREL:
+        case OBJECT_RELOCATION_X86_64_GOTPCRELX:
+        case OBJECT_RELOCATION_X86_64_REX_GOTPCRELX:
+        case OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX:
             object_assembly_append_string(buffer, S8("\t.long "));
             object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@GOTPCREL"));
             object_assembly_append_string(buffer, S8(" - .\n"));
@@ -2146,7 +2149,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_append_x86_relocation_expression(Object
     {
         object_assembly_append_string(buffer, S8("@TLVP"));
     }
-    else if (relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL)
+    else if (object_relocation_kind_is_x86_got(relocation->kind))
     {
         object_assembly_append_string(buffer, S8("@GOTPCREL"));
     }
@@ -2393,7 +2396,7 @@ BUSTER_GLOBAL_LOCAL void object_assembly_mark_internal_label(ObjectAssemblyBuffe
 BUSTER_GLOBAL_LOCAL bool object_assembly_x86_is_pc_relocation(ObjectRelocation* relocation)
 {
     return relocation && (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
-                          relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_GOTPCREL ||
+                          relocation->kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 || object_relocation_kind_is_x86_got(relocation->kind) ||
                           relocation->kind == OBJECT_RELOCATION_X86_64_PLT32);
 }
 
@@ -4255,6 +4258,8 @@ BUSTER_GLOBAL_LOCAL String8 object_elf_x86_64_relocation_name(u32 type)
         return S8("R_X86_64_GOTPCRELX");
     case 42:
         return S8("R_X86_64_REX_GOTPCRELX");
+    case 43:
+        return S8("R_X86_64_CODE_4_GOTPCRELX");
     default:
         return (String8){0};
     }
@@ -5194,15 +5199,18 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                             // resolve identically here, and only the writer
                             // has to keep the distinction (a shared link
                             // refuses PC32 against an undefined function).
-                            // The three GOT families are one kind for a
-                            // similar reason: a GOTPCRELX is a GOTPCREL the
-                            // producer promises is relaxable, and the linker
-                            // this reader feeds relaxes every one it can
-                            // resolve or refuses the shape by name.
+                            // The four GOT families stay distinct: a
+                            // GOTPCRELX is a GOTPCREL the producer promises is
+                            // relaxable, and the two X spellings differ in
+                            // whether the site carries a REX prefix. Both
+                            // facts pick the instruction the linker may write
+                            // there, so neither survives being collapsed.
                             kind = relocation_type == 1                           ? OBJECT_RELOCATION_ABSOLUTE64
                                    : relocation_type == 2 || relocation_type == 4 ? OBJECT_RELOCATION_X86_64_PC32
-                                   : relocation_type == 9 || relocation_type == 41 || relocation_type == 42
-                                       ? OBJECT_RELOCATION_X86_64_GOTPCREL
+                                   : relocation_type == 9                         ? OBJECT_RELOCATION_X86_64_GOTPCREL
+                                   : relocation_type == 41                        ? OBJECT_RELOCATION_X86_64_GOTPCRELX
+                                   : relocation_type == 42                        ? OBJECT_RELOCATION_X86_64_REX_GOTPCRELX
+                                   : relocation_type == 43                        ? OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX
                                    : relocation_type == 10 ? OBJECT_RELOCATION_ABSOLUTE32
                                    : relocation_type == 11 ? OBJECT_RELOCATION_X86_64_ABSOLUTE32S
                                    : relocation_type == 19 ? OBJECT_RELOCATION_X86_64_TLSGD
@@ -5353,7 +5361,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                                 }
                                 addend = (s64)(s32)stored;
                             }
-                            else if (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_GOTPCREL ||
+                            else if (kind == OBJECT_RELOCATION_X86_64_PC32 || object_relocation_kind_is_x86_got(kind) ||
                                      kind == OBJECT_RELOCATION_X86_64_TPOFF32 ||
                                      kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD ||
                                      kind == OBJECT_RELOCATION_AARCH64_PREL32)
@@ -9061,6 +9069,12 @@ bool object_section_kind_is_debug(ObjectSectionKind kind)
            kind == OBJECT_SECTION_DEBUG_RNGLISTS || kind == OBJECT_SECTION_DEBUG_LOCLISTS;
 }
 
+bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind)
+{
+    return kind == OBJECT_RELOCATION_X86_64_GOTPCREL || kind == OBJECT_RELOCATION_X86_64_GOTPCRELX ||
+           kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX || kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX;
+}
+
 BUSTER_GLOBAL_LOCAL void object_metadata_sections_initialize(ObjectFile* object)
 {
     for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
@@ -10057,7 +10071,10 @@ BUSTER_GLOBAL_LOCAL bool object_relocation_kind_from_codegen(CodegenModuleReloca
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGE21: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGE21; return true;
             case CODEGEN_MODULE_RELOCATION_AARCH64_MACH_PAGEOFF12: *destination = OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12; return true;
-            case CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL: *destination = OBJECT_RELOCATION_X86_64_GOTPCREL; return true;
+            // The compiler emits MOV r64,[RIP+GOT], whose one-byte REX
+            // prefix makes the relaxable spelling unambiguous.  Plain type 9 is
+            // reserved for external legacy objects and is never decoded.
+            case CODEGEN_MODULE_RELOCATION_X86_64_GOTPCREL: *destination = OBJECT_RELOCATION_X86_64_REX_GOTPCRELX; return true;
             case CODEGEN_MODULE_RELOCATION_X86_64_PLT32: *destination = OBJECT_RELOCATION_X86_64_PLT32; return true;
             case CODEGEN_MODULE_RELOCATION_COUNT: return false;
         }
@@ -10591,7 +10608,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
         }
         result.relocations[result.relocation_count++] = (ObjectRelocation){
             .addend = source.addend + (kind == OBJECT_RELOCATION_X86_64_PC32 || kind == OBJECT_RELOCATION_X86_64_PLT32 ||
-                                               kind == OBJECT_RELOCATION_X86_64_GOTPCREL ||
+                                               object_relocation_kind_is_x86_got(kind) ||
                                                kind == OBJECT_RELOCATION_X86_64_PE_TLS_INDEX_PC32 ||
                                                kind == OBJECT_RELOCATION_X86_64_MACH_TLV_PC32 ||
                                                kind == OBJECT_RELOCATION_X86_64_GOTTPOFF || kind == OBJECT_RELOCATION_X86_64_TLSGD
@@ -10674,16 +10691,19 @@ BUSTER_GLOBAL_LOCAL u32 object_elf_relocation_type(CpuArch arch, ObjectRelocatio
 {
     if (arch == CPU_ARCH_X86_64)
     {
-        return kind == OBJECT_RELOCATION_X86_64_PC32          ? 2
-               : kind == OBJECT_RELOCATION_X86_64_PLT32       ? 4
-               : kind == OBJECT_RELOCATION_X86_64_GOTPCREL    ? 9
-               : kind == OBJECT_RELOCATION_X86_64_TLSGD       ? 19
-               : kind == OBJECT_RELOCATION_X86_64_GOTTPOFF    ? 22
-               : kind == OBJECT_RELOCATION_X86_64_TPOFF32     ? 23
-               : kind == OBJECT_RELOCATION_ABSOLUTE64         ? 1
-               : kind == OBJECT_RELOCATION_ABSOLUTE32         ? 10
-               : kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S ? 11
-               : 0;
+        return kind == OBJECT_RELOCATION_X86_64_PC32            ? 2
+               : kind == OBJECT_RELOCATION_X86_64_PLT32         ? 4
+               : kind == OBJECT_RELOCATION_X86_64_GOTPCREL      ? 9
+               : kind == OBJECT_RELOCATION_X86_64_GOTPCRELX        ? 41
+               : kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX    ? 42
+               : kind == OBJECT_RELOCATION_X86_64_CODE_4_GOTPCRELX ? 43
+               : kind == OBJECT_RELOCATION_X86_64_TLSGD            ? 19
+               : kind == OBJECT_RELOCATION_X86_64_GOTTPOFF      ? 22
+               : kind == OBJECT_RELOCATION_X86_64_TPOFF32       ? 23
+               : kind == OBJECT_RELOCATION_ABSOLUTE64           ? 1
+               : kind == OBJECT_RELOCATION_ABSOLUTE32           ? 10
+               : kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S   ? 11
+                                                               : 0;
     }
     return kind == OBJECT_RELOCATION_AARCH64_JUMP26                 ? 282
            : kind == OBJECT_RELOCATION_AARCH64_CALL26               ? 283
