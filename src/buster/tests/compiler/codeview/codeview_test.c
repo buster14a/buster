@@ -195,6 +195,106 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_scope_growth(UnitTestArguments*
     return result;
 }
 
+
+// COFF object producers leave scope pointers as zero placeholders.  Linkers
+// rebuild them only after concatenating the DEBUG_S_SYMBOLS payloads into the
+// final module stream, where subsection headers and line data no longer exist.
+BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_object_scope_placeholders(UnitTestArguments* arguments, CodeviewResult built,
+                                                                           u32 expected_subsections, u32 expected_procedures,
+                                                                           u32 expected_blocks, u32 expected_inlines)
+{
+    UnitTestResult result = {0};
+    enum
+    {
+        TEST_S_END = 0x0006,
+        TEST_S_BLOCK32 = 0x1103,
+        TEST_S_GPROC32 = 0x1110,
+        TEST_S_INLINESITE = 0x114d,
+        TEST_S_INLINESITE_END = 0x114e,
+    };
+    bool valid = built.valid && built.symbols.length >= 4 && codeview_test_u32(built.symbols.pointer) == CODEVIEW_TEST_SIGNATURE_C13;
+    u32 subsection_count = 0;
+    u32 procedures = 0;
+    u32 blocks = 0;
+    u32 inlines = 0;
+    u64 subsection_offset = 4;
+    while (valid && subsection_offset < built.symbols.length)
+    {
+        if (!BUSTER_REQUIRE(arguments, subsection_offset + 8 <= built.symbols.length))
+        {
+            valid = false;
+            break;
+        }
+        u32 subsection_kind = codeview_test_u32(built.symbols.pointer + subsection_offset);
+        u32 subsection_length = codeview_test_u32(built.symbols.pointer + subsection_offset + 4);
+        u64 payload = subsection_offset + 8;
+        if (!BUSTER_REQUIRE(arguments, subsection_length <= built.symbols.length - payload))
+        {
+            valid = false;
+            break;
+        }
+        if (subsection_kind == CODEVIEW_TEST_SYMBOLS)
+        {
+            subsection_count += 1;
+            u64 record_offset = payload;
+            u64 record_end = payload + subsection_length;
+            u32 stack_capacity = subsection_length / 4 + 1;
+            u16* closing_kinds = arena_allocate(arguments->arena, u16, stack_capacity);
+            u32 depth = 0;
+            while (record_offset < record_end)
+            {
+                if (!BUSTER_REQUIRE(arguments, record_offset + 4 <= record_end))
+                {
+                    valid = false;
+                    break;
+                }
+                u16 length = codeview_test_u16(built.symbols.pointer + record_offset);
+                u16 kind = codeview_test_u16(built.symbols.pointer + record_offset + 2);
+                u64 record_size = (u64)length + 2;
+                if (!BUSTER_REQUIRE(arguments, length >= 2 && !(record_size & 3) && record_size <= record_end - record_offset))
+                {
+                    valid = false;
+                    break;
+                }
+                bool opening = kind == TEST_S_GPROC32 || kind == TEST_S_BLOCK32 || kind == TEST_S_INLINESITE;
+                if (opening)
+                {
+                    u32 minimum_size = kind == TEST_S_GPROC32 ? 40 : kind == TEST_S_BLOCK32 ? 24 : 16;
+                    if (!BUSTER_REQUIRE(arguments, record_size >= minimum_size && depth < stack_capacity))
+                    {
+                        valid = false;
+                        break;
+                    }
+                    BUSTER_TEST(arguments, codeview_test_u32(built.symbols.pointer + record_offset + 4) == 0);
+                    BUSTER_TEST(arguments, codeview_test_u32(built.symbols.pointer + record_offset + 8) == 0);
+                    closing_kinds[depth++] = kind == TEST_S_INLINESITE ? TEST_S_INLINESITE_END : TEST_S_END;
+                    procedures += kind == TEST_S_GPROC32;
+                    blocks += kind == TEST_S_BLOCK32;
+                    inlines += kind == TEST_S_INLINESITE;
+                }
+                else if (kind == TEST_S_END || kind == TEST_S_INLINESITE_END)
+                {
+                    if (!BUSTER_REQUIRE(arguments, depth && closing_kinds[depth - 1] == kind))
+                    {
+                        valid = false;
+                        break;
+                    }
+                    depth -= 1;
+                }
+                record_offset += record_size;
+            }
+            BUSTER_TEST(arguments, valid && record_offset == record_end && !depth);
+        }
+        subsection_offset = payload + (((u64)subsection_length + 3) & ~(u64)3);
+    }
+    BUSTER_TEST(arguments, valid && subsection_offset == built.symbols.length);
+    BUSTER_TEST(arguments, subsection_count == expected_subsections);
+    BUSTER_TEST(arguments, procedures == expected_procedures);
+    BUSTER_TEST(arguments, blocks == expected_blocks);
+    BUSTER_TEST(arguments, inlines == expected_inlines);
+    return result;
+}
+
 UnitTestResult codeview_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = codeview_test_large_types(arguments);
@@ -242,6 +342,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, built.types.length == 4);
     BUSTER_TEST(arguments, built.symbols.length > 16);
     BUSTER_TEST(arguments, built.relocation_count == 4 * BUSTER_ARRAY_LENGTH(functions));
+    UnitTestResult basic_scope_links = codeview_test_object_scope_placeholders(arguments, built, 3, 2, 0, 0);
+    result.test_count += basic_scope_links.test_count;
+    result.succeeded_test_count += basic_scope_links.succeeded_test_count;
     // A failed build leaves nothing walkable, and a subsection that overruns the
     // buffer stops the walk; both cases skip the structural tallies below rather
     // than leaving the function early.
@@ -349,9 +452,9 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX, .value_offset = 4, .size = 4},
     };
     DebugLocationRange model_locations[] = {
-        {.start = 0, .end = 12, .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX}},
-        {.start = 12, .end = 24, .location = {.kind = DEBUG_LOCATION_PIECEWISE, .pieces = model_pieces, .piece_count = BUSTER_ARRAY_LENGTH(model_pieces)}},
-        {.start = 24, .end = 32, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
+        {.start = 64, .end = 76, .location = {.kind = DEBUG_LOCATION_REGISTER, .reg = DEBUG_REGISTER_X86_RAX}},
+        {.start = 76, .end = 88, .location = {.kind = DEBUG_LOCATION_PIECEWISE, .pieces = model_pieces, .piece_count = BUSTER_ARRAY_LENGTH(model_pieces)}},
+        {.start = 88, .end = 96, .location = {.kind = DEBUG_LOCATION_FRAME, .frame_offset = -16}},
     };
     DebugVariableId model_variable_ids[] = {0};
     DebugVariable model_variables[] = {
@@ -367,9 +470,24 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     };
     DebugScope model_scopes[] = {
         {
+            .parent = DEBUG_SCOPE_INVALID,
             .kind = DEBUG_SCOPE_FUNCTION,
-            .start = 0,
-            .end = 32,
+            .start = 64,
+            .end = 96,
+        },
+        {
+            .parent = 0,
+            .kind = DEBUG_SCOPE_LEXICAL,
+            .start = 68,
+            .end = 92,
+        },
+        {
+            .parent = 1,
+            .kind = DEBUG_SCOPE_LEXICAL,
+            .start = 72,
+            .end = 88,
+            // Promotion-like location transitions sit inside both lexical
+            // scopes, exercising relocations around every defrange record.
             .variables = model_variable_ids,
             .variable_count = BUSTER_ARRAY_LENGTH(model_variable_ids),
         },
@@ -381,6 +499,7 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
             .symbol = {.value = 0},
             .type = 1,
             .scope = 0,
+            .code_offset = 64,
             .code_size = 32,
         },
     };
@@ -388,8 +507,8 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
         {
             .function = model_functions,
             .call_site = {.source = 0, .line = 8, .column = 9},
-            .start = 4,
-            .end = 20,
+            .start = 68,
+            .end = 84,
             .has_ranges = true,
         },
     };
@@ -410,12 +529,12 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
     };
     DwarfFunction model_function = {
         .name = S8("model_function"),
-        .code_offset = 0,
+        .code_offset = 64,
         .code_size = 32,
         .file = 0,
         .line = 1,
     };
-    DwarfLineEntry model_line = {.code_offset = 0, .file = 0, .line = 1, .column = 1};
+    DwarfLineEntry model_line = {.code_offset = 64, .file = 0, .line = 1, .column = 1};
     CodeviewResult model_built = codeview_build(arguments->arena, (CodeviewInput){
                                                                      .model = &model,
                                                                      .producer = S8("buster"),
@@ -428,6 +547,25 @@ UnitTestResult codeview_tests(UnitTestArguments* arguments)
                                                                      .machine = CODEVIEW_MACHINE_X64,
                                                                  });
     BUSTER_TEST(arguments, model_built.valid && model_built.types.length > 4);
+    BUSTER_TEST(arguments, model_built.relocation_count == 16);
+    for (u32 relocation_index = 0; relocation_index + 1 < model_built.relocation_count; relocation_index += 2)
+    {
+        CodeviewRelocation address = model_built.relocations[relocation_index];
+        CodeviewRelocation section = model_built.relocations[relocation_index + 1];
+        BUSTER_TEST(arguments, address.kind == CODEVIEW_RELOCATION_SECREL32 && section.kind == CODEVIEW_RELOCATION_SECTION16);
+        BUSTER_TEST(arguments, address.function == 0 && section.function == 0 && section.offset == address.offset + 4);
+        BUSTER_TEST(arguments, address.offset + 6 <= model_built.symbols.length);
+        if (address.offset + 6 <= model_built.symbols.length)
+        {
+            BUSTER_TEST(arguments, codeview_test_u32(model_built.symbols.pointer + address.offset) <= 24);
+            BUSTER_TEST(arguments, codeview_test_u16(model_built.symbols.pointer + section.offset) == 0);
+        }
+    }
+    // A model containing only locals must not create a zero-length
+    // DEBUG_S_SYMBOLS subsection: MSVC link.exe rejects that stream.
+    UnitTestResult model_scope_links = codeview_test_object_scope_placeholders(arguments, model_built, 2, 1, 2, 1);
+    result.test_count += model_scope_links.test_count;
+    result.succeeded_test_count += model_scope_links.succeeded_test_count;
     bool found_local = false;
     bool found_procedure_type = false;
     bool found_register = false;

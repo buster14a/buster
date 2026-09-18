@@ -914,10 +914,11 @@ BUSTER_GLOBAL_LOCAL u32 codegen_test_codeview_location_mask(ByteSlice bytes, s32
                     memcpy(&range_start, bytes.pointer + record + 12, 4);
                     memcpy(&range_length, bytes.pointer + record + 18, 2);
                 }
-                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 16)
+                else if (record_kind == CODEGEN_TEST_CODEVIEW_S_DEFRANGE_SUBFIELD && record_length >= 18)
                 {
-                    memcpy(&range_start, bytes.pointer + record + 10, 4);
-                    memcpy(&range_length, bytes.pointer + record + 16, 2);
+                    // OffsetInParent is 32 bits; the relocated address starts after it.
+                    memcpy(&range_start, bytes.pointer + record + 12, 4);
+                    memcpy(&range_length, bytes.pointer + record + 18, 2);
                 }
                 if (range_start != UINT32_MAX)
                 {

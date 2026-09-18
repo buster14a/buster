@@ -1163,6 +1163,25 @@ set(BUSTER_TEST_HEADERS
 )
 set_source_files_properties(${BUSTER_TEST_HEADERS} PROPERTIES HEADER_FILE_ONLY TRUE)
 
+
+# This assertion-heavy translation unit is intentionally not optimized. Its
+# runtime coverage does not depend on optimizer output, while optimizing it has
+# historically required several GiB of compiler RSS. Keep debug records only
+# for sanitizer configurations where they are diagnostically useful.
+set(BUSTER_X86_METADATA_TEST_SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/buster/tests/compiler/assembly/x86_64_metadata_test.c"
+)
+if (C_COMPILER_GNU_FAMILY AND NOT C_COMPILER_TCC)
+    set_property(SOURCE "${BUSTER_X86_METADATA_TEST_SOURCE}" APPEND PROPERTY COMPILE_OPTIONS
+        "$<${BUSTER_OPTIMIZE_CONDITION}:-O0>"
+        "$<$<AND:${BUSTER_OPTIMIZE_CONDITION},$<NOT:$<BOOL:${BUSTER_SANITIZE}>>>:-g0>"
+    )
+elseif (C_COMPILER_MSVC_FAMILIY)
+    set_property(SOURCE "${BUSTER_X86_METADATA_TEST_SOURCE}" APPEND PROPERTY COMPILE_OPTIONS
+        "$<${BUSTER_OPTIMIZE_CONDITION}:/Od>"
+    )
+endif()
+
 set(GNU_FAMILY_OPTIONS
     -fwrapv
     -fno-strict-aliasing

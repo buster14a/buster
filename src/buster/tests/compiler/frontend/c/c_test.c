@@ -13538,6 +13538,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
     }
     scratch_end(generic_temporary);
     {
+        TemporalArena ordinary_enum_temporary = scratch_begin(0, 0);
+        CPreprocessResult ordinary_enum_tokens = c_preprocess(
+            ordinary_enum_temporary.arena, S8("enum { ORDINARY_ENUM = 41 + 1 };\n"), (CPreprocessOptions){0});
+        BUSTER_TEST(arguments, ordinary_enum_tokens.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, ordinary_enum_tokens.token_count <= UINT32_MAX))
+        {
+            BUSTER_TEST(arguments,
+                        c_test_parse_generic_constant_tokens_alias(ordinary_enum_tokens, 0,
+                                                                   (u32)ordinary_enum_tokens.token_count));
+        }
+        CParseResult ordinary_enum_parse = c_parse(ordinary_enum_temporary.arena, ordinary_enum_tokens);
+        BUSTER_TEST(arguments, ordinary_enum_parse.diagnostic_count == 0);
+        scratch_end(ordinary_enum_temporary);
+
         String8 generic_constant_source =
             S8("static int unselected(void) { return 99; }\n"
                "_Static_assert(_Generic((float)0, float: 1, default: unselected()), \"generic static assertion\");\n"

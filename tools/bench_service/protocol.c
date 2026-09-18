@@ -35,10 +35,11 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 #endif
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
-    "schema=2 journal=3 materialization-journal=2 legacy-journal=1 executor=linux-supervisor pending=8 jobs=64\n"
-    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 workload=not-admitted\n"
-    "profile=smoke-slice validity=not-evaluated materialization=installed-read-only workspace=per-attempt\n"
-    "worker=fixed-systemd-service recipe-execution=fixed-validate-buster-v1 validation=vertical-slice "
+    "schema=2 journal=3 materialization-journal=2 legacy-journal=1 executor=supervisor pending=8 jobs=64\n"
+    "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 "
+    "blocked-recipes=native-retirement-performance-v1\n"
+    "profile=smoke validity=not-evaluated materialization=read-only workspace=per-attempt\n"
+    "worker=fixed-systemd-service dispatch=fixed-registry validation=vertical-slice retirement=blocked "
 #ifdef __linux__
     "transport=unix-seqpacket authentication=peer-uid-gid\n"
 #else
