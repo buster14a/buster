@@ -1,0 +1,35 @@
+name: Apply issue 203 zero-placeholder repair
+
+on:
+  push:
+    branches:
+      - staging/203-zero-scope-placeholders
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging/203-zero-scope-placeholders
+          fetch-depth: 0
+      - name: Apply and publish the repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check .github/issue-203-zero-codeview.patch
+          git apply --check .github/issue-203-zero-test.patch
+          git apply .github/issue-203-zero-codeview.patch
+          git apply .github/issue-203-zero-test.patch
+          rm .github/issue-203-zero-codeview.patch
+          rm .github/issue-203-zero-test.patch
+          rm .github/workflows/issue-203-zero-apply.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(codeview): leave object scope links for the linker"
+          git push origin HEAD:staging/203-zero-scope-placeholders
