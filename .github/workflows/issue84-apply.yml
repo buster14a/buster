@@ -1,0 +1,70 @@
+name: Issue 84 patch validation
+
+on:
+  push:
+    branches: [fix/84-transactional-hermetic-spawn]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: ${{ contains(github.event.head_commit.message, '[apply-84]') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout staged branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Reassemble and apply the patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > issue84-build.log
+          {
+            cat tools/issue84_apply.[0-9][0-9] > tools/issue84_apply.py
+            cat tools/issue84_spawn.[0-9][0-9] > tools/issue84_spawn_impl.txt
+            printf '%s  %s\n' c39ea6f8125dd85d4237e8ba117c79e8682b3f38235ae5e736910cc8b77a721a tools/issue84_apply.py | sha256sum --check --strict
+            printf '%s  %s\n' e2112fb6cde8e23a2833290dbb975d883cc31b310e2d8d9443fa007f49edc1fd tools/issue84_spawn_impl.txt | sha256sum --check --strict
+            python3 -m py_compile tools/issue84_apply.py
+            python3 tools/issue84_apply.py
+            git diff --check
+          } 2>&1 | tee -a issue84-build.log
+
+      - name: Build and run registered tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            ./build.sh generate --cc clang --ci --linker DEFAULT
+            BUSTER_TEST_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=2 ./build.sh build --config Debug -t ide
+            BUSTER_TEST_JOBS=1 build/Debug/ide test --ci=1
+          } 2>&1 | tee -a issue84-build.log
+
+      - name: Retain validation log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue84-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: issue84-build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Commit validated implementation
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f tools/issue84_apply.[0-9][0-9] tools/issue84_spawn.[0-9][0-9]
+          rm -f tools/issue84_apply.py tools/issue84_spawn_impl.txt issue84-build.log
+          rm -rf tools/__pycache__
+          rm -f .github/workflows/issue84-apply.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --stat
+          git commit -m 'fix(os): make process spawning transactional'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
