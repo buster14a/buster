@@ -1,0 +1,10 @@
+ISSUE_536_BASELINE_V1
+source_revision=b7a0f87cb881e44298a77e956e38ccc821d6e93b
+workflow_revision=040c5aefdffe8f623fe17fe0fbd8b95d3d440ba8
+runner_image=ubuntu-24.04
+build_config=Release
+argv=build-536-baseline/Release/ide cc -fsyntax-only -x c /home/runner/work/_temp/issue-536/first.input -x none /home/runner/work/_temp/issue-536/second.c
+status=1
+--- stdout ---
+cc: error: unsupported C input /home/runner/work/_temp/issue-536/first.input
+--- stderr ---
