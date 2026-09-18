@@ -1,0 +1,86 @@
+name: Validate PR 796 CodeView link repair
+
+on:
+  push:
+    branches:
+      - ci/796-codeview-link-validation
+    paths:
+      - .github/workflows/validate-796-codeview-link.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-796-codeview-link-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact repaired implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 99a5ba663c389f7f9985d09351fd79d3d994feae
+          persist-credentials: false
+      - name: Build compiler and link promoted ABI object
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86/x64 tools were not found' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+
+          $ResourceDir = (& clang.exe -print-resource-dir).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $RuntimeDlls = @(Get-ChildItem -Path $ResourceDir -Filter 'clang_rt.asan_dynamic-x86_64.dll' -File -Recurse | Sort-Object FullName)
+          if ($RuntimeDlls.Count -ne 1) { throw "Expected one ASan runtime under ${ResourceDir}; found $($RuntimeDlls.Count)" }
+          $env:PATH = "$(Split-Path -Parent $RuntimeDlls[0].FullName);$env:PATH"
+
+          $Driver = Join-Path $env:RUNNER_TEMP 'strict-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver generate --cc clang --ci --linker DEFAULT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Driver build --config Release -t ide
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Ide = (Resolve-Path 'build\Release\ide.exe').Path
+          $Include = (Resolve-Path 'tests\differential').Path
+          $Caller = Join-Path $env:RUNNER_TEMP 'abi-caller-sanitized.o'
+          $Subject = Join-Path $env:RUNNER_TEMP 'abi-p2.o'
+          $Program = Join-Path $env:RUNNER_TEMP 'abi-p2-sanitized.exe'
+          $LibraryPaths = @($env:LIB -split ';' | Where-Object { $_.Length -ne 0 })
+          if ($LibraryPaths.Count -eq 0) { throw 'Visual Studio developer shell supplied no LIB search paths' }
+
+          $Sanitize = @('-fsanitize=address,undefined', '-fno-sanitize-recover=all')
+          $CallerArgs = @('-O0', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char') + $Sanitize + @("-I$Include")
+          foreach ($LibraryPath in $LibraryPaths) { $CallerArgs += "-L$LibraryPath" }
+          $CallerArgs += @('tests\differential\abi_host.c', '-c', '-o', $Caller)
+          & clang.exe @CallerArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $Common = @(
+            'cc', '-fregister-allocator=fast', '-fno-machine-fallback',
+            '-fno-canonical-local-promotion', '-fno-frontend-ssa', '-fverify-codegen',
+            '-fwrapv', '-fno-strict-aliasing', '-funsigned-char', "-I$Include"
+          )
+          foreach ($LibraryPath in $LibraryPaths) { $Common += "-L$LibraryPath" }
+          & $Ide @Common '-ftarget-local-promotion' 'tests\differential\abi.c' '-c' '-o' $Subject
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Write-Output '=== promoted object CodeView and relocations ==='
+          & llvm-readobj.exe --codeview --relocations $Subject
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $LinkArgs = @() + $Sanitize
+          foreach ($LibraryPath in $LibraryPaths) { $LinkArgs += "-L$LibraryPath" }
+          $LinkArgs += @($Caller, $Subject, '-o', $Program)
+          & clang.exe -v @LinkArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $Program
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output 'PR796_CODEVIEW_LINK_VALIDATION success'
