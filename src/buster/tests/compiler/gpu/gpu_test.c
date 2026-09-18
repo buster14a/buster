@@ -101,7 +101,7 @@ BUSTER_GLOBAL_LOCAL bool gpu_test_file_equals(Arena* arena, String8 path, ByteSl
 typedef struct GpuTestConcurrentExecutions GpuTestConcurrentExecutions;
 struct GpuTestConcurrentExecutions
 {
-    GpuPipelineOptions options;
+    GpuPipelineOptions options[2];
     GpuPipelineResult results[2];
     Arena* arenas[2];
     u64 worker_count;
@@ -121,7 +121,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType gpu_test_concurrent_execute(void* argument)
         executions->arenas[index] = arena;
         if (arena)
         {
-            executions->results[index] = gpu_pipeline_execute(arena, executions->options);
+            executions->results[index] = gpu_pipeline_execute(arena, executions->options[index]);
         }
     }
 }
@@ -590,14 +590,18 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
 #endif
 
         options.save_temporaries = true;
-        GpuTestConcurrentExecutions concurrent = {.options = options};
+        // Exercise workspace ownership with a shared input and directory.
+        // Each invocation owns its final output too: concurrent replacement of
+        // one Windows destination can legitimately fail with access denied.
+        GpuTestConcurrentExecutions concurrent = {.options = {options, options}};
+        concurrent.options[1].output_path = buster_test_temporary_path(arena, S8("gpu-private-concurrent-output"), S8(".spv"));
         lane_run(BUSTER_ARRAY_LENGTH(concurrent.results), &gpu_test_concurrent_execute, &concurrent);
         if (concurrent.worker_count < BUSTER_ARRAY_LENGTH(concurrent.results))
         {
             concurrent.arenas[1] = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
             if (concurrent.arenas[1])
             {
-                concurrent.results[1] = gpu_pipeline_execute(concurrent.arenas[1], options);
+                concurrent.results[1] = gpu_pipeline_execute(concurrent.arenas[1], concurrent.options[1]);
             }
         }
         BUSTER_TEST(arguments, concurrent.arenas[0] != 0 && concurrent.arenas[1] != 0);
@@ -605,6 +609,8 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         {
             BUSTER_TEST_RAW(arguments, concurrent.results[execution].error == GPU_PIPELINE_ERROR_NONE,
                             concurrent.results[execution].diagnostic);
+            BUSTER_STRING_TEST(arguments, concurrent.results[execution].artifact.path, concurrent.options[execution].output_path);
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, concurrent.options[execution].output_path, valid_spirv));
         }
         BUSTER_TEST(arguments, concurrent.results[0].temporary_directory.length && concurrent.results[1].temporary_directory.length &&
                                    !string_equal(concurrent.results[0].temporary_directory, concurrent.results[1].temporary_directory));
@@ -621,12 +627,16 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
             {
                 BUSTER_TEST(arguments, os_directory_delete(concurrent.results[execution].temporary_directory));
             }
+            // Workspace cleanup must preserve both published artifacts.
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, concurrent.options[0].output_path, valid_spirv));
+            BUSTER_TEST(arguments, gpu_test_file_equals(arena, concurrent.options[1].output_path, valid_spirv));
             if (concurrent.arenas[execution])
             {
                 BUSTER_TEST(arguments, arena_destroy(concurrent.arenas[execution], 1));
             }
         }
 
+        BUSTER_TEST(arguments, os_file_delete(concurrent.options[1].output_path));
         BUSTER_TEST(arguments, os_file_delete(input));
         BUSTER_TEST(arguments, os_file_delete(output));
         BUSTER_TEST(arguments, os_file_delete(referent));

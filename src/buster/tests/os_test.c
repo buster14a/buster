@@ -27,10 +27,17 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_pool_entry(void* argument)
 {
     OsTestThreadPoolState* state = (OsTestThreadPoolState*)argument;
     Arena* pooled = arena_create((ArenaCreation){0});
-    BUSTER_CHECK(pooled != 0);
+    BUSTER_VALIDATE(pooled != 0);
     state->pooled_arena = pooled;
-    BUSTER_CHECK(arena_destroy(pooled, 1));
+    BUSTER_VALIDATE(arena_destroy(pooled, 1));
 }
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_resource_noop(void* argument)
+{
+    BUSTER_UNUSED(argument);
+}
+#endif
 #endif
 
 typedef struct OsTestLaneState OsTestLaneState;
@@ -143,9 +150,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_inner_lane_gang(void* argument)
         // arenas. Generic OS-thread teardown must drain all of them before
         // the TLS pool root disappears.
         Arena* pooled = arena_create((ArenaCreation){0});
-        BUSTER_CHECK(pooled != 0);
+        BUSTER_VALIDATE(pooled != 0);
         state->inner_pooled_arenas[state->invocation][index] = pooled;
-        BUSTER_CHECK(arena_destroy(pooled, 1));
+        BUSTER_VALIDATE(arena_destroy(pooled, 1));
     }
 }
 
@@ -210,6 +217,42 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     BUSTER_UNUSED(arguments);
 
     UnitTestResult result = {0};
+
+#if !BUSTER_SINGLE_THREADED && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 resource_failure_mode = os_get_environment_variable(S8("BUSTER_OS_RESOURCE_FAILURE_MODE"));
+    if (resource_failure_mode.length)
+    {
+        os_resource_test_clear();
+        if (string_equal(resource_failure_mode, S8("barrier")) || string_equal(resource_failure_mode, S8("thread")))
+        {
+            ThreadContext* owner = thread_context_allocate();
+            BUSTER_VALIDATE(owner != 0);
+            thread_context_select(owner);
+            if (string_equal(resource_failure_mode, S8("barrier")))
+            {
+                os_resource_test_fail_on_call(OS_RESOURCE_TEST_BARRIER_CREATE, 0);
+            }
+            else
+            {
+                // Lane 1 starts successfully; lane 2 fails while lane 1 is
+                // still held behind the constructor's startup gate.
+                os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_CREATE, 1);
+            }
+            lane_run(3, &os_test_resource_noop, 0);
+        }
+        else if (string_equal(resource_failure_mode, S8("join")))
+        {
+            OsThreadHandle* handle = os_thread_create((ThreadCreateOptions){
+                .callback = &os_test_resource_noop,
+                .argument = 0,
+            });
+            BUSTER_VALIDATE(handle != 0);
+            os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_JOIN, 0);
+            BUSTER_VALIDATE(os_thread_join(handle));
+        }
+        os_fail_message(S8("resource failure injection was not observed"));
+    }
+#endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     // Symbol lookup accepts bounded String8 names. A readable suffix
@@ -1408,6 +1451,59 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
 #endif
     }
+
+#if !BUSTER_SINGLE_THREADED
+    // Directly exercise partial persistent and nested-gang construction plus a
+    // retryable injected join. No worker, OS entity, or owner state may remain.
+    BUSTER_TEST(arguments, os_resource_failure_self_test());
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // The same failures must take an always-defined fatal path in optimized
+    // builds. Deadlock is a failure too, so every child has a deadline.
+    {
+        String8 modes[] = {S8("barrier"), S8("thread"), S8("join")};
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
+        {
+            SliceString8 inherited_keys = program_state->input.environment_keys;
+            SliceString8 inherited_values = program_state->input.environment_values;
+            String8* keys = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
+            String8* values = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
+            keys[0] = S8("BUSTER_OS_RESOURCE_FAILURE_MODE");
+            values[0] = modes[mode_index];
+            keys[1] = S8("BUSTER_TEST_JOBS");
+            values[1] = S8("1");
+            u64 count = 2;
+            for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+            {
+                if (!string_equal(inherited_keys.pointer[inherited], keys[0]) &&
+                    !string_equal(inherited_keys.pointer[inherited], keys[1]))
+                {
+                    keys[count] = inherited_keys.pointer[inherited];
+                    values[count] = inherited_values.pointer[inherited];
+                    count += 1;
+                }
+            }
+
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                        (SliceString8){keys, count}, (SliceString8){values, count},
+                                                        (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR});
+            BUSTER_TEST(arguments, spawn.handle != 0);
+            if (spawn.handle)
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                String8 error = {
+                    .pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                    .length = wait.streams[STANDARD_STREAM_ERROR].length,
+                };
+                BUSTER_TEST(arguments, !wait.timed_out);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+                BUSTER_TEST(arguments, string_first_sequence(error, S8("validation failed")) != BUSTER_STRING_NO_MATCH);
+            }
+        }
+    }
+#endif
+#endif
 
     // lane_range must hand out contiguous shares that cover the input exactly,
     // with sizes differing by at most one item. The context is faked per lane

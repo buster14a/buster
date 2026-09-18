@@ -75,4 +75,20 @@ struct OsPrefaultTestCounters
 // outcome and never the commit that preceded it.
 BUSTER_F_DECL void os_prefault_test_force_next(OsPrefaultResult result);
 BUSTER_F_DECL OsPrefaultTestCounters os_prefault_test_counters(void);
+
+typedef enum OsResourceTestOperation
+{
+    OS_RESOURCE_TEST_BARRIER_CREATE,
+    OS_RESOURCE_TEST_THREAD_CREATE,
+    OS_RESOURCE_TEST_THREAD_JOIN,
+    OS_RESOURCE_TEST_OPERATION_COUNT,
+} OsResourceTestOperation;
+
+// Fails exactly one zero-based call on the calling thread. The failure is
+// consumed by that call and never reaches another test.
+BUSTER_F_DECL void os_resource_test_fail_on_call(OsResourceTestOperation operation, u64 call_index);
+BUSTER_F_DECL void os_resource_test_clear(void);
+#if !BUSTER_SINGLE_THREADED
+BUSTER_F_DECL bool os_resource_failure_self_test(void);
+#endif
 #endif
