@@ -764,6 +764,11 @@ typedef enum MachineOpcode
     MACHINE_A64_INLINE_EFFECTS_MEMORY,
     MACHINE_A64_INLINE_EFFECTS_FLAGS,
     MACHINE_A64_INLINE_EFFECTS_MEMORY_FLAGS,
+    // Baseline AArch64 half conversions, using V0 as the float scratch.
+    MACHINE_A64_CVT_F16_TO_F32,
+    MACHINE_A64_CVT_F16_TO_F64,
+    MACHINE_A64_CVT_F32_TO_F16,
+    MACHINE_A64_CVT_F64_TO_F16,
     MACHINE_OPCODE_COUNT,
 } MachineOpcode;
 

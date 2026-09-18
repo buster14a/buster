@@ -181,6 +181,18 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   call is target-dependent on `cx16`.
   `tests/basic_c_atomic_aggregate.c` runs the bytes under every allocator with
   Clang's answers baked in, including the padding.
+- **GNU generic atomics use an integer view of the caller's exact object
+  representation.** `__atomic_load`, `__atomic_store`, `__atomic_exchange`
+  and `__atomic_compare_exchange` lower 1-, 2-, 4- and 8-byte objects through
+  atomic unsigned-integer places; their value and result arguments are
+  pointers and are each evaluated once through prepared-call continuations.
+  Unlike `_Atomic(T)`, the view never promotes an odd-sized aggregate: widths
+  other than 1/2/4/8 are diagnosed at the builtin. Compare-exchange writes the
+  observed representation back through `expected` on failure. GNU NAND is one
+  canonical `IR_ATOMIC_BITWISE_NAND` operation, serialized as LLVM
+  `atomicrmw nand`; the `*_nand_fetch` spellings recompute `~(old & value)`
+  from the returned old value, and the legacy `__sync_*` spellings carry
+  sequential consistency in their names.
 - **GNU scalar atomic builtins need an atomic pointer view in canonical IR.**
   Their ordinary scalar operand pointers are cast to pointers to the matching
   atomic-qualified type before dereferencing; the declared object's type and
