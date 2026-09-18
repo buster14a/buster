@@ -1,0 +1,38 @@
+name: Source export 512
+
+on:
+  push:
+    branches:
+      - codex/512-performance-execution-20260917
+    paths:
+      - .github/workflows/source-export-512.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Export exact tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tgz" "$GITHUB_SHA"
+          {
+            printf 'commit=%s\n' "$GITHUB_SHA"
+            printf 'tree=%s\n' "$(git rev-parse "$GITHUB_SHA^{tree}")"
+            sha256sum "$RUNNER_TEMP/buster-source.tgz"
+          } > "$RUNNER_TEMP/source-export.txt"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: source-export-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/buster-source.tgz
+            ${{ runner.temp }}/source-export.txt
+          if-no-files-found: error
+          retention-days: 1
