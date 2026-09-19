@@ -12591,6 +12591,27 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEncodeStatus assembly_x86_metadata_instruct
             bool explicit_width = operands[index].memory.width_explicit;
             if (explicit_width && physical[index].memory.source_width > 64)
             {
+                bool conversion_source_width = false;
+                BusterX86MetadataCandidateRange conversion_candidates = buster_x86_metadata_lookup_mnemonic(mnemonic);
+                for (u32 candidate_index = 0; candidate_index < conversion_candidates.count; candidate_index += 1)
+                {
+                    u32 form_id = 0;
+                    BusterX86MetadataForm form = {0};
+                    if (buster_x86_metadata_candidate_at(conversion_candidates, candidate_index, &form_id) &&
+                        buster_x86_metadata_form(form_id, &form) &&
+                        assembly_word_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")))
+                    {
+                        conversion_source_width = true;
+                        break;
+                    }
+                }
+                if (conversion_source_width)
+                {
+                    // The selector projects and validates this qualifier from
+                    // each compatible conversion row. Do not compare it with
+                    // the destination vector width in the syntax adapter.
+                    continue;
+                }
                 // A two-operand EVEX vector load may read a half tuple (or a
                 // full tuple wider than its destination). Keep the source
                 // qualifier for candidate-specific tuple validation instead of
