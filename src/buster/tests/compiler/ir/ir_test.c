@@ -31,18 +31,19 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrB
 
 #include <buster/tests/compiler/ir/ir_complex_value_test.c>
 
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_f80_constant(Arena* arena, u64 significand, u64 sign_exponent, u32 immediate_count, u32 target_count,
-                                                                      u64 layout_size, u32 layout_alignment)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_wide_float_constant(Arena* arena, u32 bit_width, u64 low, u64 high,
+                                                                                     u32 immediate_count, u32 target_count,
+                                                                                     u64 layout_size, u32 layout_alignment)
 {
     IrProgram program = ir_program_initialize(arena, 1, 2, 0, 0);
-    IrTypeId f80 = ir_program_add_type(&program, (IrType){
-                                                       .kind = IR_TYPE_FLOAT,
-                                                       .bit_width = 80,
-                                                       .layout = {.size = layout_size, .alignment = layout_alignment, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
-                                                   });
+    IrTypeId wide = ir_program_add_type(&program, (IrType){
+                                                        .kind = IR_TYPE_FLOAT,
+                                                        .bit_width = bit_width,
+                                                        .layout = {.size = layout_size, .alignment = layout_alignment, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+                                                    });
     IrTypeId function_type = ir_program_add_type(&program, (IrType){
                                                                    .kind = IR_TYPE_FUNCTION,
-                                                                   .return_type = f80,
+                                                                   .return_type = wide,
                                                                    .calling_convention = IR_CALLING_CONVENTION_C,
                                                                    .layout = {.size = 8, .alignment = 8, .abi_class = IR_ABI_CLASS_POINTER, .resolved = true},
                                                                });
@@ -59,7 +60,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_f80_constant(Arena* are
                                                                    })
                               : 0;
     IrValueId value = function ? ir_function_add_value(arena, function, (IrValue){
-                                                                      .canonical_type = f80,
+                                                                      .canonical_type = wide,
                                                                       .definition = IR_INSTRUCTION_ID_INVALID,
                                                                       .category = IR_VALUE_VALUE,
                                                                   })
@@ -67,8 +68,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_f80_constant(Arena* are
     u64* immediates = arena_allocate(arena, u64, 2);
     if (immediates)
     {
-        immediates[0] = significand;
-        immediates[1] = sign_exponent;
+        immediates[0] = low;
+        immediates[1] = high;
     }
     IrBlockId* targets = target_count ? arena_allocate(arena, IrBlockId, target_count) : 0;
     for (u32 target_index = 0; targets && target_index < target_count; target_index += 1)
@@ -77,7 +78,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_f80_constant(Arena* are
     }
     IrInstructionId constant = function ? ir_function_add_instruction(arena, function, (IrInstruction){
                                                                                          .immediates = immediates,
-                                                                                         .canonical_type = f80,
+                                                                                         .canonical_type = wide,
                                                                                          .targets = targets,
                                                                                          .target_count = (u16)target_count,
                                                                                          .result = value,
@@ -95,7 +96,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_f80_constant(Arena* are
     IrInstructionId returned = function ? ir_function_add_instruction(arena, function, (IrInstruction){
                                                                                          .operands = operands,
                                                                                          .operand_count = 1,
-                                                                                         .canonical_type = f80,
+                                                                                         .canonical_type = wide,
                                                                                          .result = IR_VALUE_ID_INVALID,
                                                                                          .opcode = IR_OPCODE_RETURN,
                                                                                          .next = IR_INSTRUCTION_ID_INVALID,
@@ -860,6 +861,11 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
         .bit_width = 80,
         .layout = {.size = 16, .alignment = 16, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
     });
+    IrTypeId abi_f128 = ir_program_add_type(&abi_program, (IrType){
+        .kind = IR_TYPE_FLOAT,
+        .bit_width = 128,
+        .layout = {.size = 16, .alignment = 16, .abi_class = IR_ABI_CLASS_FLOAT, .resolved = true},
+    });
     IrTypeId abi_integer = ir_program_add_type(&abi_program, (IrType){
         .kind = IR_TYPE_INTEGER,
         .bit_width = 32,
@@ -1197,6 +1203,16 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                                  abi_struct_union_f64_result.parts[1].abi_class == IR_ABI_CLASS_FLOAT && abi_struct_union_f64_result.parts[1].value_offset == 8 &&
                                  abi_struct_union_f64_result.parts[1].size == 8);
 
+    IrAbiValue abi_f128_aapcs_argument = ir_type_abi_value(&abi_program, abi_f128, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_ARGUMENT);
+    IrAbiValue abi_f128_aapcs_result = ir_type_abi_value(&abi_program, abi_f128, IR_ABI_CONVENTION_AAPCS64, IR_ABI_USE_RESULT);
+    IrAbiValue abi_f128_darwin_argument = ir_type_abi_value(&abi_program, abi_f128, IR_ABI_CONVENTION_DARWIN_AARCH64, IR_ABI_USE_ARGUMENT);
+    BUSTER_TEST(arguments, abi_f128_aapcs_argument.part_count == 1 && !abi_f128_aapcs_argument.indirect && !abi_f128_aapcs_argument.memory &&
+                               abi_f128_aapcs_argument.parts[0].abi_class == IR_ABI_CLASS_VECTOR && abi_f128_aapcs_argument.parts[0].size == 16);
+    BUSTER_TEST(arguments, abi_f128_aapcs_result.part_count == 1 && !abi_f128_aapcs_result.indirect && !abi_f128_aapcs_result.memory &&
+                               abi_f128_aapcs_result.parts[0].abi_class == IR_ABI_CLASS_VECTOR && abi_f128_aapcs_result.parts[0].size == 16);
+    BUSTER_TEST(arguments, abi_f128_darwin_argument.part_count == 1 && abi_f128_darwin_argument.memory && !abi_f128_darwin_argument.indirect &&
+                               abi_f128_darwin_argument.parts[0].abi_class == IR_ABI_CLASS_MEMORY && abi_f128_darwin_argument.parts[0].size == 16);
+
     IrAbiValue abi_f32_systemv = ir_type_abi_value(&abi_program, abi_f32, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_ARGUMENT);
     IrAbiValue abi_f64_systemv = ir_type_abi_value(&abi_program, abi_f64, IR_ABI_CONVENTION_SYSTEMV_X86_64, IR_ABI_USE_RESULT);
     IrAbiValue abi_f32_win64 = ir_type_abi_value(&abi_program, abi_f32, IR_ABI_CONVENTION_WIN64_X86_64, IR_ABI_USE_ARGUMENT);
@@ -1400,20 +1416,38 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     }
 
     IrValidationResult valid_f80_constant =
-        ir_test_canonical_f80_constant(arguments->arena, UINT64_C(0x8000000000000001), UINT64_C(0x7fff), 2, 0, 16, 16);
+        ir_test_canonical_wide_float_constant(arguments->arena, 80, UINT64_C(0x8000000000000001), UINT64_C(0x7fff), 2, 0, 16, 16);
     BUSTER_TEST(arguments, valid_f80_constant.error == IR_VALIDATION_NONE);
-    IrValidationResult malformed_f80_count = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 1, 0, 16, 16);
+    IrValidationResult malformed_f80_count = ir_test_canonical_wide_float_constant(arguments->arena, 80, UINT64_C(1), UINT64_C(0), 1, 0, 16, 16);
     BUSTER_TEST(arguments, malformed_f80_count.error == IR_VALIDATION_OPERATION);
-    IrValidationResult malformed_f80_payload = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0x10000), 2, 0, 16, 16);
+    IrValidationResult malformed_f80_payload = ir_test_canonical_wide_float_constant(arguments->arena, 80, UINT64_C(1), UINT64_C(0x10000), 2, 0, 16, 16);
     BUSTER_TEST(arguments, malformed_f80_payload.error == IR_VALIDATION_OPERATION);
-    IrValidationResult malformed_f80_extra = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 3, 0, 16, 16);
+    IrValidationResult malformed_f80_extra = ir_test_canonical_wide_float_constant(arguments->arena, 80, UINT64_C(1), UINT64_C(0), 3, 0, 16, 16);
     BUSTER_TEST(arguments, malformed_f80_extra.error == IR_VALIDATION_OPERATION);
-    IrValidationResult malformed_f80_target = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 2, 1, 16, 16);
+    IrValidationResult malformed_f80_target = ir_test_canonical_wide_float_constant(arguments->arena, 80, UINT64_C(1), UINT64_C(0), 2, 1, 16, 16);
     BUSTER_TEST(arguments, malformed_f80_target.error == IR_VALIDATION_OPERATION);
-    IrValidationResult malformed_f80_layout = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 2, 0, 10, 16);
+    IrValidationResult malformed_f80_layout = ir_test_canonical_wide_float_constant(arguments->arena, 80, UINT64_C(1), UINT64_C(0), 2, 0, 10, 16);
     BUSTER_TEST(arguments, malformed_f80_layout.error == IR_VALIDATION_OPERATION);
-    IrValidationResult malformed_f80_alignment = ir_test_canonical_f80_constant(arguments->arena, UINT64_C(1), UINT64_C(0), 2, 0, 16, 8);
+    IrValidationResult malformed_f80_alignment = ir_test_canonical_wide_float_constant(arguments->arena, 80, UINT64_C(1), UINT64_C(0), 2, 0, 16, 8);
     BUSTER_TEST(arguments, malformed_f80_alignment.error == IR_VALIDATION_OPERATION);
+    IrValidationResult valid_f128_constant = ir_test_canonical_wide_float_constant(
+        arguments->arena, 128, UINT64_C(0x0123456789abcdef), UINT64_C(0x3fff000000000000), 2, 0, 16, 16);
+    BUSTER_TEST(arguments, valid_f128_constant.error == IR_VALIDATION_NONE);
+    IrValidationResult malformed_f128_count = ir_test_canonical_wide_float_constant(
+        arguments->arena, 128, UINT64_C(1), UINT64_C(0), 1, 0, 16, 16);
+    BUSTER_TEST(arguments, malformed_f128_count.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f128_extra = ir_test_canonical_wide_float_constant(
+        arguments->arena, 128, UINT64_C(1), UINT64_C(0), 3, 0, 16, 16);
+    BUSTER_TEST(arguments, malformed_f128_extra.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f128_target = ir_test_canonical_wide_float_constant(
+        arguments->arena, 128, UINT64_C(1), UINT64_C(0), 2, 1, 16, 16);
+    BUSTER_TEST(arguments, malformed_f128_target.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f128_layout = ir_test_canonical_wide_float_constant(
+        arguments->arena, 128, UINT64_C(1), UINT64_C(0), 2, 0, 8, 16);
+    BUSTER_TEST(arguments, malformed_f128_layout.error == IR_VALIDATION_OPERATION);
+    IrValidationResult malformed_f128_alignment = ir_test_canonical_wide_float_constant(
+        arguments->arena, 128, UINT64_C(1), UINT64_C(0), 2, 0, 16, 8);
+    BUSTER_TEST(arguments, malformed_f128_alignment.error == IR_VALIDATION_OPERATION);
     IrValidationResult valid_f80_global_bytes = ir_test_canonical_float_global(arguments->arena, 80, IR_GLOBAL_INITIALIZER_BYTES);
     BUSTER_TEST(arguments, valid_f80_global_bytes.error == IR_VALIDATION_NONE);
     IrValidationResult malformed_f80_global_float = ir_test_canonical_float_global(arguments->arena, 80, IR_GLOBAL_INITIALIZER_FLOAT);
