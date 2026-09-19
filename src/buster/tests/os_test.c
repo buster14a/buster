@@ -315,6 +315,36 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
     BUSTER_TEST(arguments, invalid_environment.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT && invalid_environment.error.v != 0 &&
                                os_process_spawn_test_released(invalid_environment));
 
+    char8 embedded_nul_key_bytes[] = {'K', 0, 'Y'};
+    String8 embedded_nul_keys[] = {{.pointer = embedded_nul_key_bytes, .length = BUSTER_ARRAY_LENGTH(embedded_nul_key_bytes)}};
+    ProcessSpawnResult embedded_nul_key = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(embedded_nul_keys),
+                                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values), (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, embedded_nul_key.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT && embedded_nul_key.error.v != 0 &&
+                               os_process_spawn_test_released(embedded_nul_key));
+
+    char8 embedded_nul_value_bytes[] = {'v', 0, 'x'};
+    String8 embedded_nul_values[] = {{.pointer = embedded_nul_value_bytes, .length = BUSTER_ARRAY_LENGTH(embedded_nul_value_bytes)}};
+    ProcessSpawnResult embedded_nul_value = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(one_key),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(embedded_nul_values), (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, embedded_nul_value.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT && embedded_nul_value.error.v != 0 &&
+                               os_process_spawn_test_released(embedded_nul_value));
+
+    String8 empty_key[] = {{0}};
+    ProcessSpawnResult empty_environment_key = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(empty_key),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values), (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, empty_environment_key.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT &&
+                               empty_environment_key.error.v != 0 && os_process_spawn_test_released(empty_environment_key));
+
+    ProcessSpawnResult conflicting_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                                 (SliceString8)BUSTER_ARRAY_TO_SLICE(one_key),
+                                                                 (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values),
+                                                                 (ProcessSpawnOptions){.use_process_environment = true});
+    BUSTER_TEST(arguments, conflicting_environment.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT &&
+                               conflicting_environment.error.v != 0 && os_process_spawn_test_released(conflicting_environment));
+
     String8 environment_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_EXPECTED"), S8("PATH")};
     String8 environment_values[] = {S8("environment"), S8("present"), S8("hostile-path")};
     ProcessSpawnResult exact_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
@@ -378,21 +408,70 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArgum
 #endif
     }
 
-    String8 closed_keys[] = {S8("BUSTER_OS_SPAWN_PROBE")};
-    String8 closed_values[] = {S8("closed-stdio")};
-    ProcessSpawnResult closed_stdio = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
-                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(closed_keys),
-                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(closed_values), (ProcessSpawnOptions){0});
-    ProcessWaitResult closed_stdio_wait = os_process_spawn_test_wait(arena, closed_stdio);
-    BUSTER_TEST(arguments, closed_stdio.failure == PROCESS_SPAWN_FAILURE_NONE && closed_stdio_wait.result == PROCESS_RESULT_SUCCESS);
+    for (u32 mask = 0; mask < ((u32)1 << STANDARD_STREAM_COUNT); mask += 1)
+    {
+        String8 mask_value = string_format(arena, S8("{u32}"), mask);
+        String8 closed_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_STDIO_MASK")};
+        String8 closed_values[] = {S8("closed-stdio"), mask_value};
+        ProcessSpawnResult closed_stdio = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                           (SliceString8)BUSTER_ARRAY_TO_SLICE(closed_keys),
+                                                           (SliceString8)BUSTER_ARRAY_TO_SLICE(closed_values), (ProcessSpawnOptions){0});
+        ProcessWaitResult closed_stdio_wait = os_process_spawn_test_wait(arena, closed_stdio);
+        BUSTER_TEST(arguments, closed_stdio.failure == PROCESS_SPAWN_FAILURE_NONE &&
+                                   closed_stdio_wait.result == PROCESS_RESULT_SUCCESS);
+    }
 
 #if BUSTER_WINDOWS
+    (void)arena_allocate(arena, char16, 0);
     u64 environment_position = arena->position;
+    char16 expected_empty[] = {0, 0};
+    char16 expected_one[] = {'A', '=', '1', 0, 0};
+    char16 expected_two[] = {'A', '=', '1', 0, 'B', '=', '2', 0, 0};
+    String8 one_keys[] = {S8("A")};
+    String8 one_values[] = {S8("1")};
+    String8 two_keys[] = {S8("A"), S8("B")};
+    String8 two_values[] = {S8("1"), S8("2")};
+    String8 one_entry[] = {S8("A=1")};
+    String8 two_entries[] = {S8("A=1"), S8("B=2")};
+
+    char16* dirty = arena_allocate(arena, char16, BUSTER_ARRAY_LENGTH(expected_empty));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_empty); index += 1) dirty[index] = (char16)0xa5a5;
+    arena_set_position(arena, environment_position);
     WindowsStringList empty_key_value = windows_environment_from_keys_and_values(arena, (SliceString8){0}, (SliceString8){0});
-    BUSTER_TEST(arguments, empty_key_value[0] == 0 && empty_key_value[1] == 0);
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_empty) &&
+                               !memcmp(empty_key_value, expected_empty, sizeof(expected_empty)));
+
+    arena_set_position(arena, environment_position);
+    WindowsStringList one_key_value = windows_environment_from_keys_and_values(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(one_keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(one_values));
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_one) &&
+                               !memcmp(one_key_value, expected_one, sizeof(expected_one)));
+
+    arena_set_position(arena, environment_position);
+    WindowsStringList two_key_values = windows_environment_from_keys_and_values(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(two_keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(two_values));
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_two) &&
+                               !memcmp(two_key_values, expected_two, sizeof(expected_two)));
+
+    arena_set_position(arena, environment_position);
+    dirty = arena_allocate(arena, char16, BUSTER_ARRAY_LENGTH(expected_empty));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_empty); index += 1) dirty[index] = (char16)0xa5a5;
     arena_set_position(arena, environment_position);
     WindowsStringList empty_block = windows_environment_block_from_slice_string(arena, (SliceString8){0});
-    BUSTER_TEST(arguments, empty_block[0] == 0 && empty_block[1] == 0);
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_empty) &&
+                               !memcmp(empty_block, expected_empty, sizeof(expected_empty)));
+
+    arena_set_position(arena, environment_position);
+    WindowsStringList one_block = windows_environment_block_from_slice_string(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(one_entry));
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_one) &&
+                               !memcmp(one_block, expected_one, sizeof(expected_one)));
+
+    arena_set_position(arena, environment_position);
+    WindowsStringList two_blocks = windows_environment_block_from_slice_string(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(two_entries));
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_two) &&
+                               !memcmp(two_blocks, expected_two, sizeof(expected_two)));
     arena_set_position(arena, environment_position);
 #endif
 

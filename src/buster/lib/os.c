@@ -2663,6 +2663,7 @@ BUSTER_GLOBAL_LOCAL bool os_process_spawn_path_is_explicit(String8 path)
 }
 
 #if !defined(_WIN32) && !BUSTER_ANDROID
+#if !defined(__linux__) || !defined(F_DUPFD_CLOEXEC)
 BUSTER_GLOBAL_LOCAL int os_process_spawn_set_cloexec(int descriptor)
 {
     int result = 0;
@@ -2689,6 +2690,7 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_set_cloexec(int descriptor)
     }
     return result;
 }
+#endif
 
 BUSTER_GLOBAL_LOCAL int os_process_spawn_duplicate_above_standard(int descriptor)
 {
@@ -2723,7 +2725,14 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_pipe_create(int descriptors[2], Process
     descriptors[1] = -1;
     *failure = PROCESS_SPAWN_FAILURE_PIPE;
     int result = 0;
+#if defined(__linux__)
+    // Create the descriptors with close-on-exec atomically. A pipe() followed
+    // by F_SETFD has a window in which another thread can spawn and inherit
+    // either endpoint.
+    if (pipe2(descriptors, O_CLOEXEC) != 0)
+#else
     if (pipe(descriptors) != 0)
+#endif
     {
         result = errno;
     }
@@ -2750,10 +2759,12 @@ BUSTER_GLOBAL_LOCAL int os_process_spawn_pipe_create(int descriptors[2], Process
                 descriptors[index] = replacement;
             }
         }
+#if !defined(__linux__)
         else
         {
             result = os_process_spawn_set_cloexec(descriptors[index]);
         }
+#endif
     }
     if (result)
     {

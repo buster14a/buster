@@ -1110,45 +1110,97 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_process_spawn_probe(String8 mode)
                   !os_get_environment_variable(S8("BUSTER_OS_SPAWN_FORBIDDEN")).length &&
                   !os_get_environment_variable(S8("HOME")).length && !os_get_environment_variable(S8("USERPROFILE")).length;
     }
+    else if (string_equal(mode, S8("closed-stdio-child")))
+    {
+        u8 input_byte = 0;
+        OsFileReadResult input = os_file_read_some(os_get_standard_stream(STANDARD_STREAM_INPUT),
+                                                   (ByteSlice){.pointer = &input_byte, .length = 1});
+        String8 output_marker = S8("O");
+        String8 error_marker = S8("E");
+        bool output_written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT),
+                                                    BUSTER_SLICE_TO_BYTE_SLICE(output_marker));
+        bool error_written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR),
+                                                   BUSTER_SLICE_TO_BYTE_SLICE(error_marker));
+        success = input.status == OS_FILE_READ_EOF && output_written && error_written;
+    }
     else if (string_equal(mode, S8("closed-stdio")))
     {
+        String8 mask_string = os_get_environment_variable(S8("BUSTER_OS_SPAWN_STDIO_MASK"));
+        IntegerParsingU64 parsed = string8_parse_u64_decimal(mask_string);
+        bool mask_valid = parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == mask_string.length &&
+                          parsed.value < ((u64)1 << STANDARD_STREAM_COUNT);
+        if (mask_valid)
+        {
+            u32 mask = (u32)parsed.value;
+            bool streams_closed = true;
 #if BUSTER_WINDOWS
-        DWORD identifiers[] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
-        HANDLE closed[BUSTER_ARRAY_LENGTH(identifiers)] = {0};
-        u32 closed_count = 0;
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(identifiers); index += 1)
-        {
-            HANDLE handle = GetStdHandle(identifiers[index]);
-            (void)SetStdHandle(identifiers[index], 0);
-            bool duplicate = false;
-            for (u32 previous = 0; previous < closed_count; previous += 1)
+            DWORD identifiers[] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+            HANDLE original[BUSTER_ARRAY_LENGTH(identifiers)] = {0};
+            HANDLE closed[BUSTER_ARRAY_LENGTH(identifiers)] = {0};
+            u32 closed_count = 0;
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(identifiers); index += 1)
             {
-                duplicate = duplicate || closed[previous] == handle;
+                original[index] = GetStdHandle(identifiers[index]);
+                if (mask & ((u32)1 << index))
+                {
+                    streams_closed = SetStdHandle(identifiers[index], 0) != 0 && streams_closed;
+                }
             }
-            if (handle && handle != INVALID_HANDLE_VALUE && !duplicate)
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(identifiers); index += 1)
             {
-                closed[closed_count++] = handle;
-                CloseHandle(handle);
+                HANDLE handle = original[index];
+                bool selected = (mask & ((u32)1 << index)) != 0;
+                bool retained = false;
+                for (u32 other = 0; selected && !retained && other < BUSTER_ARRAY_LENGTH(identifiers); other += 1)
+                {
+                    retained = !(mask & ((u32)1 << other)) && original[other] == handle;
+                }
+                bool duplicate = false;
+                for (u32 previous = 0; selected && !duplicate && previous < closed_count; previous += 1)
+                {
+                    duplicate = closed[previous] == handle;
+                }
+                if (selected && handle && handle != INVALID_HANDLE_VALUE && !retained && !duplicate)
+                {
+                    closed[closed_count++] = handle;
+                    streams_closed = CloseHandle(handle) != 0 && streams_closed;
+                }
             }
-        }
 #else
-        close(STDIN_FILENO);
-        close(STDOUT_FILENO);
-        close(STDERR_FILENO);
+            for (u32 index = 0; index < STANDARD_STREAM_COUNT; index += 1)
+            {
+                if (mask & ((u32)1 << index))
+                {
+                    int close_status = close((int)index);
+                    streams_closed = (close_status == 0 || errno == EBADF) && streams_closed;
+                }
+            }
 #endif
-        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("help")};
-        String8 keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_EXPECTED"), S8("PATH")};
-        String8 values[] = {S8("environment"), S8("present"), S8("hostile-path")};
-        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
-                                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(keys),
-                                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(values),
-                                                    (ProcessSpawnOptions){
-                                                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                    });
-        if (spawn.handle)
-        {
-            ProcessWaitResult wait = os_process_wait_sync(program_state->arena, spawn);
-            success = wait.result == PROCESS_RESULT_SUCCESS;
+            if (streams_closed)
+            {
+                String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("help")};
+                String8 keys[] = {S8("BUSTER_OS_SPAWN_PROBE")};
+                String8 values[] = {S8("closed-stdio-child")};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(keys),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(values),
+                                                            (ProcessSpawnOptions){
+                                                                .capture = ((u64)1 << STANDARD_STREAM_INPUT) |
+                                                                           ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                                           ((u64)1 << STANDARD_STREAM_ERROR),
+                                                            });
+                if (spawn.handle)
+                {
+                    ProcessWaitResult wait = os_process_wait_sync(program_state->arena, spawn);
+                    String8 output_marker = S8("O");
+                    String8 error_marker = S8("E");
+                    success = spawn.failure == PROCESS_SPAWN_FAILURE_NONE && wait.result == PROCESS_RESULT_SUCCESS &&
+                              wait.streams[STANDARD_STREAM_OUTPUT].length == output_marker.length &&
+                              !memcmp(wait.streams[STANDARD_STREAM_OUTPUT].pointer, output_marker.pointer, output_marker.length) &&
+                              wait.streams[STANDARD_STREAM_ERROR].length == error_marker.length &&
+                              !memcmp(wait.streams[STANDARD_STREAM_ERROR].pointer, error_marker.pointer, error_marker.length);
+                }
+            }
         }
     }
     return success ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
