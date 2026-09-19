@@ -332,7 +332,7 @@ compilation is explicitly enabled.
 ## Incremental Android test assets
 
 The Android `apk` graph in `cmake/AndroidApk.cmake` treats the active files under
-tests/` as package inputs, not compiler sources. After configuring the normal
+`tests/` as package inputs, not compiler sources. After configuring the normal
 Android tree, `cmake --build build/android-ci-x86_64 --config Debug --target apk`
 repackages fixture edits, additions, renames and deletions without requiring a
 C source rebuild or another destructive `generate`. Release uses the same
