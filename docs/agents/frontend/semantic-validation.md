@@ -49,6 +49,14 @@ Syntax-only is not an object-emission or linker-success guarantee. Target source
 constraints are checked using the selected target, without allocating canonical
 type tables merely to inspect scalar layout facts.
 
+Validation reuses successful expression types within one function, keyed by
+source token identity, token range, scope and checking mode. Checked facts can
+answer a type-only query, while an unchecked fact cannot suppress validation.
+Failed queries, speculative machine frames and copied semantic models do not
+publish cache entries. Immutable scalar query types are created before query
+checkpoints; declarator and qualified types remain independent. All borrowed
+cache pointers are cleared before the semantic model is returned.
+
 ## Regression contract
 
 `compiler_driver_test_syntax_diagnostic_equivalence` contains frozen acceptance
