@@ -144,6 +144,9 @@ struct CPreprocessorOperation;
 struct GpuPipelineOptions
 {
     String8* input_paths;
+    // Optional per-input authority. A non-null array contains exactly
+    // input_count entries; legacy callers leave it null and use language.
+    GpuSourceLanguage* input_languages;
     String8* include_paths;
     String8* system_include_paths;
     // Authoritative when macro_operation_count is nonzero. The separate

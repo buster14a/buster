@@ -1,9 +1,202 @@
 // Included by driver_test.c. Every pass subset executes against fixed C
 // answers on the native backend, and reaches all shared non-native consumers.
 #include <buster/tests/compiler/codegen/ebpf_test_vm.h>
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_string_contains(String8 text, String8 needle)
+{
+    bool result = needle.length <= text.length;
+    if (result && needle.length)
+    {
+        result = false;
+        for (u64 offset = 0; offset <= text.length - needle.length && !result; offset += 1)
+        {
+            result = memcmp(text.pointer + offset, needle.pointer, needle.length) == 0;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_positional_languages(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 first = buster_test_temporary_path(arena, S8("buster-positional-language-first"), S8(".input"));
+    String8 second = buster_test_temporary_path(arena, S8("buster-positional-language-second"), S8(".c"));
+    String8 third = buster_test_temporary_path(arena, S8("buster-positional-language-third"), S8(".source"));
+    String8 middle = buster_test_temporary_path(arena, S8("buster-positional-language-middle"), S8(".c"));
+    String8 assembly = buster_test_temporary_path(arena, S8("buster-positional-language-assembly"), S8(".input"));
+    BUSTER_TEST(arguments, file_write(first, BUSTER_SLICE_TO_BYTE_SLICE(S8("int positional_helper(void) { return 1; }\n"))));
+    BUSTER_TEST(arguments, file_write(second, BUSTER_SLICE_TO_BYTE_SLICE(S8("int positional_second(void) { return 2; }\n"))));
+    BUSTER_TEST(arguments, file_write(third, BUSTER_SLICE_TO_BYTE_SLICE(S8("int positional_helper(void);\nint main(void) { return positional_helper() == 1 ? 0 : 1; }\n"))));
+    BUSTER_TEST(arguments, file_write(middle, BUSTER_SLICE_TO_BYTE_SLICE(S8("int positional_middle(\n"))));
+    BUSTER_TEST(arguments, file_write(assembly, BUSTER_SLICE_TO_BYTE_SLICE(S8(".text\n"))));
+
+    String8 mixed_command[] = {
+        S8("-nostdinc"), S8("-fsyntax-only"), S8("-x"), S8("c"), first,
+        S8("-x"), S8("none"), second,
+    };
+    CompilerDriverInvocation mixed = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_command));
+    BUSTER_TEST(arguments, mixed.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, mixed.input_count == 2 && mixed.input_language_count == 2 && mixed.input_languages != 0);
+    if (BUSTER_REQUIRE(arguments, mixed.input_languages && mixed.input_language_count == 2))
+    {
+        BUSTER_TEST(arguments, mixed.input_languages[0] == COMPILER_DRIVER_LANGUAGE_C);
+        BUSTER_TEST(arguments, mixed.input_languages[1] == COMPILER_DRIVER_LANGUAGE_AUTOMATIC);
+    }
+    BUSTER_TEST(arguments, mixed.language == COMPILER_DRIVER_LANGUAGE_AUTOMATIC);
+    CompilerDriverResult mixed_result = compiler_driver_execute_invocation(arena, mixed);
+    if (mixed_result.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        arguments->show(arguments, S8("positional mixed input: {S8}\n"), mixed_result.diagnostic);
+    }
+    BUSTER_TEST(arguments, mixed_result.error == COMPILER_DRIVER_ERROR_NONE);
+
+    String8 trailing_command[] = {
+        S8("-nostdinc"), S8("-fsyntax-only"), S8("-x"), S8("c"), first,
+        S8("-x"), S8("assembler"),
+    };
+    CompilerDriverInvocation trailing = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(trailing_command));
+    BUSTER_TEST(arguments, trailing.error == COMPILER_DRIVER_ERROR_NONE && trailing.input_count == 1 && trailing.input_language_count == 1);
+    if (BUSTER_REQUIRE(arguments, trailing.input_languages && trailing.input_language_count == 1))
+    {
+        BUSTER_TEST(arguments, trailing.input_languages[0] == COMPILER_DRIVER_LANGUAGE_C);
+    }
+    BUSTER_TEST(arguments, trailing.language == COMPILER_DRIVER_LANGUAGE_ASSEMBLY);
+    CompilerDriverResult trailing_result = compiler_driver_execute_invocation(arena, trailing);
+    BUSTER_TEST(arguments, trailing_result.error == COMPILER_DRIVER_ERROR_NONE);
+
+    String8 alternating_command[] = {
+        S8("-nostdinc"), S8("-fsyntax-only"),
+        S8("-x"), S8("c"), first,
+        S8("-x"), S8("assembler"), assembly,
+        S8("-x"), S8("none"), second,
+        S8("-x"), S8("c"), third,
+    };
+    CompilerDriverInvocation alternating = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(alternating_command));
+    BUSTER_TEST(arguments, alternating.error == COMPILER_DRIVER_ERROR_NONE && alternating.input_count == 4 && alternating.input_language_count == 4);
+    if (BUSTER_REQUIRE(arguments, alternating.input_languages && alternating.input_language_count == 4))
+    {
+        BUSTER_TEST(arguments, alternating.input_languages[0] == COMPILER_DRIVER_LANGUAGE_C);
+        BUSTER_TEST(arguments, alternating.input_languages[1] == COMPILER_DRIVER_LANGUAGE_ASSEMBLY);
+        BUSTER_TEST(arguments, alternating.input_languages[2] == COMPILER_DRIVER_LANGUAGE_AUTOMATIC);
+        BUSTER_TEST(arguments, alternating.input_languages[3] == COMPILER_DRIVER_LANGUAGE_C);
+    }
+
+    String8 automatic_command[] = {S8("-nostdinc"), S8("-fsyntax-only"), second};
+    CompilerDriverInvocation automatic = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(automatic_command));
+    BUSTER_TEST(arguments, automatic.error == COMPILER_DRIVER_ERROR_NONE && automatic.input_language_count == 1 &&
+                           automatic.input_languages && automatic.input_languages[0] == COMPILER_DRIVER_LANGUAGE_AUTOMATIC);
+    CompilerDriverResult automatic_result = compiler_driver_execute_invocation(arena, automatic);
+    BUSTER_TEST(arguments, automatic_result.error == COMPILER_DRIVER_ERROR_NONE);
+
+    String8 missing_command[] = {S8("-x")};
+    CompilerDriverInvocation missing = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(missing_command));
+    BUSTER_TEST(arguments, missing.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    String8 invalid_command[] = {S8("-x"), S8("objective-c"), first};
+    CompilerDriverInvocation invalid = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_command));
+    BUSTER_TEST(arguments, invalid.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+
+    CompilerDriverInvocation legacy = trailing;
+    legacy.input_languages = 0;
+    legacy.input_language_count = 0;
+    legacy.language = COMPILER_DRIVER_LANGUAGE_C;
+    CompilerDriverResult legacy_result = compiler_driver_execute_invocation(arena, legacy);
+    BUSTER_TEST(arguments, legacy_result.error == COMPILER_DRIVER_ERROR_NONE);
+    CompilerDriverInvocation malformed = trailing;
+    malformed.input_language_count = 0;
+    CompilerDriverResult malformed_result = compiler_driver_execute_invocation(arena, malformed);
+    BUSTER_TEST(arguments, malformed_result.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+
+    String8 ordered_one_command[] = {
+        S8("-nostdinc"), S8("-fcompile-jobs=1"), S8("-x"), S8("c"), first,
+        S8("-x"), S8("none"), middle, second,
+    };
+    String8 ordered_two_command[] = {
+        S8("-nostdinc"), S8("-fcompile-jobs=2"), S8("-x"), S8("c"), first,
+        S8("-x"), S8("none"), middle, second,
+    };
+    CompilerDriverInvocation ordered_one = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordered_one_command));
+    CompilerDriverInvocation ordered_two = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(ordered_two_command));
+    CompilerDriverResult ordered_one_result = compiler_driver_execute_invocation(arena, ordered_one);
+    CompilerDriverResult ordered_two_result = compiler_driver_execute_invocation(arena, ordered_two);
+    BUSTER_TEST(arguments, ordered_one_result.error != COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, ordered_two_result.error == ordered_one_result.error);
+    BUSTER_STRING_TEST(arguments, ordered_two_result.diagnostic, ordered_one_result.diagnostic);
+    BUSTER_TEST(arguments, compiler_driver_test_string_contains(ordered_two_result.diagnostic, middle));
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 serial_output = buster_test_temporary_path(arena, S8("buster-positional-language-serial"),
+#if BUSTER_WINDOWS
+                                                        S8(".exe"));
+#else
+                                                        S8(""));
+#endif
+    String8 parallel_output = buster_test_temporary_path(arena, S8("buster-positional-language-parallel"),
+#if BUSTER_WINDOWS
+                                                          S8(".exe"));
+#else
+                                                          S8(""));
+#endif
+    String8 boundary_output = buster_test_temporary_path(arena, S8("buster-positional-language-boundary"),
+#if BUSTER_WINDOWS
+                                                          S8(".exe"));
+#else
+                                                          S8(""));
+#endif
+    String8 serial_command[] = {
+        S8("-nostdinc"), S8("-fcompile-jobs=1"), S8("-x"), S8("c"), first,
+        S8("-x"), S8("c"), third, S8("-o"), serial_output,
+    };
+    String8 parallel_command[] = {
+        S8("-nostdinc"), S8("-fcompile-jobs=2"), S8("-x"), S8("c"), first,
+        S8("-x"), S8("c"), third, S8("-o"), parallel_output,
+    };
+    CompilerDriverInvocation serial = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(serial_command));
+    CompilerDriverInvocation parallel = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parallel_command));
+    CompilerDriverResult serial_result = compiler_driver_execute_invocation(arena, serial);
+    CompilerDriverResult parallel_result = compiler_driver_execute_invocation(arena, parallel);
+    if (serial_result.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        arguments->show(arguments, S8("positional serial link: {S8}\n"), serial_result.diagnostic);
+    }
+    if (parallel_result.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        arguments->show(arguments, S8("positional parallel link: {S8}\n"), parallel_result.diagnostic);
+    }
+    BUSTER_TEST(arguments, serial_result.error == COMPILER_DRIVER_ERROR_NONE && serial_result.compilation_workers == 1);
+    BUSTER_TEST(arguments, parallel_result.error == COMPILER_DRIVER_ERROR_NONE);
+#if !BUSTER_SINGLE_THREADED
+    if (lane_count() == 1 && os_get_logical_thread_count() > 1)
+    {
+        BUSTER_TEST(arguments, parallel_result.compilation_workers == 2);
+    }
+#endif
+
+    String8 boundary_command[] = {
+        S8("-nostdinc"), S8("-fcompile-jobs=2"),
+        S8("-x"), S8("c"), first,
+        S8("-x"), S8("assembler"), assembly,
+        S8("-x"), S8("c"), third,
+        S8("-o"), boundary_output,
+    };
+    CompilerDriverInvocation boundary = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(boundary_command));
+    CompilerDriverResult boundary_result = compiler_driver_execute_invocation(arena, boundary);
+    if (boundary_result.error != COMPILER_DRIVER_ERROR_NONE)
+    {
+        arguments->show(arguments, S8("positional cohort boundary: {S8}\n"), boundary_result.diagnostic);
+    }
+    BUSTER_TEST(arguments, boundary_result.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, boundary_result.compilation_workers == 1);
+#endif
+
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_positional_languages);
     String8 default_command[] = {S8("source.c")};
     CompilerDriverInvocation default_invocation = compiler_driver_parse_arguments(arguments->arena,
         (SliceString8)BUSTER_ARRAY_TO_SLICE(default_command));
