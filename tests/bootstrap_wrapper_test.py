@@ -382,7 +382,7 @@ class BootstrapWorkflowTests(unittest.TestCase):
         self.assertNotIn("continue-on-error:", block)
         self.assertEqual(self.desktop.count("tests/bootstrap_wrapper_test.py -v"), 1)
         policy = self.steps["Workflow tool regression tests"]
-        self.assertIn("timeout-minutes: 2", policy)
+        self.assertIn("timeout-minutes: ${{ matrix.lane == 'windows-aarch64' && 5 || 2 }}", policy)
         self.assertNotIn("bootstrap_wrapper_test.py", policy)
         for suite in ("tests/ci_tools_test.py", "tools/analyzer_selection_test.py", "tools/differential_ci_policy_test.py"):
             self.assertIn(suite + " -v", policy)

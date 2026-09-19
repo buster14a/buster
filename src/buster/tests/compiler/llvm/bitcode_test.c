@@ -156,7 +156,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
             compile[compile_count++] = S8("-o");
             compile[compile_count++] = executable;
             ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = compile, .length = compile_count}, (SliceString8){0}, (SliceString8){0},
-                (ProcessSpawnOptions){.use_process_environment = true,
+                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
             BUSTER_TEST(arguments, spawned.handle != 0);
             if (spawned.handle)
@@ -173,7 +173,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
                 {
                     String8 run[] = {executable};
                     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                        (ProcessSpawnOptions){.use_process_environment = true});
+                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, child.handle != 0);
                     if (child.handle)
                     {
@@ -230,7 +230,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_switches(UnitTestArguments*
 #endif
             String8 compile[] = {compiler, S8("-O0"), output, S8("tests/basic_c_llvm_switch_main.c"), S8("-o"), executable};
             ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0}, (SliceString8){0},
-                (ProcessSpawnOptions){.use_process_environment = true,
+                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
             BUSTER_TEST(arguments, spawned.handle != 0);
             if (spawned.handle)
@@ -248,7 +248,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_switches(UnitTestArguments*
                 {
                     String8 run[] = {executable};
                     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                        (ProcessSpawnOptions){.use_process_environment = true});
+                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, child.handle != 0);
                     if (child.handle)
                     {
