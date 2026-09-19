@@ -2826,7 +2826,7 @@ void link_sha256(Arena* arena, u8 const* input, u64 length, u8* output)
 
 BUSTER_GLOBAL_LOCAL bool link_write_executable_file(String8 path, ByteSlice bytes)
 {
-    return !file_write_checked(path, bytes, (OpenPermissions){.read = 1, .write = 1, .execute = 1}).error.v;
+    return file_publish_executable(path, bytes);
 }
 
 BUSTER_GLOBAL_LOCAL u32 link_symbol_find(ObjectFile* object, String8 name)
