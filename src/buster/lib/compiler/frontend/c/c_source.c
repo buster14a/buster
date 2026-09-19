@@ -2875,6 +2875,14 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     // unresolved symbol behind.
     { S8_INITIALIZER("_mm_pause"), C_SYMBOL_BUILTIN_SPIN_PAUSE },
     { S8_INITIALIZER("__builtin_ia32_pause"), C_SYMBOL_BUILTIN_SPIN_PAUSE },
+    // Clang's SSE2 headers lower immediate vector shifts through these
+    // compiler-owned spellings. Their implementation is canonical vector
+    // IR and is therefore independent of the selected native backend.
+    { S8_INITIALIZER("__builtin_ia32_pslldi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
+    { S8_INITIALIZER("__builtin_ia32_psllqi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
+    { S8_INITIALIZER("__builtin_ia32_psradi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
+    { S8_INITIALIZER("__builtin_ia32_psrldi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
+    { S8_INITIALIZER("__builtin_ia32_psrlqi128"), C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT },
     { S8_INITIALIZER("__builtin_unreachable"), C_SYMBOL_BUILTIN_UNREACHABLE },
     { S8_INITIALIZER("__builtin_frame_address"), C_SYMBOL_BUILTIN_FRAME_ADDRESS },
     { S8_INITIALIZER("__builtin_alloca"), C_SYMBOL_BUILTIN_ALLOCA },
@@ -5263,6 +5271,9 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
         "__builtin_sqrt",          "__builtin_sqrtf",
         "__builtin_strlen",        "__builtin_trap",
         "__builtin_ia32_pause",
+        "__builtin_ia32_pslldi128", "__builtin_ia32_psllqi128",
+        "__builtin_ia32_psradi128", "__builtin_ia32_psrldi128",
+        "__builtin_ia32_psrlqi128",
         "__builtin_types_compatible_p", "__builtin_offsetof",
         "__builtin_unreachable",   "__builtin_frame_address",
         "__builtin_alloca",
