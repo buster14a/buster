@@ -52,7 +52,8 @@ jobs:
           set -o pipefail
           command -v tcc
           tcc -v
-          ./build.sh build --config Release -t test_all 2>&1 | tee /tmp/solve-848-validation.log
+          ./build.sh generate 2>&1 | tee /tmp/solve-848-validation.log
+          ./build.sh build --config Release -t test_all 2>&1 | tee -a /tmp/solve-848-validation.log
 
       - name: Verify self-host fixed point
         shell: bash
