@@ -66,6 +66,7 @@ jobs:
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Exercise deterministic reconstruction and failure controls
         run: |
@@ -83,6 +84,7 @@ jobs:
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
