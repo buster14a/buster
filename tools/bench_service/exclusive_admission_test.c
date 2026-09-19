@@ -5,9 +5,26 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
+#include "../../src/buster/lib/hash.c"
 #include "queue.c"
 #include "exclusive_admission.c"
 #include <stdlib.h>
+
+/* queue.c needs only these two string primitives. Keep this focused fixture
+ * independent of the arena/formatting implementation used by the full driver. */
+String8 string_from_pointer(const char8* pointer)
+{
+    return (String8){
+        .pointer = (char8*)pointer,
+        .length = pointer ? (u64)strlen((char const*)pointer) : 0,
+    };
+}
+
+bool string_equal(String8 left, String8 right)
+{
+    return left.length == right.length &&
+           (!left.length || !memcmp(left.pointer, right.pointer, (size_t)left.length));
+}
 
 static u32 assertions;
 static u32 failures;
