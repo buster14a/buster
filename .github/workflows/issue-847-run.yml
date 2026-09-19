@@ -41,8 +41,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./build.sh generate --cc clang --config Release --linker DEFAULT
-          BUSTER_TEST_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 ./build.sh build --config Release -t test_all
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          ./build/build generate --build-directory build/issue847 --cc clang --config Release --linker DEFAULT
+          BUSTER_TEST_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 \
+            ./build/build build --build-directory build/issue847 --config Release -t test_all
 
       - name: Publish the tested source changes
         shell: bash
