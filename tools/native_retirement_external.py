@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 
+import native_retirement_dependency_binding as dependency_authority
 from native_retirement_materializer import (
     MaterializationError,
     SCHEMA,
@@ -219,12 +220,23 @@ def prepare(manifest_path, source_root=None):
         manifest = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as error:
         _fail(f"cannot read dependency manifest {manifest_path}: {error}")
-    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
+    if not isinstance(manifest, dict):
         _fail("unsupported dependency manifest schema")
     if source_root is None:
         declared = manifest.get("source_root", ".")
         source_root = manifest_path.parent / PurePosixPath(declared)
     root = _descriptor_source_root(manifest_path, manifest, source_root)
+    if manifest.get("schema") == dependency_authority.POLICY_SCHEMA:
+        policy = dependency_authority.parse_policy(raw)
+        snapshot_raw = _read_no_follow(root / PurePosixPath(dependency_authority.SNAPSHOT_PATH),
+                                       "repository-source snapshot")
+        snapshot = dependency_authority.parse_snapshot(snapshot_raw, raw, policy)
+        legacy_raw = _read_no_follow(root / PurePosixPath(dependency_authority.LEGACY_DESCRIPTOR_PATH),
+                                     "legacy dependency descriptor")
+        resolved_raw = dependency_authority.render_resolved_descriptor(policy, snapshot, legacy_raw)
+        manifest = dependency_authority.strict_json(resolved_raw, "resolved dependency descriptor")
+    elif manifest.get("schema") != SCHEMA:
+        _fail("unsupported dependency manifest schema")
     records, _metadata = parse_manifest(manifest)
     checkouts, generated = _external_declarations(manifest)
     checkout_paths = {}
