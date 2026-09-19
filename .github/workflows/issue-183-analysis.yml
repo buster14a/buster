@@ -1,0 +1,131 @@
+name: Issue 183 analysis
+
+on:
+  push:
+    branches:
+      - scratch/183-typed-ice-analysis
+    paths-ignore:
+      - .github/issue-183-current-context.txt
+
+permissions:
+  contents: write
+
+jobs:
+  gather:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Gather source context and compiler controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          roots = [Path('src/buster/lib/compiler/frontend/c'), Path('src/buster/lib/compiler'), Path('tests'), Path('.')]
+          files = []
+          seen = set()
+          for root in roots:
+              if not root.exists():
+                  continue
+              for p in root.rglob('*'):
+                  if not p.is_file() or p in seen:
+                      continue
+                  if p.suffix not in {'.c', '.h', '.md', '.sh'} and p.name not in {'build.c', 'CMakeLists.txt'}:
+                      continue
+                  if any(part in {'.git', 'build', 'third_party', 'vendor'} for part in p.parts):
+                      continue
+                  seen.add(p)
+                  files.append(p)
+
+          patterns = [
+              r'c_ir_integer_literal_type', r'c_ir_emit_integer_value', r'c_ir_constant_identifier',
+              r'c_parse_conditional_expression_type', r'c_parse_direct_expression_base',
+              r'usual.*arithmetic|arithmetic.*conversion', r'C_TYPE_.*128|IR_TYPE_.*128',
+              r'\b[UI]128\b|\bu128\b|__int128', r'C_ENTITY_ENUMERATOR', r'CEnumMember',
+              r'c_parse_sizeof_operand_expression_layout', r'c_integer_expression_evaluate',
+              r'enum_member_start', r'fixed_underlying|fixed.*enum', r'test_all|test_self_host',
+              r'c-gnu\.c|gnu17|c23|c2x',
+          ]
+          regex = re.compile('|'.join(f'(?:{p})' for p in patterns), re.I)
+          matches = {}
+          for p in files:
+              try:
+                  lines = p.read_text(errors='replace').splitlines()
+              except OSError:
+                  continue
+              hit = [i for i, line in enumerate(lines) if regex.search(line)]
+              if hit:
+                  ranges = []
+                  for i in hit:
+                      lo, hi = max(0, i - 45), min(len(lines), i + 46)
+                      if ranges and lo <= ranges[-1][1] + 5:
+                          ranges[-1] = (ranges[-1][0], max(ranges[-1][1], hi))
+                      else:
+                          ranges.append((lo, hi))
+                  matches[p] = (lines, ranges)
+
+          out = []
+          for p in sorted(matches, key=str):
+              lines, ranges = matches[p]
+              out.append(f'===== {p} =====')
+              for lo, hi in ranges:
+                  out.append(f'--- lines {lo+1}-{hi} ---')
+                  out.extend(f'{i+1:6d}: {lines[i]}' for i in range(lo, hi))
+          Path('.github/issue-183-current-context.txt').write_text('\n'.join(out) + '\n')
+          PY
+
+          cat > /tmp/enum183.c <<'EOF'
+          #include <limits.h>
+          #include <stdio.h>
+          #define T(x) _Generic((x), \
+            int: "int", unsigned int: "uint", long: "long", unsigned long: "ulong", \
+            long long: "ll", unsigned long long: "ull", __int128: "i128", \
+            unsigned __int128: "u128", default: "other")
+          enum Small { SMALL_ZERO = 0, SMALL_ONE = 1 };
+          enum High { HIGH_ZERO = 0, HIGH_BIT = 0x80000000 };
+          enum Wide { WIDE_ZERO = 0, WIDE_LL = 4294967296LL };
+          enum HexMax { HEX_MAX = 0xffffffffffffffff };
+          enum DecMax { DEC_MAX = 18446744073709551615 };
+          enum Cond { COND_NEG = (1U ? -1LL : 0LL) };
+          enum Cast { CAST_MAX = (unsigned long long)-1 };
+          enum IntSucc { INT_LAST = INT_MAX, INT_NEXT };
+          enum UIntSucc { UINT_LAST = UINT_MAX, UINT_NEXT };
+          enum LlSucc { LL_LAST = LLONG_MAX, LL_NEXT };
+          int main(void) {
+            printf("Small obj=%zu zero=%s one=%s\n", sizeof(enum Small), T(SMALL_ZERO), T(SMALL_ONE));
+            printf("High obj=%zu bit=%s gt0=%d\n", sizeof(enum High), T(HIGH_BIT), HIGH_BIT > 0);
+            printf("Wide obj=%zu member=%s value=%lld\n", sizeof(enum Wide), T(WIDE_LL), (long long)WIDE_LL);
+            printf("HexMax obj=%zu member=%s positive=%d\n", sizeof(enum HexMax), T(HEX_MAX), HEX_MAX > 0);
+            printf("DecMax obj=%zu member=%s positive=%d\n", sizeof(enum DecMax), T(DEC_MAX), DEC_MAX > 0);
+            printf("Cond member=%s negative=%d\n", T(COND_NEG), COND_NEG < 0);
+            printf("Cast member=%s positive=%d\n", T(CAST_MAX), CAST_MAX > 0);
+            printf("IntSucc last=%s next=%s nextv=%llu\n", T(INT_LAST), T(INT_NEXT), (unsigned long long)INT_NEXT);
+            printf("UIntSucc last=%s next=%s nextv=%llu\n", T(UINT_LAST), T(UINT_NEXT), (unsigned long long)UINT_NEXT);
+            printf("LlSucc last=%s next=%s nextv_low=%llu\n", T(LL_LAST), T(LL_NEXT), (unsigned long long)LL_NEXT);
+            return 0;
+          }
+          EOF
+          {
+            echo
+            echo '===== HOST COMPILER ENUM CONTROLS ====='
+            for cc in gcc clang; do
+              command -v "$cc" >/dev/null || continue
+              "$cc" --version | head -1
+              for std in gnu17 gnu2x; do
+                echo "--- $cc -std=$std ---"
+                if "$cc" -std="$std" -Wall -Wextra /tmp/enum183.c -o /tmp/enum183 2>&1; then
+                  /tmp/enum183
+                fi
+              done
+            done
+          } >> .github/issue-183-current-context.txt
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-current-context.txt
+          git commit -m 'chore: capture issue 183 analysis context'
+          git push
