@@ -21,16 +21,16 @@ HOSTED_FIXTURES = frozenset("tests/" + name + ".c" for name in (
     "basic_lz4_roundtrip", "basic_stb_compat", "basic_yyjson_roundtrip", "basic_zlib_compat"))
 FULL_CENSUS_PROFILE = "full-census"
 SELF_TEST_PROFILE = "self-test"
-FULL_SUBJECT_COUNT = 410
-FULL_ROW_COUNT = 78720
+FULL_SUBJECT_COUNT = 411
+FULL_ROW_COUNT = 78912
 FULL_SHARD_COUNT = 4
 FULL_SUPPORTED_GAP_COUNT = 192
 # This is the SHA-256 of the canonical JSON list of full-census row numbers
 # declared as supported-native gaps by the frozen support ledger.  The value is
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
-FULL_SUPPORTED_GAP_SHA256 = "9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"
-FULL_SUPPORT_CONTRACT_SHA256 = "8648b81e7c39c514d2036bb242b5ff43dfa9ffc17d67c4bbb19d2a141ed6c8d8"
+FULL_SUPPORTED_GAP_SHA256 = "0f531b1cf7c7922ea891e15703971bcb2ddf95f398f628e0b2681831d7cbf81e"
+FULL_SUPPORT_CONTRACT_SHA256 = "a13a6343881aad13d199441a47f9a59f0d4b447e7cb15c7602a0f2d97c1f3b75"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -529,7 +529,7 @@ def validate_profile(manifest, inputs, row_count):
     if profile == FULL_CENSUS_PROFILE:
         assert manifest.get("support_contract") == "docs/native-retirement-support-v1.tsv"
         assert manifest.get("support_contract_sha256") == FULL_SUPPORT_CONTRACT_SHA256
-        assert manifest.get("inputs") == "558"
+        assert manifest.get("inputs") == "559"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""
         assert manifest.get("subjects") == str(FULL_SUBJECT_COUNT)

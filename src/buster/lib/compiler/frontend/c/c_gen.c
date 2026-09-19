@@ -2007,6 +2007,8 @@ struct CIrPreparedCall
     CIrMemoryBuiltin builtin_memory;
     // An index into c_ir_simd_builtins, or C_IR_SIMD_BUILTIN_NONE.
     u32 builtin_simd;
+    // An index into c_ir_sse2_immediate_shift_builtins, or its NONE value.
+    u32 builtin_sse2_immediate_shift;
     bool emitted;
     // Set while this call's own callee expression is being lowered. The
     // callee chain can begin at this call's first token, and a token walk
@@ -2180,6 +2182,48 @@ BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
 
     return result;
 }
+
+// The Intel header spellings are frontend aliases, not target instructions:
+// each one selects an ordinary canonical vector operation and a required
+// 128-bit lane shape. Keeping the count as a folded immediate preserves the
+// intrinsic contract while allowing every vector-capable backend to lower it.
+typedef struct CIrSse2ImmediateShiftBuiltin CIrSse2ImmediateShiftBuiltin;
+struct CIrSse2ImmediateShiftBuiltin
+{
+    String8 name;
+    IrBinaryOperation operation;
+    u8 lane_width;
+    u8 lane_count;
+    u8 reserved[2];
+};
+
+BUSTER_C_INTERNAL CIrSse2ImmediateShiftBuiltin const c_ir_sse2_immediate_shift_builtins[] = {
+    {S8_INITIALIZER("__builtin_ia32_pslldi128"), IR_BINARY_VECTOR_SHIFT_LEFT, 32, 4, {0}},
+    {S8_INITIALIZER("__builtin_ia32_psllqi128"), IR_BINARY_VECTOR_SHIFT_LEFT, 64, 2, {0}},
+    {S8_INITIALIZER("__builtin_ia32_psradi128"), IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT, 32, 4, {0}},
+    {S8_INITIALIZER("__builtin_ia32_psrldi128"), IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT, 32, 4, {0}},
+    {S8_INITIALIZER("__builtin_ia32_psrlqi128"), IR_BINARY_VECTOR_UNSIGNED_SHIFT_RIGHT, 64, 2, {0}},
+};
+
+#define C_IR_SSE2_IMMEDIATE_SHIFT_NONE UINT32_MAX
+
+BUSTER_C_INTERNAL u32 c_ir_sse2_immediate_shift_builtin(String8 name)
+{
+    u32 result = C_IR_SSE2_IMMEDIATE_SHIFT_NONE;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ir_sse2_immediate_shift_builtins) &&
+                        result == C_IR_SSE2_IMMEDIATE_SHIFT_NONE;
+         index += 1)
+    {
+        if (string_equal(name, c_ir_sse2_immediate_shift_builtins[index].name))
+        {
+            result = index;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL IrValueId c_ir_vector_splat(CIntegerIrBuilder* builder, IrValueId value, IrTypeId vector_type,
+                                               IrSourceRange source);
 
 // What each position of a SIMD builtin's argument list has to be. Anything but
 // IMMEDIATE is an ordinary expression that gets lowered and then checked (and
@@ -17812,6 +17856,9 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
                                                     : (CIrAtomicBuiltinSpelling){.builtin = C_IR_ATOMIC_BUILTIN_COUNT};
         CIrAtomicBuiltin builtin_atomic = atomic_spelling.builtin;
         u32 builtin_simd = builtin_kind == C_SYMBOL_BUILTIN_SIMD ? c_ir_simd_builtin(c_token_spelling(builder->preprocess.spelling_base, token)) : C_IR_SIMD_BUILTIN_NONE;
+        u32 builtin_sse2_immediate_shift = builtin_kind == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT
+                                                   ? c_ir_sse2_immediate_shift_builtin(c_token_spelling(builder->preprocess.spelling_base, token))
+                                                   : C_IR_SSE2_IMMEDIATE_SHIFT_NONE;
         String8 builtin_math_link_name = builtin_kind == C_SYMBOL_BUILTIN_MATH ? c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token)) : (String8){0};
         CIrMemoryBuiltin builtin_memory = builtin_kind == C_SYMBOL_BUILTIN_MEMORY ? c_ir_memory_builtin(c_token_spelling(builder->preprocess.spelling_base, token)) : C_IR_MEMORY_BUILTIN_COUNT;
         IrUnaryOperation builtin_unary = builtin_kind == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS      ? IR_UNARY_INTEGER_COUNT_LEADING_ZEROS
@@ -18001,7 +18048,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
              !builtin_assume_aligned && !builtin_debugtrap && !builtin_spin_pause && !builtin_unreachable && !builtin_frame_address && !builtin_alloca && !builtin_complex && !builtin_strlen && !builtin_clear_cache && !builtin_prefetch &&
              !builtin_va_start && !builtin_va_copy && !builtin_va_end && !builtin_va_arg && !builtin_generic && builtin_atomic == C_IR_ATOMIC_BUILTIN_COUNT &&
              !builtin_math_link_name.length && builtin_memory == C_IR_MEMORY_BUILTIN_COUNT && builtin_unary == IR_UNARY_COUNT &&
-             builtin_simd == C_IR_SIMD_BUILTIN_NONE && !indirect &&
+             builtin_simd == C_IR_SIMD_BUILTIN_NONE && builtin_sse2_immediate_shift == C_IR_SSE2_IMMEDIATE_SHIFT_NONE && !indirect &&
              !c_ir_function_name_resolution(builder, c_token_spelling(builder->preprocess.spelling_base, token))) ||
             (!indirect && c_ir_prepared_control_expression_contains(builder, index)) || c_ir_prepared_call_find(builder, callee_start))
         {
@@ -18076,6 +18123,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
             .builtin_math_link_name = builtin_math_link_name,
             .builtin_unary = builtin_unary,
             .builtin_simd = builtin_simd,
+            .builtin_sse2_immediate_shift = builtin_sse2_immediate_shift,
             .indirect_function_type = indirect_function_type,
             .indirect = indirect,
             .parenthesized_callee = parenthesized_callee,
@@ -19590,6 +19638,104 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                     }
                 }
             }
+            selected->argument_count = argument_count;
+            selected->emitted = true;
+            remaining -= 1;
+            continue;
+        }
+        if (selected->builtin_sse2_immediate_shift != C_IR_SSE2_IMMEDIATE_SHIFT_NONE)
+        {
+            CIrSse2ImmediateShiftBuiltin entry =
+                c_ir_sse2_immediate_shift_builtins[selected->builtin_sse2_immediate_shift];
+            u32 starts[2] = {0};
+            u32 ends[2] = {0};
+            u32 argument_count = 0;
+            builder->failure_token_index = selected->open_index;
+            if (!c_ir_call_arguments(builder, selected, starts, ends, BUSTER_ARRAY_LENGTH(starts), &argument_count) ||
+                argument_count != 2)
+            {
+                builder->failure_message =
+                    string_format(builder->arena, S8("{S8} takes 2 arguments"), entry.name);
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
+            if (continuation != C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT)
+            {
+                return c_ir_prepared_call_request_expression(builder, frame,
+                                                             C_IR_PREPARED_CALL_CONTINUATION_SIMD_ARGUMENT,
+                                                             starts[0], ends[0], false);
+            }
+            if (!child_success)
+            {
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
+            IrTypeId vector_type = child_value.value < builder->function->value_count
+                                       ? builder->function->values[child_value.value].canonical_type
+                                       : IR_TYPE_ID_INVALID;
+            IrType* vector = ir_type_from_id(&builder->program->types, vector_type);
+            IrType* element = vector && vector->kind == IR_TYPE_VECTOR
+                                  ? ir_type_from_id(&builder->program->types, vector->element_type)
+                                  : 0;
+            bool valid_type = vector && vector->kind == IR_TYPE_VECTOR && vector->layout.resolved &&
+                              vector->layout.size == 16 && vector->element_count == entry.lane_count &&
+                              element && element->kind == IR_TYPE_INTEGER &&
+                              element->bit_width == entry.lane_width;
+            if (!valid_type)
+            {
+                builder->failure_token_index = starts[0];
+                builder->failure_message =
+                    string_format(builder->arena,
+                                  S8("argument 1 of {S8} must be a 16-byte integer vector with {u32} lanes of {u32} bits"),
+                                  entry.name, (u32)entry.lane_count, (u32)entry.lane_width);
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
+            u64 immediate = 0;
+            if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, starts[1], ends[1], &immediate))
+            {
+                builder->failure_token_index = starts[1];
+                builder->failure_message =
+                    string_format(builder->arena, S8("argument 2 of {S8} must be an integer constant"), entry.name);
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
+            IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
+            IrValueId result = IR_VALUE_ID_INVALID;
+            bool arithmetic_right = entry.operation == IR_BINARY_VECTOR_SIGNED_SHIFT_RIGHT;
+            if (immediate >= entry.lane_width && !arithmetic_right)
+            {
+                IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, vector->element_type);
+                result = zero.value != IR_ID_UNDERLYING_INVALID
+                             ? c_ir_vector_splat(builder, zero, vector_type, instruction_source)
+                             : IR_VALUE_ID_INVALID;
+            }
+            else
+            {
+                if (immediate >= entry.lane_width)
+                {
+                    immediate = (u64)entry.lane_width - 1;
+                }
+                IrValueId count =
+                    c_ir_emit_integer_value_typed(builder, immediate, false, token, vector->element_type);
+                IrValueId count_vector = count.value != IR_ID_UNDERLYING_INVALID
+                                             ? c_ir_vector_splat(builder, count, vector_type, instruction_source)
+                                             : IR_VALUE_ID_INVALID;
+                if (count_vector.value != IR_ID_UNDERLYING_INVALID)
+                {
+                    result = c_ir_add_result(builder, vector_type);
+                    IrInstruction instruction = c_ir_instruction_initialize(IR_OPCODE_BINARY, vector_type);
+                    instruction.operands = arena_allocate(builder->arena, IrValueId, 2);
+                    instruction.operands[0] = child_value;
+                    instruction.operands[1] = count_vector;
+                    instruction.operand_count = 2;
+                    instruction.binary_operation = (u8)entry.operation;
+                    instruction.result = result;
+                    IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
+                    builder->function->values[result.value].definition = id;
+                }
+            }
+            if (result.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return C_IR_PREPARED_CALL_STEP_FAILED;
+            }
+            selected->result = result;
             selected->argument_count = argument_count;
             selected->emitted = true;
             remaining -= 1;
