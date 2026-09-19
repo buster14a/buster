@@ -49,7 +49,7 @@ jobs:
           git apply --3way --index "$RUNNER_TEMP/issue845.patch"
           git diff --cached --check
           test "$(git diff --cached --name-only | wc -l)" -eq 7
-          test "$(git diff --cached --name-only | sort | sha256sum | cut -d' ' -f1)" = "c43104af9772542dc69fc25024766884765330e0f3c25df949618a9f54b4f8cf" || {
+          test "$(git diff --cached --name-only | sort | sha256sum | cut -d' ' -f1)" = "5f296a9cefb70e1c33a8c97acb9dcb370533abd5ab6980b72a2a4c6396bffbe0" || {
             git diff --cached --name-only >&2
             exit 1
           }
