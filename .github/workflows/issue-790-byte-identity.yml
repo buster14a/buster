@@ -1,0 +1,84 @@
+name: Issue 790 byte identity
+
+on:
+  push:
+    branches: ['audit/790-byte-identity']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-790-byte-identity
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out immutable base
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 7d27dc15df558d0881d976615a53255c3e18d0a9
+          path: baseline
+          persist-credentials: false
+
+      - name: Check out immutable candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 340658ac9c0ebe1f63eff16698a97434efd92c8d
+          path: candidate
+          persist-credentials: false
+
+      - name: Build trusted Release compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tree in baseline candidate; do
+            (
+              cd "$tree"
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build-$tree"
+              "$RUNNER_TEMP/buster-build-$tree" generate --config Release --cc clang --linker DEFAULT
+              "$RUNNER_TEMP/buster-build-$tree" build --config Release -t ide
+              sha256sum build/Release/ide
+            )
+          done
+
+      - name: Compare stage-1 debug objects in every required allocator
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/evidence"
+          mkdir -p "$evidence"
+          cd candidate
+          base_compiler="$GITHUB_WORKSPACE/baseline/build/Release/ide"
+          candidate_compiler="$GITHUB_WORKSPACE/candidate/build/Release/ide"
+          common=(-Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c)
+          source=src/buster/apps/ide/ide.c
+          output=build/issue-790-stage1.o
+          : > "$evidence/results.txt"
+          for mode in fast quality mir-stack; do
+            allocator=()
+            if test "$mode" != fast; then
+              allocator=("-fregister-allocator=$mode")
+            fi
+            rm -f "$output"
+            "$base_compiler" cc "${common[@]}" "${allocator[@]}" "$source" -o "$output"
+            cp "$output" "$evidence/base-$mode.o"
+            rm -f "$output"
+            "$candidate_compiler" cc "${common[@]}" "${allocator[@]}" "$source" -o "$output"
+            cp "$output" "$evidence/candidate-$mode.o"
+            cmp "$evidence/base-$mode.o" "$evidence/candidate-$mode.o"
+            size=$(stat -c %s "$output")
+            digest=$(sha256sum "$output" | cut -d' ' -f1)
+            printf 'BYTE_IDENTICAL mode=%s bytes=%s sha256=%s\n' "$mode" "$size" "$digest" | tee -a "$evidence/results.txt"
+          done
+
+      - name: Publish identity evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-790-byte-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
