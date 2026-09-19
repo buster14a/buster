@@ -1,22 +1,38 @@
-name: PR 876 rebase generator
+name: PR 876 rebase publisher
 
 on:
   push:
     branches: [codex/pr876-rebase-generator]
 
+concurrency:
+  group: pr876-rebase-publisher-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  contents: read
+  contents: write
+
+env:
+  BASE_SHA: 056b9fe0e2cf20deed1efbb99ec3d26f73c5761b
+  TARGET_BRANCH: codex/846-x87-second-argument-regression
+  EXPECTED_HEAD: fcc21c3b38c6c86e62ab8e9ab41c44fceaa58b5b
 
 jobs:
-  generate:
+  publish:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - name: Check out exact helper revision
+      - name: Check out publisher revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: true
+
+      - name: Reset worktree to exact current main
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse origin/main)" = "$BASE_SHA"
+          git reset --hard "$BASE_SHA"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
 
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -208,11 +224,21 @@ jobs:
               rf'\g<1>{binding_sha256}\g<2>',
           )
 
-          print(f"fixture-bytes={fixture_bytes}")
-          print(f"fixture-sha256={fixture_sha256}")
-          print(f"support-sha256={support_sha256}")
-          print(f"applicability-sha256={applicability_sha256}")
-          print(f"binding-validator-sha256={binding_sha256}")
+          expected = {
+              "fixture_sha256": "73bb6b55f2ef4b6c14b43dc05d70cbda1604bc344dae2a1f79f8823f1e5364a3",
+              "support_sha256": "da7fb84ed7d9cc824629a1204fe12eab001d8f90fb623bf694a983c0ab75cc08",
+              "applicability_sha256": "934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa",
+              "binding_sha256": "f05cb9bd6f170d6dd7228b1b4ba00f5f418b91117a70d4712fff2268378ec6dc",
+          }
+          actual = {
+              "fixture_sha256": fixture_sha256,
+              "support_sha256": support_sha256,
+              "applicability_sha256": applicability_sha256,
+              "binding_sha256": binding_sha256,
+          }
+          if actual != expected:
+              raise RuntimeError(f"candidate digest drift: {actual!r} != {expected!r}")
+          print(actual)
           PY
 
       - name: Prepare pinned SDK and external inputs
@@ -223,27 +249,11 @@ jobs:
             --manifest docs/native-retirement-dependencies-v1.json \
             --source-root "$(pwd)"
 
-      - name: Refresh generated authority
+      - name: Refresh and validate generated authority
         run: |
           set -euo pipefail
           python3 tools/native_retirement_rebind.py refresh --repo-root "$(pwd)"
-
-      - name: Package candidate files
-        if: ${{ always() }}
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/pr876-output"
-          rm -rf "$out"
-          mkdir -p "$out/files"
-          git status --short > "$out/status.txt"
-          git diff --name-only > "$out/changed-files.txt"
-          git diff --binary > "$out/pr876.patch"
-          while IFS= read -r path; do
-            if [[ -n "$path" && -f "$path" ]]; then
-              mkdir -p "$out/files/$(dirname "$path")"
-              cp "$path" "$out/files/$path"
-            fi
-          done < "$out/changed-files.txt"
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)"
 
       - name: Validate rebased candidate
         run: |
@@ -258,7 +268,6 @@ jobs:
           python3 tools/native_retirement_rebind_test.py -v
           python3 tools/native_retirement_materializer.py self-test
           python3 tools/native_retirement_materializer_test.py -v
-          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)"
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
           python3 tests/ci_tools_test.py -v
@@ -266,11 +275,43 @@ jobs:
           "$RUNNER_TEMP/basic_c_f80_machine"
           git diff --check
 
-      - name: Retain generated candidate
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: pr876-rebase-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/pr876-output
-          if-no-files-found: error
-          retention-days: 2
+      - name: Verify focused tree
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/expected-files" <<'EOF'
+          docs/native-retirement-applicability-v1.tsv
+          docs/native-retirement-support-v1.tsv
+          tests/basic_c_f80_machine.c
+          tools/bench_service/profiles/native-retirement-performance-v1.blocked
+          tools/bench_service/queue.c
+          tools/native_retirement_census.c
+          tools/native_retirement_contract.py
+          tools/native_retirement_materializer.py
+          tools/native_retirement_performance_binding.py
+          EOF
+          git diff --name-only | LC_ALL=C sort > "$RUNNER_TEMP/actual-files"
+          LC_ALL=C sort -o "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/expected-files"
+          diff -u "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/actual-files"
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 0
+
+      - name: Publish one rebased commit with exact lease
+        run: |
+          set -euo pipefail
+          git config user.name "OpenAI Codex"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            docs/native-retirement-applicability-v1.tsv \
+            docs/native-retirement-support-v1.tsv \
+            tests/basic_c_f80_machine.c \
+            tools/bench_service/profiles/native-retirement-performance-v1.blocked \
+            tools/bench_service/queue.c \
+            tools/native_retirement_census.c \
+            tools/native_retirement_contract.py \
+            tools/native_retirement_materializer.py \
+            tools/native_retirement_performance_binding.py
+          git commit -m "test(x86-64): cover second x87 stack argument"
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          git push \
+            --force-with-lease="refs/heads/$TARGET_BRANCH:$EXPECTED_HEAD" \
+            origin "HEAD:refs/heads/$TARGET_BRANCH"
+          echo "published_commit=$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
