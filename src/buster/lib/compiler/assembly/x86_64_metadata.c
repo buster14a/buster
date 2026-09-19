@@ -8211,6 +8211,63 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_single_physical_width(u16 flags)
     return 0;
 }
 
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_form_width_token(String8 token)
+{
+    if (buster_x86_metadata_input_string_equal(token, S8("b"))) return 8;
+    if (buster_x86_metadata_input_string_equal(token, S8("w")) ||
+        buster_x86_metadata_input_string_equal(token, S8("wrd")))
+        return 16;
+    if (buster_x86_metadata_input_string_equal(token, S8("d")) ||
+        buster_x86_metadata_input_string_equal(token, S8("ss")))
+        return 32;
+    if (buster_x86_metadata_input_string_equal(token, S8("q")) ||
+        buster_x86_metadata_input_string_equal(token, S8("sd")))
+        return 64;
+    if (buster_x86_metadata_input_string_equal(token, S8("dq")) ||
+        buster_x86_metadata_input_string_equal(token, S8("pd")) ||
+        buster_x86_metadata_input_string_equal(token, S8("ps")))
+        return 128;
+    if (buster_x86_metadata_input_string_equal(token, S8("qq"))) return 256;
+    return 0;
+}
+
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_form_memory_source_width(BusterX86MetadataForm form,
+                                                                       BusterX86MetadataString atom)
+{
+    String8 operands = buster_x86_metadata_string_span(form.operands);
+    String8 atom_text = buster_x86_metadata_string_span(atom);
+    for (u64 offset = 0; offset + atom_text.length <= operands.length; offset += 1)
+    {
+        if (offset && operands.pointer[offset - 1] != ' ') continue;
+        bool atom_match = true;
+        for (u64 index = 0; index < atom_text.length; index += 1)
+        {
+            if (operands.pointer[offset + index] != atom_text.pointer[index])
+            {
+                atom_match = false;
+                break;
+            }
+        }
+        if (!atom_match) continue;
+        u64 cursor = offset + atom_text.length;
+        if (cursor >= operands.length || (operands.pointer[cursor] != ':' && operands.pointer[cursor] != '=')) continue;
+        if (operands.pointer[cursor] == '=')
+        {
+            cursor += 1;
+            while (cursor < operands.length && operands.pointer[cursor] != ':') cursor += 1;
+        }
+        if (cursor >= operands.length || operands.pointer[cursor] != ':') continue;
+        cursor += 1;
+        while (cursor < operands.length && operands.pointer[cursor] != ':' && operands.pointer[cursor] != ' ') cursor += 1;
+        if (cursor >= operands.length || operands.pointer[cursor] != ':') continue;
+        cursor += 1;
+        u64 width_start = cursor;
+        while (cursor < operands.length && operands.pointer[cursor] != ':' && operands.pointer[cursor] != ' ') cursor += 1;
+        return buster_x86_metadata_form_width_token((String8){(char8*)operands.pointer + width_start, cursor - width_start});
+    }
+    return 0;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_standalone_sae_capable_impl(BusterX86MetadataForm form)
 {
     BusterX86MetadataPatternSemantics pattern = {0};
@@ -8259,6 +8316,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
         return false;
 
     u16 encoded_width = 0;
+    u16 form_source_width = 0;
     u16 tuple_width = evex_tuple ? buster_x86_metadata_emit_tuple_memory_width(*pattern) : 0;
     u32 metadata_memory_count = 0;
     u32 physical_memory_index = UINT32_MAX;
@@ -8280,10 +8338,14 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
             encoded_width = evex_tuple
                                 ? buster_x86_metadata_single_scalar_width(metadata.physical_width_flags)
                                 : buster_x86_metadata_single_physical_width(metadata.physical_width_flags);
+            if (fixed_conversion) form_source_width = buster_x86_metadata_form_memory_source_width(form, metadata.atom);
         }
         physical_index += 1;
     }
-    if (!evex_tuple) tuple_width = encoded_width;
+    if (!evex_tuple)
+    {
+        tuple_width = fixed_conversion && form_source_width ? form_source_width : encoded_width;
+    }
     if (metadata_memory_count != 1 || !encoded_width || !tuple_width || physical_memory_index >= query.operand_count ||
         query.operands[physical_memory_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
         return false;
