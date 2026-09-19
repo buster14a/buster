@@ -27,13 +27,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          payload="$RUNNER_TEMP/issue845.patch.gz.b64"
-          cp .github/payloads/issue845.patch.gz.b64 "$payload"
-          test "$(wc -c < "$payload")" -eq 16637
-          test "$(sha256sum "$payload" | cut -d' ' -f1)" = "34aa0a750c7de1477dea830b5d788ef8cff8a3878e94c5e70023554973369394"
-          base64 -d "$payload" > "$RUNNER_TEMP/issue845.patch.gz"
-          test "$(sha256sum "$RUNNER_TEMP/issue845.patch.gz" | cut -d' ' -f1)" = "ac12fe59e7cc72d47db040f151e746d5d3153c33e53ad803fa0677c3b59b25cc"
-          gzip -d -c "$RUNNER_TEMP/issue845.patch.gz" > "$RUNNER_TEMP/issue845.patch"
+          payload="$RUNNER_TEMP/issue845.patch.gz"
+          cp .github/payloads/issue845.patch.gz "$payload"
+          test "$(wc -c < "$payload")" -eq 12314
+          test "$(sha256sum "$payload" | cut -d' ' -f1)" = "ac12fe59e7cc72d47db040f151e746d5d3153c33e53ad803fa0677c3b59b25cc"
+          gzip -d -c "$payload" > "$RUNNER_TEMP/issue845.patch"
           test "$(wc -c < "$RUNNER_TEMP/issue845.patch")" -eq 66418
           test "$(sha256sum "$RUNNER_TEMP/issue845.patch" | cut -d' ' -f1)" = "2d86166fdbe89fd5f9d88e7ef0becaf2841939947f0940bfb12d51e473eb06ec"
 
