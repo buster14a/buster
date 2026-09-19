@@ -1,0 +1,61 @@
+name: Issue 766 CPython diagnostic
+
+on:
+  push:
+    branches:
+      - codex/issue766-cpython-diagnostic
+
+permissions:
+  contents: read
+
+jobs:
+  blake2:
+    name: Exact BLAKE2 object recipes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact PR commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ae8420737ea658de20b200f0a3efc6616af69c58
+          persist-credentials: false
+      - name: Bootstrap and build Release compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --config Release --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Fetch pinned pristine CPython
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/fetch_cpython.sh "$RUNNER_TEMP/cpython-v3.13.9"
+      - name: Configure FAST tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/cpython-fast"
+          cd "$RUNNER_TEMP/cpython-fast"
+          "$RUNNER_TEMP/cpython-v3.13.9/configure" \
+            CC="$GITHUB_WORKSPACE/build/Release/ide cc" \
+            CFLAGS='-g -O3 -fregister-allocator=fast' \
+            MODULE_BUILDTYPE=static
+      - name: Run exact generated BLAKE2 recipes
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$RUNNER_TEMP/cpython-fast"
+          status=0
+          for object in Modules/_blake2/blake2s_impl.o Modules/_blake2/blake2b_impl.o; do
+              echo "CPYTHON_DIAGNOSTIC object=${object} begin"
+              set +e
+              make -j1 V=1 "$object"
+              object_status="$?"
+              set -e
+              echo "CPYTHON_DIAGNOSTIC object=${object} status=${object_status}"
+              if test "$object_status" -ne 0; then
+                  status=1
+              fi
+          done
+          exit "$status"
