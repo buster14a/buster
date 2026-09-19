@@ -3126,6 +3126,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
     LinkObjectResult linked = link_objects(arena, link_inputs, link_input_count,
                                            (LinkOptions){
                                                .allow_undefined_symbols = true,
+                                               .alias_single_input_sections = true,
                                            });
     if (linked.error != LINK_ERROR_NONE)
     {
@@ -3949,9 +3950,10 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
     return result;
 }
 
-// Full frontend/IR state is retained for at most one worker-sized batch.
-// The result arena owns only compact objects/diagnostics after ordered copy;
-// it never retains another whole-function or whole-TU representation.
+// Multi-input frontend/IR state is retained for at most one worker-sized
+// batch and copied into the result arena in input order. A single source that
+// continues through the general linker instead uses the result arena directly,
+// so its object payload can remain live without a deep copy.
 typedef struct CompilerDriverUnit CompilerDriverUnit;
 struct CompilerDriverUnit
 {
@@ -4342,10 +4344,16 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             single.action = COMPILER_DRIVER_ACTION_OBJECT;
         }
+        bool unit_in_result_arena = invocation.input_count == 1;
         Arena* unit_arena;
         CompilerDriverResult unit;
         CompilerDriverUnit* task = 0;
-        if (compiler_driver_parallel_c_input(invocation, input_index))
+        if (unit_in_result_arena)
+        {
+            unit_arena = arena;
+            unit = compiler_driver_execute_c_single(arena, single, suppress_object_write, &warnings);
+        }
+        else if (compiler_driver_parallel_c_input(invocation, input_index))
         {
             if (input_index >= batch_end)
             {
@@ -4491,7 +4499,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 result.codegen_error = CODEGEN_ERROR_CAPACITY;
                 result.diagnostic = S8("native fallback census exceeds its record limit");
                 if (task) { task->arena = 0; }
-                arena_destroy(unit_arena, 1);
+                if (!unit_in_result_arena)
+                {
+                    arena_destroy(unit_arena, 1);
+                }
                 goto finish;
             }
             if (needed > fallback_record_capacity)
@@ -4526,67 +4537,77 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             {
                 task->arena = 0;
             }
-            arena_destroy(unit_arena, 1);
+            if (!unit_in_result_arena)
+            {
+                arena_destroy(unit_arena, 1);
+            }
             goto finish;
         }
         if (unit.has_object)
         {
-            ObjectFile object = {
-                .target = unit.object.target,
-                .error = unit.object.error,
-                .section_count = unit.object.section_count,
-                .symbol_count = unit.object.symbol_count,
-                .relocation_count = unit.object.relocation_count,
-                .debug_module_count = unit.object.debug_module_count,
-            };
-            object.sections = arena_allocate(arena, ObjectSection, object.section_count);
-            for (u32 section_index = 0; section_index < object.section_count; section_index += 1)
+            if (unit_in_result_arena)
             {
-                ObjectSection source = unit.object.sections[section_index];
-                ObjectSection* destination = &object.sections[section_index];
-                *destination = source;
-                destination->name = string_duplicate_arena(arena, source.name, false);
-                destination->data.pointer = arena_allocate(arena, u8, source.data.length);
-                if (source.data.length)
+                objects[object_count++] = unit.object;
+            }
+            else
+            {
+                ObjectFile object = {
+                    .target = unit.object.target,
+                    .error = unit.object.error,
+                    .section_count = unit.object.section_count,
+                    .symbol_count = unit.object.symbol_count,
+                    .relocation_count = unit.object.relocation_count,
+                    .debug_module_count = unit.object.debug_module_count,
+                };
+                object.sections = arena_allocate(arena, ObjectSection, object.section_count);
+                for (u32 section_index = 0; section_index < object.section_count; section_index += 1)
                 {
-                    memcpy(destination->data.pointer, source.data.pointer, source.data.length);
+                    ObjectSection source = unit.object.sections[section_index];
+                    ObjectSection* destination = &object.sections[section_index];
+                    *destination = source;
+                    destination->name = string_duplicate_arena(arena, source.name, false);
+                    destination->data.pointer = arena_allocate(arena, u8, source.data.length);
+                    if (source.data.length)
+                    {
+                        memcpy(destination->data.pointer, source.data.pointer, source.data.length);
+                    }
                 }
-            }
-            object.symbols = arena_allocate(arena, ObjectSymbol, object.symbol_count);
-            for (u32 symbol_index = 0; symbol_index < object.symbol_count; symbol_index += 1)
-            {
-                object.symbols[symbol_index] = unit.object.symbols[symbol_index];
-                object.symbols[symbol_index].name = string_duplicate_arena(arena, unit.object.symbols[symbol_index].name, false);
-            }
-            object.relocations = arena_allocate(arena, ObjectRelocation, object.relocation_count);
-            if (object.relocation_count)
-            {
-                memcpy(object.relocations, unit.object.relocations, sizeof(ObjectRelocation) * object.relocation_count);
-            }
-            object.debug_modules = arena_allocate(arena, ObjectDebugModule, object.debug_module_count);
-            for (u32 module_index = 0; module_index < object.debug_module_count; module_index += 1)
-            {
-                object.debug_modules[module_index] = unit.object.debug_modules[module_index];
-                object.debug_modules[module_index].name = string_duplicate_arena(arena, unit.object.debug_modules[module_index].name, false);
-            }
-            // The initializer priorities are as much a part of the array
-            // sections as their bytes are: the linker orders the whole
-            // program's constructors by them, and a copy that dropped them
-            // would leave a `constructor(101)` in this unit running after an
-            // unprioritized one in another.
-            for (u32 slot = 0; slot < 2; slot += 1)
-            {
-                u32 kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
-                u64 entries = unit.object.initializer_priorities[slot] && kind < unit.object.section_count
-                                  ? unit.object.sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE
-                                  : 0;
-                if (entries)
+                object.symbols = arena_allocate(arena, ObjectSymbol, object.symbol_count);
+                for (u32 symbol_index = 0; symbol_index < object.symbol_count; symbol_index += 1)
                 {
-                    object.initializer_priorities[slot] = arena_allocate(arena, u32, entries);
-                    memcpy(object.initializer_priorities[slot], unit.object.initializer_priorities[slot], entries * sizeof(u32));
+                    object.symbols[symbol_index] = unit.object.symbols[symbol_index];
+                    object.symbols[symbol_index].name = string_duplicate_arena(arena, unit.object.symbols[symbol_index].name, false);
                 }
+                object.relocations = arena_allocate(arena, ObjectRelocation, object.relocation_count);
+                if (object.relocation_count)
+                {
+                    memcpy(object.relocations, unit.object.relocations, sizeof(ObjectRelocation) * object.relocation_count);
+                }
+                object.debug_modules = arena_allocate(arena, ObjectDebugModule, object.debug_module_count);
+                for (u32 module_index = 0; module_index < object.debug_module_count; module_index += 1)
+                {
+                    object.debug_modules[module_index] = unit.object.debug_modules[module_index];
+                    object.debug_modules[module_index].name = string_duplicate_arena(arena, unit.object.debug_modules[module_index].name, false);
+                }
+                // The initializer priorities are as much a part of the array
+                // sections as their bytes are: the linker orders the whole
+                // program's constructors by them, and a copy that dropped them
+                // would leave a `constructor(101)` in this unit running after an
+                // unprioritized one in another.
+                for (u32 slot = 0; slot < 2; slot += 1)
+                {
+                    u32 kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+                    u64 entries = unit.object.initializer_priorities[slot] && kind < unit.object.section_count
+                                      ? unit.object.sections[kind].data.length / OBJECT_INITIALIZER_ENTRY_SIZE
+                                      : 0;
+                    if (entries)
+                    {
+                        object.initializer_priorities[slot] = arena_allocate(arena, u32, entries);
+                        memcpy(object.initializer_priorities[slot], unit.object.initializer_priorities[slot], entries * sizeof(u32));
+                    }
+                }
+                objects[object_count++] = object;
             }
-            objects[object_count++] = object;
         }
         if (unit.output.length)
         {
@@ -4596,7 +4617,10 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         {
             task->arena = 0;
         }
-        arena_destroy(unit_arena, 1);
+        if (!unit_in_result_arena)
+        {
+            arena_destroy(unit_arena, 1);
+        }
     }
     for (u32 library_index = 0; library_index < invocation.library_count; library_index += 1)
     {
@@ -4671,6 +4695,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     LinkObjectResult linked = link_objects(arena, objects, object_count,
                                            (LinkOptions){
                                                .allow_undefined_symbols = true,
+                                               .alias_single_input_sections = true,
                                            });
     if (linked.error != LINK_ERROR_NONE)
     {
