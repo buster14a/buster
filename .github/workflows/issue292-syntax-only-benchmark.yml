@@ -1,0 +1,193 @@
+name: Issue 292 syntax-only benchmark
+
+on:
+  push:
+    branches:
+      - codex/292-ir-free-syntax-only
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue292-syntax-only-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2a9693b23b869461aab68835a1221dba2d8c3f1f
+          path: baseline
+          persist-credentials: false
+      - name: Check out candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - name: Install existing Linux linker dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Build uninstrumented Release compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tree in baseline candidate; do
+            (
+              cd "$tree"
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/issue292-$tree-build"
+              "$RUNNER_TEMP/issue292-$tree-build" generate --config Release --cc clang --ci -DBUSTER_INCLUDE_TESTS=OFF
+              "$RUNNER_TEMP/issue292-$tree-build" build --config Release -t ide -- -j2
+            )
+          done
+      - name: Generate fixed syntax-only workloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/sources
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def write(path: Path, count: int) -> None:
+              with path.open("w", encoding="utf-8", newline="\n") as out:
+                  out.write("int issue292_seed;\n")
+                  for i in range(count):
+                      out.write(
+                          f"int issue292_f_{i:05d}(int x) {{ int y = x + {i % 17 + 1}; "
+                          f"if (y & {i % 7 + 1}) y += {i % 13 + 1}; "
+                          f"else y -= {i % 11 + 1}; return y * {i % 5 + 1}; }}\n"
+                      )
+                  out.write(f"int issue292_entry(int x) {{ return issue292_f_{count - 1:05d}(x); }}\n")
+
+          root = Path("evidence/sources")
+          write(root / "small.c", 1024)
+          write(root / "large.c", 16384)
+          PY
+          sha256sum evidence/sources/small.c evidence/sources/large.c > evidence/source-sha256.txt
+          wc -c -l evidence/sources/small.c evidence/sources/large.c > evidence/source-size.txt
+      - name: Record identities and host
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'baseline_ref=%s\n' '2a9693b23b869461aab68835a1221dba2d8c3f1f'
+            printf 'baseline_commit=%s\n' "$(git -C baseline rev-parse HEAD)"
+            printf 'baseline_tree=%s\n' "$(git -C baseline rev-parse 'HEAD^{tree}')"
+            printf 'candidate_commit=%s\n' "$(git -C candidate rev-parse HEAD)"
+            printf 'candidate_tree=%s\n' "$(git -C candidate rev-parse 'HEAD^{tree}')"
+            uname -a
+            clang --version
+            lscpu
+            free -b
+          } > evidence/environment.txt
+          sha256sum baseline/build/Release/ide candidate/build/Release/ide > evidence/compiler-sha256.txt
+      - name: Measure matched syntax-only A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import csv
+          import os
+          import statistics
+          import time
+          from pathlib import Path
+
+          root = Path.cwd()
+          compilers = {
+              "baseline": str((root / "baseline/build/Release/ide").resolve()),
+              "candidate": str((root / "candidate/build/Release/ide").resolve()),
+          }
+          sources = {
+              "small": str((root / "evidence/sources/small.c").resolve()),
+              "large": str((root / "evidence/sources/large.c").resolve()),
+          }
+          modes = {
+              "direct-ssa": [],
+              "shared-promotion": ["-fno-frontend-ssa"],
+          }
+          rows = []
+
+          def measure(argv):
+              start = time.perf_counter_ns()
+              pid = os.fork()
+              if pid == 0:
+                  devnull = os.open("/dev/null", os.O_RDWR)
+                  os.dup2(devnull, 0)
+                  os.dup2(devnull, 1)
+                  os.dup2(devnull, 2)
+                  if devnull > 2:
+                      os.close(devnull)
+                  os.execv(argv[0], argv)
+              waited, status, usage = os.wait4(pid, 0)
+              end = time.perf_counter_ns()
+              assert waited == pid
+              code = os.waitstatus_to_exitcode(status)
+              if code != 0:
+                  raise SystemExit(f"compiler exited {code}: {argv!r}")
+              return (end - start) / 1_000_000_000.0, int(usage.ru_maxrss)
+
+          for source_name, source_path in sources.items():
+              for mode_name, mode_flags in modes.items():
+                  for variant in ("baseline", "candidate"):
+                      argv = [compilers[variant], "cc", "-std=c17", "-g0", *mode_flags, "-fsyntax-only", source_path]
+                      measure(argv)
+                  for pair in range(7):
+                      order = ("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline")
+                      for variant in order:
+                          argv = [compilers[variant], "cc", "-std=c17", "-g0", *mode_flags, "-fsyntax-only", source_path]
+                          wall, rss = measure(argv)
+                          rows.append({
+                              "source": source_name,
+                              "frontend": mode_name,
+                              "pair": pair + 1,
+                              "variant": variant,
+                              "wall_seconds": f"{wall:.9f}",
+                              "peak_rss_kib": rss,
+                          })
+
+          csv_path = root / "evidence/raw.csv"
+          with csv_path.open("w", encoding="utf-8", newline="") as f:
+              writer = csv.DictWriter(f, fieldnames=["source", "frontend", "pair", "variant", "wall_seconds", "peak_rss_kib"])
+              writer.writeheader()
+              writer.writerows(rows)
+
+          lines = [
+              "# Issue #292 hosted syntax-only A/B",
+              "",
+              "Seven alternating-order pairs after one warmup per variant/cell. Wall time is perf_counter around fork/exec/wait4; peak RSS is Linux wait4 ru_maxrss for that compiler process. This is fresh hosted-runner directional evidence, not dedicated Ryzen 7 9700X acceptance.",
+              "",
+              "| source | frontend | baseline wall median (s) | candidate wall median (s) | wall delta | baseline RSS median (KiB) | candidate RSS median (KiB) | RSS delta |",
+              "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+          ]
+          for source_name in sources:
+              for mode_name in modes:
+                  cell = [r for r in rows if r["source"] == source_name and r["frontend"] == mode_name]
+                  bw = statistics.median(float(r["wall_seconds"]) for r in cell if r["variant"] == "baseline")
+                  cw = statistics.median(float(r["wall_seconds"]) for r in cell if r["variant"] == "candidate")
+                  br = statistics.median(int(r["peak_rss_kib"]) for r in cell if r["variant"] == "baseline")
+                  cr = statistics.median(int(r["peak_rss_kib"]) for r in cell if r["variant"] == "candidate")
+                  wd = (cw / bw - 1.0) * 100.0
+                  rd = (cr / br - 1.0) * 100.0
+                  lines.append(f"| {source_name} | {mode_name} | {bw:.6f} | {cw:.6f} | {wd:+.2f}% | {br:.0f} | {cr:.0f} | {rd:+.2f}% |")
+          summary = "\n".join(lines) + "\n"
+          (root / "evidence/summary.md").write_text(summary, encoding="utf-8")
+          print(summary)
+          PY
+          cat evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload raw evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue292-syntax-only-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
