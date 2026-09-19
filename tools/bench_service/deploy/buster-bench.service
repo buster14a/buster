@@ -1,5 +1,5 @@
 [Unit]
-Description=Buster benchmark single-job supervisor (repository reference only)
+Description=Buster benchmark authenticated service (repository reference only)
 Documentation=file:/usr/local/share/doc/buster/bench_service/README.md
 Requires=buster-bench.slice
 After=local-fs.target
@@ -7,11 +7,16 @@ ConditionPathIsDirectory=/opt/buster-bench/installed
 ConditionPathIsDirectory=/var/lib/buster-bench/workspaces
 
 [Service]
-Type=oneshot
+Type=exec
 User=buster-bench
 Group=buster-bench
 UMask=0077
-ExecStart=/usr/local/libexec/buster-bench-service worker-run /var/lib/buster-bench/queue /opt/buster-bench/installed /var/lib/buster-bench/workspaces /var/lib/buster-bench/host.lock 2
+RuntimeDirectory=buster-bench
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
+WorkingDirectory=/
+Restart=no
+ExecStart=/usr/local/libexec/buster-bench-service serve /var/lib/buster-bench/queue /run/buster-bench/control.sock /opt/buster-bench/installed /var/lib/buster-bench/workspaces /var/lib/buster-bench/lease/host.lock 2
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -29,6 +34,7 @@ ProtectHostname=yes
 ProtectProc=invisible
 ReadOnlyPaths=/opt/buster-bench/installed
 ReadWritePaths=/var/lib/buster-bench
+ReadWritePaths=/run/buster-bench
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RemoveIPC=yes
@@ -42,5 +48,6 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
 # This unit is intentionally not enabled by repository automation. The
-# operator must install the fixed binary and authorize only its transient
-# buster-bench.slice scope operation before a live qualification review.
+# operator must complete VALIDATE_BUSTER_V1.md before starting it. RuntimeDirectory
+# owns only the endpoint lifetime, never the durable queue, results or lease.
+# A service stop/restart is not evidence that sibling job/stage units are absent.

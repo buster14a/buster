@@ -1,0 +1,250 @@
+# First authenticated smoke deployment gate
+
+This checklist is for the first real `validate-buster-v1` execution on
+`buster-zen5-9700x`. It is not an installer or a deployment approval. Stop before
+submission if an identity, authorization, host fact or cleanup proof is missing.
+Keep #437, #512 and #36 open. Keep `native-retirement-performance-v1` blocked.
+One-pair smoke observations are not A/A qualification or a performance verdict.
+
+Read [the service contract](../README.md), [deployment references](README.md),
+[benchmarking guidance](../../../docs/agents/benchmarking.md) and issues
+[#437](https://github.com/buster14a/buster/issues/437),
+[#422](https://github.com/buster14a/buster/issues/422),
+[#426](https://github.com/buster14a/buster/issues/426) and
+[#512](https://github.com/buster14a/buster/issues/512). Resolve current main's
+full commit and tree and check active service PRs before changing the inventory.
+
+## Repository prerequisites that provisioning cannot substitute for
+
+- The typed `client` reaches the authenticated socket, but does not grant the
+  Actions runner permission to use the service identity. A reviewed fixed
+  gateway is still required. The runner must not become `buster-bench`, gain
+  queue/lease write access, or receive a shell or unrestricted `sudo` under that
+  identity. The gateway must fix the socket, principal, recipe and inventory;
+  accept bounded immutable IDs and idempotency keys only; and use `client` or
+  its typed encoder. Never expose direct `submit`, `protocol`, `rpc`,
+  `materialize`, `worker-run` or `workspace-reconcile` to Actions.
+- A bounded result exporter is still required. `client result JOB` invokes
+  the service's exhaustive result validation, but the human CLI prints only
+  status fields. The schema-2 response can bind the result root, manifest,
+  bundle and full-result digests; `main.c` does not print that extension. There
+  is no public file-download operation. Do not treat `client result` stdout
+  or `client logs` (journal transitions only) as a downloaded result bundle.
+- The exporter must select by authenticated job/attempt identity, not a
+  caller-supplied path. Reuse the existing manifest/bundle validator and fixed
+  limits; retain every indexed file and separately bound control record.
+  Include the supervisor/journal/host evidence needed for the lifecycle claim.
+  No recursive copy of a caller-selected directory or glob is an exporter.
+- There is no admitted smoke dispatch workflow in these deployment references.
+  Add it only with the gateway/exporter it actually invokes. Do not create a
+  workflow that assumes nonexistent installed commands or manufactures receipt
+  fields. Review and test its final head on hosted runners before deployment.
+
+These missing components are implementation work, not permissions that an
+operator should compensate for by broadening account or socket access.
+
+## One-time operator provisioning
+
+Perform this work in a maintenance window with admission stopped and all prior
+outer/stage units and recursive cgroups reconciled. Do not install binaries,
+change permissions, copy a live queue, or replace a lease while work is active.
+The tmpfiles reference describes a **new installation**. An existing deployment
+requires a separately reviewed layout transition that preserves ownership and
+the recorded stable lease inode; this document authorizes no automatic migration.
+
+### Identities and paths
+
+Record numeric UID/GID values and supplementary groups, not only account names.
+`buster-bench` is both the trusted service and trusted baseline-build identity;
+there is no separate `benchmark` account in the compiled recipe. Provision
+`buster-bench-candidate` as a different non-login user and primary group. The
+trusted account needs membership in the candidate group for staging access.
+The candidate and runner must not belong to the service group or obtain system
+manager authority. Apply that membership to the accounts used by transient
+units as well as the long-lived unit.
+
+| Object | Required new-installation contract |
+| --- | --- |
+| `/usr/local/libexec/buster-bench-service` | Reviewed service binary; operator-owned, executable, not writable by any service/candidate/runner identity |
+| `/usr/local/libexec/buster-bench-build` | Reviewed native `build.c` driver; same executable ownership rule |
+| `/usr/local/libexec/buster-bench-throughput` | Reviewed prebuilt native harness; same executable ownership rule |
+| `/opt/buster-bench/installed` | Root/service-owned, no write bits, service-readable, no symlink components |
+| `installed/recipes/validate-buster-v1.recipe` | Exact repository recipe bytes, read-only regular single-link file |
+| `installed/sources/REVISION/source.manifest` | Exact `BQ-SOURCE-V1` manifest and reviewed source closure; read-only |
+| `/var/lib/buster-bench` | `buster-bench:buster-bench-candidate`, `0710`; candidate traversal only |
+| `/var/lib/buster-bench/queue` | `buster-bench:buster-bench`, `0700`; local durable filesystem |
+| `/var/lib/buster-bench/lease` | `buster-bench:buster-bench`, `0700`; private final lease parent |
+| `/var/lib/buster-bench/lease/host.lock` | Pre-provision once, `0600`, service-owned, regular, one link; record device/inode; never truncate, unlink, replace or age it |
+| `/var/lib/buster-bench/workspaces` | `buster-bench:buster-bench-candidate`, `02710`; SGID and candidate traversal, no group write |
+| `workspaces/job-JOB-attempt-TOKEN` | Materializer-owned; disjoint base/candidate source/build trees, candidate staging only |
+| `workspaces/results/job-JOB-attempt-TOKEN` | Service-private durable evidence; outside removable attempt tree |
+| `/run/buster-bench/control.sock` | Service-created Unix seqpacket endpoint under systemd-owned runtime directory, `0700`, service UID/GID |
+
+The private lease subdirectory is deliberate: candidate traversal of the state
+parent must not weaken the worker's private-final-lease-parent check. A `0700`
+workspace without SGID fails `bq_workspace_root_directory`; a `0700` state
+parent blocks candidate traversal even if the workspace itself is correct.
+Do not grant candidate write permission to either parent to fix an access error.
+
+The long-lived reference uses `Type=exec` and `serve`, with `Restart=no`.
+`RuntimeDirectory` manages only the socket directory. It does not reconcile
+queue state or clean sibling transient units. No `.socket` activation unit is
+supplied: `serve` binds its own endpoint and rejects a pre-existing socket.
+Do not blindly unlink a stale endpoint; establish daemon/instance absence and
+preserve the journal before an operator-authorized restart.
+
+### Immutable inventory and source closure
+
+For each executable record SHA-256, source commit/tree, build invocation,
+bootstrap/toolchain and dependency identities. Resolve and record executable
+dependencies selected by the fixed build driver, including Clang, CMake and
+Ninja, and the effective environment. A root-owned executable pathname alone
+does not establish the identity of the program installed there.
+
+Record both profile SHA-256 values and confirm that the retirement descriptor
+is still a blocked descriptor, never an executable `.recipe`. Independently
+bind each allowed subject's commit to its Git tree and source manifest digest.
+The materializer checks source hashes and a revision string; it does not prove
+that a human-labelled revision is that Git commit's tree. The installation
+receipt must supply that relation. Include the complete fixed build's source
+closure, generated inputs and dependencies; do not omit files to meet bounds.
+
+`BQ-SOURCE-V1` allows at most 64 KiB of manifest, 4,096 sorted unique entries,
+64 MiB per file, 512 MiB per snapshot and 480 copied directories. Hash and
+validate the real closure before publication. A size violation blocks this
+deployment; do not increase limits or substitute a partial source tree merely
+to make a smoke run pass. No fetch or branch resolution belongs to the gateway.
+
+### System manager and host policy
+
+The reference slice, outer worker and nested build-driver policy must agree:
+
+| Property | Current compiled/reference requirement |
+| --- | --- |
+| Slice | `buster-bench.slice` |
+| CPU | Logical CPU `2`; also `BENCH_SERVICE_RECIPE_CPU` in `build.c` |
+| Memory | `8589934592` bytes |
+| Swap | `0` bytes |
+| Tasks | `256` |
+| Per-unit runtime | `3600000000` microseconds |
+| Stop policy | `KillMode=control-group`, `SendSIGKILL=yes`, `TimeoutStopSec=10s` |
+| Outer identity | Explicit `buster-bench` UID and primary GID |
+| Nested identities | Baseline: `buster-bench`; candidate/throughput: `buster-bench-candidate` |
+
+CPU 2 is a reference requirement, not an assertion about this physical host.
+Reject the deployment if topology or effective ancestor restrictions do not
+support it. A different CPU requires reviewed, matching driver/unit/slice
+identities; changing only `serve`'s CPU argument is insufficient. Preserve the
+existing sandbox properties and exact checks in `bq_worker_observed` and
+`bench_service_recipe_sandbox_process_add`.
+
+An operator must review system-bus authorization for the fixed transient-unit
+lifecycle. Merely matching a unit-name prefix or granting the entire
+`manage-units` action does not constrain arbitrary transient service properties
+or executable selection. Do not install such a broad polkit rule. Establish a
+reviewed boundary for the actual installed systemd/polkit versions and record
+which identity may start, observe, signal and collect each fixed unit. If that
+cannot be demonstrated, leave the service stopped. Candidates and the Actions
+runner must not gain that authority.
+
+Record kernel, boot ID, systemd version, cgroup-v2 mount identity, CPU model,
+logical/physical topology and SMT siblings, microcode, RAM, governor/driver,
+boost/EPP availability, CPU affinity, effective ancestor CPU/memory/swap/task
+limits, quota/throttling state, and relevant services/timers/power policy.
+Distinguish unsupported optional sensors from missing required facts. Verify
+filesystem durability and free space. None of these facts can be inferred from
+the `ryzen-9700x` runner label or from this repository's example values.
+
+### GitHub and competing execution
+
+Restrict the runner to the reviewed service workflow and a protected manual
+main dispatch. Provision and verify the environment's actual review/branch
+rules; an `environment:` name in YAML can create an unprotected environment.
+See [GitHub's environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
+Require immutable action SHAs, minimal permissions, read-only contents,
+`persist-credentials: false` for any checkout, and exactly
+`runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`.
+Do not expose those labels to a `pull_request` job.
+
+The reviewed workflow must not execute checked-out candidate code. All service,
+driver, harness, source and policy identities come from the installed inventory.
+Validate typed input values before transport; pass no request expressions into
+shell source. A workflow concurrency group is not whole-host ownership.
+
+Before activation, disable/exclude `.github/workflows/zen5-audit.yml` from this
+host: it independently checks out/builds code and permits `audit/**` pushes.
+Drain any previously admitted execution and verify runner-group/workflow
+restrictions outside YAML; changing only main does not revoke older branch
+workflows. Identify and stop competing Forgejo/manual/agent execution through
+the operator's maintenance procedure. Do not use the audit workflow as a host
+probe or substitute service dispatcher.
+
+## First execution and controlled recovery
+
+Use an approved run plan with a unique retained key per intended job. No
+retry-until-green loop. Same-key transport retries may recover an uncertain
+acknowledgment; never change the key to hide a failed or unknown attempt.
+
+1. Through the fixed gateway, submit one `validate-buster-v1` request with two
+   allowlisted full source IDs. Retain the canonical request, durable job ID,
+   attempt token and authenticated receipt. Record lease acquisition before
+   reservation/materialization and separate identity-bound workspaces.
+2. Retain observed outer and all five nested units (`base-generate`,
+   `base-build`, `candidate-generate`, `candidate-build`, `throughput`), their
+   UID/GID, invocation IDs, boot identity, properties and descriptor-bound
+   cgroup identities. Verify the candidate has only its staging write surface.
+   Its inability to write queue/lease/inventory/final candidate/results must be
+   demonstrated through the reviewed containment procedure, not an uploaded
+   candidate script or a root-run probe.
+3. The harness invocation remains exactly the recipe's `--profile smoke
+   --mode all --pairs 1 --warmups 1 --no-guard` selection. This recipe builds
+   Release `ide` with tests disabled; it does not run the compiler correctness
+   suite or self-host fixed point. Record those as separate exact-head checks,
+   never infer them from smoke success.
+4. Retain success or failure evidence. Require exhaustive `BQ-BUNDLE-V1`
+   replay: 4,096 entries, 512 MiB total, 64 MiB/file, 256 levels, 192-byte
+   relative paths, 8 MiB index. Include separately bound manifest/outcome
+   controls and reject missing/unlisted/unsafe files. The existing service
+   status/result operation revalidates its bound durable result. Replaying
+   native throughput uses the prebuilt `buster-bench-throughput compare
+   --output RETRIEVED_THROUGHPUT_DIRECTORY` on a separate retrieval copy, after
+   bundle validation, away from an active measurement. It is not an outer
+   service receipt validator; no standalone outer export/replay CLI exists yet.
+5. After recursive cleanup and durable terminal publication, demonstrate a
+   subsequent benign admission. Use that second job for the planned recovery
+   scenario: an operator-controlled SIGTERM of the exact long-lived service
+   main process after reservation/materialization and before terminal
+   publication. Record the observed boundary and signal. Current SIGTERM
+   semantics are cancellation; do not relabel that outcome as success or as a
+   demonstrated SIGKILL crash. No reboot is necessary.
+6. Preserve the service journal, terminal/partial evidence and relevant system
+   journal before controlled restart. Reopen deterministically and reconcile
+   exact boot/unit/invocation/cgroup identities. Prove the outer and all five
+   stage units and recursive cgroups absent, including descendants, before
+   admission/lease release. Ambiguity means quarantine, not force-unlock.
+7. Admit a later benign request only after durable reconciliation and absence
+   proof. Retain its actual reservation and terminal evidence too. This is a
+   planned follow-up, not a retry of the interrupted job. The other live-systemd
+   scenarios in #437 remain outstanding unless separately exercised.
+
+Keep `execution_outcome`, `measurement_validity` and `statistical_decision`
+separate. For this slice validity/decision remain `not_evaluated`. Service
+success, a replayed bundle, or successful next-job admission cannot establish
+#512 acceptance, A/A calibration or a compiler performance conclusion.
+
+## Evidence required before reporting completion
+
+Update #437 and #512 with main commit/tree; implementation head/tree and merge
+identity; independent final-head review; exact-head warning/native/ASan/UBSan/
+throughput/recipe/workflow checks; installed executable/profile/source digests;
+workflow run/job IDs; service job/attempt/request identities; host/boot facts;
+lifecycle trace; durable result location and bundle/full-result digests;
+download/replay result; recursive absence proof; interruption boundary/outcome;
+and later admission proof. Preserve original failed attempts and diagnosis.
+
+Mark every unavailable gate explicitly. An Actions artifact's finite retention
+is not the entire durable publication policy. Keep the service-owned original,
+exact downloaded copy and their digests attributable to the same attempt.
+Leave the implementation PR in draft until the requested exact-head checks,
+independent review and real smoke/recovery slice have passed. Do not merge a
+branch onto main merely to run unreviewed code on the dedicated host.
