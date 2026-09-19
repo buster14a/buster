@@ -1,4 +1,6 @@
-/* Local one-shot CLI. No shell commands, remote execution, timers or listeners.
+/* Service and control entry points. No caller-selected commands or shell execution.
+ * bq_client_arguments owns typed requests; gateway fixes socket/principal/recipe.
+ * bq_cli owns dispatch and diagnostics; bq_response_write prints bounded receipts.
  * Tests include this entry point, as the existing throughput tests do.
  */
 #ifndef _GNU_SOURCE
@@ -24,6 +26,67 @@ BUSTER_GLOBAL_LOCAL bool bq_decimal(char const* text, bool nonzero, u64* value)
     return ok;
 }
 
+/* The gateway is a fixed request encoder, not a privilege transition. The
+ * installed executable still needs the service's authenticated UID/GID. */
+#define BQ_GATEWAY_SOCKET "/run/buster-bench/control.sock"
+
+BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway, BqPacket* request, u32* operation)
+{
+    u8 body[BQ_CONTROL_BODY] = {0};
+    u32 size = 0;
+    u64 id = 0, after = 0;
+    bool valid = false;
+    *request = (BqPacket){0};
+    *operation = 0;
+    if (argc == 1 && !strcmp(argv[0], "capabilities"))
+    {
+        *operation = BQ_OP_CAPABILITIES;
+        valid = true;
+    }
+    else if (argc == (gateway ? 4 : 6) && !strcmp(argv[0], "submit"))
+    {
+        BqRequest submission;
+        String8 fields[BQ_FIELD_COUNT];
+        if (gateway)
+        {
+            fields[0] = S8("github-actions");
+            fields[1] = string_from_pointer(argv[1]);
+            fields[2] = S8("validate-buster-v1");
+            fields[3] = string_from_pointer(argv[2]);
+            fields[4] = string_from_pointer(argv[3]);
+        }
+        else
+        {
+            for (u32 i = 0; i < BQ_FIELD_COUNT; i += 1)
+                fields[i] = string_from_pointer(argv[1 + i]);
+        }
+        valid = bq_request_make(fields, &submission) == BQ_OK && bq_recipe_service(bq_request_recipe(&submission));
+        *operation = BQ_OP_SUBMIT;
+        if (valid)
+        {
+            size = submission.size;
+            memcpy(body, submission.bytes, size);
+        }
+    }
+    else if (argc == 2 && (!strcmp(argv[0], "status") || !strcmp(argv[0], "result") || !strcmp(argv[0], "cancel")))
+    {
+        *operation = !strcmp(argv[0], "status") ? BQ_OP_STATUS : !strcmp(argv[0], "result") ? BQ_OP_RESULT : BQ_OP_CANCEL;
+        valid = bq_decimal(argv[1], true, &id);
+        bq_put64(body, id);
+        size = 8;
+    }
+    else if ((argc == 2 || argc == 3) && !strcmp(argv[0], "logs"))
+    {
+        *operation = BQ_OP_LOGS;
+        valid = bq_decimal(argv[1], true, &id) && (argc == 2 || bq_decimal(argv[2], false, &after));
+        bq_put64(body, id);
+        bq_put64(body + 8, after);
+        size = 16;
+    }
+    if (valid) bq_packet(request, *operation, 1, body, size);
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL char const* bq_phase_name(u32 phase)
 {
     char const* names[] = {"queued", "reserved", "preparing", "settling", "measuring", "finalizing", "cleaning", "finished"};
@@ -38,6 +101,53 @@ BUSTER_GLOBAL_LOCAL char const* bq_outcome_name(u32 outcome)
     return result;
 }
 
+/* Only locally dispatched or validated typed responses reach this formatter. */
+BUSTER_GLOBAL_LOCAL bool bq_response_write(u32 operation, BqPacket const* response, FILE* output)
+{
+    bool written = true;
+    u8 const* data = response->bytes + BQ_CONTROL_HEADER;
+    if (operation == BQ_OP_CAPABILITIES)
+    {
+        written = fwrite(data + 4, 1, response->size - BQ_CONTROL_HEADER - 4, output) == response->size - BQ_CONTROL_HEADER - 4;
+    }
+    else if (operation == BQ_OP_LOGS)
+    {
+        for (u32 i = 0; written && i < bq_u32(data + 4); i += 1)
+        {
+            u8 const* event = data + 20 + i * 32;
+            written = fprintf(output, "sequence=%" PRIu64 " job=%" PRIu64 " event=%u phase=%s outcome=%s validity=not-evaluated\n",
+                              (uint64_t)bq_u64(event), (uint64_t)bq_u64(event + 8), bq_u32(event + 16),
+                              bq_phase_name(bq_u32(event + 20)), bq_outcome_name(bq_u32(event + 24))) >= 0;
+        }
+        if (written)
+        {
+            written = fprintf(output, "next=%" PRIu64 " more=%u\n", (uint64_t)bq_u64(data + 8), bq_u32(data + 16)) >= 0;
+        }
+    }
+    else
+    {
+        written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " sequence=%" PRIu64
+                          " phase=%s outcome=%s validity=not-evaluated cancel-requested=%u reconciliation=%u"
+                          " pending=%u retained=%u request-sha256=%.64s failure=%s\n",
+                          (uint64_t)bq_u64(data + 4), (uint64_t)bq_u64(data + 12), (uint64_t)bq_u64(data + 20),
+                          bq_phase_name(bq_u32(data + 28)), bq_outcome_name(bq_u32(data + 32)), bq_u32(data + 40),
+                          bq_u32(data + 44), bq_u32(data + 48), bq_u32(data + 52), (char const*)data + 56,
+                          bq_error_name((BqError)bq_u32(data + 120))) >= 0;
+        if (written)
+        {
+            bool bound = response->size == BQ_CONTROL_CAP;
+            written = fprintf(output, "result-bound=%u statistical-decision=not-evaluated\n", bound ? 1u : 0u) >= 0;
+            if (written && bound)
+            {
+                written = fprintf(output, "result-root=%.*s\nmanifest-sha256=%.64s\nbundle-sha256=%.64s\n"
+                                  "full-result-sha256=%.64s\n", (int)bq_u32(data + 124), (char const*)data + 128,
+                                  (char const*)data + 320, (char const*)data + 384, (char const*)data + 448) >= 0;
+            }
+        }
+    }
+    return written;
+}
+
 BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output, FILE* diagnostics)
 {
     BqPacket request = {0};
@@ -50,6 +160,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     bool raw = false;
     bool remote = false;
     bool typed_remote = false;
+    char const* socket_path = NULL;
     bool serve = false;
     bool valid = false;
     bool handled = false;
@@ -80,44 +191,14 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     else if (argc >= 4 && !strcmp(argv[1], "client"))
     {
         typed_remote = true;
-        if (argc == 4 && !strcmp(argv[3], "capabilities"))
-        {
-            operation = BQ_OP_CAPABILITIES;
-            valid = true;
-        }
-        else if (argc == 9 && !strcmp(argv[3], "submit"))
-        {
-            BqRequest submission;
-            String8 fields[BQ_FIELD_COUNT];
-            for (u32 i = 0; i < BQ_FIELD_COUNT; i += 1)
-            {
-                fields[i] = string_from_pointer(argv[4 + i]);
-            }
-            valid = bq_request_make(fields, &submission) == BQ_OK;
-            operation = BQ_OP_SUBMIT;
-            if (valid)
-            {
-                body_size = submission.size;
-                memcpy(body, submission.bytes, body_size);
-            }
-        }
-        else if (argc == 5 && (!strcmp(argv[3], "status") || !strcmp(argv[3], "result") ||
-                               !strcmp(argv[3], "cancel")))
-        {
-            operation = !strcmp(argv[3], "status") ? BQ_OP_STATUS :
-                        !strcmp(argv[3], "result") ? BQ_OP_RESULT : BQ_OP_CANCEL;
-            valid = bq_decimal(argv[4], true, &id);
-            bq_put64(body, id);
-            body_size = 8;
-        }
-        else if ((argc == 5 || argc == 6) && !strcmp(argv[3], "logs"))
-        {
-            operation = BQ_OP_LOGS;
-            valid = bq_decimal(argv[4], true, &id) && (argc == 5 || bq_decimal(argv[5], false, &argument));
-            bq_put64(body, id);
-            bq_put64(body + 8, argument);
-            body_size = 16;
-        }
+        socket_path = argv[2];
+        valid = bq_client_arguments(argc - 3, argv + 3, false, &request, &operation);
+    }
+    else if (argc >= 3 && !strcmp(argv[1], "gateway"))
+    {
+        typed_remote = true;
+        socket_path = BQ_GATEWAY_SOCKET;
+        valid = bq_client_arguments(argc - 2, argv + 2, true, &request, &operation);
     }
     else if (argc == 8 && !strcmp(argv[1], "serve"))
     {
@@ -243,8 +324,12 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     }
     if (!handled && typed_remote && valid)
     {
-        bq_packet(&request, operation, 1, body, body_size);
-        error = bq_transport_request(argv[2], &request, &response);
+        error = bq_transport_request(socket_path, &request, &response);
+        if (error == BQ_OK && !bq_public_response_valid(&request, &response))
+        {
+            response = (BqPacket){0};
+            error = BQ_BAD_REQUEST;
+        }
         handled = true;
         simple_diagnostic = true;
     }
@@ -292,37 +377,9 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     {
         written = fwrite(response.bytes, 1, response.size, output) == response.size;
     }
-    else if (error == BQ_OK)
+    else if (error == BQ_OK && response.size)
     {
-        u8 const* data = response.bytes + BQ_CONTROL_HEADER;
-        if (operation == BQ_OP_CAPABILITIES)
-        {
-            written = fwrite(data + 4, 1, response.size - BQ_CONTROL_HEADER - 4, output) == response.size - BQ_CONTROL_HEADER - 4;
-        }
-        else if (operation == BQ_OP_LOGS)
-        {
-            for (u32 i = 0; written && i < bq_u32(data + 4); i += 1)
-            {
-                u8 const* event = data + 20 + i * 32;
-                written = fprintf(output, "sequence=%" PRIu64 " job=%" PRIu64 " event=%u phase=%s outcome=%s validity=not-evaluated\n",
-                                  (uint64_t)bq_u64(event), (uint64_t)bq_u64(event + 8), bq_u32(event + 16),
-                                  bq_phase_name(bq_u32(event + 20)), bq_outcome_name(bq_u32(event + 24))) >= 0;
-            }
-            if (written)
-            {
-                written = fprintf(output, "next=%" PRIu64 " more=%u\n", (uint64_t)bq_u64(data + 8), bq_u32(data + 16)) >= 0;
-            }
-        }
-        else
-        {
-            written = fprintf(output, "job=%" PRIu64 " token=%" PRIu64 " sequence=%" PRIu64
-                              " phase=%s outcome=%s validity=not-evaluated cancel-requested=%u reconciliation=%u"
-                              " pending=%u retained=%u request-sha256=%.64s failure=%s\n",
-                              (uint64_t)bq_u64(data + 4), (uint64_t)bq_u64(data + 12), (uint64_t)bq_u64(data + 20),
-                              bq_phase_name(bq_u32(data + 28)), bq_outcome_name(bq_u32(data + 32)), bq_u32(data + 40),
-                              bq_u32(data + 44), bq_u32(data + 48), bq_u32(data + 52), (char const*)data + 56,
-                              bq_error_name((BqError)bq_u32(data + 120))) >= 0;
-        }
+        written = bq_response_write(operation, &response, output);
     }
     if (fflush(output) != 0)
     {
@@ -347,6 +404,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
                     "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
+                    "gateway capabilities | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
+                    "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
                     "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU\n");
         }
     }

@@ -73,11 +73,15 @@ which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
 The separate `TCC bootstrap / Canonical TCC bootstrap` check guards the
-canonical path on the dedicated Linux runner. For same-repository pull requests,
-merge groups, pushes to `main`, and manual runs it records `tcc -v`, removes
+canonical path on an ephemeral GitHub-hosted Ubuntu runner. For pull requests,
+merge groups, pushes to `main`, and manual runs it builds TinyCC at the pinned
+commit below, records `tcc -v`, removes
 the local bootstrap cache, and runs `./build.sh time_trace_summary_self_test`
-twice to prove both cold publication and warm reuse. Fork pull requests skip
-this self-hosted job; untrusted fork code remains on hosted runners.
+twice to prove both cold publication and warm reuse. This check does not select
+the dedicated benchmark runner or require privileged installation.
+The same hosted check runs native service tests, their ASan/UBSan variant, and
+the fixed smoke recipe self-test through this TCC-built driver. These use
+temporary fixtures and do not provision or qualify the benchmark host.
 
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
