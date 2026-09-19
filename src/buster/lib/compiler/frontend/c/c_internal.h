@@ -347,7 +347,14 @@ struct CSpellingSpace
     Arena* arena;
 };
 BUSTER_C_EXTERN CSpellingSpace c_space_local(Arena* arena, u64 capacity);
-BUSTER_C_EXTERN bool c_token_is_punctuator(const CToken* token, CPunctuator punctuator);
+// One compare, and deliberately no kind test: only a C_TOKEN_PUNCTUATOR token
+// ever carries a punctuator id, so the id alone answers the question.  Every
+// site that retypes a token must keep that invariant.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_is_punctuator(const CToken* token, CPunctuator punctuator)
+{
+    return token->punctuator == punctuator;
+}
+
 // Punctuator sets the frontend asks about repeatedly (see c_punctuator_in_set
 // in c.h). The parenthesis pair is what the two backward scans that look for
 // a control-statement head classify on; the statement-boundary set is the
@@ -819,8 +826,30 @@ struct CTypeLayoutCache
     CToken const* tokens;
 };
 
+// Successful expression facts are reused only after all bindings are final,
+// within one function. Scope, token end and checking mode are part of the key;
+// failed/speculative queries and queries over copied models are never stored.
+#define C_PARSE_EXPRESSION_QUERY_VALID 1u
+#define C_PARSE_EXPRESSION_QUERY_CHECKED 2u
+#define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
+#define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
+
+typedef struct CParseExpressionQuery CParseExpressionQuery;
+struct CParseExpressionQuery
+{
+    u32 end;
+    CScopeId scope;
+    CTypeId type;
+    u32 flags;
+};
+
 struct CTypeParseMachine
 {
+    CParseExpressionQuery* expression_queries;
+    CParseResult* expression_query_result;
+    CToken const* expression_query_tokens;
+    u32 expression_query_start;
+    u32 expression_query_end;
     CTypeParseFrame* frames;
     CTypeMutation* mutations;
     CParseExpressionTypeTask* expression_tasks;

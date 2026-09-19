@@ -3654,14 +3654,6 @@ BUSTER_C_EXTERN bool c_token_spelling_equal(char8 const* spelling_base, CToken t
     return string_equal(c_token_spelling(spelling_base, token), spelling);
 }
 
-// One compare, and deliberately no kind test: only a C_TOKEN_PUNCTUATOR token
-// ever carries a punctuator id, so the id alone answers the question.  Every
-// site that retypes a token must keep that invariant.
-BUSTER_C_SHARED bool c_token_is_punctuator(const CToken* token, CPunctuator punctuator)
-{
-    return token->punctuator == punctuator;
-}
-
 // Macros are found by interned symbol id: one indexed load. Symbol 0 (an
 // uninterned token) matches nothing because every definition interns its
 // name, so entry 0 is never written; an id past the index's capacity was

@@ -1204,6 +1204,9 @@ struct CParseResult
     CSymbolTable* symbols;
     CDeclaration* declarations;
     CType* types;
+    // Borrowed only while semantic constraints are checked. Scalar query
+    // results share immutable types; declarator types remain independent.
+    CTypeId* expression_scalar_types;
     CParameter* parameters;
     CMember* members;
     CEnumMember* enum_members;
