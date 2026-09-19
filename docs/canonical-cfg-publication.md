@@ -41,9 +41,19 @@ removed. Selected machine IR still owns its graph: AArch64 legalization can
 split canonical blocks and i128 joins expand a value into two registers. That
 is a target lowering result, not a duplicate canonical CFG.
 
-Publication clears every per-instruction `next` and every builder
-parameter/predecessor first/last pointer. The linked construction graph is no
-longer retained as a second authoritative representation. Its arena allocations
+Publication clears every builder parameter/predecessor first/last pointer.
+When strict canonical validation in the same preparation call proves that
+mutable instruction traversal is already row 0..N-1, publication can reuse
+that proof. Promotion and FAST changes invalidate it; a subsequent strict
+output validation can establish a fresh proof. An input producer certificate
+alone does not establish instruction order. The proof lives only in preparation
+scratch and is never a persistent semantic certificate.
+
+For this validated identity order, publication derives spans from block
+endpoints and leaves the already matching `next` links untouched. All other
+paths build the permutation and clear per-instruction links as before. Published
+consumers always use the dense spans; retained links are not a second authority.
+Builder parameter/predecessor arena allocations
 become unreachable; arena high-water memory is reclaimed when the translation
 unit is released, not by freeing individual nodes at publication. This cost
 must be included in peak-memory measurements.
