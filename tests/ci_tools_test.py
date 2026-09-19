@@ -947,6 +947,11 @@ class WorkflowPolicyTests(unittest.TestCase):
                 "        required: false",
                 "        default: false",
                 "        type: boolean",
+                "      analyzer_comparison:",
+                "        description: Run an explicit reference/candidate Clang analyzer comparison",
+                "        required: false",
+                "        default: false",
+                "        type: boolean",
             ),
             "self-host-audit.yml": common + ("  workflow_dispatch:",),
         }
@@ -963,6 +968,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertNotRegex(workflow, r"(?m)^\s+(ref|repository):")
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("inputs.cmake_profile", ci)
+        self.assertIn("inputs.analyzer_comparison", ci)
         self.assertNotIn("vars.BUSTER_CMAKE_PROFILE", ci)
 
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):

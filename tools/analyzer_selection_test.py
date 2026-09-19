@@ -1,16 +1,54 @@
 #!/usr/bin/env python3
-"""Network-free regressions for analyzer comparison selection."""
+"""Network-free regressions for analyzer provenance and comparison selection."""
+from __future__ import annotations
+
+import io
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import tarfile
 import tempfile
 import textwrap
 import unittest
 
+import analyzer_reference as provenance
+
 ROOT = Path(__file__).resolve().parents[1]
+HELPER = ROOT / "tools/analyzer_reference.py"
+DRIVER_DEPENDENCIES = (
+    "build.c",
+    "src/buster/lib/base.h",
+    "src/buster/lib/driver.h",
+    "src/buster/lib/transitive.h",
+    "tools/clang_analyze.c",
+)
 
 
 class AnalyzerSelectionTests(unittest.TestCase):
+    @staticmethod
+    def command(arguments, *, cwd=None, env=None, check=True, timeout=30):
+        return subprocess.run(
+            [str(argument) for argument in arguments],
+            cwd=cwd,
+            env=env,
+            check=check,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+
+    @classmethod
+    def git(cls, repository, *arguments):
+        return cls.command(["git", "-C", repository, *arguments]).stdout.strip()
+
+    @classmethod
+    def commit(cls, repository, message):
+        cls.git(repository, "add", "-A")
+        cls.git(repository, "commit", "--quiet", "-m", message)
+        return cls.git(repository, "rev-parse", "HEAD")
+
     @staticmethod
     def analyzer_step(name):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -18,218 +56,349 @@ class AnalyzerSelectionTests(unittest.TestCase):
         block = block.split("      - name:", 1)[0]
         return textwrap.dedent(block.split("        run: |\n", 1)[1])
 
-    @unittest.skipIf(os.name == "nt", "The analyzer workflow policy uses the Unix hosted runner")
-    def test_analyzer_comparison_selection_uses_verified_commit_identities(self):
-        script = self.analyzer_step("Bootstrap candidate and select reference build driver")
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            subprocess.run(["git", "init", "--quiet", root], check=True)
-            subprocess.run(["git", "-C", root, "config", "user.name", "CI fixture"], check=True)
-            subprocess.run(["git", "-C", root, "config", "user.email", "ci@example.invalid"], check=True)
-            (root / "build.c").write_text("int baseline;\n")
-            subprocess.run(["git", "-C", root, "add", "build.c"], check=True)
-            subprocess.run(["git", "-C", root, "commit", "--quiet", "-m", "baseline"], check=True)
-            baseline = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
-            (root / "build.c").write_text("int candidate;\n")
-            subprocess.run(["git", "-C", root, "commit", "--quiet", "-am", "candidate"], check=True)
-            candidate = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
-            fake_bin = root / "fake-bin"
-            fake_bin.mkdir()
-            clang = fake_bin / "clang"
-            clang.write_text("""#!/bin/sh
-if [ "$1" = "--version" ]; then
+    @classmethod
+    def fixture_repository(cls, root):
+        cls.command(["git", "init", "--quiet", root])
+        cls.git(root, "config", "user.name", "CI fixture")
+        cls.git(root, "config", "user.email", "ci@example.invalid")
+        (root / "src/buster/lib").mkdir(parents=True)
+        (root / "tools").mkdir()
+        (root / ".github/workflows").mkdir(parents=True)
+        shutil.copy2(HELPER, root / "tools/analyzer_reference.py")
+        (root / ".github/workflows/ci.yml").write_text("name: fixture\n")
+        (root / "build.c").write_text(
+            "#include <buster/lib/base.h>\n"
+            "#include <buster/lib/driver.h>\n"
+            "#include \"tools/clang_analyze.c\"\n"
+            "int main(void) { return fixture_value; }\n"
+        )
+        (root / "src/buster/lib/base.h").write_text("enum { fixture_value = 0 };\n")
+        (root / "src/buster/lib/driver.h").write_text(
+            "#include <buster/lib/transitive.h>\n"
+        )
+        (root / "src/buster/lib/transitive.h").write_text("/* BASELINE */\n")
+        (root / "tools/clang_analyze.c").write_text("/* analyzer implementation */\n")
+        return cls.commit(root, "baseline")
+
+    @staticmethod
+    def write_depfile(path, target="driver", dependencies=DRIVER_DEPENDENCIES):
+        path.write_text(f"{target}: " + " \\\n  ".join(dependencies) + "\n")
+
+    @staticmethod
+    def materialize(repository, revision, destination):
+        archive = subprocess.check_output(
+            ["git", "-C", str(repository), "archive", "--format=tar", revision]
+        )
+        destination.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
+            stream.extractall(destination, filter="data")
+
+    @staticmethod
+    def write_manifest(repository, revision, root, depfile, output):
+        manifest = provenance.build_manifest(repository, revision, root, depfile)
+        provenance.write_manifest(output, manifest)
+        return manifest
+
+    @staticmethod
+    def select(repository, event, requested, candidate, reference,
+               candidate_manifest, reference_manifest, output):
+        record = provenance.select_campaign(
+            repository,
+            event,
+            "true" if requested else "false",
+            candidate,
+            reference,
+            candidate_manifest,
+            reference_manifest,
+        )
+        provenance.write_atomic(output, record)
+        return provenance.load_selection(output)
+
+    @staticmethod
+    def parse_exports(path):
+        return dict(line.split("=", 1) for line in path.read_text().splitlines())
+
+    @staticmethod
+    def fake_clang(directory):
+        directory.mkdir()
+        clang = directory / "clang"
+        clang.write_text(
+            """#!/bin/sh
+set -eu
+if [ "${1-}" = "--version" ]; then
     printf '%s\\n' 'fixture clang'
-else
-    output=
-    while [ "$#" -gt 0 ]; do
-        if [ "$1" = "-o" ]; then
-            shift
-            output=$1
-        fi
-        shift
-    done
-    : > "$output"
+    exit 0
 fi
-""")
-            clang.chmod(0o755)
+depfile=
+output=
+previous=
+for argument in "$@"; do
+    if [ "$previous" = -MF ]; then depfile=$argument; fi
+    if [ "$previous" = -o ]; then output=$argument; fi
+    previous=$argument
+done
+printf '%s: build.c src/buster/lib/base.h src/buster/lib/driver.h src/buster/lib/transitive.h tools/clang_analyze.c\\n' "$output" > "$depfile"
+printf 'cwd=%s header=%s\\n' "$PWD" "$(cat src/buster/lib/transitive.h)" >> "$CLANG_LOG"
+printf '#!/bin/sh\\nexit 0\\n' > "$output"
+chmod +x "$output"
+"""
+        )
+        clang.chmod(0o755)
+        return clang
 
-            def run(reference, event):
-                runner_temp = root / ("runner-" + event + "-" + reference[:8])
-                runner_temp.mkdir()
-                environment = dict(os.environ, BASELINE_REVISION=reference, EVENT_NAME=event,
-                                   RUNNER_TEMP=str(runner_temp),
-                                   GITHUB_ENV=str(runner_temp / "environment"),
-                                   GITHUB_STEP_SUMMARY=str(runner_temp / "summary"),
-                                   PATH=str(fake_bin) + os.pathsep + os.environ["PATH"])
-                result = subprocess.run(["bash", "--noprofile", "--norc", "-c", script],
-                                        cwd=root, env=environment, capture_output=True, text=True, timeout=30)
-                return result, runner_temp
+    @unittest.skipIf(os.name == "nt", "The analyzer policy uses the Unix hosted runner")
+    def test_compiler_dependency_manifest_and_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repository"
+            baseline = self.fixture_repository(root)
+            baseline_root = Path(temporary) / "baseline"
+            self.materialize(root, baseline, baseline_root)
+            depfile = Path(temporary) / "driver.d"
+            self.write_depfile(depfile)
+            baseline_path = Path(temporary) / "baseline.json"
+            baseline_manifest = self.write_manifest(
+                root, baseline, baseline_root, depfile, baseline_path
+            )
+            self.assertTrue(baseline_manifest["complete"])
+            self.assertEqual(
+                [entry["path"] for entry in baseline_manifest["dependencies"]],
+                list(DRIVER_DEPENDENCIES),
+            )
 
-            same, same_temp = run(candidate, "push")
-            self.assertEqual(same.returncode, 0, same.stdout + same.stderr)
-            self.assertEqual((same_temp / "buster-analyzer/comparison-selection.txt").read_text(),
-                             "BUSTER_ANALYZER_COMPARISON_SELECTION_V1\n"
-                             "event=push\n"
-                             f"candidate_revision={candidate}\nreference_revision={candidate}\n"
-                             "selection=skip\nreason=same-revision\n")
-            self.assertIn("ANALYZER_COMPARISON_SELECTION=skip\n", (same_temp / "environment").read_text())
-            self.assertFalse((root / "build/analyzer-baseline").exists())
+            (root / "README.md").write_text("unrelated\n")
+            unrelated = self.commit(root, "unrelated source change")
+            unrelated_path = Path(temporary) / "unrelated.json"
+            unrelated_manifest = self.write_manifest(
+                root, unrelated, root, depfile, unrelated_path
+            )
+            self.assertEqual(
+                unrelated_manifest["closure_sha256"], baseline_manifest["closure_sha256"]
+            )
+            record = Path(temporary) / "unrelated-selection.txt"
+            fields = self.select(
+                root, "pull_request", False, unrelated, baseline,
+                unrelated_path, baseline_path, record,
+            )
+            self.assertEqual(fields["selection"], "skip")
+            self.assertEqual(fields["reason"], "unchanged-driver-closure")
 
-            dispatched, dispatched_temp = run(candidate, "workflow_dispatch")
-            self.assertEqual(dispatched.returncode, 0, dispatched.stdout + dispatched.stderr)
-            self.assertIn("selection=skip\nreason=same-revision\n",
-                          (dispatched_temp / "buster-analyzer/comparison-selection.txt").read_text())
+            (root / "src/buster/lib/transitive.h").write_text("/* CANDIDATE */\n")
+            changed = self.commit(root, "change driver dependency")
+            changed_path = Path(temporary) / "changed.json"
+            self.write_manifest(root, changed, root, depfile, changed_path)
+            fields = self.select(
+                root, "pull_request", False, changed, baseline,
+                changed_path, baseline_path, Path(temporary) / "changed-selection.txt",
+            )
+            self.assertEqual(fields["selection"], "compare")
+            self.assertEqual(fields["reason"], "changed-driver-closure")
 
-            different, different_temp = run(baseline, "pull_request")
-            self.assertEqual(different.returncode, 0, different.stdout + different.stderr)
-            self.assertIn(f"candidate_revision={candidate}\nreference_revision={baseline}\n",
-                          (different_temp / "buster-analyzer/comparison-selection.txt").read_text())
-            self.assertIn("selection=compare\nreason=distinct-revisions\n",
-                          (different_temp / "buster-analyzer/comparison-selection.txt").read_text())
-            self.assertIn("ANALYZER_COMPARISON_SELECTION=compare\n", (different_temp / "environment").read_text())
+            malformed = Path(temporary) / "malformed.d"
+            malformed.write_text("not a dependency file\n")
+            uncertain_path = Path(temporary) / "uncertain.json"
+            uncertain = self.write_manifest(root, changed, root, malformed, uncertain_path)
+            self.assertFalse(uncertain["complete"])
+            fields = self.select(
+                root, "pull_request", False, changed, baseline,
+                uncertain_path, baseline_path, Path(temporary) / "uncertain-selection.txt",
+            )
+            self.assertEqual(fields["reason"], "provenance-uncertain")
+
+            fields = self.select(
+                root, "push", False, changed, changed,
+                changed_path, changed_path, Path(temporary) / "push-selection.txt",
+            )
+            self.assertEqual(fields["reason"], "same-revision")
+            fields = self.select(
+                root, "merge_group", False, changed, changed,
+                changed_path, changed_path, Path(temporary) / "merge-selection.txt",
+            )
+            self.assertEqual(fields["reason"], "event-requires-comparison")
+            fields = self.select(
+                root, "workflow_dispatch", True, changed, changed,
+                changed_path, changed_path, Path(temporary) / "requested-selection.txt",
+            )
+            self.assertEqual(fields["reason"], "requested")
+
+            tampered = json.loads(changed_path.read_text())
+            tampered["dependencies"][0]["oid"] = "0" * 40
+            changed_path.write_text(json.dumps(tampered, sort_keys=True, indent=2) + "\n")
+            with self.assertRaises(provenance.ProvenanceError):
+                provenance.select_campaign(
+                    root, "push", "false", changed, changed, changed_path, changed_path
+                )
+
+    @unittest.skipIf(os.name == "nt", "The analyzer workflow uses the Unix hosted runner")
+    def test_historical_bootstrap_and_comparison_campaign(self):
+        bootstrap = self.analyzer_step("Bootstrap candidate and select reference build driver")
+        campaign = self.analyzer_step("Compare reference analysis and aggregate all module shards")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repository"
+            baseline = self.fixture_repository(root)
+            (root / "src/buster/lib/transitive.h").write_text("/* CANDIDATE */\n")
+            self.commit(root, "candidate dependency")
+            fake_bin = Path(temporary) / "fake-bin"
+            self.fake_clang(fake_bin)
+            clang_log = Path(temporary) / "clang.log"
+            runner = Path(temporary) / "runner"
+            runner.mkdir()
+            environment = dict(
+                os.environ,
+                BASELINE_REVISION=baseline,
+                EVENT_NAME="pull_request",
+                COMPARISON_REQUESTED="false",
+                RUNNER_TEMP=str(runner),
+                GITHUB_WORKSPACE=str(root),
+                GITHUB_ENV=str(runner / "environment"),
+                GITHUB_STEP_SUMMARY=str(runner / "summary"),
+                CLANG_LOG=str(clang_log),
+                PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+            )
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", bootstrap],
+                cwd=root,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = clang_log.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn("header=/* CANDIDATE */", lines[0])
+            self.assertIn("/reference-tree", lines[1])
+            self.assertIn("header=/* BASELINE */", lines[1])
+            exports = self.parse_exports(runner / "environment")
+            self.assertEqual(exports["ANALYZER_COMPARISON_SELECTION"], "compare")
+            self.assertEqual(exports["ANALYZER_COMPARISON_REASON"], "changed-driver-closure")
+            self.assertEqual(exports["ANALYZER_REFERENCE_MATERIALIZED"], "true")
             self.assertTrue((root / "build/analyzer-baseline").is_file())
 
-            merge_group, merge_group_temp = run(candidate, "merge_group")
-            self.assertEqual(merge_group.returncode, 0, merge_group.stdout + merge_group.stderr)
-            self.assertIn("selection=compare\nreason=event-requires-comparison\n",
-                          (merge_group_temp / "buster-analyzer/comparison-selection.txt").read_text())
-
-            unknown, unknown_temp = run(candidate, "schedule")
-            self.assertEqual(unknown.returncode, 0, unknown.stdout + unknown.stderr)
-            self.assertIn("selection=compare\nreason=event-requires-comparison\n",
-                          (unknown_temp / "buster-analyzer/comparison-selection.txt").read_text())
-
-            invalid, invalid_temp = run("f" * 40, "push")
-            self.assertNotEqual(invalid.returncode, 0)
-            self.assertFalse((invalid_temp / "buster-analyzer/comparison-selection.txt").exists())
-
-    @unittest.skipIf(os.name == "nt", "The analyzer workflow policy uses the Unix hosted runner")
-    def test_analyzer_campaign_rejects_missing_selection_and_keeps_candidate_aggregate(self):
-        script = self.analyzer_step("Compare reference analysis and aggregate all module shards")
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            subprocess.run(["git", "init", "--quiet", root], check=True)
-            subprocess.run(["git", "-C", root, "config", "user.name", "CI fixture"], check=True)
-            subprocess.run(["git", "-C", root, "config", "user.email", "ci@example.invalid"], check=True)
-            (root / "build.c").write_text("int candidate;\n")
-            subprocess.run(["git", "-C", root, "add", "build.c"], check=True)
-            subprocess.run(["git", "-C", root, "commit", "--quiet", "-m", "candidate"], check=True)
-            candidate = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
-            (root / "build").mkdir()
+            driver_log = Path(temporary) / "driver.log"
             driver = root / "build/analyzer-driver"
-            driver.write_text("""#!/bin/sh
+            driver.write_text(
+                """#!/bin/sh
 printf '%s\\n' "$*" >> "$DRIVER_LOG"
 case "${FAIL_MODE-}:$*" in
-    reference:*--baseline-driver*) exit 31 ;;
-    candidate:*--aggregate*) ;;
-    candidate:*) exit 32 ;;
+    fail:*--baseline-driver*) exit 31 ;;
 esac
-""")
+"""
+            )
             driver.chmod(0o755)
+            campaign_environment = dict(
+                os.environ,
+                BASELINE_REVISION=baseline,
+                EVENT_NAME="pull_request",
+                COMPARISON_REQUESTED="false",
+                RUNNER_TEMP=str(runner),
+                GITHUB_WORKSPACE=str(root),
+                DRIVER_LOG=str(driver_log),
+                FAIL_MODE="",
+                **exports,
+            )
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", campaign],
+                cwd=root,
+                env=campaign_environment,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = driver_log.read_text().splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertIn("--baseline-driver build/analyzer-baseline", calls[0])
+            self.assertIn("--aggregate", calls[1])
+            self.assertFalse((runner / "buster-analyzer/reference-tree").exists())
 
-            def run(selection, event, baseline, record="valid", fail_mode=""):
-                driver_log = root / ("driver-" + selection + "-" + event + "-" + record +
-                                     ("-baseline" if baseline else "") + ".log")
-                if driver_log.exists():
-                    driver_log.unlink()
-                baseline_path = root / "build/analyzer-baseline"
-                baseline_target = root / "build/analyzer-baseline-target"
-                (root / "runner/buster-analyzer").mkdir(parents=True, exist_ok=True)
-                if baseline_path.exists() or baseline_path.is_symlink():
-                    baseline_path.unlink()
-                if baseline_target.exists():
-                    baseline_target.unlink()
-                if baseline == "symlink":
-                    baseline_target.write_text("fixture\n")
-                    baseline_target.chmod(0o755)
-                    baseline_path.symlink_to(baseline_target.name)
-                elif baseline == "dangling":
-                    baseline_path.symlink_to("missing-analyzer-baseline")
-                elif baseline:
-                    baseline_path.write_text("fixture\n")
-                    baseline_path.chmod(0o755)
-                selection_path = root / "runner/buster-analyzer/comparison-selection.txt"
-                if selection_path.exists() or selection_path.is_symlink():
-                    selection_path.unlink()
-                expected_selection = ("skip" if event in ("push", "workflow_dispatch") else "compare")
-                expected_reason = ("same-revision" if expected_selection == "skip" else
-                                   "event-requires-comparison")
-                fields = ["BUSTER_ANALYZER_COMPARISON_SELECTION_V1", f"event={event}",
-                          f"candidate_revision={candidate}", f"reference_revision={candidate}",
-                          f"selection={expected_selection}", f"reason={expected_reason}"]
-                if record == "tampered":
-                    fields[4] = "selection=compare" if expected_selection == "skip" else "selection=skip"
-                elif record == "stale":
-                    fields[2] = "candidate_revision=" + "f" * 40
-                elif record == "wrong-reference":
-                    fields[3] = "reference_revision=" + "e" * 40
-                elif record == "wrong-reason":
-                    fields[5] = "reason=distinct-revisions"
-                elif record == "malformed":
-                    fields.append("unexpected=field")
-                if record == "no-final-lf":
-                    selection_path.write_text("\n".join(fields))
-                elif record == "nul":
-                    selection_path.write_bytes(("\n".join(fields) + "\n").encode() + b"\0")
-                elif record == "symlink":
-                    target = selection_path.with_name("comparison-selection-target.txt")
-                    target.write_text("\n".join(fields) + "\n")
-                    selection_path.symlink_to(target.name)
-                elif record != "missing":
-                    selection_path.write_text("\n".join(fields) + "\n")
-                environment = dict(os.environ, ANALYZER_COMPARISON_SELECTION=selection,
-                                   BASELINE_REVISION=candidate, EVENT_NAME=event,
-                                   RUNNER_TEMP=str(root / "runner"), DRIVER_LOG=str(driver_log),
-                                   FAIL_MODE=fail_mode)
-                result = subprocess.run(["bash", "--noprofile", "--norc", "-c", script], cwd=root,
-                                        env=environment, capture_output=True, text=True, timeout=30)
-                lines = driver_log.read_text().splitlines() if driver_log.exists() else []
-                return result, lines
+    @unittest.skipIf(os.name == "nt", "The analyzer workflow uses the Unix hosted runner")
+    def test_unchanged_closure_skips_and_tampering_fails_closed(self):
+        bootstrap = self.analyzer_step("Bootstrap candidate and select reference build driver")
+        campaign = self.analyzer_step("Compare reference analysis and aggregate all module shards")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repository"
+            baseline = self.fixture_repository(root)
+            (root / "README.md").write_text("unrelated\n")
+            self.commit(root, "unrelated candidate")
+            fake_bin = Path(temporary) / "fake-bin"
+            self.fake_clang(fake_bin)
+            runner = Path(temporary) / "runner"
+            runner.mkdir()
+            common = dict(
+                os.environ,
+                BASELINE_REVISION=baseline,
+                EVENT_NAME="pull_request",
+                COMPARISON_REQUESTED="false",
+                RUNNER_TEMP=str(runner),
+                GITHUB_WORKSPACE=str(root),
+                GITHUB_ENV=str(runner / "environment"),
+                GITHUB_STEP_SUMMARY=str(runner / "summary"),
+                CLANG_LOG=str(Path(temporary) / "clang.log"),
+                PATH=str(fake_bin) + os.pathsep + os.environ["PATH"],
+            )
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", bootstrap],
+                cwd=root,
+                env=common,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            exports = self.parse_exports(runner / "environment")
+            self.assertEqual(exports["ANALYZER_COMPARISON_SELECTION"], "skip")
+            self.assertEqual(exports["ANALYZER_COMPARISON_REASON"], "unchanged-driver-closure")
+            self.assertFalse((root / "build/analyzer-baseline").exists())
 
-            skipped, skipped_lines = run("skip", "push", False)
-            self.assertEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
-            self.assertEqual(len(skipped_lines), 2)
-            self.assertNotIn("--baseline-driver", skipped_lines[0])
-            self.assertIn("--aggregate", skipped_lines[1])
+            driver_log = Path(temporary) / "driver.log"
+            driver = root / "build/analyzer-driver"
+            driver.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DRIVER_LOG\"\n")
+            driver.chmod(0o755)
+            campaign_environment = dict(
+                common,
+                DRIVER_LOG=str(driver_log),
+                ANALYZER_COMPARISON_SELECTION=exports["ANALYZER_COMPARISON_SELECTION"],
+                ANALYZER_COMPARISON_REASON=exports["ANALYZER_COMPARISON_REASON"],
+                ANALYZER_REFERENCE_MATERIALIZED=exports["ANALYZER_REFERENCE_MATERIALIZED"],
+            )
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", campaign],
+                cwd=root,
+                env=campaign_environment,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = driver_log.read_text().splitlines()
+            self.assertEqual(len(calls), 2)
+            self.assertNotIn("--baseline-driver", calls[0])
+            self.assertIn("--aggregate", calls[1])
 
-            compared, compared_lines = run("compare", "merge_group", True)
-            self.assertEqual(compared.returncode, 0, compared.stdout + compared.stderr)
-            self.assertEqual(len(compared_lines), 2)
-            self.assertIn("--baseline-driver build/analyzer-baseline", compared_lines[0])
-            self.assertIn("--aggregate", compared_lines[1])
-            self.assertEqual(compared_lines[0].replace(" --baseline-driver build/analyzer-baseline", ""),
-                             skipped_lines[0])
-            self.assertEqual(compared_lines[1], skipped_lines[1])
-
-            for record in ("missing", "malformed", "tampered", "stale", "wrong-reference",
-                           "wrong-reason", "no-final-lf", "nul", "symlink"):
-                with self.subTest(record=record):
-                    rejected, rejected_lines = run("skip", "push", False, record)
-                    self.assertNotEqual(rejected.returncode, 0)
-                    self.assertFalse(rejected_lines)
-            missing_export, missing_export_lines = run("", "push", False)
-            self.assertNotEqual(missing_export.returncode, 0)
-            self.assertFalse(missing_export_lines)
-            stale_baseline, stale_baseline_lines = run("skip", "push", True)
-            self.assertNotEqual(stale_baseline.returncode, 0)
-            self.assertFalse(stale_baseline_lines)
-            absent, absent_lines = run("compare", "merge_group", False)
-            self.assertNotEqual(absent.returncode, 0)
-            self.assertFalse(absent_lines)
-            linked, linked_lines = run("compare", "merge_group", "symlink")
-            self.assertNotEqual(linked.returncode, 0)
-            self.assertFalse(linked_lines)
-            dangling, dangling_lines = run("skip", "push", "dangling")
-            self.assertNotEqual(dangling.returncode, 0)
-            self.assertFalse(dangling_lines)
-            reference_failure, reference_failure_lines = run(
-                "compare", "merge_group", True, fail_mode="reference")
-            self.assertNotEqual(reference_failure.returncode, 0)
-            self.assertEqual(len(reference_failure_lines), 1)
-            candidate_failure, candidate_failure_lines = run(
-                "skip", "push", False, fail_mode="candidate")
-            self.assertNotEqual(candidate_failure.returncode, 0)
-            self.assertEqual(len(candidate_failure_lines), 1)
+            # Recreate evidence, corrupt the retained selection, and require a
+            # failure before the analyzer driver launches.
+            shutil.rmtree(runner)
+            runner.mkdir()
+            common["RUNNER_TEMP"] = str(runner)
+            common["GITHUB_ENV"] = str(runner / "environment")
+            common["GITHUB_STEP_SUMMARY"] = str(runner / "summary")
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", bootstrap],
+                cwd=root,
+                env=common,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            record = runner / "buster-analyzer/comparison-selection.txt"
+            record.write_text(record.read_text().replace("selection=skip", "selection=compare"))
+            driver_log.unlink(missing_ok=True)
+            exports = self.parse_exports(runner / "environment")
+            campaign_environment.update(
+                RUNNER_TEMP=str(runner),
+                ANALYZER_COMPARISON_SELECTION=exports["ANALYZER_COMPARISON_SELECTION"],
+                ANALYZER_COMPARISON_REASON=exports["ANALYZER_COMPARISON_REASON"],
+                ANALYZER_REFERENCE_MATERIALIZED=exports["ANALYZER_REFERENCE_MATERIALIZED"],
+            )
+            result = self.command(
+                ["bash", "--noprofile", "--norc", "-c", campaign],
+                cwd=root,
+                env=campaign_environment,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(driver_log.exists())
 
 
 if __name__ == "__main__":

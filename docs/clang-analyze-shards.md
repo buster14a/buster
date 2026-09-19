@@ -96,37 +96,45 @@ is reanalyzed. Every desktop combination entrypoint and the independent analyzer
 job run these controls.
 
 The analyzer CI job resolves both the checked-out candidate and requested
-reference to commit identities before compiling either driver. When those
-identities are the same on a push or workflow dispatch, it records
-`selection=skip` and `reason=same-revision` in `comparison-selection.txt`, does
-not compile or run a second driver, and executes the complete candidate
-split-source analysis and fail-closed aggregate once. An unresolvable identity
-fails the job instead of being treated as a same-revision result. Main and tag
-pushes and dispatches currently select their checked-out revision as the
-reference. Pull requests select their base revision and keep the comparison.
-Merge-group events also keep comparison even if the available reference resolves
-to the checkout commit; an event not admitted to the narrow skip policy cannot
-silently inherit it.
+reference to commit and tree identities before selecting a campaign. Each driver
+compile emits a Clang `-MMD` dependency file under the exact bootstrap command
+profile. `tools/analyzer_reference.py` normalizes the compiler-selected local
+dependencies, requires regular non-symlink materializations whose bytes match the
+selected Git blobs, adds the workflow and policy helper identities, and hashes
+that versioned closure. The compiler, rather than a changed-file heuristic,
+therefore defines which transitive build-driver inputs are relevant.
 
-Immediately before analysis, the campaign re-resolves both revisions from the
-unchanged checkout, re-derives the event decision, and requires the retained
-six-line V1 selection record and exported selection to agree exactly. The record
-must be a regular, non-symlink file whose bytes, including its final newline,
-match the re-derived record. Missing, extra, malformed, tampered or stale fields,
-NUL data and alternate framing fail before an analyzer launches.
+A same-revision push or workflow dispatch without an explicit comparison records
+`selection=skip` and `reason=same-revision`, does not materialize or compile a
+second driver, and executes the complete candidate split-source analysis and
+fail-closed aggregate once. Pull requests materialize their base with `git
+archive`, reject symlinks, and compile the reference wholly inside that frozen
+tree. A complete byte-identical driver closure records `selection=skip` and
+`reason=unchanged-driver-closure`; a changed closure selects comparison, and any
+incomplete or unprovable provenance selects comparison conservatively with
+`reason=provenance-uncertain`. Merge groups, distinct unclassified events, and
+same-revision events outside the narrow skip policy also compare. A manual
+workflow dispatch with `analyzer_comparison=true` always selects comparison and
+records `reason=requested`.
+
+Immediately before analysis, the campaign re-resolves both revisions, regenerates
+both manifests from the retained dependency files and materialized trees, and
+requires their bytes, the versioned V2 selection record, and all exported fields
+to agree exactly. Missing, extra, malformed, tampered, stale, NUL-containing or
+symlinked evidence fails before an analyzer launches. The historical source tree
+is removed after this revalidation so it is not retained as a large artifact.
 The skip path refuses any reference-driver path, including a dangling symlink,
 while comparison requires a regular, executable, non-symlink reference driver.
 
-When the identities differ, CI preserves the existing explicit comparison path.
-`--baseline-driver` runs that reference first against the **same split database**
-and records metrics in `baseline.log` (diagnostics remain in the full CI log);
-its failure fails the comparison. Passing `--baseline-driver` directly remains
-the reproducible opt-in path for requested measurements. The current different-
-revision workflow compiles the historical `build.c` against the candidate
-checkout's include tree, so it is not a fully frozen historical driver dependency
-closure. Freezing that closure and classifying analyzer-relevant changes remain
-separate #603 acceptance work; the same-revision elimination does not broaden
-that claim. No historical issue timing is presented as a current measurement.
+When comparison is selected, `--baseline-driver` runs the executable compiled
+from the full frozen reference tree first against the **same candidate split
+database** and records metrics in `baseline.log` (diagnostics remain in the full
+CI log); its failure fails the comparison. Passing `--baseline-driver` directly
+remains the reproducible opt-in path, while the manual workflow input provides an
+explicit hosted comparative campaign. The retained revision, Clang identity,
+dependency files, manifests and selection record bind the source, command and
+configuration used by both paths. No historical issue timing is presented as a
+current measurement.
 
 `ANALYZE_BASELINE` is present only when comparison was selected;
 `ANALYZE_RUN` records the candidate's complete wall microseconds in both modes.
