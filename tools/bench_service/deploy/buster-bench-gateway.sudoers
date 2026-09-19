@@ -1,0 +1,12 @@
+# The Actions runner must be added explicitly to buster-bench-dispatch.
+# No shell, environment override, path, SSH target or service-management
+# command is authorized here. The gateway validates every typed argument.
+Defaults:%buster-bench-dispatch env_reset, !set_home, secure_path=/usr/sbin:/usr/bin:/sbin:/bin
+Cmnd_Alias BUSTER_BENCH_GATEWAY = \
+    /usr/local/libexec/buster-bench-service gateway capabilities, \
+    /usr/local/libexec/buster-bench-service gateway submit *, \
+    /usr/local/libexec/buster-bench-service gateway status *, \
+    /usr/local/libexec/buster-bench-service gateway result *, \
+    /usr/local/libexec/buster-bench-service gateway cancel *, \
+    /usr/local/libexec/buster-bench-service gateway logs *
+%buster-bench-dispatch ALL=(buster-bench:buster-bench) NOPASSWD: NOEXEC: BUSTER_BENCH_GATEWAY
