@@ -356,6 +356,90 @@ class ZigTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertFalse((self.root / "install").exists())
 
+    def test_windows_publish_retries_access_denied_before_path_publication(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "archive").write_bytes(self.payload)
+        installed = self.root / "install"
+        output = self.root / "path"
+        original_rename = Path.rename
+        observations = []
+
+        def flaky_rename(path, destination):
+            observations.append((path, destination, output.exists()))
+            if len(observations) == 1:
+                error = PermissionError("Access is denied")
+                error.winerror = 5
+                raise error
+            return original_rename(path, destination)
+
+        with mock.patch.object(ci_zig, "_running_on_windows", return_value=True), \
+                mock.patch.object(ci_zig.Path, "rename", new=flaky_rename), \
+                mock.patch.object(ci_zig.time, "sleep") as sleep, \
+                mock.patch.object(ci_zig.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="0.16.0\n")
+            ci_zig.install("x86_64-linux", self.manifest, cache, installed, output)
+        self.assertEqual(len(observations), 2)
+        self.assertFalse(observations[0][2])
+        self.assertFalse(observations[1][2])
+        sleep.assert_called_once_with(ci_zig.INSTALL_PUBLISH_RETRY_SECONDS)
+        self.assertTrue(installed.is_dir())
+        self.assertEqual(output.read_text().strip(), str(installed.resolve()))
+
+    def test_windows_publish_access_denied_retries_are_bounded(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "archive").write_bytes(self.payload)
+        installed = self.root / "install"
+        output = self.root / "path"
+        attempts = []
+
+        def denied_rename(path, destination):
+            attempts.append((path, destination))
+            error = PermissionError("Access is denied")
+            error.winerror = 5
+            raise error
+
+        with mock.patch.object(ci_zig, "_running_on_windows", return_value=True), \
+                mock.patch.object(ci_zig.Path, "rename", new=denied_rename), \
+                mock.patch.object(ci_zig.time, "sleep") as sleep, \
+                mock.patch.object(ci_zig.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="0.16.0\n")
+            with self.assertRaises(PermissionError):
+                ci_zig.install("x86_64-linux", self.manifest, cache, installed, output)
+        self.assertEqual(len(attempts), ci_zig.INSTALL_PUBLISH_ATTEMPTS)
+        self.assertEqual(sleep.call_count, ci_zig.INSTALL_PUBLISH_ATTEMPTS - 1)
+        self.assertFalse(installed.exists())
+        self.assertFalse(output.exists())
+
+    def test_windows_publish_never_overwrites_destination_appearing_during_retry(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "archive").write_bytes(self.payload)
+        installed = self.root / "install"
+        output = self.root / "path"
+        attempts = []
+
+        def racing_rename(path, destination):
+            attempts.append((path, destination))
+            destination.mkdir()
+            (destination / "owner").write_text("independent")
+            error = PermissionError("Access is denied")
+            error.winerror = 5
+            raise error
+
+        with mock.patch.object(ci_zig, "_running_on_windows", return_value=True), \
+                mock.patch.object(ci_zig.Path, "rename", new=racing_rename), \
+                mock.patch.object(ci_zig.time, "sleep") as sleep, \
+                mock.patch.object(ci_zig.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="0.16.0\n")
+            with self.assertRaisesRegex(ValueError, "appeared during publication"):
+                ci_zig.install("x86_64-linux", self.manifest, cache, installed, output)
+        self.assertEqual(len(attempts), 1)
+        sleep.assert_not_called()
+        self.assertEqual((installed / "owner").read_text(), "independent")
+        self.assertFalse(output.exists())
+
     def test_installation_is_not_overwritten(self):
         installed = self.root / "install"
         installed.mkdir()
