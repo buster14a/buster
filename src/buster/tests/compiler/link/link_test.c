@@ -369,6 +369,75 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_initializer_order(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_single_input_alias(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u8 text[] = {0x55, 0x48, 0x89, 0xe5, 0x5d, 0xc3};
+    ObjectSymbol symbol = {
+        .name = S8("single_input_alias"),
+        .size = sizeof(text),
+        .section = OBJECT_SECTION_TEXT,
+        .kind = OBJECT_SYMBOL_FUNCTION,
+    };
+    ObjectFile object = link_test_object_make(
+        arguments->arena, (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        (ByteSlice)BUSTER_ARRAY_TO_SLICE(text), &symbol, 1, 0, 0);
+    LinkObjectResult copied = link_objects(arguments->arena, &object, 1, (LinkOptions){0});
+    BUSTER_TEST(arguments, copied.error == LINK_ERROR_NONE);
+    if (copied.error == LINK_ERROR_NONE)
+    {
+        BUSTER_TEST(arguments, copied.object.sections[OBJECT_SECTION_TEXT].data.pointer != text);
+        BUSTER_TEST(arguments, copied.object.sections[OBJECT_SECTION_TEXT].data.length == sizeof(text));
+        BUSTER_TEST(arguments, memcmp(copied.object.sections[OBJECT_SECTION_TEXT].data.pointer, text, sizeof(text)) == 0);
+    }
+    LinkObjectResult aliased = link_objects(
+        arguments->arena, &object, 1, (LinkOptions){.alias_single_input_sections = true});
+    BUSTER_TEST(arguments, aliased.error == LINK_ERROR_NONE);
+    if (aliased.error == LINK_ERROR_NONE)
+    {
+        BUSTER_TEST(arguments, aliased.object.sections[OBJECT_SECTION_TEXT].data.pointer == text);
+        BUSTER_TEST(arguments, aliased.object.symbols != object.symbols);
+        BUSTER_TEST(arguments, aliased.object.symbol_count == 1 && string_equal(aliased.object.symbols[0].name, symbol.name));
+    }
+
+    ObjectFile virtual_tail = object;
+    ObjectSection* virtual_sections = arena_allocate(arguments->arena, ObjectSection, object.section_count);
+    memcpy(virtual_sections, object.sections, object.section_count * sizeof(*virtual_sections));
+    virtual_tail.sections = virtual_sections;
+    virtual_tail.sections[OBJECT_SECTION_TEXT].virtual_size = sizeof(text) + 4;
+    LinkObjectResult padded = link_objects(
+        arguments->arena, &virtual_tail, 1, (LinkOptions){.alias_single_input_sections = true});
+    BUSTER_TEST(arguments, padded.error == LINK_ERROR_NONE);
+    if (padded.error == LINK_ERROR_NONE)
+    {
+        ObjectSection* section = padded.object.sections + OBJECT_SECTION_TEXT;
+        BUSTER_TEST(arguments, section->data.pointer != text && section->data.length == sizeof(text) + 4);
+        BUSTER_TEST(arguments, memcmp(section->data.pointer, text, sizeof(text)) == 0);
+        BUSTER_TEST(arguments, section->data.pointer[sizeof(text)] == 0 && section->data.pointer[sizeof(text) + 3] == 0);
+    }
+
+    u8 first_text[] = {1, 2, 3};
+    u8 second_text[] = {4, 5};
+    ObjectFile inputs[] = {
+        link_test_object_make(arguments->arena, object.target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(first_text), 0, 0, 0, 0),
+        link_test_object_make(arguments->arena, object.target, (ByteSlice)BUSTER_ARRAY_TO_SLICE(second_text), 0, 0, 0, 0),
+    };
+    inputs[0].sections[OBJECT_SECTION_TEXT].alignment = 1;
+    inputs[1].sections[OBJECT_SECTION_TEXT].alignment = 1;
+    LinkObjectResult merged = link_objects(
+        arguments->arena, inputs, BUSTER_ARRAY_LENGTH(inputs), (LinkOptions){.alias_single_input_sections = true});
+    BUSTER_TEST(arguments, merged.error == LINK_ERROR_NONE);
+    if (merged.error == LINK_ERROR_NONE)
+    {
+        ObjectSection* section = merged.object.sections + OBJECT_SECTION_TEXT;
+        u8 expected[] = {1, 2, 3, 4, 5};
+        BUSTER_TEST(arguments, section->data.pointer != first_text && section->data.pointer != second_text);
+        BUSTER_TEST(arguments, section->data.length == sizeof(expected));
+        BUSTER_TEST(arguments, memcmp(section->data.pointer, expected, sizeof(expected)) == 0);
+    }
+    return result;
+}
+
 #if BUSTER_CPU_ARCH_X86_64
 BUSTER_GLOBAL_LOCAL u32 link_test_symbol_find(ObjectFile* object, String8 name)
 {
@@ -3849,6 +3918,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_data_precedence(UnitTestArgumen
 UnitTestResult link_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult single_input_alias = link_test_single_input_alias(arguments);
+    result.succeeded_test_count += single_input_alias.succeeded_test_count;
+    result.test_count += single_input_alias.test_count;
     UnitTestResult data_indexes = link_test_elf_data_indexes(arguments);
     result.succeeded_test_count += data_indexes.succeeded_test_count;
     result.test_count += data_indexes.test_count;

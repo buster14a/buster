@@ -1961,6 +1961,46 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         result.symbol = link_string_copy(arena, comdat_error_symbol);
         return result;
     }
+    // A one-input merge has no cross-object concatenation. Sharing a payload
+    // is nevertheless an ownership opt-in, and remains unsafe when one kind
+    // appears more than once, when a file-backed virtual tail needs zeroing,
+    // or when initializer ordering would mutate the input bytes.
+    ObjectSection* aliased_sections[OBJECT_SECTION_COUNT] = {0};
+    bool alias_section_data[OBJECT_SECTION_COUNT] = {0};
+    if (options.alias_single_input_sections && object_count == 1)
+    {
+        ObjectFile* object = objects;
+        for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
+        {
+            ObjectSection* section = object->sections + section_index;
+            ObjectSectionKind kind = section->kind;
+            if (!aliased_sections[kind])
+            {
+                aliased_sections[kind] = section;
+                alias_section_data[kind] = !object_section_kind_is_zero_fill(kind) &&
+                                           section_offsets[section_index] == 0 &&
+                                           section->data.length == section_sizes[kind];
+            }
+            else
+            {
+                alias_section_data[kind] = false;
+            }
+        }
+        for (u32 slot = 0; slot < 2; slot += 1)
+        {
+            ObjectSectionKind kind = slot ? OBJECT_SECTION_FINI_ARRAY : OBJECT_SECTION_INIT_ARRAY;
+            u32* priorities = object->initializer_priorities[slot];
+            ObjectSection* section = aliased_sections[kind];
+            u64 entries = priorities && section ? section->data.length / OBJECT_INITIALIZER_ENTRY_SIZE : 0;
+            for (u64 entry = 1; alias_section_data[kind] && entry < entries; entry += 1)
+            {
+                if (priorities[entry - 1] > priorities[entry])
+                {
+                    alias_section_data[kind] = false;
+                }
+            }
+        }
+    }
     result.object = (ObjectFile){
         .sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT),
         .symbols = arena_allocate(arena, ObjectSymbol, total_symbols),
@@ -1974,7 +2014,9 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         bool zero_fill = object_section_kind_is_zero_fill((ObjectSectionKind)kind);
         // Source copies cover neither alignment gaps nor file-backed virtual
         // tails. Define those bytes even when the output arena is reused.
-        u8* data = zero_fill ? 0 : arena_allocate_zeroed(arena, u8, section_sizes[kind]);
+        u8* data = zero_fill ? 0
+                             : alias_section_data[kind] ? aliased_sections[kind]->data.pointer
+                                                        : arena_allocate_zeroed(arena, u8, section_sizes[kind]);
         result.object.sections[kind] = (ObjectSection){
             .name = object_section_name_for_kind((ObjectSectionKind)kind),
             .data =
@@ -2026,7 +2068,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         for (u32 section_index = 0; section_index < object->section_count; section_index += 1)
         {
             ObjectSection* source = &object->sections[section_index];
-            if (source->data.length)
+            if (source->data.length && !alias_section_data[source->kind])
             {
                 memcpy(result.object.sections[source->kind].data.pointer + offsets[section_index], source->data.pointer, source->data.length);
             }
