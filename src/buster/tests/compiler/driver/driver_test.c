@@ -2090,6 +2090,134 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_non_power_vector_source(Arena* ar
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source));
 }
 
+// GNU explicit casts reinterpret vector bits, including LLVM's add_epi32/64
+// shapes. Keep the source inline because the retirement fixture set is frozen.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_vector_casts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "typedef long long m128i __attribute__((vector_size(16), aligned(16)));\n"
+        "typedef unsigned int v4su __attribute__((vector_size(16)));\n"
+        "typedef unsigned long long v2du __attribute__((vector_size(16)));\n"
+        "typedef float v4sf __attribute__((vector_size(16)));\n"
+        "typedef double v2df __attribute__((vector_size(16)));\n"
+        "typedef unsigned int alias4 __attribute__((vector_size(16)));\n"
+        "static m128i add32(m128i a, m128i b)\n"
+        "{\n"
+        "    return (m128i)((v4su)a + (v4su)b);\n"
+        "}\n"
+        "static m128i add64(m128i a, m128i b)\n"
+        "{\n"
+        "    return (m128i)((v2du)a + (v2du)b);\n"
+        "}\n"
+        "static alias4 compatible(v4su value)\n"
+        "{\n"
+        "    alias4 copy = value;\n"
+        "    return copy;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    m128i a = {0x00000002ffffffffll, 0x0000000400000003ll};\n"
+        "    m128i b = {0x0000000500000001ll, 0x0000000700000006ll};\n"
+        "    v4su sum32 = (v4su)add32(a, b);\n"
+        "    v2du sum64 = (v2du)add64(a, b);\n"
+        "    v4su bits = {0x3f800000u, 0x80000000u, 0x7fc12345u, 0xff800000u};\n"
+        "    v4sf floats = (v4sf)bits;\n"
+        "    m128i carrier = (m128i)floats;\n"
+        "    v2df doubles = (v2df)carrier;\n"
+        "    v4su roundtrip = (v4su)doubles;\n"
+        "    alias4 alias = compatible(bits);\n"
+        "    int result = sum32[0] != 0 || sum32[1] != 7 || sum32[2] != 9 || sum32[3] != 11;\n"
+        "    result |= sum64[0] != 0x0000000800000000ull || sum64[1] != 0x0000000b00000009ull;\n"
+        "    result |= a[0] != 0x00000002ffffffffll || a[1] != 0x0000000400000003ll;\n"
+        "    result |= b[0] != 0x0000000500000001ll || b[1] != 0x0000000700000006ll;\n"
+        "    for (int lane = 0; lane < 4; lane += 1)\n"
+        "    {\n"
+        "        result |= roundtrip[lane] != bits[lane] || alias[lane] != bits[lane];\n"
+        "    }\n"
+        "    return result;\n"
+        "}\n"
+    );
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-vector-casts"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows"),
+                             S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows")};
+        String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                          S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-vector-casts"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-nostdinc"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                                         S8("-fverify-codegen"), S8("-o"), output, input};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("vector casts {S8} {S8} {S8}: {S8}"),
+                        targets[target], modes[mode], frontends[frontend], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+                    bool native_arch = target < 3 ? BUSTER_CPU_ARCH_X86_64 : BUSTER_CPU_ARCH_AARCH64;
+                    bool native_os = (target % 3 == 0 && BUSTER_LINUX) || (target % 3 == 1 && BUSTER_MACOS) || (target % 3 == 2 && BUSTER_WINDOWS);
+                    if (native_arch && native_os && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-vector-casts-run"), S8(".exe"));
+                        String8 native_command[] = {modes[mode], frontends[frontend], S8("-fverify-codegen"), S8("-o"), executable, input};
+                        CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(temporary.arena,
+                            (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                        native_invocation.reject_machine_fallback = mode != 0;
+                        CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                        BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                        if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+        String8 prefix = S8("typedef unsigned int words __attribute__((vector_size(16)));\n"
+                            "typedef unsigned long long longs __attribute__((vector_size(16)));\n"
+                            "typedef unsigned int short_words __attribute__((vector_size(8)));\n");
+        String8 rejected[] = {
+            S8("words cast(short_words value) { return (words)value; }\n"),
+            S8("short_words cast(words value) { return (short_words)value; }\n"),
+            S8("longs initialize(words value) { longs copy = value; return copy; }\n"),
+            S8("void assign(longs *out, words value) { *out = value; }\n"),
+            S8("longs implicit_return(words value) { return value; }\n"),
+            S8("void take(longs value); void argument(words value) { take(value); }\n"),
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(rejected); index += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                String8 invalid_input = buster_test_temporary_path(temporary.arena, S8("buster-invalid-vector-cast"), S8(".c"));
+                String8 invalid_source = string_format(temporary.arena, S8("{S8}{S8}"), prefix, rejected[index]);
+                if (BUSTER_REQUIRE(arguments, file_write(invalid_input, BUSTER_SLICE_TO_BYTE_SLICE(invalid_source))))
+                {
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-invalid-vector-cast"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-nostdinc"), frontends[frontend], S8("-o"), output, invalid_input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length != 0 && !compiled.has_object,
+                        invalid_source);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6776,6 +6904,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_platform_variadic);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_frame_vectors);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_float16_codegen);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_vector_casts);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_vector_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_sseup);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_sysv_va_list);
