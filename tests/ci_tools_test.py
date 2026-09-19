@@ -412,6 +412,32 @@ class ZigTests(unittest.TestCase):
         self.assertFalse(installed.exists())
         self.assertFalse(output.exists())
 
+    def test_windows_publish_does_not_retry_unrelated_os_errors(self):
+        cache = self.root / "cache"
+        cache.mkdir()
+        (cache / "archive").write_bytes(self.payload)
+        installed = self.root / "install"
+        output = self.root / "path"
+        attempts = []
+
+        def denied_rename(path, destination):
+            attempts.append((path, destination))
+            error = PermissionError("Sharing violation")
+            error.winerror = 32
+            raise error
+
+        with mock.patch.object(ci_zig, "_running_on_windows", return_value=True), \
+                mock.patch.object(ci_zig.Path, "rename", new=denied_rename), \
+                mock.patch.object(ci_zig.time, "sleep") as sleep, \
+                mock.patch.object(ci_zig.subprocess, "run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="0.16.0\n")
+            with self.assertRaises(PermissionError):
+                ci_zig.install("x86_64-linux", self.manifest, cache, installed, output)
+        self.assertEqual(len(attempts), 1)
+        sleep.assert_not_called()
+        self.assertFalse(installed.exists())
+        self.assertFalse(output.exists())
+
     def test_windows_publish_never_overwrites_destination_appearing_during_retry(self):
         cache = self.root / "cache"
         cache.mkdir()
