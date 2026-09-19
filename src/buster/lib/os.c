@@ -2511,7 +2511,7 @@ bool os_process_spawn_test_end(void)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool os_process_spawn_test_should_fail(OsProcessSpawnTestOperation operation)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool os_process_spawn_test_should_fail(OsProcessSpawnTestOperation operation)
 {
     bool result = false;
     if (os_process_spawn_test_state.armed && os_process_spawn_test_state.operation == operation)
