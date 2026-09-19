@@ -8191,6 +8191,26 @@ BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_single_scalar_width(u16 flags)
     return 0;
 }
 
+BUSTER_GLOBAL_LOCAL u16 buster_x86_metadata_single_physical_width(u16 flags)
+{
+    u16 fixed_flags = flags & (BUSTER_X86_METADATA_PHYSICAL_WIDTH_8 | BUSTER_X86_METADATA_PHYSICAL_WIDTH_16 |
+                               BUSTER_X86_METADATA_PHYSICAL_WIDTH_32 | BUSTER_X86_METADATA_PHYSICAL_WIDTH_64 |
+                               BUSTER_X86_METADATA_PHYSICAL_WIDTH_80 | BUSTER_X86_METADATA_PHYSICAL_WIDTH_128 |
+                               BUSTER_X86_METADATA_PHYSICAL_WIDTH_256 | BUSTER_X86_METADATA_PHYSICAL_WIDTH_512 |
+                               BUSTER_X86_METADATA_PHYSICAL_WIDTH_1024);
+    if (!fixed_flags || (fixed_flags & (u16)(fixed_flags - 1))) return 0;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_8) return 8;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_16) return 16;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_32) return 32;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_64) return 64;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_80) return 80;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_128) return 128;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_256) return 256;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_512) return 512;
+    if (fixed_flags == BUSTER_X86_METADATA_PHYSICAL_WIDTH_1024) return 1024;
+    return 0;
+}
+
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_form_standalone_sae_capable_impl(BusterX86MetadataForm form)
 {
     BusterX86MetadataPatternSemantics pattern = {0};
@@ -8205,48 +8225,78 @@ bool buster_x86_metadata_form_standalone_sae_capable(BusterX86MetadataForm form)
     return buster_x86_metadata_form_standalone_sae_capable_impl(form);
 }
 
-// Source tuple size and encoded element type are distinct for conversions.
-// The query-side gate below proves a two-operand EVEX vector load; each
-// candidate then supplies its own tuple and element widths. Preserve explicit
-// qualifiers, including m64 half tuples, as constraints. An invalid qualifier
-// is reported only after shape binding, so another vector-length candidate
-// still gets its own independent check. Direct physical queries are unchanged.
+// A source-assembled conversion must bind the memory width published by each
+// compatible metadata row. EVEX FULL/HALF rows publish a scalar element plus
+// a tuple; legacy/VEX/XOP CONVERT rows publish one fixed q/dq/qq memory width.
+// Project each candidate independently, retaining an explicit qualifier as a
+// constraint. Distinct successful unsized widths are rejected by the caller
+// instead of being selected by table order or shortest encoding.
 BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_prepare_source_tuple_query(
     BusterX86MetadataForm form, BusterX86MetadataPatternSemantics const* pattern,
     BusterX86MetadataPhysicalQuery query, BusterX86MetadataPhysicalOperand* candidate_operands,
-    bool* source_width_valid, u16* source_tuple_width)
+    bool* source_width_valid, u16* source_tuple_width, u8* source_memory_operand)
 {
-    bool projected = false;
-    if (form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX && !form.apx_flags && !form.amx_flags &&
-        pattern->has_tuple_control && (pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_FULL ||
-                                       pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_HALF))
+    bool conversion = buster_x86_metadata_string_input_equal(form.category.offset, S8("CONVERT"));
+    bool bounded_evex_tuple_query = conversion;
+    if (!bounded_evex_tuple_query && query.operands && query.operand_count == 2)
     {
-        u16 tuple_width = buster_x86_metadata_emit_tuple_memory_width(*pattern);
-        u16 element_width = 0;
-        u32 memory_count = 0;
-        bool schema_valid = true;
-        for (u32 index = 0; index < form.operand_count && schema_valid; index += 1)
-        {
-            BusterX86MetadataOperand metadata = {0};
-            schema_valid = buster_x86_metadata_operand(form.id, index, &metadata);
-            if (schema_valid && metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY)
-            {
-                memory_count += 1;
-                element_width = buster_x86_metadata_single_scalar_width(metadata.physical_width_flags);
-            }
-        }
-        if (schema_valid && memory_count == 1 && element_width && tuple_width)
-        {
-            bool broadcast = (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0;
-            u16 source_width = query.operands[1].memory.source_width;
-            *source_width_valid = !source_width || source_width == (broadcast ? element_width : tuple_width);
-            memcpy(candidate_operands, query.operands, query.operand_count * sizeof(*candidate_operands));
-            candidate_operands[1].width = element_width;
-            *source_tuple_width = tuple_width;
-            projected = true;
-        }
+        bounded_evex_tuple_query =
+            query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
+            query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+            (query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
+             query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
+             query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM) &&
+            (query.attributes.has_mask_register || query.attributes.zeroing ||
+             (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) ||
+             query.operands[0].reg.width == 512 || query.operands[0].reg.index >= 16);
     }
-    return projected;
+    bool evex_tuple = form.encoder_family == BUSTER_X86_METADATA_ENCODER_EVEX && !form.apx_flags && !form.amx_flags &&
+                      bounded_evex_tuple_query && pattern->has_tuple_control &&
+                      (pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_FULL ||
+                       pattern->tuple_control_kind == BUSTER_X86_METADATA_TUPLE_HALF);
+    bool fixed_conversion = form.encoder_family != BUSTER_X86_METADATA_ENCODER_EVEX && conversion;
+    if ((!evex_tuple && !fixed_conversion) || !query.operands || !query.operand_count || query.operand_count > 16)
+        return false;
+
+    u16 encoded_width = 0;
+    u16 tuple_width = evex_tuple ? buster_x86_metadata_emit_tuple_memory_width(*pattern) : 0;
+    u32 metadata_memory_count = 0;
+    u32 physical_memory_index = UINT32_MAX;
+    u32 physical_index = 0;
+    for (u32 index = 0; index < form.operand_count; index += 1)
+    {
+        BusterX86MetadataOperand metadata = {0};
+        if (!buster_x86_metadata_operand(form.id, index, &metadata)) return false;
+        if (!metadata.visible) continue;
+        bool writemask_default = buster_x86_metadata_emit_is_writemask_operand(metadata) &&
+                                 (physical_index >= query.operand_count ||
+                                  buster_x86_metadata_emit_operand_class(query.operands[physical_index]) !=
+                                      BUSTER_X86_METADATA_PHYSICAL_CLASS_MASK);
+        if (writemask_default) continue;
+        if (metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY)
+        {
+            metadata_memory_count += 1;
+            physical_memory_index = physical_index;
+            encoded_width = evex_tuple
+                                ? buster_x86_metadata_single_scalar_width(metadata.physical_width_flags)
+                                : buster_x86_metadata_single_physical_width(metadata.physical_width_flags);
+        }
+        physical_index += 1;
+    }
+    if (!evex_tuple) tuple_width = encoded_width;
+    if (metadata_memory_count != 1 || !encoded_width || !tuple_width || physical_memory_index >= query.operand_count ||
+        query.operands[physical_memory_index].kind != BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY)
+        return false;
+
+    bool broadcast = (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0;
+    u16 required_source_width = evex_tuple && broadcast ? encoded_width : tuple_width;
+    u16 source_width = query.operands[physical_memory_index].memory.source_width;
+    *source_width_valid = !source_width || source_width == required_source_width;
+    memcpy(candidate_operands, query.operands, query.operand_count * sizeof(*candidate_operands));
+    candidate_operands[physical_memory_index].width = encoded_width;
+    *source_tuple_width = tuple_width;
+    *source_memory_operand = (u8)physical_memory_index;
+    return true;
 }
 
 // AT&T memory operands intentionally omit the Intel-style scalar qualifier
@@ -8963,15 +9013,17 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                                         (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) != 0 &&
                                         !query.attributes.sae &&
                                         query.attributes.rounding_mode == BUSTER_X86_METADATA_ROUNDING_NONE;
-            bool source_tuple_query_possible = query.source_semantics && query.operand_count == 2 &&
-                query.address_size == 64 && query.operands[0].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER &&
-                query.operands[1].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
-                (query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM ||
-                 query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM ||
-                 query.operands[0].reg.physical_class == BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM) &&
-                (query.attributes.has_mask_register || query.attributes.zeroing ||
-                 (query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST) ||
-                 query.operands[0].reg.width == 512 || query.operands[0].reg.index >= 16);
+            bool source_tuple_query_possible = query.source_semantics && query.operands && query.operand_count &&
+                                               query.operand_count <= 16 && query.address_size == 64;
+            if (source_tuple_query_possible)
+            {
+                bool has_source_memory = false;
+                for (u32 operand_index = 0; operand_index < query.operand_count; operand_index += 1)
+                {
+                    has_source_memory |= query.operands[operand_index].kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY;
+                }
+                source_tuple_query_possible = has_source_memory;
+            }
             for (u32 position = 0; position < candidates.count; position += 1)
             {
                 u32 form_id = 0;
@@ -9045,6 +9097,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 bool inferred_memory_width = false;
                 bool source_width_valid = true;
                 u16 candidate_source_tuple_width = 0;
+                u8 candidate_source_memory_operand = UINT8_MAX;
                 bool aggregate_memory_topology =
                     topology_query_possible &&
                     buster_x86_metadata_aggregate_memory_source_topology_internal(form, query, &block_memory_width);
@@ -9069,7 +9122,8 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 {
                     inferred_memory_width = source_tuple_query_possible &&
                         buster_x86_metadata_prepare_source_tuple_query(form, filter_view, query, candidate_operands,
-                                                                       &source_width_valid, &candidate_source_tuple_width);
+                                                                       &source_width_valid, &candidate_source_tuple_width,
+                                                                       &candidate_source_memory_operand);
                     if (!inferred_memory_width)
                     {
                         inferred_memory_width = typed_query_possible &&
@@ -9119,8 +9173,12 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 else
                 {
                     status = BUSTER_X86_METADATA_ENCODE_OPERAND_MISMATCH;
-                    diagnostic_operand = 1;
-                    diagnostic_value = query.operands[1].memory.source_width;
+                    diagnostic_operand = candidate_source_memory_operand < query.operand_count
+                                             ? candidate_source_memory_operand
+                                             : 0;
+                    diagnostic_value = candidate_source_memory_operand < query.operand_count
+                                           ? query.operands[candidate_source_memory_operand].memory.source_width
+                                           : 0;
                 }
                 if (status != BUSTER_X86_METADATA_ENCODE_SUCCESS)
                 {
@@ -9158,10 +9216,11 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                     }
                     continue;
                 }
-                if (candidate_source_tuple_width && !query.operands[1].memory.source_width &&
+                if (candidate_source_tuple_width && candidate_source_memory_operand < query.operand_count &&
+                    !query.operands[candidate_source_memory_operand].memory.source_width &&
                     !(query.attributes.decorator_flags & BUSTER_X86_METADATA_DECORATOR_BROADCAST))
                 {
-                    // An unsized narrowing load can bind the same XMM destination
+                    // An unsized conversion may bind the same visible operands
                     // with different source tuples. Encoding length and form order
                     // cannot choose its semantics; require a source qualifier.
                     ambiguous_source_tuple |= inferred_source_tuple_width &&
