@@ -1,0 +1,151 @@
+name: Issue 837 final CPython validation
+
+"on":
+  push:
+    branches:
+      - validation/839-cpython-final
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-837-final-cpython-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+      CPYTHON_SOURCE: /tmp/cpython-v3.13.9
+      CPYTHON_BUILD: /tmp/cpython-v3.13.9-build
+      LLVM_SOURCE: /tmp/llvm-project-21.1.0
+    steps:
+      - name: Checkout validation candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Build Buster
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bootstrap
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o bootstrap/build
+          ./bootstrap/build generate --cc clang --config Release --linker DEFAULT
+          ./bootstrap/build build --config Release -t ide
+
+      - name: Fetch pinned pristine CPython and LLVM headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/fetch_cpython.sh "$CPYTHON_SOURCE"
+          git clone --depth 1 --filter=blob:none --sparse --branch llvmorg-21.1.0 \
+            https://github.com/llvm/llvm-project.git "$LLVM_SOURCE"
+          git -C "$LLVM_SOURCE" sparse-checkout set clang/lib/Headers
+          test "$(git -C "$CPYTHON_SOURCE" rev-parse HEAD)" = 8183fa5e3f78ca6ab862de7fb8b14f3d929421e0
+          test "$(git -C "$LLVM_SOURCE" rev-parse HEAD)" = 3623fe661ae35c6c80ac221f14d85be76aa870f1
+          test -z "$(git -C "$CPYTHON_SOURCE" status --porcelain --untracked-files=all)"
+
+      - name: Configure CPython-generated include tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$CPYTHON_BUILD"
+          cd "$CPYTHON_BUILD"
+          CC=gcc-13 CFLAGS='-g -O3' MODULE_BUILDTYPE=static "$CPYTHON_SOURCE/configure"
+
+      - name: Compile both Blake2 units in the complete frontend and allocator matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          ide="$GITHUB_WORKSPACE/build/Release/ide"
+          output="$RUNNER_TEMP/issue-837-objects"
+          mkdir -p "$output"
+          common=(
+            cc -g -O3 -std=c11 -DPy_BUILD_CORE_BUILTIN
+            -isystem /usr/include/x86_64-linux-gnu
+            -isystem /usr/include
+            -isystem "$LLVM_SOURCE/clang/lib/Headers"
+            -I"$CPYTHON_SOURCE/Include/internal"
+            -I"$CPYTHON_SOURCE/Include/internal/mimalloc"
+            -I"$CPYTHON_BUILD/Objects"
+            -I"$CPYTHON_BUILD/Include"
+            -I"$CPYTHON_BUILD/Python"
+            -I"$CPYTHON_BUILD"
+            -I"$CPYTHON_SOURCE/Include"
+          )
+          for frontend in local-backed-canonical direct-ssa; do
+            case "$frontend" in
+              local-backed-canonical) frontend_flag=-fno-frontend-ssa ;;
+              direct-ssa) frontend_flag=-ffrontend-ssa ;;
+            esac
+            for allocator in none mir-stack fast quality; do
+              for unit in blake2s blake2b; do
+                source="$CPYTHON_SOURCE/Modules/_blake2/${unit}_impl.c"
+                object="$output/${unit}-${frontend}-${allocator}.o"
+                echo "ISSUE_837_COMPILE unit=$unit frontend=$frontend allocator=$allocator"
+                "$ide" "${common[@]}" "$frontend_flag" \
+                  "-fregister-allocator=$allocator" -c "$source" -o "$object"
+                test -s "$object"
+              done
+            done
+          done
+          count="$(find "$output" -maxdepth 1 -type f -name '*.o' | wc -l)"
+          test "$count" -eq 16
+          echo "ISSUE_837_DIRECT_MATRIX status=pass objects=$count"
+
+      - name: Continue the canonical CPython harness and retain its next blocker
+        id: harness
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          ./bootstrap/build test_cpython --config Release "$CPYTHON_SOURCE" 2>&1 | tee issue-837-cpython.log
+          status=${PIPESTATUS[0]}
+          printf '%s\n' "$status" > issue-837-cpython.status
+          exit "$status"
+
+      - name: Reduce a canonical-harness build failure
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status="$(cat issue-837-cpython.status 2>/dev/null || printf '125')"
+          echo "ISSUE_837_CANONICAL_HARNESS status=$status"
+          root="$(sed -n 's/^CPYTHON_HARNESS .* output=\([^ ]*\).*$/\1/p' issue-837-cpython.log | tail -n1)"
+          if test -n "$root" && test -d "$root"; then
+            echo "ISSUE_837_CANONICAL_ROOT path=$root"
+            while IFS= read -r directory; do
+              name="$(basename "$directory")"
+              case "$name" in clang) continue ;; esac
+              echo "::group::canonical diagnostic $name"
+              rm -f "$directory/Modules/_blake2/blake2s_impl.o" \
+                    "$directory/Modules/_blake2/blake2b_impl.o"
+              make -C "$directory" -j1 V=1 \
+                Modules/_blake2/blake2s_impl.o Modules/_blake2/blake2b_impl.o \
+                2>&1 | tee "issue-837-${name}-diagnostic.log"
+              printf '%s\n' "${PIPESTATUS[0]}" > "issue-837-${name}-diagnostic.status"
+              echo "::endgroup::"
+            done < <(find "$root" -mindepth 1 -maxdepth 2 -type f -name Makefile -printf '%h\n' | sort -u)
+          fi
+          grep -h -E 'error:|could not lower|unsupported option|make: \*\*\*' \
+            issue-837-cpython.log issue-837-*-diagnostic.log 2>/dev/null || true
+          if grep -h -E '__builtin_ia32_(pslldi128|psllqi128|psradi128|psrldi128|psrlqi128)' \
+              issue-837-cpython.log issue-837-*-diagnostic.log 2>/dev/null; then
+            echo 'error: the issue #837 builtin blocker is still present' >&2
+            exit 1
+          fi
+
+      - name: Publish validation diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-837-final-cpython-${{ github.run_id }}
+          path: |
+            issue-837-cpython.log
+            issue-837-cpython.status
+            issue-837-*-diagnostic.log
+            issue-837-*-diagnostic.status
+          retention-days: 7
+          if-no-files-found: warn
