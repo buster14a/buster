@@ -143,9 +143,11 @@ Object rows intentionally have no host sysroot. Linux GNU rows receive only the
 target-matched, authenticated musl include roots from the project snapshot;
 Windows, Apple, Android and UEFI rows do not receive those Linux headers.
 
-Repo-owned project dependencies use the checked-in
-[`native-retirement-dependencies-v1.json`](native-retirement-dependencies-v1.json)
-descriptor. Before `evidence-candidate.txt` is created, the workflow runs the
+Repo-owned project dependency policy is reviewed in
+[`native-retirement-dependencies-v1.json`](native-retirement-dependencies-v1.json),
+while exact repository byte/hash identities are generated in
+[`native-retirement-repository-sources-v1.json`](native-retirement-repository-sources-v1.json).
+Before `evidence-candidate.txt` is created, the workflow runs the
 offline external-closure verifier against the exact candidate checkout first.
 That verifier proves pristine GitHub worktrees at the seven descriptor pins
 (cJSON, DoomGeneric, LZ4, yyjson, stb, zlib and musl), checks each admitted
@@ -190,15 +192,15 @@ or the support ledger bytes and digests. These are historical replay disposition
 the authenticated 692-record project closure, including the target SDK headers
 and the project-owned MinGW varargs adapter described below.
 
-The binding values are frozen in both the C producer and the independent
-validator: descriptor SHA-256
-`514f4611b44211a1184ec5a029f4278b07f8964179f670b44f4cc39dfce1df0d`, materializer
-receipt SHA-256
-`c0f9044a60f987f476353dee297324d9cf0afe4124f078252edd772491a8ad58`, project
-closure SHA-256
-`66bdfb46423045ca112f92e98fb1da013d93e8e6f26a30be50f35205a3a0f8b1`, and
-materializer ledger SHA-256
-`7f3472bdefc8a998c935a972786b82862e2c3bb8b7f66dec6504ce055df69ffa`.
+The live dependency aggregate is generated once in
+[`../tools/native_retirement_dependency_binding.generated.h`](../tools/native_retirement_dependency_binding.generated.h).
+That artifact binds the reviewed policy and generated repository snapshot to the
+materializer receipt, project closure, and materializer ledger. The C producer
+includes it directly and the independent Python validator parses the same bytes;
+neither consumer nor this prose carries a separately edited live quartet.
+Malformed, stale, truncated, or mismatched generated state fails closed. The
+immutable legacy descriptor and validator compatibility constants continue to
+authenticate evidence produced before this representation change.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is
