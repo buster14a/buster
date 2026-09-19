@@ -1,0 +1,157 @@
+name: PR 821 rebase publisher
+
+on:
+  push:
+    branches:
+      - automation/pr821-source-snapshot-20260919
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr821-rebase-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Rebase, validate, and publish #821
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/84-transactional-hermetic-spawn
+          fetch-depth: 0
+
+      - name: Rebase onto exact main
+        shell: bash
+        env:
+          BASE_SHA: 6836e4a8d89b037a6a9d323a3ebf000378397c72
+          EXPECTED_HEAD_SHA: 4bb77f2c930de7aba428de89bf81b82a562ac25f
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          git config user.name "David"
+          git config user.email "davidgmbb@gmail.com"
+          git fetch --no-tags origin "$BASE_SHA"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE_SHA"
+
+          set +e
+          git rebase "$BASE_SHA"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            git diff --name-only --diff-filter=U | sort > /tmp/actual-conflicts
+            cat > /tmp/expected-conflicts <<'EOF'
+          docs/native-retirement-census.md
+          tools/native_retirement_census.c
+          tools/native_retirement_contract.py
+          EOF
+            sort -o /tmp/expected-conflicts /tmp/expected-conflicts
+            diff -u /tmp/expected-conflicts /tmp/actual-conflicts
+            git checkout --ours -- docs/native-retirement-census.md tools/native_retirement_census.c tools/native_retirement_contract.py
+            git add docs/native-retirement-census.md tools/native_retirement_census.c tools/native_retirement_contract.py
+            GIT_EDITOR=true git rebase --continue
+          fi
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 1
+
+      - name: Refresh integrated dependency identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              "33be3c1582858afb570298ae49db193293e7ec2008d3a6b85f03df3485dea803": "e7007dc92507d1fa7b07f6e1ca9d170d3308f1e29aeb9dda167262a87a84c7c2",
+              "dc14e25a42f9000071d46c776f43282852bcebbf392a91089afe6b7e46aed55d": "e003bec1c3ab5dd1432570319a45c13f6b9426ade031cf81afa9912a80765607",
+              "542c978ad5f8252917fb0fd93cdd318ac8fcca9db14ffa1093edb606a8d637a2": "89e26522541a36798fabf34dbe3eae42b7ab4feace29974914df7681f53a1f40",
+              "fa98a21ebeeede091e8810034b315d12c66f629ba2d5e2c4225b5f96fc1ce48a": "06339d21853a7c90b773814bb0ddfe1c0fb584e14e5a1ce5b0b17387d20ad7f5",
+          }
+          expected_blobs = {
+              "docs/native-retirement-census.md": "3063939a33720e19aaf3871495dbe7f2efc6c6a3",
+              "tools/native_retirement_census.c": "de2b3797f3292064b195f9953153b6c675d65f1b",
+              "tools/native_retirement_contract.py": "d49e21d1ae465681112385bffb4be8ccab6803c8",
+          }
+          for name in expected_blobs:
+              path = Path(name)
+              text = path.read_text()
+              for old, new in replacements.items():
+                  if text.count(old) != 1:
+                      raise SystemExit(f"{name}: expected exactly one {old}")
+                  text = text.replace(old, new)
+              path.write_text(text)
+          PY
+          for item in \
+            'docs/native-retirement-census.md 3063939a33720e19aaf3871495dbe7f2efc6c6a3' \
+            'tools/native_retirement_census.c de2b3797f3292064b195f9953153b6c675d65f1b' \
+            'tools/native_retirement_contract.py d49e21d1ae465681112385bffb4be8ccab6803c8'; do
+            set -- $item
+            test "$(git hash-object "$1")" = "$2"
+          done
+          git add docs/native-retirement-census.md tools/native_retirement_census.c tools/native_retirement_contract.py
+          git commit --amend --no-edit
+
+      - name: Validate rebased tree
+        shell: bash
+        env:
+          BASE_SHA: 6836e4a8d89b037a6a9d323a3ebf000378397c72
+        run: |
+          set -euo pipefail
+          git diff --check "$BASE_SHA"..HEAD
+          git diff --name-only "$BASE_SHA"..HEAD | sort > /tmp/actual-paths
+          cat > /tmp/expected-paths <<'EOF'
+          .github/workflows/ci.yml
+          build.c
+          docs/agents/platform.md
+          docs/native-retirement-census.md
+          docs/native-retirement-dependencies-v1.json
+          docs/native-retirement-support-v1.tsv
+          src/buster/apps/ide/ide.c
+          src/buster/lib/compiler/assembly/arm_a64_sysreg_import.c
+          src/buster/lib/compiler/gpu/gpu.c
+          src/buster/lib/entry_point.c
+          src/buster/lib/os.c
+          src/buster/lib/os.h
+          src/buster/lib/os_internal.h
+          src/buster/lib/string.c
+          src/buster/tests/compiler/diagnostic_test.c
+          src/buster/tests/compiler/driver/driver_fast_test.c
+          src/buster/tests/compiler/driver/driver_test.c
+          src/buster/tests/compiler/frontend/c/macro_conditional_test.c
+          src/buster/tests/compiler/link/link_test.c
+          src/buster/tests/compiler/llvm/bitcode_test.c
+          src/buster/tests/compiler/metamorphic/metamorphic_test.c
+          src/buster/tests/file_test.c
+          src/buster/tests/os_test.c
+          tests/bootstrap_wrapper_test.py
+          tools/bench_service/profiles/native-retirement-performance-v1.blocked
+          tools/bench_service/queue.c
+          tools/clang_analyze.c
+          tools/differential.c
+          tools/native_retirement_census.c
+          tools/native_retirement_contract.py
+          tools/native_retirement_materializer.py
+          tools/native_retirement_performance_binding.py
+          tools/production_profile.c
+          tools/uefi_boot.c
+          EOF
+          sort -o /tmp/expected-paths /tmp/expected-paths
+          diff -u /tmp/expected-paths /tmp/actual-paths
+          test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 1
+          test "$(git log -1 --format=%s)" = "runtime: make process spawning transactional and hermetic"
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -q
+          python3 tools/native_retirement_rebind_test.py -q
+          python3 tools/native_retirement_materializer_test.py -q
+          python3 tools/check_action_pins.py
+
+      - name: Publish rebased PR head
+        shell: bash
+        env:
+          EXPECTED_HEAD_SHA: 4bb77f2c930de7aba428de89bf81b82a562ac25f
+        run: |
+          set -euo pipefail
+          git push --force-with-lease=refs/heads/fix/84-transactional-hermetic-spawn:$EXPECTED_HEAD_SHA origin HEAD:refs/heads/fix/84-transactional-hermetic-spawn
+          printf 'PUBLISHED_HEAD=%s\n' "$(git rev-parse HEAD)"
