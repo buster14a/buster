@@ -18188,7 +18188,14 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_expression_start(CParseResult* result, 
             u32 open = openers[cursor - 1 - start];
             if (open < cursor && open >= start)
             {
-                cursor = open;
+                // A control header ends before its unbraced body. In particular,
+                // if (condition) (*pointer()) = value is a dereferenced place,
+                // not an assignment to a call result spanning the condition.
+                bool control = open > start && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[open - 1],
+                    C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(FOR) |
+                    C_SYMBOL_WELL_KNOWN_BIT(SWITCH));
+                if (control) done = true;
+                else cursor = open;
             }
             else
             {
@@ -18196,7 +18203,8 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_expression_start(CParseResult* result, 
             }
         }
         else if (token.kind == C_TOKEN_IDENTIFIER && c_token_in_well_known_set(preprocess.spelling_base, token,
-                     C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(GOTO)))
+                     C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(CASE) | C_SYMBOL_WELL_KNOWN_BIT(GOTO) |
+                     C_SYMBOL_WELL_KNOWN_BIT(ELSE) | C_SYMBOL_WELL_KNOWN_BIT(DO)))
         {
             done = true;
         }
@@ -19957,7 +19965,14 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
     u32 header_close = header ? c_parse_matching_delimiter_indexed(result, preprocess, switch_index + 1) : function_end;
     u32 switch_end = header_close < function_end && header_close + 1 < function_end
         ? c_parse_statement_end(preprocess, header_close + 1, function_end, suffix, function_end - header_close) : UINT32_MAX;
-    if (switch_end != UINT32_MAX)
+    bool braced_body = header_close < function_end && header_close + 1 < function_end &&
+                       c_token_is_punctuator(&preprocess.tokens[header_close + 1], C_PUNCTUATOR_LEFT_BRACE);
+    if (!braced_body)
+    {
+        c_parse_lowering_constraint_consider(diagnostic, S8("unsupported C function-body statement or expression near 'switch'"),
+                                             switch_index, switch_index);
+    }
+    else if (switch_end != UINT32_MAX)
     {
         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, switch_index);
         u64 controlling_mark = machine->scratch_arena->position;

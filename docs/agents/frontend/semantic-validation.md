@@ -36,7 +36,7 @@ checks remain defensive checks for direct lowering callers.
 | Arithmetic and conditional operands, standalone expressions, conditions, returns, nested statement expressions | `c_parse_checked_expression_type`, `c_parse_validate_statement_expressions`, `c_parse_validate_return_statements` |
 | Named and computed calls, arity, argument conversions, discarded generic associations | `c_parse_validate_named_call_arities`, `c_parse_validate_const_assignments`, `c_parse_validate_generic_duplicates`; `c_semantic_call_accepts_arity` and shared message formatting |
 | `_Generic` shape, complete object associations, duplicate compatible types, selected association | `c_parse_validate_generic_duplicates` and the shared semantic expression/type queries |
-| Switch controlling types, typed cases/ranges, overlap, nested-case restrictions; break/continue/goto/labels | `c_parse_validate_switch_duplicates`, `c_parse_validate_control_statements`, `c_parse_validate_labels` |
+| Switch braced-body support, controlling types, typed cases/ranges, overlap, nested-case restrictions; break/continue/goto/labels | `c_parse_validate_switch_duplicates`, `c_parse_validate_control_statements`, `c_parse_validate_labels` |
 | Label-address conversion, storage, escape, computed target and dynamic aggregate indexing restrictions | `c_parse_validate_label_values` and compact entity provenance facts |
 | Builtin arity/types/immediates, variadic access, frame address, complex construction, atomic widths, SIMD shapes | `c_parse_validate_builtin_calls`, `c_parse_validate_atomic_accesses`; shared atomic spelling/arity, SIMD metadata and target layout facts |
 | Inline asm constraints, matching operands, register bindings, clobbers, names/labels and x87 stack positions | `c_parse_validate_assembly`; shared scalar-class, bound-register, clobber-conflict, fixed-operand and x87 policy helpers |
@@ -65,6 +65,10 @@ runs through syntax-only and object actions in both frontend SSA forms. The test
 compares success/failure, diagnostic and warning counts, structured fields and
 rendered diagnostics. Frozen expectations are essential: agreement between two
 paths sharing validation cannot alone prove that neither changed acceptance.
+An explicit invalid const-pointer assignment under an unbraced control statement
+is now rejected; main previously missed that qualifier check. The neighboring
+mutable assignments, including a directory-macro-shaped statement expression,
+remain accepted. This diagnostic correction is not counted as baseline parity.
 
 With `BUSTER_BENCH_ALLOCATIONS=ON`, the same cases require every canonical
 construction counter to remain unchanged across syntax-only. The counters cover
