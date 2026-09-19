@@ -16,19 +16,22 @@ full commit and tree and check active service PRs before changing the inventory.
 
 ## Repository prerequisites that provisioning cannot substitute for
 
-- The typed `client` reaches the authenticated socket, but does not grant the
-  Actions runner permission to use the service identity. A reviewed fixed
-  gateway is still required. The runner must not become `buster-bench`, gain
+- The typed `client` and fixed `gateway` reach the authenticated socket, but
+  do not grant the Actions runner permission to use the service identity.
+  A reviewed operator authorization boundary is still required. The installed
+  `gateway` fixes the socket, principal and smoke recipe; it accepts only
+  bounded keys, full source identities, numeric job IDs and log cursors. The
+  service checks the immutable installed inventory under the host lease.
+  The runner must not become `buster-bench`, gain
   queue/lease write access, or receive a shell or unrestricted `sudo` under that
-  identity. The gateway must fix the socket, principal, recipe and inventory;
-  accept bounded immutable IDs and idempotency keys only; and use `client` or
-  its typed encoder. Never expose direct `submit`, `protocol`, `rpc`,
+  identity. Authorize only the fixed installed `gateway` subcommand, with no
+  environment or executable override. Never expose direct `submit`, `protocol`, `rpc`,
   `materialize`, `worker-run` or `workspace-reconcile` to Actions.
-- A bounded result exporter is still required. `client result JOB` invokes
-  the service's exhaustive result validation, but the human CLI prints only
-  status fields. The schema-2 response can bind the result root, manifest,
-  bundle and full-result digests; `main.c` does not print that extension. There
-  is no public file-download operation. Do not treat `client result` stdout
+- A bounded result exporter is still required. `client result JOB` and
+  `gateway result JOB` invoke the service's exhaustive result validation and
+  print the bound result root, manifest, bundle and full-result digests after
+  validating the response payload. There is no public file-download operation.
+  Do not treat `client result` stdout
   or `client logs` (journal transitions only) as a downloaded result bundle.
 - The exporter must select by authenticated job/attempt identity, not a
   caller-supplied path. Reuse the existing manifest/bundle validator and fixed

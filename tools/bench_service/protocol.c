@@ -1,6 +1,7 @@
 /* Versioned local control codec, not a network server or authentication layer.
  * Requests and responses are capped at 536 bytes, independent of queue size.
  * Both human CLI commands and raw protocol requests enter bq_dispatch.
+ * bq_public_response_valid checks successful typed replies before rendering.
  */
 #include "queue.h"
 #define BQ_CONTROL_HEADER 24u
@@ -72,6 +73,86 @@ BUSTER_GLOBAL_LOCAL void bq_packet_schema(BqPacket* packet, u32 schema, u32 oper
 BUSTER_GLOBAL_LOCAL void bq_packet(BqPacket* packet, u32 operation, u64 correlation, u8 const* body, u32 size)
 {
     bq_packet_schema(packet, BQ_CONTROL_SCHEMA, operation, correlation, body, size);
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPacket const* response)
+{
+    bool valid = request && response && request->size >= BQ_CONTROL_HEADER && request->size <= BQ_CONTROL_CAP &&
+                 response->size >= BQ_CONTROL_HEADER + 4 && response->size <= BQ_CONTROL_CAP;
+    if (valid)
+    {
+        valid = !memcmp(request->bytes, "BQP1", 4) && !memcmp(response->bytes, "BQP1", 4) &&
+                bq_u32(request->bytes + 4) == BQ_CONTROL_SCHEMA && bq_u32(response->bytes + 4) == BQ_CONTROL_SCHEMA &&
+                bq_u32(request->bytes + 12) == request->size - BQ_CONTROL_HEADER &&
+                bq_u32(response->bytes + 12) == response->size - BQ_CONTROL_HEADER &&
+                bq_u32(response->bytes + 8) == (bq_u32(request->bytes + 8) | 0x80000000u) &&
+                bq_u64(response->bytes + 16) == bq_u64(request->bytes + 16) &&
+                bq_u32(response->bytes + BQ_CONTROL_HEADER) == BQ_OK;
+    }
+    if (valid)
+    {
+        u32 operation = bq_u32(request->bytes + 8);
+        u32 length = response->size - BQ_CONTROL_HEADER;
+        u8 const* data = response->bytes + BQ_CONTROL_HEADER;
+        u8 const* arguments = request->bytes + BQ_CONTROL_HEADER;
+        if (operation == BQ_OP_CAPABILITIES)
+        {
+            valid = request->size == BQ_CONTROL_HEADER && length > 4;
+            for (u32 i = 4; valid && i < length; i += 1)
+                valid = data[i] == '\n' || (data[i] >= 0x20 && data[i] <= 0x7e);
+        }
+        else if (operation == BQ_OP_LOGS)
+        {
+            valid = request->size == BQ_CONTROL_HEADER + 16 && length >= 20;
+            if (valid)
+            {
+                u32 count = bq_u32(data + 4);
+                u64 next = bq_u64(arguments + 8);
+                valid = count <= BQ_LOG_PAGE && length == 20 + count * 32 && bq_u32(data + 16) <= 1 &&
+                        (!bq_u32(data + 16) || count == BQ_LOG_PAGE);
+                for (u32 i = 0; valid && i < count; i += 1)
+                {
+                    u8 const* event = data + 20 + i * 32;
+                    valid = bq_u64(event) > next && bq_u64(event + 8) == bq_u64(arguments) &&
+                            bq_u32(event + 16) >= BQ_SUBMIT && bq_u32(event + 16) <= BQ_RESULT_BIND &&
+                            bq_u32(event + 20) <= BQ_FINISHED && bq_u32(event + 24) <= BQ_INTERRUPTED &&
+                            bq_u32(event + 28) == BQ_NOT_EVALUATED;
+                    next = bq_u64(event);
+                }
+                valid = valid && bq_u64(data + 8) == next;
+            }
+        }
+        else if (operation >= BQ_OP_SUBMIT && operation <= BQ_OP_CANCEL)
+        {
+            valid = (length == 124 || length == BQ_CONTROL_BODY) &&
+                    (operation == BQ_OP_SUBMIT || request->size == BQ_CONTROL_HEADER + 8);
+            if (valid)
+            {
+                valid = bq_u64(data + 4) != 0 &&
+                        (operation == BQ_OP_SUBMIT || bq_u64(data + 4) == bq_u64(arguments)) &&
+                        bq_u32(data + 28) <= BQ_FINISHED && bq_u32(data + 32) <= BQ_INTERRUPTED &&
+                        bq_u32(data + 36) == BQ_NOT_EVALUATED && bq_u32(data + 40) <= 1 &&
+                        bq_u32(data + 44) <= 1 && bq_u32(data + 48) <= BQ_PENDING_CAP &&
+                        bq_u32(data + 52) <= BQ_JOB_CAP && bq_u32(data + 48) <= bq_u32(data + 52) &&
+                        bq_result_digest_valid(data + 56) && bq_u32(data + 120) <= BQ_WORKER_CANCEL_SIGNAL;
+                if (valid && length == BQ_CONTROL_BODY)
+                {
+                    u32 root_length = bq_u32(data + 124);
+                    valid = (operation == BQ_OP_STATUS || operation == BQ_OP_RESULT) && bq_u64(data + 12) != 0 &&
+                            bq_result_path_valid(data + 128, root_length) &&
+                            bq_result_digest_valid(data + 320) && bq_result_digest_valid(data + 384) &&
+                            bq_result_digest_valid(data + 448);
+                    for (u32 i = root_length; valid && i < BQ_PATH_CAP; i += 1)
+                        valid = data[128 + i] == 0;
+                }
+            }
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 size, BqPacket* response)
@@ -240,7 +321,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         {
             memcpy(output + 56, job->digest, 64);
         }
-        if (output_size == 124)
+        if (output_size == 124 || output_size == BQ_CONTROL_BODY)
         {
             BqError failure = job ? bq_failure_evidence(queue, job) : BQ_NOT_FOUND;
             bq_put32(output + 120, failure != BQ_NOT_FOUND && failure != BQ_UNSUPPORTED ? (u32)failure : 0);
