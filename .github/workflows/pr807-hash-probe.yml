@@ -1,0 +1,30 @@
+name: PR 807 support-input hash probe
+
+on:
+  push:
+    branches:
+      - codex/603-analyzer-reference-provenance-v3-20260918
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr807-hash-probe-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  hash:
+    name: Hash frozen support input
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Report identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          wc -c tests/ci_tools_test.py
+          sha256sum tests/ci_tools_test.py
