@@ -254,23 +254,27 @@ struct DebugLocationSeed
     DebugLocation location;
 };
 
-// Accelerator over a `DebugLocationSeed` array, grouping seed indexes by their
-// owning function symbol.  Every variable needs the seeds of exactly one
-// symbol, and debug info is built for every function by default, so scanning
-// the whole seed array per variable is quadratic across a translation unit.
+// Accelerator over a `DebugLocationSeed` array. One stable partition groups
+// seed indexes by owning function symbol for wildcard/global queries; a second
+// groups them by `(function_symbol, local)` for exact local-variable queries.
+// This avoids rescanning every seed of a large function for each named local.
 typedef struct DebugLocationIndex DebugLocationIndex;
 struct DebugLocationIndex
 {
     // The exact array this index describes. Model construction rebuilds stale
     // indexes and validates matching ones once before any variable lookup.
     // Caller-owned arrays must remain alive and contain their declared counts.
-    // Endpoints partition all seeds; each bucket's order is strictly increasing
-    // and contains exactly the seeds whose symbols hash to that bucket.
+    // Both endpoint/order pairs partition every seed, preserve original order
+    // within a bucket, and contain only seeds hashing to that bucket's key.
     DebugLocationSeed* locations;
-    // `bucket_ends[bucket]` is the end offset of the bucket inside `order`; the
-    // bucket starts at `bucket ? bucket_ends[bucket - 1] : 0`.
+    // `bucket_ends[bucket]` is the end offset of the symbol bucket inside
+    // `order`; the bucket starts at `bucket ? bucket_ends[bucket - 1] : 0`.
     u32* bucket_ends;
     u32* order;
+    // The exact-local partition uses the same bucket count and endpoint
+    // convention, but hashes both the function symbol and local ID.
+    u32* local_bucket_ends;
+    u32* local_order;
     u32 bucket_count;
     u32 location_count;
 };
