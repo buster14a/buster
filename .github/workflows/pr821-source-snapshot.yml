@@ -21,7 +21,7 @@ jobs:
           path: snapshots/base
           persist-credentials: false
       - name: Check out PR head
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af25f
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 4bb77f2c930de7aba428de89bf81b82a562ac25f
           path: snapshots/head
