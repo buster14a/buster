@@ -1,0 +1,34 @@
+{
+  "schema": "buster.native-retirement.gates.v1",
+  "backend_identity": "mir-native-v1",
+  "gates": {
+    "census-508": "linux-x86_64",
+    "strict-linux-x86_64": "linux-x86_64",
+    "strict-linux-aarch64": "linux-aarch64",
+    "strict-macos-x86_64": "macos-x86_64",
+    "strict-macos-aarch64": "macos-aarch64",
+    "strict-windows-x86_64": "windows-x86_64",
+    "strict-windows-aarch64": "windows-aarch64",
+    "sanitizer-linux-x86_64": "linux-x86_64",
+    "sanitizer-linux-aarch64": "linux-aarch64",
+    "sanitizer-macos-x86_64": "macos-x86_64",
+    "sanitizer-macos-aarch64": "macos-aarch64",
+    "sanitizer-windows-x86_64": "windows-x86_64",
+    "repeated-self-host-509": "linux-x86_64",
+    "semantic-509": "linux-x86_64",
+    "production-direct-reachability": "source-verifier",
+    "final-change-comparison-512": "bench-linux-x86_64"
+  },
+  "requirements": {
+    "census_issue": 508,
+    "platform_and_semantic_issue": 509,
+    "final_change_issue": 512,
+    "minimum_repeated_self_host_iterations": 3,
+    "production_direct_native_reachable": 0,
+    "direct_fallback_invocations": 0,
+    "required_oracles": [
+      "archived-direct",
+      "clang"
+    ]
+  }
+}
