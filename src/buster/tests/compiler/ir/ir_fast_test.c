@@ -1,6 +1,16 @@
 // Included by ir_test.c. These inspect shared canonical rows before any target
 // can hide a missing transformation; executable differential uses the fixture
 // tests/basic_c_canonical_fast.c with all pass/allocator combinations.
+BUSTER_GLOBAL_LOCAL u64 ir_test_operand_total(IrFunction* function)
+{
+    u64 total = 0;
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        total += function->instructions[index].operand_count;
+    }
+    return total;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -16,6 +26,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         {
             IrProgram* program = lowered.program;
             IrModule* module = program->modules;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* function = module->functions + index;
+                BUSTER_TEST(arguments, function->operand_total == ir_test_operand_total(function));
+            }
             IrValidationResult before = ir_prepare_canonical_module(program, module, false);
             BUSTER_TEST(arguments, before.error == IR_VALIDATION_NONE);
             u32 calls = 0, stores = 0, loads = 0;
@@ -36,6 +51,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             for (u32 index = 0; index < module->function_count; index += 1)
             {
                 IrFunction* function = module->functions + index;
+                BUSTER_TEST(arguments, function->operand_total == ir_test_operand_total(function));
                 after_calls += ir_test_opcode_count(function, IR_OPCODE_CALL);
                 after_stores += ir_test_opcode_count(function, IR_OPCODE_STORE);
                 after_loads += ir_test_opcode_count(function, IR_OPCODE_LOAD);
@@ -225,6 +241,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
     // the advertised value population. This is not a valid-IR certification test.
+    // Known summaries must admit from the producer's facts, before touching
+    // row storage. Unknown summaries must ignore that cache and scan the row.
+    for (u32 known = 0; known < 2; known += 1)
+    {
+        IrInstruction row = {.opcode = IR_OPCODE_LABEL_ADDRESS, .operand_count = 1};
+        IrFunction probe = {.state = IR_FUNCTION_LOWERED, .instructions = known ? 0 : &row,
+            .instruction_count = 1, .operand_total = IR_FAST_WORK_BUDGET + 1,
+            .opcode_summary = known ? IR_OPCODE_SUMMARY_KNOWN : 0};
+        IrProgram probe_program = {.arena = arguments->arena, .fast_passes = IR_FAST_ALL};
+        IrFastStatistics probe_statistics = ir_test_fast_function(&probe_program, &probe);
+        BUSTER_TEST(arguments, probe_statistics.budget_skips == known);
+        BUSTER_TEST(arguments, probe_statistics.provenance_skips == !known);
+        BUSTER_TEST(arguments, probe_statistics.scratch_peak_bytes == 0);
+        if (known)
+        {
+            probe.opcode_summary |= IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH);
+            probe.operand_total = 0;
+            probe_statistics = ir_test_fast_function(&probe_program, &probe);
+            BUSTER_TEST(arguments, probe_statistics.provenance_skips == 1 && probe_statistics.budget_skips == 0);
+            BUSTER_TEST(arguments, probe_statistics.scratch_peak_bytes == 0);
+        }
+    }
     IrFunction oversized = {.state = IR_FUNCTION_LOWERED, .value_count = UINT32_MAX};
     IrProgram oversized_program = {.arena = arguments->arena, .disable_local_promotion = true, .fast_passes = IR_FAST_ALL};
     IrFastStatistics oversized_statistics = ir_test_fast_function(&oversized_program, &oversized);

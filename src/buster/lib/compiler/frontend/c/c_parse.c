@@ -4119,9 +4119,71 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_expression_type(CTypeParseMachine* machine
 }
 
 
-BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
-                                                        CDeclaration declaration, CScopeId scope, u64* value_out, String8* message_out)
+// Bounds the controlling expression of one static assertion.  Buster applies
+// the C integer-constant-expression constraint in every dialect; GNU modes do
+// not adopt GCC's extension that accepts a floating scalar constant here.
+BUSTER_C_INTERNAL bool c_parse_static_assert_expression_range(CPreprocessResult preprocess, CDeclaration declaration,
+                                                                u32* expression_start_out, u32* expression_end_out)
 {
+    u32 start = declaration.token_start;
+    u32 end = start + declaration.token_count;
+    u32 comma = end;
+    u32 close = end;
+    u32 depth = 0;
+    u32 group_depth = 0;
+    bool valid = start + 3 < end && end <= preprocess.token_count &&
+                 c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    for (u32 token_index = start + 1; valid && token_index < end; token_index += 1)
+    {
+        CToken token = preprocess.tokens[token_index];
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        {
+            group_depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET))
+        {
+            group_depth -= group_depth != 0;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            depth += 1;
+        }
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            valid = depth != 0;
+            if (valid)
+            {
+                depth -= 1;
+                if (!depth)
+                {
+                    close = token_index;
+                    break;
+                }
+            }
+        }
+        else if (depth == 1 && !group_depth && comma == end && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            comma = token_index;
+        }
+    }
+    u32 expression_end = comma < close ? comma : close;
+    valid &= close != end && expression_end > start + 2;
+    if (valid)
+    {
+        *expression_start_out = start + 2;
+        *expression_end_out = expression_end;
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CDeclaration declaration, CScopeId scope, u64* value_out, String8* message_out,
+                                                        bool* requires_typed_evaluation_out)
+{
+    if (requires_typed_evaluation_out)
+    {
+        *requires_typed_evaluation_out = false;
+    }
     u32 start = declaration.token_start;
     u32 end = start + declaration.token_count;
     if (start + 3 >= end || !c_token_is_punctuator(&preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
@@ -4237,6 +4299,16 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
                     cast_type = c_parse_pointer_chain(result, preprocess, cast_type, &type_index, type_end);
                     if (cast_type.value != C_ID_UNDERLYING_INVALID && type_index == type_end)
                     {
+                        // The legacy token evaluator has no typed cast operation:
+                        // erasing this cast changes both the controlling type and
+                        // truncating conversions.  Real static assertions hand the
+                        // expression to canonical-IR constant evaluation instead;
+                        // synthetic integer-range callers retain the established
+                        // token path by passing no flag.
+                        if (requires_typed_evaluation_out)
+                        {
+                            *requires_typed_evaluation_out = true;
+                        }
                         expression_index = cast_close;
                         continue;
                     }
@@ -4416,7 +4488,7 @@ BUSTER_C_INTERNAL bool c_parse_integer_constant_range(CTypeParseMachine* machine
                                           (CDeclaration){
                                               .token_count = expression_count + 4,
                                           },
-                                          scope, value_out, &ignored_message);
+                                          scope, value_out, &ignored_message, 0);
 }
 
 // C11 6.3.2.3p3 gives a null pointer constant two spellings: an integer
@@ -4555,9 +4627,29 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
         return;
     }
     CToken first = preprocess.tokens[declaration.token_start];
+    bool expression_is_integer = true;
+    u32 expression_start = 0;
+    u32 expression_end = 0;
+    if (machine && c_parse_static_assert_expression_range(preprocess, declaration, &expression_start, &expression_end))
+    {
+        CTypeId expression_type = C_TYPE_ID_INVALID;
+        if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, expression_start, expression_end, &expression_type) &&
+            expression_type.value < result->type_count)
+        {
+            expression_is_integer = c_parse_expression_integer_kind(result->types[expression_type.value].kind);
+        }
+    }
     u64 value = 0;
     String8 message = {0};
-    if (!c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value, &message))
+    bool requires_typed_evaluation = false;
+    bool evaluated = expression_is_integer &&
+                     c_parse_static_assert_evaluate(machine, arena, preprocess, result, declaration, scope, &value, &message,
+                                                    &requires_typed_evaluation);
+    if (requires_typed_evaluation)
+    {
+        c_parse_defer_static_assert(preprocess, result, declaration, scope);
+    }
+    else if (!evaluated)
     {
         String8* parts = arena_allocate(arena, String8, declaration.token_count * 2);
         u32 part_count = 0;

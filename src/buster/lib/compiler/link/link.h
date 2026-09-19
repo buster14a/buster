@@ -33,7 +33,12 @@ typedef struct LinkOptions LinkOptions;
 struct LinkOptions
 {
     bool allow_undefined_symbols;
-    u8 reserved[7];
+    // The caller guarantees that a single input's section payloads outlive
+    // the linked object. Metadata is still rebuilt; only immutable payloads
+    // that need neither concatenation, padding nor initializer reordering
+    // may be shared.
+    bool alias_single_input_sections;
+    u8 reserved[6];
 };
 
 typedef struct LinkObjectResult LinkObjectResult;
