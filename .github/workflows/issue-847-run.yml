@@ -31,6 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 .github/issue-847-apply.py
+          python3 .github/issue-847-restore-helper.py
           git fetch --no-tags origin refs/pull/522/head
           git checkout FETCH_HEAD -- \
             src/buster/tests/compiler/codegen/aarch64_stride_test.c \
