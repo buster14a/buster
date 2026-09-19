@@ -241,45 +241,67 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunc
 }
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* arena, Arena* scratch, IrFunction* function,
-                                                                      IrPublishedCfg* cfg, IrCfgBlock* blocks)
+                                                                      IrPublishedCfg* cfg, IrCfgBlock* blocks,
+                                                                      bool linear_order_validated)
 {
     IrValidationResult result = ir_validation_ok();
     u32 count = function->instruction_count;
-    IrInstructionId* remap = arena_allocate(scratch, IrInstructionId, count);
-    u32* inverse = arena_allocate(scratch, u32, count);
-    memset(remap, 0xff, sizeof(*remap) * count);
+    IrInstructionId* remap = 0;
+    u32* inverse = 0;
     u32 cursor = 0;
     bool moved = false;
-    for (u32 index = 0; index < function->block_count && result.error == IR_VALIDATION_NONE; index += 1)
+    if (linear_order_validated)
     {
-        IrBlock* block = function->blocks + index;
-        IrInstructionId id = block->first_instruction;
-        IrInstructionId last = IR_INSTRUCTION_ID_INVALID;
-        blocks[index].first_instruction = cursor;
-        while (id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
+        // Canonical validation already walked these exact mutable chains and
+        // proved their traversal order is row 0..N-1. Derive spans from the
+        // certified endpoints without touching every instruction again.
+        for (u32 index = 0; index < function->block_count; index += 1)
         {
-            if (id.value >= count || remap[id.value].value != IR_ID_UNDERLYING_INVALID)
-            {
-                result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, id);
-            }
-            else
-            {
-                moved |= id.value != cursor;
-                remap[id.value].value = cursor;
-                inverse[cursor++] = id.value;
-                last = id;
-                id = function->instructions[id.value].next;
-            }
+            IrBlock* block = function->blocks + index;
+            BUSTER_CHECK(block->first_instruction.value == cursor);
+            BUSTER_CHECK(block->last_instruction.value >= cursor && block->last_instruction.value < count);
+            blocks[index].first_instruction = cursor;
+            blocks[index].instruction_count = block->last_instruction.value - cursor + 1;
+            cursor += blocks[index].instruction_count;
         }
-        blocks[index].instruction_count = cursor - blocks[index].first_instruction;
-        if (result.error == IR_VALIDATION_NONE && last.value != block->last_instruction.value)
-        {
-            result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, block->last_instruction);
-        }
+        BUSTER_CHECK(cursor == count);
     }
-    if (result.error == IR_VALIDATION_NONE && cursor != count)
+    else
     {
-        result.error = IR_VALIDATION_INSTRUCTION_OWNERSHIP;
+        remap = arena_allocate(scratch, IrInstructionId, count);
+        inverse = arena_allocate(scratch, u32, count);
+        memset(remap, 0xff, sizeof(*remap) * count);
+        for (u32 index = 0; index < function->block_count && result.error == IR_VALIDATION_NONE; index += 1)
+        {
+            IrBlock* block = function->blocks + index;
+            IrInstructionId id = block->first_instruction;
+            IrInstructionId last = IR_INSTRUCTION_ID_INVALID;
+            blocks[index].first_instruction = cursor;
+            while (id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
+            {
+                if (id.value >= count || remap[id.value].value != IR_ID_UNDERLYING_INVALID)
+                {
+                    result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, id);
+                }
+                else
+                {
+                    moved |= id.value != cursor;
+                    remap[id.value].value = cursor;
+                    inverse[cursor++] = id.value;
+                    last = id;
+                    id = function->instructions[id.value].next;
+                }
+            }
+            blocks[index].instruction_count = cursor - blocks[index].first_instruction;
+            if (result.error == IR_VALIDATION_NONE && last.value != block->last_instruction.value)
+            {
+                result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, block->last_instruction);
+            }
+        }
+        if (result.error == IR_VALIDATION_NONE && cursor != count)
+        {
+            result.error = IR_VALIDATION_INSTRUCTION_OWNERSHIP;
+        }
     }
     for (u32 index = 0; index < function->value_count && result.error == IR_VALIDATION_NONE; index += 1)
     {
@@ -355,12 +377,16 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
             IrCfgBlock* published = blocks + index;
             block->first_instruction.value = published->instruction_count ? published->first_instruction : IR_ID_UNDERLYING_INVALID;
             block->last_instruction.value = published->instruction_count ? published->first_instruction + published->instruction_count - 1 : IR_ID_UNDERLYING_INVALID;
-            // The mutable chain stops existing at publication. Consumers use
-            // the dense span; explicit invalidation reconstructs builder links.
-            for (u32 offset = 0; offset < published->instruction_count; offset += 1)
+            // Published consumers use the dense span. With a validated
+            // identity order, the retained links are exactly what explicit
+            // invalidation would reconstruct, so avoid rewriting every row.
+            if (!linear_order_validated)
             {
-                u32 row = published->first_instruction + offset;
-                function->instructions[row].next = IR_INSTRUCTION_ID_INVALID;
+                for (u32 offset = 0; offset < published->instruction_count; offset += 1)
+                {
+                    u32 row = published->first_instruction + offset;
+                    function->instructions[row].next = IR_INSTRUCTION_ID_INVALID;
+                }
             }
         }
         cfg->instruction_count = count;
@@ -455,7 +481,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_published_cfg(IrFunction* fun
     return result;
 }
 
-IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_function_publish_cfg_validated_linear(Arena* arena, IrFunction* function, bool linear_order_validated)
 {
     IrValidationResult result = ir_validation_ok();
     if (!arena || !function || !function->block_count || !function->blocks || !function->instructions ||
@@ -654,7 +680,7 @@ IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
                     .argument_count = (u32)argument_count, .allocated_bytes = sizeof(*cfg) + sizeof(*blocks) * (u64)count +
                         (sizeof(*edges) + sizeof(*predecessors)) * edge_count + sizeof(*parameters) * parameter_count +
                         sizeof(*arguments) * argument_count};
-                result = ir_cfg_publish_instruction_rows(arena, temporary.arena, function, cfg, blocks);
+                result = ir_cfg_publish_instruction_rows(arena, temporary.arena, function, cfg, blocks, linear_order_validated);
                 if (result.error == IR_VALIDATION_NONE)
                 {
                     for (u32 block = 0; block < count; block += 1)
@@ -678,4 +704,9 @@ IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
         IR_CONSTRUCTION_RECORD(CFG_FAILURES, 1);
     }
     return result;
+}
+
+IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
+{
+    return ir_function_publish_cfg_validated_linear(arena, function, false);
 }
