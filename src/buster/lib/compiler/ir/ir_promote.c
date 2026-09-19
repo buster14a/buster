@@ -723,17 +723,6 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                                      IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) |
                                      IR_OPCODE_BIT(IR_OPCODE_STACK_SAVE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE);
         barrier |= ir_function_may_contain_opcodes(function, unconditional_barriers);
-        if (local_count && !barrier && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_CALL)))
-        {
-            // CALL is conditional: direct ordinary calls are safe, while
-            // indirect and returns-twice calls are barriers. The summary
-            // proves when this scan is unnecessary.
-            for (u32 index = 0; index < function->instruction_count && !barrier; index += 1)
-            {
-                IrInstruction* row = function->instructions + index;
-                barrier = row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(program, row);
-            }
-        }
     }
     else
     {
@@ -833,14 +822,18 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                 }
             }
         }
-        statistics->candidate_locals += local_count;
+        // Calls need semantic qualification, unlike unconditional barriers.
+        // Reuse the required operand/event walk and finish that proof before
+        // any local can be promoted instead of adding a discovery row scan.
+        bool inspect_calls = sparse_locals && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_CALL));
         u32 event_count = 0;
-        for (u32 block = 0; block < function->block_count; block += 1)
+        for (u32 block = 0; block < function->block_count && !barrier; block += 1)
         {
             IrBlock* source = function->blocks + block;
-            for (u32 index = source->first_instruction.value; index != IR_PROMOTE_NONE; index = function->instructions[index].next.value)
+            for (u32 index = source->first_instruction.value; index != IR_PROMOTE_NONE && !barrier; index = function->instructions[index].next.value)
             {
                 IrInstruction* row = function->instructions + index;
+                barrier = inspect_calls && row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(program, row);
                 u32 owner = row->opcode == IR_OPCODE_LOCAL ? local_by_value[row->result.value] : IR_PROMOTE_NONE;
                 for (u32 operand = 0; operand < row->operand_count; operand += 1)
                 {
@@ -876,7 +869,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                     local->last = event_count++;
                 }
             }
-            for (IrBlockParameter* parameter = source->first_parameter; parameter; parameter = parameter->next)
+            for (IrBlockParameter* parameter = source->first_parameter; parameter && !barrier; parameter = parameter->next)
             {
                 for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
                 {
@@ -888,6 +881,14 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                 }
             }
         }
+        if (barrier)
+        {
+            statistics->barrier_functions += 1;
+        }
+        else
+        {
+            statistics->candidate_locals += local_count;
+        }
         IrPromoteCfg cfg = {0};
         bool cfg_built = false;
         bool cfg_valid = false;
@@ -898,7 +899,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
         u32* entries = 0;
         u32* exits = 0;
         u64 promoted_before = statistics->promoted_locals;
-        for (u32 index = 0; index < local_count; index += 1)
+        for (u32 index = 0; index < local_count && !barrier; index += 1)
         {
             IrPromoteLocal* local = locals + index;
             if (local->eligible)

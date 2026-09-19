@@ -534,8 +534,8 @@
       "source": "src/buster/lib/compiler/ir/ir_promote.c",
       "provenance": "repo:src/buster/lib/compiler/ir/ir_promote.c",
       "destination": "dependencies/project-include/buster/lib/compiler/ir/ir_promote.c",
-      "bytes": 42674,
-      "sha256": "36289333585546c96ee52a9055534e9abb500e5635391df64c39384a39d0e69a"
+      "bytes": 42693,
+      "sha256": "ed4e8363e376b502442c8a3ed17c1a52539c4638be493f3dd03c779e29a99fde"
     },
     {
       "source": "src/buster/lib/compiler/ir/model.h",

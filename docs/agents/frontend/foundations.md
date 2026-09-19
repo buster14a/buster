@@ -97,9 +97,10 @@ The existing conservative opcode summary also tracks `LOCAL`, so shared
 promotion skips its discovery scan for certified functions with no memory
 locals. Summary-known functions discover remaining live definitions through
 `local_places`, retaining definition-row order for deterministic promotion.
-Tracked barrier opcodes avoid further inspection when absent; calls still need
-the existing indirect/returns-twice qualification. Unknown summaries keep the
-row scan and the shared algorithm stays independent.
+Tracked barrier opcodes avoid further inspection when absent. The required
+operand/event walk qualifies indirect/returns-twice calls before any promotion,
+so ordinary calls do not require a separate discovery scan. Unknown summaries
+keep the row scan and the shared algorithm stays independent.
 
 `c_lower_to_ir_with_options` and `c_analyze_with_options` expose the memory-form
 reference through `CIRLowerOptions.disable_direct_ssa`. `ide cc
