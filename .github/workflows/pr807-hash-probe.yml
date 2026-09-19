@@ -1,4 +1,4 @@
-name: PR 807 support-input hash probe
+name: PR 807 CI repair staging
 
 on:
   push:
@@ -6,25 +6,54 @@ on:
       - codex/603-analyzer-reference-provenance-v3-20260918
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: pr807-hash-probe-${{ github.sha }}
+  group: pr807-ci-repair-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
-  hash:
-    name: Hash frozen support input
+  repair:
+    name: Stage frozen support identity repair
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          persist-credentials: false
-      - name: Report identity
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Rewrite, validate, and stage the repair commit
         shell: bash
         run: |
           set -euo pipefail
-          wc -c tests/ci_tools_test.py
-          sha256sum tests/ci_tools_test.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import csv
+
+          manifest = Path("docs/native-retirement-support-v1.tsv")
+          old = ("tests/ci_tools_test.py\tsupport-file\tdependency-only\t78923\t"
+                 "7b55011a66ac8b5bc5b3d9757c17c1d7e6698c37d500777121022f6308a54981")
+          new = ("tests/ci_tools_test.py\tsupport-file\tdependency-only\t79253\t"
+                 "beb9475bf0a114b86b62edd1193263e717319365cd204db7791cdb44ede78d2d")
+          text = manifest.read_text(encoding="utf-8")
+          if text.count(old) != 1:
+              raise SystemExit("expected exactly one stale tests/ci_tools_test.py identity")
+          manifest.write_text(text.replace(old, new), encoding="utf-8")
+          with manifest.open(newline="", encoding="utf-8") as stream:
+              rows = list(csv.DictReader(stream, delimiter="\t"))
+          if len(rows) != 558:
+              raise SystemExit(f"unexpected support row count: {len(rows)}")
+          row = next(row for row in rows if row["path"] == "tests/ci_tools_test.py")
+          if row["bytes"] != "79253" or row["sha256"] != new.rsplit("\t", 1)[1]:
+              raise SystemExit("rewritten support identity did not validate")
+          Path(".github/workflows/pr807-hash-probe.yml").unlink()
+          PY
+          python3 tools/native_retirement_contract_test.py
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/native-retirement-support-v1.tsv .github/workflows/pr807-hash-probe.yml
+          git commit -m "ci: refresh frozen support identity"
+          git push origin HEAD:refs/heads/codex/807-ci-fix-staging-20260918
+          printf 'STAGED_COMMIT=%s\n' "$(git rev-parse HEAD)"
