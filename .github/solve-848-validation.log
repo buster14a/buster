@@ -1,4 +1,4 @@
-head=2d8dae39125f9a9aa914cf8de5236f1a3aede2cb
+head=6d50cf9b43edf58cb0bdcc5e0294a1643c701543
 status=failed
 
-error: tcc was not found in PATH
+Error: /home/runner/work/buster/buster/build is not a directory
