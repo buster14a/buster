@@ -17109,23 +17109,30 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
     {
         return;
     }
+
     CScopeId scope = c_parse_scope_for_token(result, declaration->scope, switch_index);
     u64 controlling_mark = machine->scratch_arena->position;
     CTypeId controlling_type = C_TYPE_ID_INVALID;
     bool controlling_type_resolved =
         c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, switch_index + 2, header_close, &controlling_type);
+    CTypeKind controlling_kind = C_TYPE_INVALID;
     u64 value_mask = UINT64_MAX;
+    u64 sign_bit = 0;
     if (controlling_type_resolved && controlling_type.value < result->type_count)
     {
-        CTypeKind kind = c_parse_expression_promoted_kind(result->types[controlling_type.value].kind);
+        controlling_kind = c_parse_expression_promoted_kind(result->types[controlling_type.value].kind);
         u64 size = 0;
         u32 alignment = 0;
-        controlling_type_resolved = c_parse_expression_integer_kind(kind) &&
-                                    c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) && size && size <= sizeof(u64);
+        controlling_type_resolved = c_parse_expression_integer_kind(controlling_kind) &&
+                                    c_parse_builtin_type_layout(preprocess.target, controlling_kind, &size, &alignment) && size && size <= sizeof(u64);
         BUSTER_UNUSED(alignment);
         if (controlling_type_resolved && size < sizeof(u64))
         {
             value_mask = UINT64_MAX >> (64 - (u32)(size * 8));
+        }
+        if (controlling_type_resolved && c_parse_expression_signed_kind(controlling_kind))
+        {
+            sign_bit = size == sizeof(u64) ? (UINT64_C(1) << 63) : (UINT64_C(1) << ((u32)(size * 8) - 1));
         }
     }
     arena_set_position(machine->scratch_arena, controlling_mark);
@@ -17133,8 +17140,11 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
     {
         return;
     }
+
     u64 mark = machine->scratch_arena->position;
-    u64* values = arena_allocate(machine->scratch_arena, u64, switch_end - header_close + 1);
+    u32 capacity = switch_end - header_close + 1;
+    u64* lows = arena_allocate(machine->scratch_arena, u64, capacity);
+    u64* highs = arena_allocate(machine->scratch_arena, u64, capacity);
     u32 value_count = 0;
     for (u32 index = header_close + 1; index < switch_end; index += 1)
     {
@@ -17159,29 +17169,95 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
         {
             continue;
         }
+
         u32 colon = c_parse_case_label_colon(result, preprocess, index + 1, switch_end);
         if (colon == UINT32_MAX)
         {
             continue;
         }
-        u64 value = 0;
-        u64 expression_mark = machine->scratch_arena->position;
-        bool constant = c_parse_integer_constant_range(machine, machine->scratch_arena, preprocess, result, scope, index + 1, colon, &value);
-        arena_set_position(machine->scratch_arena, expression_mark);
-        if (!constant)
+        u32 range_operator = UINT32_MAX;
+        u32 malformed_operator = UINT32_MAX;
+        for (u32 scan = index + 1; scan < colon; scan += 1)
         {
+            CToken current = preprocess.tokens[scan];
+            if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACE))
+            {
+                u32 nested = c_parse_matching_delimiter_indexed(result, preprocess, scan);
+                scan = nested < colon ? nested : colon;
+            }
+            else if (c_token_is_punctuator(&current, C_PUNCTUATOR_ELLIPSIS))
+            {
+                if (range_operator != UINT32_MAX)
+                {
+                    malformed_operator = scan;
+                    break;
+                }
+                range_operator = scan;
+            }
+        }
+
+        if (range_operator != UINT32_MAX && !c_preprocess_dialect_is_gnu(preprocess.dialect))
+        {
+            c_parse_lowering_constraint_consider(diagnostic, S8("GNU case ranges are only available in GNU dialects"), index, index);
             continue;
         }
-        value &= value_mask;
+        if (malformed_operator != UINT32_MAX || (range_operator != UINT32_MAX && (range_operator == index + 1 || range_operator + 1 >= colon)))
+        {
+            u32 location = malformed_operator != UINT32_MAX ? malformed_operator : range_operator;
+            c_parse_lowering_constraint_consider(diagnostic, S8("malformed GNU case range"), index, location);
+            continue;
+        }
+
+        CScopeId case_scope = c_parse_scope_for_token(result, declaration->scope, index);
+        u64 low = 0;
+        u64 high = 0;
+        u64 expression_mark = machine->scratch_arena->position;
+        bool low_constant = c_parse_integer_constant_range(machine, machine->scratch_arena, preprocess, result, case_scope, index + 1,
+                                                           range_operator == UINT32_MAX ? colon : range_operator, &low);
+        arena_set_position(machine->scratch_arena, expression_mark);
+        if (!low_constant)
+        {
+            if (range_operator != UINT32_MAX)
+            {
+                c_parse_lowering_constraint_consider(diagnostic, S8("case range lower bound is not an integer constant expression"), index, index);
+            }
+            continue;
+        }
+        high = low;
+        if (range_operator != UINT32_MAX)
+        {
+            expression_mark = machine->scratch_arena->position;
+            bool high_constant = c_parse_integer_constant_range(machine, machine->scratch_arena, preprocess, result, case_scope, range_operator + 1, colon,
+                                                                &high);
+            arena_set_position(machine->scratch_arena, expression_mark);
+            if (!high_constant)
+            {
+                c_parse_lowering_constraint_consider(diagnostic, S8("case range upper bound is not an integer constant expression"), index,
+                                                     range_operator + 1);
+                continue;
+            }
+        }
+
+        low &= value_mask;
+        high &= value_mask;
+        if (range_operator != UINT32_MAX && (low ^ sign_bit) > (high ^ sign_bit))
+        {
+            c_parse_lowering_constraint_consider(diagnostic, S8("case range is not ordered after conversion to the switch type"), index, index);
+            continue;
+        }
         for (u32 previous = 0; previous < value_count; previous += 1)
         {
-            if (values[previous] == value)
+            bool overlaps = (low ^ sign_bit) <= (highs[previous] ^ sign_bit) && (lows[previous] ^ sign_bit) <= (high ^ sign_bit);
+            if (overlaps)
             {
                 c_parse_lowering_constraint_consider(diagnostic, S8("case label overlaps another case label"), index, index);
                 break;
             }
         }
-        values[value_count++] = value;
+        lows[value_count] = low;
+        highs[value_count] = high;
+        value_count += 1;
     }
     arena_set_position(machine->scratch_arena, mark);
 }
