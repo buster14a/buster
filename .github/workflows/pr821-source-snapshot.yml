@@ -1,0 +1,52 @@
+name: PR 821 source snapshot
+
+on:
+  push:
+    branches:
+      - automation/pr821-source-snapshot-20260919
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    name: Package exact rebase inputs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out old base
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: bfd14ad8788513eef6df5c216ce7fd6ce29c8248
+          path: snapshots/base
+          persist-credentials: false
+      - name: Check out PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 4bb77f2c930de7aba428de89bf81b82a562ac25f
+          path: snapshots/head
+          persist-credentials: false
+      - name: Check out current main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e013ef03b560677b1a6b47590e9eb05171b9b34d
+          path: snapshots/main
+          persist-credentials: false
+      - name: Create deterministic source archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr821-snapshots"
+          for name in base head main; do
+            git -C "snapshots/$name" archive --format=tar.gz --prefix="$name/" -o "$RUNNER_TEMP/pr821-snapshots/$name.tar.gz" HEAD
+            printf '%s %s %s\n' "$name" "$(git -C "snapshots/$name" rev-parse HEAD)" "$(git -C "snapshots/$name" rev-parse 'HEAD^{tree}')" >> "$RUNNER_TEMP/pr821-snapshots/manifest.txt"
+          done
+          sha256sum "$RUNNER_TEMP/pr821-snapshots/"*.tar.gz > "$RUNNER_TEMP/pr821-snapshots/sha256.txt"
+      - name: Upload snapshots
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr821-source-snapshots-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr821-snapshots/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
