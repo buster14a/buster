@@ -1,0 +1,64 @@
+name: PR 821 Windows spawn diagnosis
+
+on:
+  push:
+    branches:
+      - fix/84-transactional-hermetic-spawn
+    paths:
+      - '.github/workflows/pr821-windows-spawn-diagnose.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.event.head_commit.message == 'ci diagnose PR821 Windows spawn' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: fix/84-transactional-hermetic-spawn
+          persist-credentials: false
+
+      - name: Add structured spawn failure diagnostics
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          path = Path("tools/differential.c")
+          text = path.read_text(encoding="utf-8")
+          old = "    DObservation observation = {.kind = D_SPAWN};\n    if (spawn.handle)"
+          new = """    DObservation observation = {.kind = D_SPAWN};
+              if (!spawn.handle)
+              {
+                  observation.status = (u32)spawn.failure;
+                  observation.raw_status = spawn.error.v;
+              }
+              if (spawn.handle)"""
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f"expected one d_observe spawn site, found {count}")
+          path.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+          '@ | python -
+
+      - name: Build and run the Windows release self-test
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio was not found' }
+          $VsPath = $VsPaths[0].Trim()
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          $Driver = Join-Path (Get-Location) 'build\build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" test_differential --self-test 2>&1"
+          $Status = $LASTEXITCODE
+          Write-Output "PR821_DIAGNOSTIC_SELF_TEST_STATUS=$Status"
+          exit 0
