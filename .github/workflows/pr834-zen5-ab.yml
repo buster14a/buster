@@ -1,0 +1,152 @@
+name: PR 834 Zen 5 A/B audit
+
+on:
+  push:
+    branches: ['audit/pr834-worklist-20260918']
+    paths: ['.github/workflows/pr834-zen5-ab.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zen5-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 60
+    env:
+      LC_ALL: C
+      BASE_SHA: 12b0dbec556f764e7d4bcc9d1b6f31a95dc33f98
+      CANDIDATE_SHA: 010a2645ad756cd10ff6d87aa0ab7ed9dc0a1e17
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record host and immutable inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUDIT="$RUNNER_TEMP/pr834-zen5-ab"
+          rm -rf "$AUDIT"
+          mkdir -p "$AUDIT"
+          printf 'AUDIT=%s\n' "$AUDIT" >> "$GITHUB_ENV"
+          {
+            printf 'workflow_commit='
+            git rev-parse HEAD
+            printf 'workflow_tree='
+            git rev-parse 'HEAD^{tree}'
+            printf 'base_commit=%s\n' "$BASE_SHA"
+            printf 'candidate_commit=%s\n' "$CANDIDATE_SHA"
+            git show -s --format='base_tree=%T' "$BASE_SHA"
+            git show -s --format='candidate_tree=%T' "$CANDIDATE_SHA"
+            uname -a
+            id
+            nproc
+            lscpu
+            cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor 2>/dev/null || true
+            cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_driver 2>/dev/null || true
+            cat /sys/devices/system/cpu/cpu2/cpufreq/energy_performance_preference 2>/dev/null || true
+            cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || true
+            clang --version
+            cmake --version
+            ninja --version
+            perf --version
+          } 2>&1 | tee "$AUDIT/host-and-inputs.txt"
+
+      - name: Build trusted Clang Release compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_TREE="$RUNNER_TEMP/pr834-base"
+          CANDIDATE_TREE="$RUNNER_TEMP/pr834-candidate"
+          rm -rf "$BASE_TREE" "$CANDIDATE_TREE"
+          git worktree add --detach "$BASE_TREE" "$BASE_SHA"
+          git worktree add --detach "$CANDIDATE_TREE" "$CANDIDATE_SHA"
+          printf 'BASE_TREE=%s\nCANDIDATE_TREE=%s\n' "$BASE_TREE" "$CANDIDATE_TREE" >> "$GITHUB_ENV"
+          if command -v mold >/dev/null 2>&1; then linker=MOLD; else linker=DEFAULT; fi
+          for label in base candidate; do
+            if [[ "$label" == base ]]; then tree="$BASE_TREE"; else tree="$CANDIDATE_TREE"; fi
+            pushd "$tree"
+            if command -v tcc >/dev/null 2>&1; then
+              driver=./build.sh
+            else
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$AUDIT/$label-build"
+              driver="$AUDIT/$label-build"
+            fi
+            "$driver" generate --config Release --cc clang --linker "$linker"
+            "$driver" build --config Release -t ide
+            sha256sum build/Release/ide | tee "$AUDIT/$label-compiler.sha256"
+            popd
+          done
+
+      - name: Compare stage-1 unity cycles and instructions
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_IDE="$BASE_TREE/build/Release/ide"
+          CANDIDATE_IDE="$CANDIDATE_TREE/build/Release/ide"
+          cd "$CANDIDATE_TREE"
+          common=(cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm)
+          taskset -c 2 "$BASE_IDE" "${common[@]}" -o "$AUDIT/warm-base"
+          taskset -c 2 "$CANDIDATE_IDE" "${common[@]}" -o "$AUDIT/warm-candidate"
+          sha256sum "$AUDIT/warm-base" "$AUDIT/warm-candidate" | tee "$AUDIT/warm.sha256"
+          cmp "$AUDIT/warm-base" "$AUDIT/warm-candidate"
+          printf 'label\trun\torder\twall_ns\tcycles\tinstructions\toutput_sha256\n' > "$AUDIT/results.tsv"
+          order=(base candidate candidate base base candidate)
+          base_run=0
+          candidate_run=0
+          ordinal=0
+          for label in "${order[@]}"; do
+            ordinal=$((ordinal + 1))
+            if [[ "$label" == base ]]; then
+              base_run=$((base_run + 1)); run=$base_run; compiler="$BASE_IDE"
+            else
+              candidate_run=$((candidate_run + 1)); run=$candidate_run; compiler="$CANDIDATE_IDE"
+            fi
+            output="$AUDIT/$label-$run.out"
+            stat="$AUDIT/$label-$run.perf"
+            start=$(date +%s%N)
+            perf stat -x ';' -o "$stat" -e cycles:u -e instructions:u -- taskset -c 2 "$compiler" "${common[@]}" -o "$output"
+            finish=$(date +%s%N)
+            wall_ns=$((finish - start))
+            cycles=$(awk -F';' '$3 ~ /^cycles/ {gsub(/[[:space:]]/, "", $1); print $1}' "$stat")
+            instructions=$(awk -F';' '$3 ~ /^instructions/ {gsub(/[[:space:]]/, "", $1); print $1}' "$stat")
+            [[ "$cycles" =~ ^[0-9]+$ && "$instructions" =~ ^[0-9]+$ ]]
+            output_sha=$(sha256sum "$output" | awk '{print $1}')
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$run" "$ordinal" "$wall_ns" "$cycles" "$instructions" "$output_sha" | tee -a "$AUDIT/results.tsv"
+          done
+          [[ $(tail -n +2 "$AUDIT/results.tsv" | cut -f7 | sort -u | wc -l) -eq 1 ]]
+          python3 - "$AUDIT/results.tsv" <<'PY' | tee "$AUDIT/summary.txt"
+          import csv
+          import statistics
+          import sys
+
+          rows = list(csv.DictReader(open(sys.argv[1], encoding="utf-8"), delimiter="\t"))
+          grouped = {"base": [], "candidate": []}
+          for row in rows:
+              grouped[row["label"]].append(row)
+          for label in grouped:
+              assert len(grouped[label]) == 3
+          for metric in ("wall_ns", "cycles", "instructions"):
+              base = statistics.median(int(row[metric]) for row in grouped["base"])
+              candidate = statistics.median(int(row[metric]) for row in grouped["candidate"])
+              delta = (candidate / base - 1.0) * 100.0
+              print(f"SUMMARY metric={metric} base_median={base} candidate_median={candidate} delta_percent={delta:.4f}")
+          print(f"OUTPUT_SHA256 {rows[0]['output_sha256']}")
+          PY
+          cat "$AUDIT/results.tsv" >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```text\n' >> "$GITHUB_STEP_SUMMARY"
+          cat "$AUDIT/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          printf '```\n' >> "$GITHUB_STEP_SUMMARY"
+          rm -f "$AUDIT"/*.out "$AUDIT"/warm-base "$AUDIT"/warm-candidate
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr834-zen5-ab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr834-zen5-ab
+          retention-days: 14
