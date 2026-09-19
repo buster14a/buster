@@ -1668,6 +1668,99 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
     u64* live_out = arena_allocate(arena, u64, plane ? plane : 1);
     memset(live_in, 0, (plane ? plane : 1) * sizeof(*live_in));
     memset(live_out, 0, (plane ? plane : 1) * sizeof(*live_out));
+    // Seed an explicit LIFO in ascending order so its first pulls preserve
+    // the old reverse-index sweep. After that, only a block whose
+    // live-out gained a bit is pending; converged regions are never
+    // re-swept. `queued` bounds the stack to one entry per block.
+    u32 work_axis = block_count ? block_count : 1u;
+    u32* worklist = arena_allocate(arena, u32, work_axis);
+    u8* queued = arena_allocate(arena, u8, work_axis);
+    memset(queued, 0, work_axis);
+    u32 work_count = 0;
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        worklist[work_count++] = block_index;
+        queued[block_index] = 1;
+    }
+    while (work_count)
+    {
+        u32 block_index = worklist[--work_count];
+        queued[block_index] = 0;
+        u64 const* block_reads = reads + (u64)block_index * words;
+        u64 const* block_writes = writes + (u64)block_index * words;
+        u64* block_in = live_in + (u64)block_index * words;
+        u64 const* block_out = live_out + (u64)block_index * words;
+        for (u32 word = 0; word < words; word += 1)
+        {
+            block_in[word] = block_reads[word] | (block_out[word] & ~block_writes[word]);
+        }
+        u32 first = prepass->predecessor_offsets[block_index];
+        u32 limit = prepass->predecessor_offsets[block_index + 1u];
+        for (u32 entry = first; entry < limit; entry += 1)
+        {
+            u32 predecessor = prepass->predecessor_list[entry];
+            u64* predecessor_out = live_out + (u64)predecessor * words;
+            bool predecessor_changed = false;
+            for (u32 word = 0; word < words; word += 1)
+            {
+                u64 previous = predecessor_out[word];
+                u64 merged = previous | block_in[word];
+                if (merged != previous)
+                {
+                    predecessor_out[word] = merged;
+                    predecessor_changed = true;
+                }
+            }
+            if (predecessor_changed && !queued[predecessor])
+            {
+                worklist[work_count++] = predecessor;
+                queued[predecessor] = 1;
+            }
+        }
+    }
+    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    {
+        MachineBlock const* block = function->blocks + block_index;
+        u64 const* block_in = live_in + (u64)block_index * words;
+        u64 const* block_out = live_out + (u64)block_index * words;
+        u32 last = block->instruction_count ? block->first_instruction + block->instruction_count - 1u : block->first_instruction;
+        // An object arriving live occupies the block from its first row, and
+        // one leaving live occupies it through its last; an object born and
+        // consumed inside the block keeps only the rows its touches gave it.
+        for (u32 word = 0; word < words; word += 1)
+        {
+            u64 entering = block_in[word];
+            while (entering)
+            {
+                u32 object = 64u * word + trailing_zeroes_u64(entering);
+                entering &= entering - 1u;
+                starts[object] = BUSTER_MIN(starts[object], block->first_instruction);
+            }
+            u64 leaving = block_out[word];
+            while (leaving)
+            {
+                u32 object = 64u * word + trailing_zeroes_u64(leaving);
+                leaving &= leaving - 1u;
+                ends[object] = BUSTER_MAX(ends[object], last);
+            }
+        }
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+// The removed whole-sweep solver is retained only as an exact oracle
+// for the worklist regression below. It receives the same dense planes
+// and materializes the same start/end contract as production.
+BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges_sweep_reference(Arena* arena, MachineFunction const* function,
+                                                                         MachineFastPrepass const* prepass, u64 const* reads,
+                                                                         u64 const* writes, u32 words, u32* starts, u32* ends)
+{
+    u32 block_count = function->block_count;
+    u64 plane = (u64)block_count * words;
+    u64* live_in = arena_allocate(arena, u64, plane ? plane : 1);
+    u64* live_out = arena_allocate(arena, u64, plane ? plane : 1);
+    memset(live_in, 0, (plane ? plane : 1) * sizeof(*live_in));
+    memset(live_out, 0, (plane ? plane : 1) * sizeof(*live_out));
     bool changed = true;
     while (changed)
     {
@@ -1703,9 +1796,6 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
         u64 const* block_in = live_in + (u64)block_index * words;
         u64 const* block_out = live_out + (u64)block_index * words;
         u32 last = block->instruction_count ? block->first_instruction + block->instruction_count - 1u : block->first_instruction;
-        // An object arriving live occupies the block from its first row, and
-        // one leaving live occupies it through its last; an object born and
-        // consumed inside the block keeps only the rows its touches gave it.
         for (u32 word = 0; word < words; word += 1)
         {
             u64 entering = block_in[word];
@@ -1725,6 +1815,84 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
         }
     }
 }
+
+bool machine_fast_close_live_ranges_test(Arena* arena)
+{
+    enum
+    {
+        MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT = 9,
+        MACHINE_FAST_CLOSE_TEST_SLOT_COUNT = 1025,
+        MACHINE_FAST_CLOSE_TEST_WORD_COUNT = (MACHINE_FAST_CLOSE_TEST_SLOT_COUNT + 63) / 64,
+    };
+    MachineBlock blocks[MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT] = {
+        {.first_instruction = 0, .instruction_count = 2},
+        {.first_instruction = 2, .instruction_count = 3},
+        {.first_instruction = 5, .instruction_count = 1},
+        {.first_instruction = 6, .instruction_count = 4},
+        {.first_instruction = 10, .instruction_count = 2},
+        {.first_instruction = 12, .instruction_count = 3},
+        {.first_instruction = 15, .instruction_count = 2},
+        {.first_instruction = 17, .instruction_count = 1},
+        {.first_instruction = 18, .instruction_count = 2},
+    };
+    // 0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8, with 5 -> 4
+    // as the inner back edge and 6 -> 2 as the outer back edge.
+    u32 predecessor_offsets[MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT + 1] = {0, 0, 1, 3, 4, 6, 7, 8, 10, 11};
+    u32 predecessor_list[] = {0, 1, 6, 2, 3, 5, 4, 5, 2, 6, 7};
+    MachineFunction function = {
+        .blocks = blocks,
+        .block_count = MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT,
+    };
+    MachineFastPrepass prepass = {
+        .predecessor_offsets = predecessor_offsets,
+        .predecessor_list = predecessor_list,
+    };
+    u64 reads[MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT * MACHINE_FAST_CLOSE_TEST_WORD_COUNT] = {0};
+    u64 writes[MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT * MACHINE_FAST_CLOSE_TEST_WORD_COUNT] = {0};
+    u32 reference_starts[MACHINE_FAST_CLOSE_TEST_SLOT_COUNT];
+    u32 reference_ends[MACHINE_FAST_CLOSE_TEST_SLOT_COUNT];
+    u32 actual_starts[MACHINE_FAST_CLOSE_TEST_SLOT_COUNT];
+    u32 actual_ends[MACHINE_FAST_CLOSE_TEST_SLOT_COUNT];
+    for (u32 slot = 0; slot < MACHINE_FAST_CLOSE_TEST_SLOT_COUNT; slot += 1)
+    {
+        u32 write_block = (slot * 7u + slot / 64u + 1u) % MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT;
+        u32 read_block = (slot * 5u + slot / 32u + 3u) % MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT;
+        u64 bit = UINT64_C(1) << (slot & 63u);
+        writes[(u64)write_block * MACHINE_FAST_CLOSE_TEST_WORD_COUNT + slot / 64u] |= bit;
+        reads[(u64)read_block * MACHINE_FAST_CLOSE_TEST_WORD_COUNT + slot / 64u] |= bit;
+        reference_starts[slot] =
+            BUSTER_MIN(blocks[write_block].first_instruction, blocks[read_block].first_instruction);
+        reference_ends[slot] =
+            BUSTER_MAX(blocks[write_block].first_instruction + blocks[write_block].instruction_count - 1u,
+                       blocks[read_block].first_instruction + blocks[read_block].instruction_count - 1u);
+        if ((slot & 7u) == 0)
+        {
+            u32 second_read = (read_block + 4u) % MACHINE_FAST_CLOSE_TEST_BLOCK_COUNT;
+            reads[(u64)second_read * MACHINE_FAST_CLOSE_TEST_WORD_COUNT + slot / 64u] |= bit;
+            reference_starts[slot] = BUSTER_MIN(reference_starts[slot], blocks[second_read].first_instruction);
+            reference_ends[slot] =
+                BUSTER_MAX(reference_ends[slot],
+                           blocks[second_read].first_instruction + blocks[second_read].instruction_count - 1u);
+        }
+        actual_starts[slot] = reference_starts[slot];
+        actual_ends[slot] = reference_ends[slot];
+    }
+
+    u64 arena_position = arena->position;
+    machine_fast_close_live_ranges_sweep_reference(arena, &function, &prepass, reads, writes,
+                                                   MACHINE_FAST_CLOSE_TEST_WORD_COUNT, reference_starts, reference_ends);
+    arena_set_position(arena, arena_position);
+    machine_fast_close_live_ranges(arena, &function, &prepass, reads, writes, MACHINE_FAST_CLOSE_TEST_WORD_COUNT,
+                                   actual_starts, actual_ends);
+    arena_set_position(arena, arena_position);
+    bool result = true;
+    for (u32 slot = 0; slot < MACHINE_FAST_CLOSE_TEST_SLOT_COUNT; slot += 1)
+    {
+        result = result && actual_starts[slot] == reference_starts[slot] && actual_ends[slot] == reference_ends[slot];
+    }
+    return result;
+}
+#endif
 
 // One frame slot per simultaneously live home instead of one per spilled
 // value. The caller hands each home the rows over which it may hold anything

@@ -1140,9 +1140,11 @@ BUSTER_GLOBAL_LOCAL void gpu_append_clang_language(GpuArgumentBuilder* arguments
     }
 }
 
-BUSTER_GLOBAL_LOCAL GpuSourceLanguage gpu_effective_language(GpuPipelineOptions options, String8 path)
+BUSTER_GLOBAL_LOCAL GpuSourceLanguage gpu_effective_language(GpuPipelineOptions options, u32 input_index)
 {
-    return options.language == GPU_SOURCE_LANGUAGE_AUTOMATIC ? gpu_source_language_from_path(path) : options.language;
+    GpuSourceLanguage language = options.input_languages ? options.input_languages[input_index] : options.language;
+    String8 path = options.input_paths[input_index];
+    return language == GPU_SOURCE_LANGUAGE_AUTOMATIC ? gpu_source_language_from_path(path) : language;
 }
 
 BUSTER_GLOBAL_LOCAL bool gpu_target_kind_is_spirv(GpuTargetKind target)
@@ -1959,7 +1961,7 @@ GpuPipelinePlan gpu_pipeline_plan(Arena* arena, GpuPipelineOptions options)
     GpuSourceLanguage* languages = arena_allocate(arena, GpuSourceLanguage, options.input_count);
     for (u32 input_index = 0; input_index < options.input_count; input_index += 1)
     {
-        languages[input_index] = gpu_effective_language(options, options.input_paths[input_index]);
+        languages[input_index] = gpu_effective_language(options, input_index);
         if (languages[input_index] == GPU_SOURCE_LANGUAGE_AUTOMATIC)
         {
             gpu_plan_error(&builder, GPU_PIPELINE_ERROR_INVALID_INPUT,

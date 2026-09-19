@@ -78,6 +78,129 @@ BUSTER_GLOBAL_LOCAL BqRequest bq_test_request(u32 number, bool failure)
     return request;
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_typed_client(void)
+{
+    char* gateway[] = {"submit", "run-123-1", "1111111111111111111111111111111111111111",
+                       "2222222222222222222222222222222222222222"};
+    char* client[] = {"submit", "github-actions", gateway[1], "validate-buster-v1", gateway[2], gateway[3]};
+    BqPacket fixed, typed;
+    u32 operation = 0;
+    BQ_CHECK(bq_client_arguments(4, gateway, true, &fixed, &operation) && operation == BQ_OP_SUBMIT);
+    BQ_CHECK(bq_client_arguments(6, client, false, &typed, &operation) &&
+             fixed.size == typed.size && !memcmp(fixed.bytes, typed.bytes, fixed.size));
+    client[3] = "native-retirement-performance-v1";
+    BQ_CHECK(!bq_client_arguments(6, client, false, &typed, &operation) && !typed.size);
+    client[3] = "fake-success-v1";
+    BQ_CHECK(!bq_client_arguments(6, client, false, &typed, &operation));
+    char const* invalid_ids[] = {"main", "HEAD", "1111111", "../installed", "--help", "$(id)",
+                                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"};
+    for (u32 i = 0; i < sizeof(invalid_ids) / sizeof(invalid_ids[0]); i += 1)
+    {
+        gateway[2] = (char*)invalid_ids[i];
+        BQ_CHECK(!bq_client_arguments(4, gateway, true, &typed, &operation) && !typed.size);
+    }
+    gateway[2] = client[4];
+    gateway[1] = "not a key";
+    BQ_CHECK(!bq_client_arguments(4, gateway, true, &typed, &operation));
+    gateway[1] = "run-123-1";
+    BQ_CHECK(!bq_client_arguments(6, client, true, &typed, &operation));
+    char* private_operation[] = {"worker-run"};
+    BQ_CHECK(!bq_client_arguments(1, private_operation, true, &typed, &operation));
+    char* status[] = {"result", "7"};
+    BQ_CHECK(bq_client_arguments(2, status, true, &typed, &operation) && operation == BQ_OP_RESULT &&
+             bq_u64(typed.bytes + BQ_CONTROL_HEADER) == 7);
+    status[1] = "0";
+    BQ_CHECK(!bq_client_arguments(2, status, true, &fixed, &operation));
+    status[1] = "18446744073709551616";
+    BQ_CHECK(!bq_client_arguments(2, status, true, &fixed, &operation));
+
+    u8 body[BQ_CONTROL_BODY] = {0};
+    bq_put64(body + 4, 7);
+    bq_put64(body + 12, 2);
+    bq_put64(body + 20, 12);
+    bq_put32(body + 28, BQ_FINISHED);
+    bq_put32(body + 32, BQ_INTERRUPTED);
+    bq_put32(body + 52, 1);
+    memset(body + 56, 'a', 64);
+    char const* root = "/var/lib/buster-bench/workspaces/result-7-2";
+    bq_put32(body + 124, (u32)strlen(root));
+    memcpy(body + 128, root, strlen(root));
+    memset(body + 320, 'b', 64);
+    memset(body + 384, 'c', 64);
+    memset(body + 448, 'd', 64);
+    bq_packet(&fixed, BQ_OP_RESULT | 0x80000000u, 1, body, sizeof(body));
+    BQ_CHECK(bq_public_response_valid(&typed, &fixed));
+    for (u32 length = 0; length < BQ_CONTROL_BODY; length += 1)
+    {
+        BqPacket truncated;
+        bq_packet(&truncated, BQ_OP_RESULT | 0x80000000u, 1, body, length);
+        BQ_CHECK(bq_public_response_valid(&typed, &truncated) == (length == 124));
+    }
+    u32 invalid_offsets[] = {4, 28, 32, 36, 40, 44, 48, 52, 56, 120, 124, 128, 319, 320, 384, 448};
+    for (u32 i = 0; i < sizeof(invalid_offsets) / sizeof(invalid_offsets[0]); i += 1)
+    {
+        BqPacket invalid = fixed;
+        invalid.bytes[BQ_CONTROL_HEADER + invalid_offsets[i]] = 0xff;
+        BQ_CHECK(!bq_public_response_valid(&typed, &invalid));
+    }
+    BqPacket traversal = fixed;
+    memcpy(traversal.bytes + BQ_CONTROL_HEADER + 128, "/../", 4);
+    BQ_CHECK(!bq_public_response_valid(&typed, &traversal));
+    FILE* output = tmpfile();
+    BQ_CHECK(output != NULL);
+    if (output)
+    {
+        BQ_CHECK(bq_response_write(BQ_OP_RESULT, &fixed, output) && fflush(output) == 0);
+        rewind(output);
+        char receipt[1024] = {0};
+        size_t count = fread(receipt, 1, sizeof(receipt) - 1, output);
+        BQ_CHECK(count > 0 && !ferror(output) && strstr(receipt, "job=7 token=2 sequence=12") &&
+                 strstr(receipt, "outcome=interrupted validity=not-evaluated") &&
+                 strstr(receipt, "result-bound=1 statistical-decision=not-evaluated\n") &&
+                 strstr(receipt, root));
+        char digest_line[96];
+        char const* names[] = {"manifest", "bundle", "full-result"};
+        for (u32 i = 0; i < 3; i += 1)
+        {
+            snprintf(digest_line, sizeof(digest_line), "%s-sha256=%.64s\n", names[i], (char const*)body + 320 + i * 64);
+            BQ_CHECK(strstr(receipt, digest_line) != NULL);
+        }
+        fclose(output);
+    }
+    char* logs[] = {"logs", "7", "10"};
+    BQ_CHECK(bq_client_arguments(3, logs, true, &typed, &operation) && operation == BQ_OP_LOGS);
+    memset(body, 0, sizeof(body));
+    bq_put32(body + 4, 1);
+    bq_put64(body + 8, 11);
+    bq_put64(body + 20, 11);
+    bq_put64(body + 28, 7);
+    bq_put32(body + 36, BQ_ADVANCE);
+    bq_packet(&fixed, BQ_OP_LOGS | 0x80000000u, 1, body, 52);
+    BQ_CHECK(bq_public_response_valid(&typed, &fixed));
+    u32 log_offsets[] = {4, 8, 16, 28, 36, 40, 44, 48};
+    for (u32 i = 0; i < sizeof(log_offsets) / sizeof(log_offsets[0]); i += 1)
+    {
+        BqPacket invalid = fixed;
+        invalid.bytes[BQ_CONTROL_HEADER + log_offsets[i]] = 0xff;
+        BQ_CHECK(!bq_public_response_valid(&typed, &invalid));
+    }
+    bq_put64(fixed.bytes + BQ_CONTROL_HEADER + 20, 10);
+    BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
+    memset(body, 0, sizeof(body));
+    bq_put64(body + 8, 10);
+    bq_packet(&fixed, BQ_OP_LOGS | 0x80000000u, 1, body, 20);
+    BQ_CHECK(bq_public_response_valid(&typed, &fixed));
+    char* capabilities[] = {"capabilities"};
+    BQ_CHECK(bq_client_arguments(1, capabilities, true, &typed, &operation));
+    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
+    BQ_CHECK(bq_dispatch(&queue, typed.bytes, typed.size, &fixed) == BQ_OK &&
+             bq_public_response_valid(&typed, &fixed));
+    fixed.bytes[BQ_CONTROL_HEADER + 4] = 0x1b;
+    BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
+    bq_packet(&fixed, BQ_OP_CAPABILITIES | 0x80000000u, 1, body, 4);
+    BQ_CHECK(!bq_public_response_valid(&typed, &fixed));
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
 {
     BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
@@ -3831,6 +3954,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_result_bundle_and_evidence(void)
                  bound_response.size == BQ_CONTROL_CAP &&
                  !memcmp(bound_response.bytes + BQ_CONTROL_HEADER + 128, finalization.result_root,
                          strlen(finalization.result_root)));
+        BQ_CHECK(bq_public_response_valid(&bound_status, &bound_response));
         char malicious_bundle[512], malicious_digest[SHA256_HEX_CAPACITY];
         int malicious_length = snprintf(malicious_bundle, sizeof(malicious_bundle),
                                          "BQ-BUNDLE-V1\nentries=1\nbytes=5\n%.64s 5 ../escape.txt\n",
@@ -4453,6 +4577,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     (void)argv;
 #endif
     bq_test_codec();
+    bq_test_typed_client();
 #ifndef _WIN32
     bq_test_physical_temp_paths();
     bq_test_workspace_root_group_policy();

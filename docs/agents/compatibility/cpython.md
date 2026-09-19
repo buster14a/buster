@@ -54,10 +54,13 @@ shared-object import, and the driver has no `-shared`) plus
 `_Py_Get_Getpath_CodeObject`, defined only by getpath.o, while the bootstrap
 deliberately links getpath_noop.o. Both trees carry the same file, so their
 suites skip the same tests. Buster compiles `Python/perf_jit_trampoline.o`
-itself with the object-specific `-fno-pic` constraint and its supported `-g`
-debug mode; this directly exercises source conditional directives inside a
-macro argument (GitHub #76) without using a substituted Clang object. The
-Clang reference compiles the same unit through CPython's generated make rules.
+itself with its supported `-g` debug mode and the ordinary non-PIC driver
+default. The former object-specific `-fno-pic` spelling became a no-op once
+GitHub #76 moved the unit away from a substituted Clang object; GitHub #78
+records the GOTPCRELX linker gap that originally required it and the full
+conversion table that retired the workaround. The unit still directly
+exercises source conditional directives inside a macro argument. The Clang
+reference compiles the same unit through CPython's generated make rules.
 The removed substitute's Clang-specific `-gdwarf-4` spelling is no longer
 needed; the ELF reader accepts the ordinary DWARF 5 section family (GitHub
 #77). `CPYTHON_UNIT` records this Buster-built object independently for every

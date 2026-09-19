@@ -119,6 +119,77 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_scheduled_line_marks(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool debug_test_location_ranges_equal(DebugVariable* left, DebugVariable* right)
+{
+    bool equal = left->location_count == right->location_count;
+    for (u32 index = 0; equal && index < left->location_count; index += 1)
+    {
+        DebugLocationRange* left_range = left->locations + index;
+        DebugLocationRange* right_range = right->locations + index;
+        DebugLocation* left_location = &left_range->location;
+        DebugLocation* right_location = &right_range->location;
+        equal = left_range->start == right_range->start && left_range->end == right_range->end &&
+                left_location->kind == right_location->kind && left_location->reg == right_location->reg &&
+                left_location->frame_offset == right_location->frame_offset && left_location->constant == right_location->constant &&
+                left_location->piece_count == right_location->piece_count;
+        if (equal && left_location->piece_count)
+        {
+            equal = memcmp(left_location->pieces, right_location->pieces,
+                           sizeof(DebugLocationPiece) * left_location->piece_count) == 0;
+        }
+    }
+    return equal;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_local_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    DebugLocationSeed locations[] = {
+        {.function_symbol = {.value = 7}, .local = {.value = 3}, .start = 0, .end = 2,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 11}},
+        {.function_symbol = {.value = 7}, .local = {.value = 4}, .start = 2, .end = 4,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 23}},
+        {.function_symbol = {.value = 9}, .local = {.value = 3}, .start = 4, .end = 6,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 37}},
+        {.function_symbol = {.value = 7}, .local = {.value = 3}, .start = 6, .end = 8,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 41}},
+        {.function_symbol = {.value = 7}, .local = {.value = 4}, .start = 8, .end = 10,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 53}},
+        {.function_symbol = {.value = 7}, .local = {.value = 3}, .start = 10, .end = 12,
+         .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 67}},
+    };
+    DebugLocationSeed saved[BUSTER_ARRAY_LENGTH(locations)];
+    memcpy(saved, locations, sizeof(locations));
+    DebugModelInput linear_input = {
+        .locations = locations,
+        .location_count = BUSTER_ARRAY_LENGTH(locations),
+    };
+    DebugLocationIndex location_index = debug_location_index_build(arguments->arena, locations, (u32)BUSTER_ARRAY_LENGTH(locations));
+    BUSTER_TEST(arguments, location_index.bucket_ends && location_index.order &&
+                           location_index.local_bucket_ends && location_index.local_order);
+    DebugModelInput indexed_input = linear_input;
+    indexed_input.location_index = &location_index;
+
+    DebugVariable linear_exact = {0};
+    DebugVariable indexed_exact = {0};
+    debug_variable_add_location(arguments->arena, &linear_input, &linear_exact, (IrSymbolId){.value = 7}, (IrLocalId){.value = 3}, 0, 12);
+    debug_variable_add_location(arguments->arena, &indexed_input, &indexed_exact, (IrSymbolId){.value = 7}, (IrLocalId){.value = 3}, 0, 12);
+    BUSTER_TEST(arguments, debug_test_location_ranges_equal(&linear_exact, &indexed_exact));
+    BUSTER_TEST(arguments, indexed_exact.location_count == 3 && indexed_exact.locations[0].start == 0 &&
+                           indexed_exact.locations[1].start == 6 && indexed_exact.locations[2].start == 10);
+
+    DebugVariable linear_wildcard = {0};
+    DebugVariable indexed_wildcard = {0};
+    debug_variable_add_location(arguments->arena, &linear_input, &linear_wildcard, (IrSymbolId){.value = 7}, IR_LOCAL_ID_INVALID, 0, 12);
+    debug_variable_add_location(arguments->arena, &indexed_input, &indexed_wildcard, (IrSymbolId){.value = 7}, IR_LOCAL_ID_INVALID, 0, 12);
+    BUSTER_TEST(arguments, debug_test_location_ranges_equal(&linear_wildcard, &indexed_wildcard));
+    BUSTER_TEST(arguments, indexed_wildcard.location_count == 5 && indexed_wildcard.locations[0].start == 0 &&
+                           indexed_wildcard.locations[1].start == 2 && indexed_wildcard.locations[2].start == 6 &&
+                           indexed_wildcard.locations[3].start == 8 && indexed_wildcard.locations[4].start == 10);
+    BUSTER_TEST(arguments, memcmp(locations, saved, sizeof(locations)) == 0);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -135,19 +206,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTest
          .location = {.kind = DEBUG_LOCATION_CONSTANT, .constant = 37}},
     };
     DebugLocationIndex built = debug_location_index_build(arguments->arena, locations, (u32)BUSTER_ARRAY_LENGTH(locations));
-    BUSTER_TEST(arguments, built.bucket_count == 4 && built.location_count == 3);
+    BUSTER_TEST(arguments, built.bucket_count == 4 && built.location_count == 3 &&
+                           built.local_bucket_ends && built.local_order);
 
     // Keep the backing arrays at their declared sizes. The malformed cases
     // exercise validation of public metadata, not inaccessible test storage.
-    for (u32 variant = 0; variant < 18; variant += 1)
+    for (u32 variant = 0; variant < 27; variant += 1)
     {
         u32 ends[4];
         u32 order[3];
+        u32 local_ends[4];
+        u32 local_order[3];
         memcpy(ends, built.bucket_ends, sizeof(ends));
         memcpy(order, built.order, sizeof(order));
+        memcpy(local_ends, built.local_bucket_ends, sizeof(local_ends));
+        memcpy(local_order, built.local_order, sizeof(local_order));
         DebugLocationIndex index = built;
         index.bucket_ends = ends;
         index.order = order;
+        index.local_bucket_ends = local_ends;
+        index.local_order = local_order;
         DebugModelInput input = {
             .program = &program, .module = &module, .locations = locations,
             .location_count = 3, .location_index = &index,
@@ -159,23 +237,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTest
         case 2: index.bucket_count = 3; break;
         case 3: index.bucket_ends = 0; break;
         case 4: index.order = 0; break;
-        case 5: ends[0] = 4; break;
-        case 6: ends[1] = 2; break;
-        case 7: ends[0] = 2; ends[1] = 2; ends[2] = 2; ends[3] = 2; break;
-        case 8: order[0] = 3; break;
-        case 9: order[0] = UINT32_MAX; break;
-        case 10: order[1] = 0; break;
-        case 11: order[0] = 1; order[1] = 0; break;
-        case 12: ends[0] = 0; break;
-        case 13: locations[0].location.piece_count = 1; break;
-        case 14: input.inline_site_count = 1; break;
-        case 15: index.locations = locations + 1; ends[0] = UINT32_MAX; break;
-        case 16: index.location_count = 2; ends[0] = UINT32_MAX; break;
-        case 17: break;
+        case 5: index.local_bucket_ends = 0; break;
+        case 6: index.local_order = 0; break;
+        case 7: ends[0] = 4; break;
+        case 8: ends[1] = 2; break;
+        case 9: ends[0] = 2; ends[1] = 2; ends[2] = 2; ends[3] = 2; break;
+        case 10: order[0] = 3; break;
+        case 11: order[0] = UINT32_MAX; break;
+        case 12: order[1] = 0; break;
+        case 13: order[0] = 1; order[1] = 0; break;
+        case 14: ends[0] = 0; break;
+        case 15: local_ends[0] = 4; break;
+        case 16: local_ends[3] = 2; break;
+        case 17: local_ends[0] = 2; local_ends[1] = 2; local_ends[2] = 2; local_ends[3] = 2; break;
+        case 18: local_order[0] = 3; break;
+        case 19: local_order[0] = UINT32_MAX; break;
+        case 20: local_order[0] = 0; local_order[1] = 0; local_order[2] = 0; break;
+        case 21: local_order[0] = 2; local_order[1] = 1; local_order[2] = 0; break;
+        case 22: locations[0].location.piece_count = 1; break;
+        case 23: input.inline_site_count = 1; break;
+        case 24: index.locations = locations + 1; ends[0] = UINT32_MAX; local_ends[0] = UINT32_MAX; break;
+        case 25: index.location_count = 2; ends[0] = UINT32_MAX; local_ends[0] = UINT32_MAX; break;
+        case 26: break;
         default: break;
         }
         DebugModel model = debug_model_build(arguments->arena, input);
-        bool expected_valid = variant >= 15;
+        bool expected_valid = variant >= 24;
         BUSTER_TEST(arguments, model.valid == expected_valid);
         if (expected_valid && model.valid)
         {
@@ -210,6 +297,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult debug_test_location_index_validation(UnitTest
 UnitTestResult debug_model_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = debug_test_location_index_validation(arguments);
+    UnitTestResult local_index = debug_test_location_local_index(arguments);
+    result.succeeded_test_count += local_index.succeeded_test_count;
+    result.test_count += local_index.test_count;
     UnitTestResult scheduled = debug_test_scheduled_line_marks(arguments);
     result.succeeded_test_count += scheduled.succeeded_test_count;
     result.test_count += scheduled.test_count;
@@ -250,8 +340,8 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, variable.locations[3].location.kind == DEBUG_LOCATION_CONSTANT && variable.locations[3].location.constant == 42);
     BUSTER_TEST(arguments, variable.locations[4].location.kind == DEBUG_LOCATION_UNAVAILABLE);
 
-    // The symbol index is an accelerator, never a filter: it must reproduce the
-    // linear scan exactly, including seed order, and a stale index must be
+    // The location index is an accelerator, never a filter: it must reproduce
+    // the linear scan exactly, including seed order, and a stale index must be
     // rejected rather than silently dropping locations.
     DebugLocationIndex location_index = debug_location_index_build(arguments->arena, locations, (u32)BUSTER_ARRAY_LENGTH(locations));
     location_input.location_index = &location_index;

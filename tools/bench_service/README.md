@@ -530,11 +530,38 @@ cannot produce a performance qualification or #512 acceptance result.
 
 `client` constructs only the public schema-2 operations, rejects fake and
 blocked recipe submissions before transport, and verifies that the response
-schema, operation and correlation exactly match the request. Transport or
-malformed-response failures remain fail-closed. It does not grant access: the
-socket still requires the daemon's exact effective UID and GID. An external
-fixed-request gateway must therefore run under the reviewed service identity;
-this command is not permission to expose an arbitrary RPC or shell boundary.
+schema, operation and correlation exactly match the request. Before rendering,
+it validates reply sizes, job identity, enums, bounded log pages and cursors,
+and result paths/digests. A bound result prints `result-bound=1`, `result-root`,
+`manifest-sha256`, `bundle-sha256` and `full-result-sha256`. Execution outcome,
+`validity=not-evaluated` and `statistical-decision=not-evaluated` remain separate.
+These are authenticated receipts, not file downloads or performance verdicts.
+Transport or malformed-response failures remain fail-closed.
+
+The installed executable also provides a fixed smoke request encoder:
+
+```sh
+/usr/local/libexec/buster-bench-service gateway capabilities
+/usr/local/libexec/buster-bench-service gateway submit KEY BASE_SHA CANDIDATE_SHA
+/usr/local/libexec/buster-bench-service gateway status JOB
+/usr/local/libexec/buster-bench-service gateway result JOB
+/usr/local/libexec/buster-bench-service gateway logs JOB [AFTER_SEQUENCE]
+/usr/local/libexec/buster-bench-service gateway cancel JOB
+```
+
+`gateway` fixes `/run/buster-bench/control.sock`, principal `github-actions`
+and recipe `validate-buster-v1`. It accepts full lowercase immutable source
+identities and bounded keys, never a recipe override, path, command, flag or
+environment override. It shares `client`'s typed transport and reply validator;
+it never opens the queue. Installed-source allowlisting and all materialization
+checks remain service-owned under the host lease.
+
+Neither command grants access: the socket still requires the daemon's exact
+effective UID and GID. Operator authorization must permit only the installed
+fixed gateway invocation. Never grant Actions an arbitrary service-account
+shell, direct queue access, `rpc` or unrestricted service executable invocation.
+The fixed encoder is not a setuid program or a completed privilege boundary;
+the deployment checklist's authorization and bounded-export gates still apply.
 
 `SOCKET`'s parent must already be a private, operator-provisioned directory;
 the service refuses an existing socket, final symlink, non-private parent or
@@ -542,7 +569,7 @@ replacement inode. The bind uses a restrictive umask and validates the
 pathname inode before listening and again after setup. On shutdown it removes
 only the socket inode it created and reports cleanup or replacement failures.
 Windows and macOS compile the bounded codec but report `unsupported` for
-`serve`, `client` and `rpc`; no network listener is added there.
+`serve`, `client`, `gateway` and `rpc`; no network listener is added there.
 
 ## CLI
 

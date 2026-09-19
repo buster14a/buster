@@ -1,10 +1,11 @@
 name: Buster CI
 
-# Build/test policy remains in build.c. Two shards per desktop lane, four
-# independent Unix mode/differential lanes and three mobile lanes retain full
-# coverage. See docs/ci-suite-partition.md for suite ownership and measurement;
-# docs/ci-combination-shards.md describes the internal combination partition;
-# docs/ci-workflow-audit.md documents cache boundaries and reproduction.
+# Build/test policy remains in build.c. Two shards per desktop lane, six
+# independent native mode lanes, four Unix differential lanes and three mobile
+# lanes retain full coverage. See docs/ci-suite-partition.md for suite ownership
+# and measurement; docs/ci-combination-shards.md describes the internal
+# combination partition; docs/ci-workflow-audit.md documents cache boundaries
+# and reproduction.
 on:
   pull_request:
   push:
@@ -16,6 +17,11 @@ on:
     inputs:
       cmake_profile:
         description: Retain native per-tree CMake command profiles
+        required: false
+        default: false
+        type: boolean
+      analyzer_comparison:
+        description: Run an explicit reference/candidate Clang analyzer comparison
         required: false
         default: false
         type: boolean
@@ -425,10 +431,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # These suites already generated a fresh compiler after the combination
-  # matrix. Run that independent producer in parallel, not a second copy of
-  # the combination build. Keep modes and differential together for reuse.
+  # The mode matrix is independent from the combination matrix on all six
+  # desktop platforms. Unix additionally reuses that fresh compiler for the
+  # native differential corpus; Windows reports the mode gate independently.
   native:
+    env:
+      BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
@@ -457,6 +465,22 @@ jobs:
             platform: unix
             os: macos
             arch: aarch64
+          - name: Windows x86-64 native
+            platform: windows
+            runner: windows-2025
+            os: windows
+            arch: x86_64
+            vs_arch: amd64
+            vs_component: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+            clang_arch: x86_64
+          - name: Windows AArch64 native
+            platform: windows
+            runner: windows-11-arm
+            os: windows
+            arch: aarch64
+            vs_arch: arm64
+            vs_component: Microsoft.VisualStudio.Component.VC.Tools.ARM64
+            clang_arch: aarch64
     steps:
       - name: Checkout
         id: checkout
@@ -465,7 +489,7 @@ jobs:
           persist-credentials: false
 
       # A failed mode suite must not hide the independent differential result.
-      # No continue-on-error: either failure still fails this native lane.
+      # No continue-on-error: either failure still fails this Unix native lane.
       - name: Execution-mode matrix
         id: modes
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'unix' }}
@@ -481,6 +505,46 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
           "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
           "$driver" test_mode_matrix --config Release
+
+      - name: Execution-mode matrix (Windows)
+        id: modes_windows
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'windows' }}
+        shell: powershell
+        env:
+          VS_ARCH: ${{ matrix.vs_arch }}
+          VS_COMPONENT: ${{ matrix.vs_component }}
+          CLANG_ARCH: ${{ matrix.clang_arch }}
+          CFLAGS: -Wno-invalid-feature-combination
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
+          New-Item -ItemType Directory -Force -Path $Logs | Out-Null
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
+          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
+          $VsPath = $VsPaths[0].Trim()
+          if (-not $VsPath) { throw "Visual Studio with ${env:VS_COMPONENT} was not found" }
+          # ARM64 uses an emulated amd64 VS host but native standalone LLVM.
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+          foreach ($Compiler in @('cl', 'clang')) {
+            where.exe $Compiler
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $ClangVersion = (& clang --version) -join "`n"
+          Write-Output $ClangVersion
+          if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
+            throw "clang does not default to a ${env:CLANG_ARCH} target"
+          }
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Redirect inside cmd, so native stderr is not a terminating PS error.
+          cmd /c "`"$Driver`" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'modes-generate.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" test_mode_matrix --config Release 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'modes.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Native configuration differential matrix
         id: differential
@@ -509,18 +573,20 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: modes differential
-          BUSTER_CI_REPRO: See docs/ci-suite-partition.md for the native suite commands and coverage contract.
-        run: python3 tools/ci_summary.py
+          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows' || 'modes differential' }}
+          BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for the matching native commands and coverage contract.
+        # Unix equivalent: run: python3 tools/ci_summary.py
+        run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
 
       # The differential runner writes tens of thousands of tiny evidence files;
       # uploading each as an artifact entry was a measured tail (#409). Pack
-      # them once and verify the archive; verdicts stay readable beside it.
+      # every platform's native evidence once and keep verdicts readable beside it.
       - name: Pack native logs
         id: pack
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         shell: bash
-        run: python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"
+        run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; else python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; fi
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
@@ -539,9 +605,11 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: modes differential pack
-          BUSTER_CI_REPRO: See docs/ci-suite-partition.md for native evidence packaging and fallback.
-        run: python3 tools/ci_summary.py
+          # Unix equivalent: BUSTER_CI_REQUIRED: modes differential pack
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows pack' || 'modes differential pack' }}
+          BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for native evidence packaging and fallback.
+        # Unix equivalent: run: python3 tools/ci_summary.py
+        run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
 
       # A packing failure already fails this lane; still retain the original tree.
       - name: Retain unpacked native logs
@@ -778,43 +846,81 @@ jobs:
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          COMPARISON_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p build "$RUNNER_TEMP/buster-analyzer"
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
           reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
+          candidate_depfile="$RUNNER_TEMP/buster-analyzer/candidate-driver.d"
+          reference_depfile="$RUNNER_TEMP/buster-analyzer/reference-driver.d"
+          candidate_manifest="$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
+          reference_manifest="$RUNNER_TEMP/buster-analyzer/reference-driver-provenance.json"
+          selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
+          reference_root="$RUNNER_TEMP/buster-analyzer/reference-tree"
           printf '%s\n' "$candidate_revision" | tee "$RUNNER_TEMP/buster-analyzer/revision.txt"
           printf '%s\n' "$reference_revision" > "$RUNNER_TEMP/buster-analyzer/baseline-revision.txt"
-          if [[ "$candidate_revision" == "$reference_revision" && ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) ]]; then
-            selection=skip
-            reason=same-revision
-          else
-            selection=compare
-            if [[ "$candidate_revision" == "$reference_revision" ]]; then
-              reason=event-requires-comparison
-            else
-              reason=distinct-revisions
+          clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
+          rm -f "$candidate_depfile" "$reference_depfile" build/analyzer-baseline
+          rm -rf "$reference_root"
+          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
+            -MMD -MF "$candidate_depfile" build.c -o build/analyzer-driver
+          python3 tools/analyzer_reference.py manifest \
+            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
+            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
+            --output "$candidate_manifest"
+
+          reference_materialized=true
+          if [[ "$candidate_revision" == "$reference_revision" && \
+                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
+                "$COMPARISON_REQUESTED" == false ]]; then
+            reference_materialized=false
+          fi
+          if [[ "$reference_materialized" == true ]]; then
+            mkdir -p "$reference_root"
+            trap 'rm -rf "$reference_root"' EXIT
+            git archive --format=tar "$reference_revision" | tar -xf - -C "$reference_root"
+            if find "$reference_root" -type l -print -quit | grep -q .; then
+              echo '::error::Historical analyzer reference contains a symlink.'
+              exit 1
             fi
+            (
+              cd "$reference_root"
+              clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
+                -MMD -MF "$reference_depfile" build.c -o "$GITHUB_WORKSPACE/build/analyzer-baseline"
+            )
+            python3 tools/analyzer_reference.py manifest \
+              --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
+              --root "$reference_root" --depfile "$reference_depfile" \
+              --output "$reference_manifest"
+          else
+            cp "$candidate_manifest" "$reference_manifest"
+          fi
+          python3 tools/analyzer_reference.py select \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$candidate_manifest" \
+            --reference-manifest "$reference_manifest" \
+            --output "$selection_path"
+          selection="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field selection)"
+          reason="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field reason)"
+          if [[ "$selection" == skip ]]; then
+            rm -f build/analyzer-baseline
           fi
           {
-            printf 'BUSTER_ANALYZER_COMPARISON_SELECTION_V1\n'
-            printf 'event=%s\n' "$EVENT_NAME"
-            printf 'candidate_revision=%s\n' "$candidate_revision"
-            printf 'reference_revision=%s\n' "$reference_revision"
-            printf 'selection=%s\n' "$selection"
-            printf 'reason=%s\n' "$reason"
-          } > "$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
-          printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection" >> "$GITHUB_ENV"
+            printf 'ANALYZER_COMPARISON_SELECTION=%s\n' "$selection"
+            printf 'ANALYZER_COMPARISON_REASON=%s\n' "$reason"
+            printf 'ANALYZER_REFERENCE_MATERIALIZED=%s\n' "$reference_materialized"
+          } >> "$GITHUB_ENV"
           {
             printf '## Clang analyzer comparison selection\n\n'
             printf '| Event | Candidate | Reference | Selection | Reason |\n| --- | --- | --- | --- | --- |\n'
             printf '| %s | %s | %s | %s | %s |\n' "$EVENT_NAME" "$candidate_revision" "$reference_revision" "$selection" "$reason"
           } >> "$GITHUB_STEP_SUMMARY"
-          clang --version | tee "$RUNNER_TEMP/buster-analyzer/clang.txt"
-          clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o build/analyzer-driver
-          if [[ "$selection" == compare ]]; then
-            git show "$reference_revision:build.c" > "$RUNNER_TEMP/buster-analyzer/baseline.c"
-            clang -Isrc -I. -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char "$RUNNER_TEMP/buster-analyzer/baseline.c" -o build/analyzer-baseline
+          if [[ "$reference_materialized" == true ]]; then
+            trap - EXIT
           fi
       - name: Exercise analyzer failure and coverage controls
         shell: bash
@@ -831,44 +937,84 @@ jobs:
         env:
           BASELINE_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
           EVENT_NAME: ${{ github.event_name }}
+          COMPARISON_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.analyzer_comparison && 'true' || 'false' }}
         run: |
           set -euo pipefail
           candidate_revision="$(git rev-parse --verify 'HEAD^{commit}')"
           reference_revision="$(git rev-parse --verify "$BASELINE_REVISION^{commit}")"
-          if [[ "$candidate_revision" == "$reference_revision" && ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) ]]; then
-            expected_selection=skip
-            expected_reason=same-revision
-          else
-            expected_selection=compare
-            if [[ "$candidate_revision" == "$reference_revision" ]]; then
-              expected_reason=event-requires-comparison
-            else
-              expected_reason=distinct-revisions
-            fi
-          fi
+          candidate_depfile="$RUNNER_TEMP/buster-analyzer/candidate-driver.d"
+          reference_depfile="$RUNNER_TEMP/buster-analyzer/reference-driver.d"
+          candidate_manifest="$RUNNER_TEMP/buster-analyzer/candidate-driver-provenance.json"
+          reference_manifest="$RUNNER_TEMP/buster-analyzer/reference-driver-provenance.json"
           selection_path="$RUNNER_TEMP/buster-analyzer/comparison-selection.txt"
-          if [[ ! -f "$selection_path" || -L "$selection_path" ]]; then
-            echo '::error::Missing analyzer comparison selection evidence.'
+          reference_root="$RUNNER_TEMP/buster-analyzer/reference-tree"
+          expected_directory="$(mktemp -d "$RUNNER_TEMP/buster-analyzer/.comparison-expected.XXXXXX")"
+          trap 'rm -rf "$expected_directory" "$reference_root"' EXIT
+          for evidence in "$candidate_depfile" "$candidate_manifest" "$reference_manifest" "$selection_path"; do
+            if [[ ! -f "$evidence" || -L "$evidence" ]]; then
+              echo '::error::Missing analyzer comparison provenance evidence.'
+              exit 1
+            fi
+          done
+          expected_materialized=true
+          if [[ "$candidate_revision" == "$reference_revision" && \
+                ("$EVENT_NAME" == push || "$EVENT_NAME" == workflow_dispatch) && \
+                "$COMPARISON_REQUESTED" == false ]]; then
+            expected_materialized=false
+          fi
+          if [[ "${ANALYZER_REFERENCE_MATERIALIZED-}" != "$expected_materialized" ]]; then
+            echo '::error::Analyzer reference materialization evidence is missing or stale.'
             exit 1
           fi
-          expected_selection_path="$(mktemp "$RUNNER_TEMP/buster-analyzer/.comparison-selection.expected.XXXXXX")"
-          trap 'rm -f "$expected_selection_path"' EXIT
-          {
-            printf 'BUSTER_ANALYZER_COMPARISON_SELECTION_V1\n'
-            printf 'event=%s\n' "$EVENT_NAME"
-            printf 'candidate_revision=%s\n' "$candidate_revision"
-            printf 'reference_revision=%s\n' "$reference_revision"
-            printf 'selection=%s\n' "$expected_selection"
-            printf 'reason=%s\n' "$expected_reason"
-          } > "$expected_selection_path"
-          if ! cmp -s "$expected_selection_path" "$selection_path" ||
-             [[ "${ANALYZER_COMPARISON_SELECTION-}" != "$expected_selection" ]]; then
+          python3 tools/analyzer_reference.py manifest \
+            --repository "$GITHUB_WORKSPACE" --revision "$candidate_revision" \
+            --root "$GITHUB_WORKSPACE" --depfile "$candidate_depfile" \
+            --output "$expected_directory/candidate.json"
+          if [[ "$expected_materialized" == true ]]; then
+            if [[ ! -d "$reference_root" || -L "$reference_root" || \
+                  ! -f "$reference_depfile" || -L "$reference_depfile" ]]; then
+              echo '::error::Historical analyzer reference evidence is missing or unsafe.'
+              exit 1
+            fi
+            python3 tools/analyzer_reference.py manifest \
+              --repository "$GITHUB_WORKSPACE" --revision "$reference_revision" \
+              --root "$reference_root" --depfile "$reference_depfile" \
+              --output "$expected_directory/reference.json"
+          else
+            if [[ -e "$reference_root" || -L "$reference_root" || \
+                  -e "$reference_depfile" || -L "$reference_depfile" ]]; then
+              echo '::error::Same-revision skip retained unexpected historical reference state.'
+              exit 1
+            fi
+            cp "$expected_directory/candidate.json" "$expected_directory/reference.json"
+          fi
+          if ! cmp -s "$expected_directory/candidate.json" "$candidate_manifest" || \
+             ! cmp -s "$expected_directory/reference.json" "$reference_manifest"; then
+            echo '::error::Missing, malformed, stale or inconsistent analyzer provenance evidence.'
+            exit 1
+          fi
+          python3 tools/analyzer_reference.py select \
+            --repository "$GITHUB_WORKSPACE" --event "$EVENT_NAME" \
+            --requested "$COMPARISON_REQUESTED" \
+            --candidate-revision "$candidate_revision" \
+            --reference-revision "$reference_revision" \
+            --candidate-manifest "$expected_directory/candidate.json" \
+            --reference-manifest "$expected_directory/reference.json" \
+            --output "$expected_directory/selection.txt"
+          if ! cmp -s "$expected_directory/selection.txt" "$selection_path"; then
             echo '::error::Missing, malformed, stale or inconsistent analyzer comparison selection evidence.'
             exit 1
           fi
-          rm -f "$expected_selection_path"
+          selection="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field selection)"
+          reason="$(python3 tools/analyzer_reference.py field --record "$selection_path" --field reason)"
+          if [[ "${ANALYZER_COMPARISON_SELECTION-}" != "$selection" || \
+                "${ANALYZER_COMPARISON_REASON-}" != "$reason" ]]; then
+            echo '::error::Analyzer comparison selection exports do not match retained evidence.'
+            exit 1
+          fi
+          rm -rf "$expected_directory" "$reference_root"
           trap - EXIT
-          case "$expected_selection" in
+          case "$selection" in
             compare)
               if [[ ! -f build/analyzer-baseline || -L build/analyzer-baseline || ! -x build/analyzer-baseline ]]; then
                 echo '::error::Analyzer comparison requires a regular, non-symlink executable baseline driver.'
@@ -941,7 +1087,7 @@ jobs:
         run: |
           {
             printf '| Shards | Result |\n| --- | --- |\n| All twelve desktop shards | %s |\n| All three mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
-            printf '| All four native lanes | %s |\n' "$NATIVE_RESULT"
+            printf '| All six native lanes | %s |\n' "$NATIVE_RESULT"
             printf '| UEFI firmware boot | %s |\n' "$UEFI_RESULT"
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
             printf '| Workflow lint | %s |\n' "$LINT_RESULT"

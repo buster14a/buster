@@ -5,11 +5,23 @@ supervisor. They are not an installer, are never applied by `build.c`, and do
 not qualify a benchmark host. Installation and any system-bus authorization
 remain explicit operator work.
 
+Use the [validate-buster-v1 provisioning and evidence checklist](VALIDATE_BUSTER_V1.md)
+before starting the reference service. It separates repository prerequisites,
+privileged operator work, and still-unperformed live checks. The reference now
+selects the authenticated long-lived `serve` endpoint, not the one-shot
+`worker-run` CLI. It supplies no runner gateway or result exporter.
+
 The installed executable must be the reviewed `bench_service` binary at
 `/usr/local/libexec/buster-bench-service`. The queue, workspace root and stable
 lease inode live under `/var/lib/buster-bench`; the frozen recipe/source store
-lives at `/opt/buster-bench/installed`. All are provisioned once, owned by the
-dedicated account, and must not be symlink aliases. Provision the dedicated
+lives at `/opt/buster-bench/installed`. The new-installation lease path is
+`/var/lib/buster-bench/lease/host.lock`, with a private `lease` parent. The state
+parent is group-traversable and the workspace root is SGID to the candidate
+group; the queue, lease parent and durable results remain service-private.
+Never move or replace an existing lease as part of applying this reference.
+State is provisioned once under the dedicated account; installed executables
+must be operator-owned and immutable to service/candidate/runner users. Paths
+must not be symlink aliases. Provision the dedicated
 `buster-bench-candidate` user and group as well. The service account is a member
 of that group only for read access to candidate-owned staging output; candidate
 build and throughput services use the candidate account as both their explicit
@@ -23,7 +35,10 @@ six recipe identities documented in the service README; those two executable
 paths and every build/throughput option remain build-policy constants.
 
 The example CPU (`2`) and budgets are review fixtures, not portable defaults.
-Change the service argument and slice together. The worker also repeats the
+CPU 2 is also compiled into `build.c::BENCH_SERVICE_RECIPE_CPU`; changing only
+the service argument and slice is insufficient. Require matching installed
+driver, service argument and slice identities before enabling the service.
+The worker also repeats the
 values on each transient service and fails closed unless manager properties and
 cgroup-v2 files show the exact leaf limits and non-tighter ancestor limits.
 

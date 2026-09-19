@@ -147,11 +147,6 @@ BUSTER_GLOBAL_LOCAL DebugLocation debug_location_copy(Arena* arena, DebugLocatio
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool debug_symbol_equal(IrSymbolId left, IrSymbolId right)
-{
-    return left.value == right.value;
-}
-
 BUSTER_GLOBAL_LOCAL DebugLocation debug_unavailable_location(void)
 {
     return (DebugLocation){
@@ -164,6 +159,18 @@ BUSTER_GLOBAL_LOCAL u32 debug_location_bucket(IrSymbolId symbol, u32 bucket_mask
     // Symbol values are dense indexes, but a caller may hand over sparse ones;
     // mixing keeps the buckets balanced either way.
     u32 value = symbol.value;
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    return value & bucket_mask;
+}
+
+BUSTER_GLOBAL_LOCAL u32 debug_location_local_bucket(IrSymbolId symbol, IrLocalId local, u32 bucket_mask)
+{
+    // Hash-combine the two dense IDs before applying the same final mixer as
+    // the symbol-only partition. Unsigned overflow is intentional here.
+    u32 value = symbol.value;
+    value ^= local.value + 0x9e3779b9u + (value << 6) + (value >> 2);
     value ^= value >> 16;
     value *= 0x7feb352du;
     value ^= value >> 15;
@@ -183,30 +190,44 @@ DebugLocationIndex debug_location_index_build(Arena* arena, DebugLocationSeed* l
         u32 bucket_mask = bucket_count - 1;
         u32* bucket_ends = arena_allocate(arena, u32, bucket_count);
         u32* order = arena_allocate(arena, u32, location_count);
-        if (bucket_ends && order)
+        u32* local_bucket_ends = arena_allocate(arena, u32, bucket_count);
+        u32* local_order = arena_allocate(arena, u32, location_count);
+        if (bucket_ends && order && local_bucket_ends && local_order)
         {
             memset(bucket_ends, 0, sizeof(u32) * bucket_count);
+            memset(local_bucket_ends, 0, sizeof(u32) * bucket_count);
             for (u32 index = 0; index < location_count; index += 1)
             {
-                bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)] += 1;
+                DebugLocationSeed* seed = locations + index;
+                bucket_ends[debug_location_bucket(seed->function_symbol, bucket_mask)] += 1;
+                local_bucket_ends[debug_location_local_bucket(seed->function_symbol, seed->local, bucket_mask)] += 1;
             }
             u32 running = 0;
+            u32 local_running = 0;
             for (u32 bucket = 0; bucket < bucket_count; bucket += 1)
             {
                 u32 count = bucket_ends[bucket];
                 bucket_ends[bucket] = running;
                 running += count;
+                u32 local_count = local_bucket_ends[bucket];
+                local_bucket_ends[bucket] = local_running;
+                local_running += local_count;
             }
-            // Filling through the exclusive prefix sums advances every entry to its
-            // bucket's end offset, which is exactly what queries need.
+            // Filling through the exclusive prefix sums advances every entry to
+            // its bucket's end offset. Iterating seeds in source order makes both
+            // counting sorts stable, preserving emitted range order.
             for (u32 index = 0; index < location_count; index += 1)
             {
-                order[bucket_ends[debug_location_bucket(locations[index].function_symbol, bucket_mask)]++] = index;
+                DebugLocationSeed* seed = locations + index;
+                order[bucket_ends[debug_location_bucket(seed->function_symbol, bucket_mask)]++] = index;
+                local_order[local_bucket_ends[debug_location_local_bucket(seed->function_symbol, seed->local, bucket_mask)]++] = index;
             }
             result = (DebugLocationIndex){
                 .locations = locations,
                 .bucket_ends = bucket_ends,
                 .order = order,
+                .local_bucket_ends = local_bucket_ends,
+                .local_order = local_order,
                 .bucket_count = bucket_count,
                 .location_count = location_count,
             };
@@ -216,32 +237,46 @@ DebugLocationIndex debug_location_index_build(Arena* arena, DebugLocationSeed* l
     return result;
 }
 
-// Only model construction accepts a caller-populated index. Prove its
-// complete partition, bucket membership and stable seed order once; the
-// per-variable lookup below remains constant-time plus its matching bucket.
-BUSTER_GLOBAL_LOCAL bool debug_location_index_valid(DebugLocationIndex* index)
+BUSTER_GLOBAL_LOCAL bool debug_location_index_partition_valid(DebugLocationIndex* index, u32* bucket_ends, u32* order,
+                                                               bool exact_local)
 {
-    bool valid = index->locations && index->location_count && index->bucket_count &&
-                 !(index->bucket_count & (index->bucket_count - 1)) && index->bucket_ends && index->order;
+    bool valid = bucket_ends && order;
     u32 first = 0;
     for (u32 bucket = 0; valid && bucket < index->bucket_count; bucket += 1)
     {
-        u32 end = index->bucket_ends[bucket];
+        u32 end = bucket_ends[bucket];
         valid = first <= end && end <= index->location_count;
         u32 previous = 0;
         for (u32 scan = first; valid && scan < end; scan += 1)
         {
-            u32 seed = index->order[scan];
-            valid = seed < index->location_count && (scan == first || previous < seed);
+            u32 seed_index = order[scan];
+            valid = seed_index < index->location_count && (scan == first || previous < seed_index);
             if (valid)
             {
-                valid = debug_location_bucket(index->locations[seed].function_symbol, index->bucket_count - 1) == bucket;
+                DebugLocationSeed* seed = index->locations + seed_index;
+                u32 expected_bucket = exact_local ? debug_location_local_bucket(seed->function_symbol, seed->local, index->bucket_count - 1)
+                                                  : debug_location_bucket(seed->function_symbol, index->bucket_count - 1);
+                valid = expected_bucket == bucket;
             }
-            previous = seed;
+            previous = seed_index;
         }
         first = end;
     }
-    valid = valid && first == index->location_count;
+    return valid && first == index->location_count;
+}
+
+// Only model construction accepts a caller-populated index. Prove both
+// complete partitions, bucket membership and stable seed order once; the
+// per-variable lookup below remains constant-time plus its matching bucket.
+BUSTER_GLOBAL_LOCAL bool debug_location_index_valid(DebugLocationIndex* index)
+{
+    bool valid = index && index->locations && index->location_count && index->bucket_count &&
+                 !(index->bucket_count & (index->bucket_count - 1));
+    if (valid)
+    {
+        valid = debug_location_index_partition_valid(index, index->bucket_ends, index->order, false) &&
+                debug_location_index_partition_valid(index, index->local_bucket_ends, index->local_order, true);
+    }
     return valid;
 }
 
@@ -263,7 +298,7 @@ BUSTER_GLOBAL_LOCAL bool debug_model_locations_prepare(Arena* arena, DebugModelI
         else
         {
             // An index for a different slice is stale, not a reason to omit
-            // locations. Rebuild it without reading its bucket/order arrays.
+            // locations. Rebuild it without reading any partition arrays.
             *storage = debug_location_index_build(arena, input->locations, input->location_count);
             input->location_index = storage;
         }
@@ -281,8 +316,8 @@ BUSTER_GLOBAL_LOCAL DebugLocationIndex* debug_location_index_for(DebugModelInput
     if (input && input->locations && input->location_index)
     {
         DebugLocationIndex* index = input->location_index;
-        if (index->locations == input->locations && index->location_count == input->location_count &&
-            index->bucket_count && index->bucket_ends && index->order)
+        if (index->locations == input->locations && index->location_count == input->location_count && index->bucket_count &&
+            index->bucket_ends && index->order && index->local_bucket_ends && index->local_order)
         {
             // The model boundary has already validated matching indexes.
             // Test-only direct calls may still provide a stale index.
@@ -296,21 +331,30 @@ void debug_variable_add_location(Arena* arena, DebugModelInput* input, DebugVari
                                                      IrLocalId local, u32 start, u32 end)
 {
     DebugLocationIndex* index = debug_location_index_for(input);
+    bool exact_local = local.value != IR_ID_UNDERLYING_INVALID;
+    u32* scan_order = 0;
     u32 scan_first = 0;
     u32 scan_count = input && input->locations ? input->location_count : 0;
     if (index)
     {
+        u32* bucket_ends = index->bucket_ends;
         u32 bucket = debug_location_bucket(symbol, index->bucket_count - 1);
-        scan_first = bucket ? index->bucket_ends[bucket - 1] : 0;
-        scan_count = index->bucket_ends[bucket] - scan_first;
+        scan_order = index->order;
+        if (exact_local)
+        {
+            bucket_ends = index->local_bucket_ends;
+            bucket = debug_location_local_bucket(symbol, local, index->bucket_count - 1);
+            scan_order = index->local_order;
+        }
+        scan_first = bucket ? bucket_ends[bucket - 1] : 0;
+        scan_count = bucket_ends[bucket] - scan_first;
     }
     u32 matching_count = 0;
     for (u32 scan = 0; scan < scan_count; scan += 1)
     {
-        u32 seed_index = index ? index->order[scan_first + scan] : scan;
+        u32 seed_index = scan_order ? scan_order[scan_first + scan] : scan;
         DebugLocationSeed* seed = input->locations + seed_index;
-        if (debug_symbol_equal(seed->function_symbol, symbol) &&
-            (local.value == IR_ID_UNDERLYING_INVALID || seed->local.value == local.value))
+        if (seed->function_symbol.value == symbol.value && (!exact_local || seed->local.value == local.value))
         {
             matching_count += 1;
         }
@@ -319,14 +363,13 @@ void debug_variable_add_location(Arena* arena, DebugModelInput* input, DebugVari
     if (matching_count)
     {
         u32 output_count = 0;
-        // The index groups by symbol without reordering within a group, so the
-        // emitted ranges keep their original seed order either way.
+        // Both index partitions are stable, so filtering a hash bucket retains
+        // the original seed order and therefore byte-identical emitted ranges.
         for (u32 scan = 0; scan < scan_count; scan += 1)
         {
-            u32 seed_index = index ? index->order[scan_first + scan] : scan;
+            u32 seed_index = scan_order ? scan_order[scan_first + scan] : scan;
             DebugLocationSeed* seed = input->locations + seed_index;
-            if (!debug_symbol_equal(seed->function_symbol, symbol) ||
-                (local.value != IR_ID_UNDERLYING_INVALID && seed->local.value != local.value))
+            if (seed->function_symbol.value != symbol.value || (exact_local && seed->local.value != local.value))
             {
                 continue;
             }

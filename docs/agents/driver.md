@@ -409,3 +409,17 @@ ID/name, source coordinates, reason/stage and opcode; normal compilation allocat
 no record array. The first strict diagnostic remains unchanged. The
 [retirement object census](../native-retirement-census.md) validates and retains
 both aggregate and function records, including records before a fatal stop.
+
+## Positional source-language selection
+
+`-x` is positional. The command-line parser snapshots the active language
+beside each following input, and `-x none` restores automatic extension
+classification only for later inputs. A later or trailing `-x` never
+reclassifies an earlier path.
+
+`CompilerDriverInvocation.input_languages` is authoritative when non-null
+and must contain exactly `input_count` entries. Embedding callers that
+leave the pointer null and `input_language_count` zero retain the legacy
+invocation-wide `language` behavior. Any code that slices `input_paths`
+for a single translation unit must slice the language array in lockstep.
+The GPU handoff follows the same null-means-global compatibility rule.
