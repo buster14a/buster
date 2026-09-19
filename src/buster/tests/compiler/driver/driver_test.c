@@ -1491,10 +1491,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { return; }\n"), false},
         {S8("_Static_assert(0, \"syntax diagnostic corpus\");\n"), false},
         {S8("int g(int x) { return _Generic(x, int: 1, int: 2); }\n"), false},
+        {S8("int g(void) { return _Generic(1, default: 1, default: 2); }\n"), false},
+        {S8("int g(void) { return _Generic(1.0, int: 1); }\n"), false},
+        {S8("int g(void) { return _Generic(1, void: 1, default: 2); }\n"), false},
         {S8("int g(int n) { int a[n] = {1}; return a[0]; }\n"), false},
+        {S8("int g(int n) { static int a[n]; return a[0]; }\n"), false},
         {S8("int g(int n) { switch(n) { case 1: return 1; case 1: return 2; } return 0; }\n"), false},
+        {S8("int g(int n) { switch(n) { case 1 ... 2: return 1; } return 0; }\n"), false},
         {S8("int f(int); int g(void) { return sizeof(f(1)); }\n"), true},
         {S8("int g(int x) { return x * 3 + 1; }\n"), true},
+        {S8("int g(void) { int a[sizeof(int)]; return a[0]; }\n"), true},
+        {S8("long long g(long long x) { switch (x) { case -1: return 1; case 4294967295LL: return 2; } return 0; }\n"), true},
         {S8("static int x; int *p = &x;\n"), true},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
