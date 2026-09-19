@@ -1219,6 +1219,20 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
             continue;
         }
         DObservation observed = d_observe(&child, argv, prefix);
+        String8 provenance_record = string_format_z(temporary.arena, S8("{S8}.provenance"), prefix);
+        String8 tree_identity = mode ? settings->compiler_revision : settings->baseline_revision;
+        if (!tree_identity.length) { tree_identity = stage_object_source_tree_identity(temporary.arena); }
+        StageObjectProvenance provenance = {
+            .object_path = object,
+            .source_path = source,
+            .compiler_path = command[0],
+            .record_path = provenance_record,
+            .tree_identity = tree_identity,
+            .toolchain_arguments = argv,
+        };
+        bool provenance_valid = d_success(observed) &&
+                                stage_object_provenance_capture(temporary.arena, &provenance, true) &&
+                                stage_object_provenance_validate(temporary.arena, &provenance, true);
         NrcStatistics statistics = nrc_statistics(observed.output, nrc_allocators[mode]);
         u64 row = group * BUSTER_ARRAY_LENGTH(nrc_allocators) + mode;
         String8 expected_features = nrc_target_features(temporary.arena, nrc_targets[target], recipe_cpu);
@@ -1232,7 +1246,7 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
         nrc_counters(settings, row, observed.output, diagnostic_target, nrc_allocators[mode]);
         u64 object_hash = 0, object_bytes = 0;
         String8 object_sha256 = {0};
-        bool artifact = build_artifact_fanout_hash_file(temporary.arena, object, &object_hash, &object_bytes);
+        bool artifact = provenance_valid && build_artifact_fanout_hash_file(temporary.arena, object, &object_hash, &object_bytes);
         if (artifact)
         {
             u64 identity_bytes = 0, identity_hash = 0;
@@ -1465,6 +1479,10 @@ BUSTER_GLOBAL_LOCAL u32 nrc_self_test(Arena* arena)
 
 BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, SliceString8 arguments)
 {
+    if (!stage_object_provenance_self_test(arena))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
     NrcSettings settings = {.child = {.arena = arena, .ide = S8("build/Release/ide"),
         .out = S8("build/native-retirement-census"), .timeout_seconds = 30, .verify = true},
         .shard_count = 1, .cpu = S8("baseline"), .contract_path = S8("docs/native-retirement-support-v1.tsv"),
