@@ -14,20 +14,9 @@ jobs:
       - shell: bash
         run: |
           set -euo pipefail
-          mkdir issue-183-source
-          cp --parents \
-            src/buster/lib/compiler/frontend/c/c.h \
-            src/buster/lib/compiler/frontend/c/c_parse.c \
-            src/buster/lib/compiler/frontend/c/c_gen.c \
-            src/buster/lib/compiler/frontend/c/c_source.c \
-            src/buster/lib/compiler/frontend/c/c_parse.h \
-            src/buster/lib/compiler/frontend/c/c_gen.h \
-            tests/c/c.c tests/c/c-gnu.c \
-            build.sh build.c AGENTS.md \
-            issue-183-source/
-          find docs/agents/frontend -maxdepth 2 -type f -exec cp --parents {} issue-183-source/ \;
+          git ls-files -z | tar --null -T - -czf issue-183-source.tgz
       - uses: actions/upload-artifact@v4
         with:
           name: issue-183-source
-          path: issue-183-source
+          path: issue-183-source.tgz
           retention-days: 1
