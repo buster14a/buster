@@ -1,0 +1,259 @@
+{
+  "candidate": "856",
+  "source_commit": "2a9693b23b869461aab68835a1221dba2d8c3f1f",
+  "candidate_commit": "8954cc9ba5120b49b6b0750fcd81dfaeb962eac6",
+  "command": [
+    "cc",
+    "-Isrc",
+    "-Ibuild/generated",
+    "-DBUSTER_UNITY_BUILD=1",
+    "-DBUSTER_INCLUDE_TESTS=0",
+    "-g",
+    "-v",
+    "src/buster/apps/ide/ide.c",
+    "-lm",
+    "-o",
+    "/home/david/bench/issue791-20260919/main/build/issue791-stage1"
+  ],
+  "cpu": 2,
+  "compiler_sha256": {
+    "base": "b315e6f10129c01b05463a0eef8e91f39d3af8a97b566327e5896c20bcc73386",
+    "candidate": "ebe975eea48c50116826897a0d745fe6376c3ba58b82d3293fce78057d5419ea"
+  },
+  "records": [
+    {
+      "leg": "base",
+      "index": "warm",
+      "measured": false,
+      "wall_ns": 1075640116,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965"
+    },
+    {
+      "leg": "candidate",
+      "index": "warm",
+      "measured": false,
+      "wall_ns": 1073047359,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965"
+    },
+    {
+      "leg": "base",
+      "index": 0,
+      "measured": true,
+      "wall_ns": 1116074581,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5385428417,
+      "instructions:u": 14382743384,
+      "ls_any_fills_from_sys.dram_io_all:u": 12726466
+    },
+    {
+      "leg": "candidate",
+      "index": 0,
+      "measured": true,
+      "wall_ns": 1082395062,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5390607430,
+      "instructions:u": 14394965880,
+      "ls_any_fills_from_sys.dram_io_all:u": 12581386
+    },
+    {
+      "leg": "candidate",
+      "index": 1,
+      "measured": true,
+      "wall_ns": 1078795980,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5373176922,
+      "instructions:u": 14394965019,
+      "ls_any_fills_from_sys.dram_io_all:u": 12643398
+    },
+    {
+      "leg": "base",
+      "index": 1,
+      "measured": true,
+      "wall_ns": 1080316447,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5380781729,
+      "instructions:u": 14382553660,
+      "ls_any_fills_from_sys.dram_io_all:u": 12632660
+    },
+    {
+      "leg": "base",
+      "index": 2,
+      "measured": true,
+      "wall_ns": 1079571882,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5385135156,
+      "instructions:u": 14382553625,
+      "ls_any_fills_from_sys.dram_io_all:u": 12617232
+    },
+    {
+      "leg": "candidate",
+      "index": 2,
+      "measured": true,
+      "wall_ns": 1078225369,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5373883339,
+      "instructions:u": 14394963042,
+      "ls_any_fills_from_sys.dram_io_all:u": 12523562
+    },
+    {
+      "leg": "candidate",
+      "index": 3,
+      "measured": true,
+      "wall_ns": 1077417295,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5373604211,
+      "instructions:u": 14394964030,
+      "ls_any_fills_from_sys.dram_io_all:u": 12567957
+    },
+    {
+      "leg": "base",
+      "index": 3,
+      "measured": true,
+      "wall_ns": 1078791131,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5368437788,
+      "instructions:u": 14382708483,
+      "ls_any_fills_from_sys.dram_io_all:u": 12618332
+    },
+    {
+      "leg": "base",
+      "index": 4,
+      "measured": true,
+      "wall_ns": 1083578792,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5400471149,
+      "instructions:u": 14382741595,
+      "ls_any_fills_from_sys.dram_io_all:u": 12726817
+    },
+    {
+      "leg": "candidate",
+      "index": 4,
+      "measured": true,
+      "wall_ns": 1081223538,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5383407715,
+      "instructions:u": 14394966168,
+      "ls_any_fills_from_sys.dram_io_all:u": 12647279
+    },
+    {
+      "leg": "candidate",
+      "index": 5,
+      "measured": true,
+      "wall_ns": 1079305304,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5378789499,
+      "instructions:u": 14394776019,
+      "ls_any_fills_from_sys.dram_io_all:u": 12627637
+    },
+    {
+      "leg": "base",
+      "index": 5,
+      "measured": true,
+      "wall_ns": 1078908911,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5378001497,
+      "instructions:u": 14382721032,
+      "ls_any_fills_from_sys.dram_io_all:u": 12643766
+    },
+    {
+      "leg": "base",
+      "index": 6,
+      "measured": true,
+      "wall_ns": 1081501771,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5393320569,
+      "instructions:u": 14382742205,
+      "ls_any_fills_from_sys.dram_io_all:u": 12581393
+    },
+    {
+      "leg": "candidate",
+      "index": 6,
+      "measured": true,
+      "wall_ns": 1075915334,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5367718966,
+      "instructions:u": 14394776010,
+      "ls_any_fills_from_sys.dram_io_all:u": 12543919
+    },
+    {
+      "leg": "candidate",
+      "index": 7,
+      "measured": true,
+      "wall_ns": 1079253520,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5375912080,
+      "instructions:u": 14394943243,
+      "ls_any_fills_from_sys.dram_io_all:u": 12611982
+    },
+    {
+      "leg": "base",
+      "index": 7,
+      "measured": true,
+      "wall_ns": 1077580585,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5375028647,
+      "instructions:u": 14382743555,
+      "ls_any_fills_from_sys.dram_io_all:u": 12575303
+    },
+    {
+      "leg": "base",
+      "index": 8,
+      "measured": true,
+      "wall_ns": 1079668987,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5380375893,
+      "instructions:u": 14382740973,
+      "ls_any_fills_from_sys.dram_io_all:u": 12569799
+    },
+    {
+      "leg": "candidate",
+      "index": 8,
+      "measured": true,
+      "wall_ns": 1079355209,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5380024750,
+      "instructions:u": 14394966250,
+      "ls_any_fills_from_sys.dram_io_all:u": 12538374
+    },
+    {
+      "leg": "candidate",
+      "index": 9,
+      "measured": true,
+      "wall_ns": 1077786051,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5368589967,
+      "instructions:u": 14394966159,
+      "ls_any_fills_from_sys.dram_io_all:u": 12614761
+    },
+    {
+      "leg": "base",
+      "index": 9,
+      "measured": true,
+      "wall_ns": 1082593488,
+      "output_sha256": "96c501c5c0f4ad74171635dfa15f755f39712ee5b7a8e0811869f4616c0f0965",
+      "cycles:u": 5398014230,
+      "instructions:u": 14382719194,
+      "ls_any_fills_from_sys.dram_io_all:u": 12596038
+    }
+  ],
+  "medians": {
+    "base": {
+      "wall_ns": 1079992717.0,
+      "cycles:u": 5382958442.5,
+      "instructions:u": 14382731002.5,
+      "ls_any_fills_from_sys.dram_io_all:u": 12617782.0
+    },
+    "candidate": {
+      "wall_ns": 1079024750.0,
+      "cycles:u": 5374897709.5,
+      "instructions:u": 14394964524.5,
+      "ls_any_fills_from_sys.dram_io_all:u": 12596684.0
+    }
+  },
+  "delta_percent": {
+    "wall_ns": -0.0896271784766145,
+    "cycles:u": -0.14974540647310075,
+    "instructions:u": 0.08505701732079984,
+    "ls_any_fills_from_sys.dram_io_all:u": -0.16720846817610546
+  }
+}
