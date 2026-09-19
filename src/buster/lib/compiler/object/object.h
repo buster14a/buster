@@ -178,11 +178,49 @@ struct ObjectSection
     u32 alignment;
 };
 
-// A replaceable definition: COFF selectany COMDAT (IMAGE_SCN_LNK_COMDAT with
-// a selection other than NODUPLICATES), ELF STB_WEAK, or Mach-O N_WEAK_DEF.
-// The linker keeps the first such definition instead of diagnosing a
-// duplicate, and any non-replaceable definition of the same name wins over
-// every replaceable one regardless of input order.
+// COFF gives every COMDAT source section one of these selection contracts.
+// The numeric values deliberately match IMAGE_COMDAT_SELECT_* so the reader
+// can validate and preserve the auxiliary section-definition byte directly.
+typedef enum ObjectComdatSelection
+{
+    OBJECT_COMDAT_SELECTION_NONE,
+    OBJECT_COMDAT_SELECTION_NO_DUPLICATES,
+    OBJECT_COMDAT_SELECTION_ANY,
+    OBJECT_COMDAT_SELECTION_SAME_SIZE,
+    OBJECT_COMDAT_SELECTION_EXACT_MATCH,
+    OBJECT_COMDAT_SELECTION_ASSOCIATIVE,
+    OBJECT_COMDAT_SELECTION_LARGEST,
+    OBJECT_COMDAT_SELECTION_COUNT,
+} ObjectComdatSelection;
+
+#define OBJECT_COMDAT_ASSOCIATED_NONE UINT32_MAX
+
+// One original COFF COMDAT section contribution after the reader has merged
+// sections of the same neutral kind. `offset`/`size` identify its bytes in
+// `sections[section]`; `source_section` preserves the input section number;
+// and `associated` is another record in this array for ASSOCIATIVE sections.
+// Relocations stay contiguous per source section and are recorded explicitly
+// so EXACT_MATCH can compare their canonical identity without rescanning the
+// entire object. A record with selection NONE represents a malformed/pending
+// COMDAT and deliberately keeps the old hard-definition behavior.
+typedef struct ObjectComdat ObjectComdat;
+struct ObjectComdat
+{
+    String8 key;
+    u64 offset;
+    u64 size;
+    u32 section;
+    u32 source_section;
+    u32 associated;
+    u32 first_relocation;
+    u32 relocation_count;
+    ObjectComdatSelection selection;
+};
+
+// A replaceable definition: a selected COFF COMDAT contribution, ELF
+// STB_WEAK, or Mach-O N_WEAK_DEF. COFF selection is resolved as a group before
+// this ordinary weak/strong arbitration; `comdat` is zero for every other
+// symbol and otherwise names ObjectFile.comdats[comdat - 1].
 typedef struct ObjectSymbol ObjectSymbol;
 struct ObjectSymbol
 {
@@ -190,6 +228,7 @@ struct ObjectSymbol
     u64 value;
     u64 size;
     u32 section;
+    u32 comdat;
     ObjectSymbolKind kind;
     bool global;
     bool weak;
@@ -208,6 +247,9 @@ struct ObjectRelocation
     u64 offset;
     u32 section;
     u32 symbol;
+    // Zero outside a COFF COMDAT; otherwise ObjectFile.comdats[comdat - 1].
+    // The field fills the structure's former tail padding on 64-bit hosts.
+    u32 comdat;
     ObjectRelocationKind kind;
 };
 
@@ -233,6 +275,7 @@ struct ObjectFile
     ObjectSection* sections;
     ObjectSymbol* symbols;
     ObjectRelocation* relocations;
+    ObjectComdat* comdats;
     Target target;
     ObjectError error;
     // When error is OBJECT_ERROR_UNSUPPORTED_TARGET, this may name the
@@ -242,6 +285,7 @@ struct ObjectFile
     u32 section_count;
     u32 symbol_count;
     u32 relocation_count;
+    u32 comdat_count;
     ObjectDebugModule* debug_modules;
     u32 debug_module_count;
     // The GNU `constructor(N)`/`destructor(N)` priority of every entry of

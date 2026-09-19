@@ -60,8 +60,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   `IrSymbol.is_weak` and becomes `ObjectSymbol.weak`, which ELF writes as
   `STB_WEAK` and Mach-O as `N_WEAK_DEF`. COFF spells a weak definition as a
   selectany COMDAT, which needs a section per symbol while this model merges
-  sections by kind, so a COFF object reads `weak` back but cannot write it and
-  carries such a symbol as an ordinary external. That is the one gap of the
+  sections by kind, so the writer still cannot synthesize it. The reader does
+  preserve each source contribution's key, selection, associated parent, byte
+  range and relocation range. `link_objects` resolves those groups first:
+  ANY keeps one, SAME_SIZE and EXACT_MATCH validate their contracts, LARGEST
+  chooses by size independently of input order, and ASSOCIATIVE follows its
+  parent. Only then does the surviving definition enter ordinary weak/strong
+  arbitration. A COFF object therefore reads `weak` back but cannot write it
+  and carries a compiler-produced weak symbol as an ordinary external. That is the one gap of the
   three formats, and it predates aliases: `object.c`'s header states it. An
   alias is a pair in `IrModule.aliases` rather than a field on every symbol:
   it is a relation between two symbols rather than a property of one, and
