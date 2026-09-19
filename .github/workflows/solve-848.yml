@@ -70,13 +70,16 @@ jobs:
           set -e
 
           if test "$test_status" -ne 0; then
-            failure_count=$(grep -cF " test failed at " /tmp/solve-848-validation.log || true)
+            failure_count=$(grep -Ec " failed at .*/src/buster/tests/" /tmp/solve-848-validation.log || true)
             if test "$failure_count" -eq 1 && \
-               grep -Fq "c_driver_artifact_tests:9694 c_artifact_wait(&executable, 0, 0)" /tmp/solve-848-validation.log && \
+               grep -Fq "c_artifact_wait.result == PROCESS_RESULT_SUCCESS failed at " /tmp/solve-848-validation.log && \
+               grep -Fq "driver_test.c:compiler_driver_tests:9694" /tmp/solve-848-validation.log && \
                grep -Eq "module=ir_tests .*failed=0 .*status=pass" /tmp/solve-848-validation.log; then
               echo "Retrying the isolated driver artifact wait failure once" | tee -a /tmp/solve-848-validation.log
+              set +e
               ./build.sh build --config Release -t test_all 2>&1 | tee -a /tmp/solve-848-validation.log
               test_status=${PIPESTATUS[0]}
+              set -e
             fi
           fi
           test "$test_status" -eq 0
@@ -110,6 +113,7 @@ jobs:
               'Assertion',
               'assertion',
               'ir_unreachable',
+              'Retrying the isolated driver artifact wait failure once',
           )
           for index, line in enumerate(lines):
               if any(needle in line for needle in needles):
@@ -147,8 +151,8 @@ jobs:
           git diff --check
           git config user.name "OpenAI Codex"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch --detach "$BASE_SHA"
-          git switch -C "$FINAL_BRANCH"
+          git reset --hard "$BASE_SHA"
+          git switch -C "$FINAL_BRANCH" "$BASE_SHA"
           git apply --index "$patch"
           git diff --cached --check
           test "$(git diff --cached --name-only | wc -l)" -eq 3
