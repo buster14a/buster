@@ -3568,11 +3568,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     }
     if (invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
     {
-        CIRLowerResult semantic = c_analyze_with_options(arena, invocation.input_paths[0], preprocess, syntax, invocation.target,
-                                                       (CIRLowerOptions){.disable_direct_ssa = invocation.disable_direct_ssa,
-                                                                         .sysv_unnamed_bitfields_integer = invocation.sysv_unnamed_bitfields_integer});
+        CAnalysisResult semantic = c_analyze_semantics_only(arena, preprocess, syntax);
         result.analysis_diagnostic_count = semantic.diagnostic_count;
-        if (semantic.diagnostic_count || !semantic.program)
+        if (semantic.diagnostic_count || !semantic.analysis_complete)
         {
             result.error = COMPILER_DRIVER_ERROR_ANALYSIS;
             if (semantic.diagnostic_count)

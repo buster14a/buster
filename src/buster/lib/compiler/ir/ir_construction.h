@@ -9,6 +9,10 @@
 
 #if BUSTER_BENCH_ALLOCATIONS
 #define IR_CONSTRUCTION_COUNTERS(X) \
+    X(PROGRAM_STARTS, program_starts) \
+    X(TYPE_APPENDS, type_appends) \
+    X(SYMBOL_APPENDS, symbol_appends) \
+    X(GLOBAL_APPENDS, global_appends) \
     X(BLOCK_APPENDS, block_appends) \
     X(VALUE_APPENDS, value_appends) \
     X(INSTRUCTION_APPENDS, instruction_appends) \
