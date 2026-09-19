@@ -1,0 +1,185 @@
+name: Compare issue 183 candidate
+
+on:
+  push:
+    branches:
+      - scratch/183-current-progress
+    paths:
+      - .github/workflows/issue-183-compare.yml
+
+permissions:
+  contents: write
+
+jobs:
+  compare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Configure and build baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUSTER_STDOUT_ASSERTS=TRUE \
+            -DBUILD_TESTING=ON
+          cmake --build build --parallel 2
+      - name: Run baseline suite
+        shell: bash
+        run: |
+          set +e
+          BUSTER_TEST_JOBS=2 build/ide test --ci=1 --verbose=1 > /tmp/issue-183-baseline.log 2>&1
+          printf '%s\n' "$?" > /tmp/issue-183-baseline.exit
+          exit 0
+      - name: Recover and apply candidate
+        id: apply
+        shell: bash
+        run: |
+          set +e
+          git fetch --no-tags --depth=1 origin fix/183-gnu17-enum-types
+          git show FETCH_HEAD:.github/issue-183-apply.py > /tmp/issue-183-apply.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('/tmp/issue-183-apply.py')
+          text = path.read_text()
+          start = text.index('def replace_once(')
+          end = text.index('\n\n# Preserve', start)
+          helper = '''def replace_once(path: str, old: str, new: str) -> None:
+              import re
+
+              source_path = Path(path)
+              text = source_path.read_text()
+              count = text.count(old)
+              if count == 1:
+                  source_path.write_text(text.replace(old, new, 1))
+                  return
+              if count != 0:
+                  raise SystemExit(f"{path}: expected exactly one exact match, found {count}: {old[:120]!r}")
+              parts = re.split(r"(\\s+)", old)
+              pattern = "".join(r"\\s+" if part.isspace() else re.escape(part) for part in parts if part)
+              matches = list(re.finditer(pattern, text))
+              if len(matches) != 1:
+                  raise SystemExit(f"{path}: expected exactly one whitespace-normalized match, found {len(matches)}: {old[:120]!r}")
+              match = matches[0]
+              source_path.write_text(text[:match.start()] + new + text[match.end():])'''
+          text = text[:start] + helper + text[end:]
+          old_layout = '''    u32 symbol;
+              // The declaration-point type for C23, or the completed compatible type
+              // selected for a GNU enum. This fills the former alignment hole.
+              CTypeId type;
+              u64 value;
+              bool is_negative;
+              bool is_unsigned;
+              u8 reserved[6];
+          '''
+          new_layout = '''    u32 symbol;
+              u64 value;
+              bool is_negative;
+              bool is_unsigned;
+              u8 reserved[2];
+              // The declaration-point type for C23, or the completed compatible type
+              // selected for a GNU enum. Stored in the previous tail padding.
+              CTypeId type;
+          '''
+          if text.count(old_layout) != 1:
+              raise SystemExit('could not locate staged CEnumMember replacement')
+          path.write_text(text.replace(old_layout, new_layout, 1))
+          PY
+          python3 /tmp/issue-183-apply.py > /tmp/issue-183-apply.log 2>&1
+          apply_status=$?
+          printf '%s\n' "$apply_status" > /tmp/issue-183-apply.exit
+          if [ "$apply_status" -eq 0 ]; then
+            git diff --check >> /tmp/issue-183-apply.log 2>&1
+            diff_status=$?
+            if [ "$diff_status" -ne 0 ]; then
+              printf '%s\n' "$diff_status" > /tmp/issue-183-apply.exit
+            fi
+          fi
+          exit 0
+      - name: Build and test candidate
+        shell: bash
+        run: |
+          set +e
+          if [ "$(cat /tmp/issue-183-apply.exit)" -eq 0 ]; then
+            cmake --build build --parallel 2 > /tmp/issue-183-candidate-build.log 2>&1
+            build_status=$?
+          else
+            build_status=125
+          fi
+          printf '%s\n' "$build_status" > /tmp/issue-183-candidate-build.exit
+          if [ "$build_status" -eq 0 ]; then
+            build/ide cc tests/basic_c_enum_underlying_type.c -o /tmp/basic_c_enum_underlying_type > /tmp/issue-183-targeted.log 2>&1
+            targeted_compile=$?
+            if [ "$targeted_compile" -eq 0 ]; then
+              /tmp/basic_c_enum_underlying_type >> /tmp/issue-183-targeted.log 2>&1
+              targeted_run=$?
+            else
+              targeted_run=125
+            fi
+            BUSTER_TEST_JOBS=2 build/ide test --ci=1 --verbose=1 > /tmp/issue-183-candidate.log 2>&1
+            candidate_status=$?
+          else
+            targeted_compile=125
+            targeted_run=125
+            candidate_status=125
+            : > /tmp/issue-183-targeted.log
+            : > /tmp/issue-183-candidate.log
+          fi
+          printf '%s %s\n' "$targeted_compile" "$targeted_run" > /tmp/issue-183-targeted.exit
+          printf '%s\n' "$candidate_status" > /tmp/issue-183-candidate.exit
+          exit 0
+      - name: Write comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def extract(name: str, path: str, exit_path: str) -> list[str]:
+              lines = Path(path).read_text(errors='replace').splitlines() if Path(path).exists() else []
+              chosen = []
+              for line in lines:
+                  if (' failed at ' in line or
+                      (line.startswith('TEST_MODULE_TIMING ') and 'status=fail' in line) or
+                      re.match(r'^\[[0-9]+/[0-9]+\] (Unit|Module|External) tests$', line)):
+                      chosen.append(line)
+              status = Path(exit_path).read_text().strip() if Path(exit_path).exists() else 'missing'
+              return [f'=== {name} exit={status} lines={len(lines)} ===', *chosen]
+
+          out = [
+              f'base={Path(".git/refs/heads/scratch/183-current-progress").read_text().strip() if Path(".git/refs/heads/scratch/183-current-progress").exists() else "checked-out-head"}',
+              f'apply_exit={Path("/tmp/issue-183-apply.exit").read_text().strip()}',
+              f'candidate_build_exit={Path("/tmp/issue-183-candidate-build.exit").read_text().strip()}',
+              f'targeted_compile_run={Path("/tmp/issue-183-targeted.exit").read_text().strip()}',
+              '',
+          ]
+          out.extend(extract('baseline', '/tmp/issue-183-baseline.log', '/tmp/issue-183-baseline.exit'))
+          out.append('')
+          out.extend(extract('candidate', '/tmp/issue-183-candidate.log', '/tmp/issue-183-candidate.exit'))
+          out.append('')
+          out.append('=== apply log ===')
+          out.extend(Path('/tmp/issue-183-apply.log').read_text(errors='replace').splitlines()[-100:])
+          out.append('')
+          out.append('=== candidate build tail ===')
+          out.extend(Path('/tmp/issue-183-candidate-build.log').read_text(errors='replace').splitlines()[-100:] if Path('/tmp/issue-183-candidate-build.log').exists() else [])
+          out.append('')
+          out.append('=== targeted output ===')
+          out.extend(Path('/tmp/issue-183-targeted.log').read_text(errors='replace').splitlines())
+          Path('.github/issue-183-current-comparison.txt').write_text('\n'.join(out) + '\n')
+          PY
+      - name: Publish comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git clean -fd
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-current-comparison.txt
+          git commit -m 'chore: compare issue 183 baseline and candidate'
+          git push origin HEAD:${GITHUB_REF_NAME}
