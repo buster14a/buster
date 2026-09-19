@@ -9537,12 +9537,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_arity_diagnostics(UnitTestArgumen
                                                     .data_layout = target_data_layout(target_native),
                                                     .dialect = expected[expected_index].dialect,
                                                 });
-        CParseResult parse = c_parse(temporary.arena, tokens);
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, parse.diagnostic_count == 1);
-        if (parse.diagnostic_count == 1)
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == 1);
+        if (analysis.diagnostic_count == 1)
         {
-            BUSTER_STRING_TEST(arguments, parse.diagnostics[0].message, expected[expected_index].message);
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, expected[expected_index].message);
         }
         scratch_end(temporary);
     }
