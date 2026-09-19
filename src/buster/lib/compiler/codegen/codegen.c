@@ -20449,7 +20449,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         }
                         if (argument_type->kind == IR_TYPE_FLOAT && !aarch64_windows_variadic)
                         {
-                            if (!codegen_canonical_type_is_ieee_binary16(argument_type) && argument_type->bit_width != 32 && argument_type->bit_width != 64)
+                            if (!codegen_canonical_type_is_ieee_binary16(argument_type) && argument_type->bit_width != 32 &&
+                                argument_type->bit_width != 64 && argument_type->bit_width != 128)
                             {
                                 result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                 return result;
@@ -22204,7 +22205,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             {
                                 u8 float_register = argument_float_register[argument_index - 1];
                                 if (float_register >= 8 ||
-                                    (!codegen_canonical_type_is_ieee_binary16(argument_type) && argument_type->bit_width != 32 && argument_type->bit_width != 64))
+                                    (!codegen_canonical_type_is_ieee_binary16(argument_type) && argument_type->bit_width != 32 &&
+                                     argument_type->bit_width != 64 && argument_type->bit_width != 128))
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
@@ -22300,7 +22302,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             if (return_type && return_type->kind == IR_TYPE_FLOAT)
                             {
-                                if (!codegen_canonical_type_is_ieee_binary16(return_type) && return_type->bit_width != 32 && return_type->bit_width != 64)
+                                if (!codegen_canonical_type_is_ieee_binary16(return_type) && return_type->bit_width != 32 &&
+                                    return_type->bit_width != 64 && return_type->bit_width != 128)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;
@@ -23393,7 +23396,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                             }
                             else if (return_type && return_type->kind == IR_TYPE_FLOAT)
                             {
-                                if (!codegen_canonical_type_is_ieee_binary16(return_type) && return_type->bit_width != 32 && return_type->bit_width != 64)
+                                if (!codegen_canonical_type_is_ieee_binary16(return_type) && return_type->bit_width != 32 &&
+                                    return_type->bit_width != 64 && return_type->bit_width != 128)
                                 {
                                     result.error = CODEGEN_ERROR_UNSUPPORTED_ABI;
                                     return result;

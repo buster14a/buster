@@ -3473,7 +3473,19 @@ BUSTER_GLOBAL_LOCAL IrAbiValue ir_classify_abi_value(IrProgram* program, IrTypeI
                         }
                         return value;
                     }
-                    if (type->bit_width > 64)
+                    if (convention == IR_ABI_CONVENTION_AAPCS64 && type->bit_width == 128 && size == 16)
+                    {
+                        // Base AAPCS64 carries IEEE binary128 directly in one
+                        // Q register for arguments and results. Keep the whole
+                        // sixteen-byte image in one vector-file ABI part so
+                        // caller, callee and compiler-rt declarations agree.
+                        value.part_count = 1;
+                        value.parts[0] = (IrAbiPart){
+                            .abi_class = IR_ABI_CLASS_VECTOR,
+                            .size = 16,
+                        };
+                    }
+                    else if (type->bit_width > 64)
                     {
                         value.part_count = 1;
                         value.indirect = is_result;
@@ -4605,6 +4617,12 @@ BUSTER_GLOBAL_LOCAL bool ir_canonical_float_constant_valid(IrType* type, IrInstr
         // never accepted as an additional immediate or payload bits.
         return type->layout.resolved && type->layout.size == 16 && type->layout.alignment == 16 && instruction->immediate_count == 2 &&
                (instruction->immediates[1] & ~UINT64_C(0xffff)) == 0;
+    }
+    if (type->bit_width == 128)
+    {
+        // IEEE binary128 is represented by its exact low/high target-image
+        // limbs. Unlike x87 there are no non-semantic ABI padding bytes.
+        return type->layout.resolved && type->layout.size == 16 && type->layout.alignment == 16 && instruction->immediate_count == 2;
     }
     return type->bit_width == 16
                ? type->layout.resolved && type->layout.size == 2 && type->layout.alignment >= 2 &&
