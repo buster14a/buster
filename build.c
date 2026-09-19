@@ -20968,43 +20968,54 @@ BUSTER_GLOBAL_LOCAL bool cpython_git_verify(Arena* arena, String8 source_directo
     return true;
 }
 
-// Same shape and rationale as quickjs_raise_stack_limit: Buster frames are
-// larger than Clang's, and CPython tunes Py_C_RECURSION_LIMIT assuming an
-// eval frame well under a kilobyte where Buster's is 4 KB (issue 842), so
-// the C-stack recursion tests need an OS limit the budget actually fits in.
-// Both suite runs get the same limit, so the comparison stays symmetric.
-#define CPYTHON_STACK_LIMIT_BYTES (512ull * 1024ull * 1024ull)
+// CPython's recursion accounting assumes the evaluator consumes an ordinary
+// main-thread C-stack budget. Keep both oracle runs at Linux's conventional
+// 8 MiB soft limit: raising it concealed oversized Buster evaluator frames
+// instead of testing the contract issue #79 exists to protect.
+#define CPYTHON_STACK_LIMIT_BYTES (8ull * 1024ull * 1024ull)
 
-BUSTER_GLOBAL_LOCAL void cpython_raise_stack_limit(u64 requested_bytes)
+BUSTER_GLOBAL_LOCAL bool cpython_set_stack_limit(u64 requested_bytes)
 {
+    bool result = true;
 #if BUSTER_LINUX || BUSTER_MACOS
     struct rlimit limit = {0};
     if (getrlimit(RLIMIT_STACK, &limit) != 0)
     {
-        string_print(S8("warning: test_cpython could not read RLIMIT_STACK; the suite runs with the inherited stack\n"));
-        return;
+        string_print(S8("error: test_cpython could not read RLIMIT_STACK\n"));
+        result = false;
     }
-    if (limit.rlim_cur == RLIM_INFINITY || (u64)limit.rlim_cur >= requested_bytes)
+    else
     {
-        string_print(S8("CPYTHON_STACK_LIMIT requested_bytes={u64} status=already-sufficient\n"), requested_bytes);
-        return;
+        u64 previous = limit.rlim_cur == RLIM_INFINITY ? UINT64_MAX : (u64)limit.rlim_cur;
+        if (limit.rlim_max != RLIM_INFINITY && (u64)limit.rlim_max < requested_bytes)
+        {
+            string_print(S8("error: test_cpython hard stack limit {u64} is below required soft limit {u64}\n"), (u64)limit.rlim_max,
+                         requested_bytes);
+            result = false;
+        }
+        else if (limit.rlim_cur == (rlim_t)requested_bytes)
+        {
+            string_print(S8("CPYTHON_STACK_LIMIT soft_bytes={u64} status=already-exact\n"), requested_bytes);
+        }
+        else
+        {
+            limit.rlim_cur = (rlim_t)requested_bytes;
+            if (setrlimit(RLIMIT_STACK, &limit) != 0)
+            {
+                string_print(S8("error: test_cpython could not set RLIMIT_STACK from {u64} to {u64} bytes\n"), previous, requested_bytes);
+                result = false;
+            }
+            else
+            {
+                string_print(S8("CPYTHON_STACK_LIMIT previous_soft_bytes={u64} soft_bytes={u64} reason=eval-frame-budget status=set\n"), previous,
+                             requested_bytes);
+            }
+        }
     }
-    u64 previous = (u64)limit.rlim_cur;
-    u64 target = requested_bytes;
-    if (limit.rlim_max != RLIM_INFINITY && (u64)limit.rlim_max < target)
-    {
-        target = (u64)limit.rlim_max;
-    }
-    limit.rlim_cur = (rlim_t)target;
-    if (setrlimit(RLIMIT_STACK, &limit) != 0)
-    {
-        string_print(S8("warning: test_cpython could not raise RLIMIT_STACK from {u64} to {u64} bytes\n"), previous, target);
-        return;
-    }
-    string_print(S8("CPYTHON_STACK_LIMIT previous_soft_bytes={u64} soft_bytes={u64} reason=buster-frame-layout status=raised\n"), previous, target);
 #else
     string_print(S8("CPYTHON_STACK_LIMIT requested_bytes={u64} status=unsupported-platform\n"), requested_bytes);
 #endif
+    return result;
 }
 
 // The modules both trees disable, and why each is here rather than built:
@@ -21379,7 +21390,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     make_directory_recursive(arena, output_directory);
     output_directory = os_path_absolute(arena, output_directory, true);
     string_print(S8("CPYTHON_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
-    cpython_raise_stack_limit(CPYTHON_STACK_LIMIT_BYTES);
+    if (!cpython_set_stack_limit(CPYTHON_STACK_LIMIT_BYTES))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
 
     String8 workload_path = path_join(arena, output_directory, S8("workload.py"));
     if (!file_write(workload_path, BUSTER_SLICE_TO_BYTE_SLICE(cpython_workload_source())))

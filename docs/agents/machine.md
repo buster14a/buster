@@ -153,19 +153,27 @@
   masks and final pin counts use the same list. The global pin-map bridge is
   scratch-owned and is not retained by the returned placement.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
-  giving every spilled value and every stack slot its own bytes. Spill homes
-  take their rows from the allocator's memory edits; selector slots take theirs
-  from a block-level liveness fixed point over covering writes and reads, so a
-  slot written and read inside one iteration does not widen to its loop. Both
-  are assigned by one linear scan in start order with a free-color stack; no
+  giving every spilled value and every stack slot its own bytes. Selector slots
+  close their touched rows through a block-level liveness fixed point over
+  covering writes and upward-exposed reads. Allocator-created spill homes use
+  the same closure on a direct acyclic block chain: a spill covers the previous
+  contents of a home, while a reload before that spill reads the value arriving
+  from a predecessor. Retroactive edge repairs at one machine point have no
+  path order, so the home analysis observes every reload before every spill at
+  that point, conservatively lengthening rather than shortening a range. Dense
+  home IDs keep the CFG bit planes proportional to actually spilled values, not
+  all virtual registers. Branches, joins, loops, indirect edges, and
+  inline-assembly landings retain the conservative per-home lifetime guard until
+  their path-specific repairs have the same proof. Both object classes are
+  assigned by one linear scan in start order with a free-color stack; no
   interference graph is built. Scalar (8-byte) and vector (64-byte, 16-byte
   aligned) homes keep separate pools. Reuse requires a linear block/row tiling
-  and `MachineFunction.returns_twice_absence_certified`, which the selectors
-  publish when no call in the function returns twice: a `longjmp` can re-enter
-  the frame at a row no machine edge reaches. Address-taken, volatile-tainted,
-  inline-assembly, variadic, outgoing-argument and unproven-form objects, homes
-  crossing their defining block, and escaping values all keep storage of their
-  own. Debug records may name slots but never decide layout.
+  and
+  `MachineFunction.returns_twice_absence_certified`, which the selectors publish
+  when no call in the function returns twice: a `longjmp` can re-enter the frame
+  at a row no machine edge reaches. Address-taken, volatile-tainted,
+  inline-assembly, variadic, outgoing-argument and unproven-form objects keep
+  storage of their own. Debug records may name slots but never decide layout.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
