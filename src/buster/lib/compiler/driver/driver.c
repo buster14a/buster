@@ -3094,6 +3094,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         {
             result->error = COMPILER_DRIVER_ERROR_OBJECT;
             result->object_error = artifact.error;
+            result->diagnostic = string_format(arena, S8("native object serialization failed with error {u32}"), (u32)artifact.error);
             return;
         }
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
