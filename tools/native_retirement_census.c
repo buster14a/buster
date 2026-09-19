@@ -62,6 +62,8 @@ struct NrcSettings
     String8 baseline;
     String8 compiler_revision;
     String8 baseline_revision;
+    String8 compiler_sha256;
+    String8 baseline_sha256;
     String8 fixture_filter;
     String8 target_filter;
     String8 cpu;
@@ -849,10 +851,18 @@ BUSTER_GLOBAL_LOCAL NrcInput* nrc_inventory(NrcSettings* settings, u64* count_ou
                     valid = bytes.pointer && os_file_get_size(source) == bytes.length;
                     valid &= os_file_close(source);
                 }
-                if (valid) { d_write(&settings->child, destination, BYTE_SLICE_TO_STRING(8, bytes)); }
                 input->bytes = bytes.length;
                 input->hash = buster_hash_64(bytes.pointer, bytes.length);
                 input->sha256 = nrc_sha256(arena, bytes.pointer, bytes.length);
+                if (valid) { d_write(&settings->child, destination, BYTE_SLICE_TO_STRING(8, bytes)); }
+                if (valid)
+                {
+                    u64 frozen_bytes = 0, frozen_hash = 0;
+                    String8 frozen_sha256 = {0};
+                    valid = nrc_file_identity(temporary.arena, destination, &frozen_bytes, &frozen_hash, &frozen_sha256) &&
+                            frozen_bytes == input->bytes && frozen_hash == input->hash &&
+                            string_equal(frozen_sha256, input->sha256);
+                }
                 valid &= string_equal(input->path, approved.path) && string_equal(input->role, approved.role) &&
                          string_equal(input->compile_obligation, approved.compile_obligation) && input->bytes == approved.bytes &&
                          string_equal(input->sha256, approved.sha256);
@@ -1228,6 +1238,9 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
             .compiler_path = command[0],
             .record_path = provenance_record,
             .tree_identity = tree_identity,
+            // These copies are SHA-256 authenticated before any census row executes.
+            .authenticated_source_sha256 = input.sha256,
+            .authenticated_compiler_sha256 = mode ? settings->compiler_sha256 : settings->baseline_sha256,
             .toolchain_arguments = argv,
         };
         bool provenance_valid = d_success(observed) &&
@@ -1615,10 +1628,32 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             String8 baseline_copy = path_join(arena, settings.child.out, S8("baseline-ide.exe"));
             if (!settings.child.io_failed)
             {
-                settings.child.io_failed |= !build_artifact_fanout_snapshot(arena, settings.child.ide, candidate_copy, compiler_hash, compiler_bytes) ||
-                                           !build_artifact_fanout_snapshot(arena, settings.baseline, baseline_copy, baseline_hash, baseline_bytes);
-                settings.child.ide = candidate_copy;
-                settings.baseline = baseline_copy;
+                bool snapshots_valid = build_artifact_fanout_snapshot(arena, settings.child.ide, candidate_copy,
+                                                                       compiler_hash, compiler_bytes) &&
+                                       build_artifact_fanout_snapshot(arena, settings.baseline, baseline_copy,
+                                                                       baseline_hash, baseline_bytes);
+                if (snapshots_valid)
+                {
+                    u64 candidate_bytes = 0, candidate_hash = 0;
+                    u64 copied_baseline_bytes = 0, copied_baseline_hash = 0;
+                    String8 candidate_sha256 = {0}, copied_baseline_sha256 = {0};
+                    snapshots_valid = nrc_file_identity(arena, candidate_copy, &candidate_bytes, &candidate_hash,
+                                                        &candidate_sha256) &&
+                                      nrc_file_identity(arena, baseline_copy, &copied_baseline_bytes,
+                                                        &copied_baseline_hash, &copied_baseline_sha256) &&
+                                      candidate_bytes == compiler_bytes && candidate_hash == compiler_hash &&
+                                      string_equal(candidate_sha256, compiler_sha256) &&
+                                      copied_baseline_bytes == baseline_bytes && copied_baseline_hash == baseline_hash &&
+                                      string_equal(copied_baseline_sha256, baseline_sha256);
+                }
+                settings.child.io_failed |= !snapshots_valid;
+                if (snapshots_valid)
+                {
+                    settings.child.ide = candidate_copy;
+                    settings.baseline = baseline_copy;
+                    settings.compiler_sha256 = compiler_sha256;
+                    settings.baseline_sha256 = baseline_sha256;
+                }
             }
             nrc_explicit_environment(&settings);
         }

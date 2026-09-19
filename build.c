@@ -3168,6 +3168,10 @@ struct StageObjectProvenance
     String8 compiler_path;
     String8 record_path;
     String8 tree_identity;
+    // Optional preauthenticated identities are valid only for immutable snapshots.
+    // A present malformed digest fails closed instead of falling back to a path read.
+    String8 authenticated_source_sha256;
+    String8 authenticated_compiler_sha256;
     SliceString8 toolchain_arguments;
     StageObjectProvenanceFailure failure;
     u32 captured : 1;
@@ -3193,6 +3197,33 @@ BUSTER_GLOBAL_LOCAL bool stage_object_sha256_file(Arena* arena, String8 path, St
         *digest = stage_object_sha256_bytes(arena, map.bytes.pointer, map.bytes.length);
     }
     file_map_unmap(map);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_sha256_valid(String8 digest)
+{
+    bool result = digest.length == SHA256_HEX_CAPACITY - 1;
+    for (u64 index = 0; result && index < digest.length; index += 1)
+    {
+        char8 byte = digest.pointer[index];
+        result = (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_sha256_resolve(Arena* arena, String8 path, String8 authenticated_digest,
+                                                         String8* digest)
+{
+    bool result = false;
+    if (authenticated_digest.length)
+    {
+        result = stage_object_sha256_valid(authenticated_digest);
+        if (result) { *digest = authenticated_digest; }
+    }
+    else
+    {
+        result = stage_object_sha256_file(arena, path, digest);
+    }
     return result;
 }
 
@@ -3273,8 +3304,10 @@ BUSTER_GLOBAL_LOCAL bool stage_object_provenance_record_create(Arena* arena, Sta
     String8 toolchain_digest = stage_object_sha256_arguments(arena, provenance->toolchain_arguments);
     bool result = provenance->tree_identity.length && provenance->toolchain_arguments.length &&
                   stage_object_sha256_file(arena, provenance->object_path, &object_digest) &&
-                  stage_object_sha256_file(arena, provenance->source_path, &source_digest) &&
-                  stage_object_sha256_file(arena, provenance->compiler_path, &compiler_digest);
+                  stage_object_sha256_resolve(arena, provenance->source_path,
+                                              provenance->authenticated_source_sha256, &source_digest) &&
+                  stage_object_sha256_resolve(arena, provenance->compiler_path,
+                                              provenance->authenticated_compiler_sha256, &compiler_digest);
     if (result)
     {
         *record = (StageObjectProvenanceRecord){0};
@@ -3449,6 +3482,25 @@ BUSTER_GLOBAL_LOCAL bool stage_object_provenance_self_test(Arena* arena)
                  provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN;
         provenance.toolchain_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments);
     }
+    if (result)
+    {
+        String8 source_digest = {0}, compiler_digest = {0};
+        provenance.record_path = path_join(arena, directory, S8("cached.stage.o.provenance"));
+        result = stage_object_sha256_file(arena, source, &source_digest) &&
+                 stage_object_sha256_file(arena, compiler, &compiler_digest);
+        provenance.authenticated_source_sha256 = source_digest;
+        provenance.authenticated_compiler_sha256 = compiler_digest;
+        result = result && stage_object_provenance_capture(arena, &provenance, false) &&
+                 stage_object_provenance_validate(arena, &provenance, false) && provenance.verified;
+    }
+    if (result)
+    {
+        provenance.record_path = path_join(arena, directory, S8("malformed.stage.o.provenance"));
+        provenance.authenticated_source_sha256 = S8("not-a-sha256");
+        result = !stage_object_provenance_capture(arena, &provenance, false) && !provenance.captured;
+        provenance.authenticated_source_sha256 = (String8){0};
+        provenance.authenticated_compiler_sha256 = (String8){0};
+    }
     if (!result)
     {
         string_print(S8("error: stage object provenance self-test failed at check {S8}\n"),
@@ -3456,7 +3508,7 @@ BUSTER_GLOBAL_LOCAL bool stage_object_provenance_self_test(Arena* arena)
     }
     else
     {
-        string_print(S8("STAGE_OBJECT_PROVENANCE_SELF_TEST matching=1 stale=1 source=1 tree=1 compiler=1 toolchain=1 pre_link=1\n"));
+        string_print(S8("STAGE_OBJECT_PROVENANCE_SELF_TEST matching=1 stale=1 source=1 tree=1 compiler=1 toolchain=1 cached=1 malformed_cached=1 pre_link=1\n"));
     }
     remove_path_recursive(arena, directory);
     return result;
