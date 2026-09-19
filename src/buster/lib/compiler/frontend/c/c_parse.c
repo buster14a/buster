@@ -17181,7 +17181,8 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     }
 }
 
-BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
+BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPreprocessResult preprocess, CParserResult syntax,
+                                                                  bool validate_lowering_constraints)
 {
     CParseResult result = {
         .arena = arena,
@@ -17915,7 +17916,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     };
     c_parse_validate_unattached_cleanup_attributes(&result, preprocess);
     c_parse_validate_bfloat16_builtin_calls(&machine, arena, &result, preprocess);
-    if (!result.diagnostic_count)
+    if (validate_lowering_constraints && !result.diagnostic_count)
     {
         c_parse_validate_lowering_constraints(&machine, arena, &result, preprocess);
     }
@@ -17924,9 +17925,14 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessR
     BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
     return result;
 }
+BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
+{
+    return c_analyze_semantics_core(arena, preprocess, syntax, false);
+}
+
 CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax)
 {
-    return c_analyze_semantics(arena, preprocess, syntax);
+    return c_analyze_semantics_core(arena, preprocess, syntax, true);
 }
 
 CParseResult c_parse(Arena* arena, CPreprocessResult preprocess)
