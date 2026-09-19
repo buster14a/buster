@@ -70,13 +70,44 @@ jobs:
 
       - name: Publish validation diagnostics
         if: failure()
+        shell: bash
         run: |
-          {
-            echo "head=$(git rev-parse HEAD)"
-            echo "status=failed"
-            echo
-            tail -n 500 /tmp/solve-848-validation.log 2>/dev/null || true
-          } > .github/solve-848-validation.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          source = Path('/tmp/solve-848-validation.log')
+          text = source.read_text(errors='replace') if source.exists() else ''
+          text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+          lines = text.splitlines()
+          selected = set()
+          needles = (
+              ' failed at ',
+              'status=fail',
+              'FAILED:',
+              'ninja: build stopped',
+              'error:',
+              'Error:',
+              'Assertion',
+              'assertion',
+              'ir_unreachable',
+          )
+          for index, line in enumerate(lines):
+              if any(needle in line for needle in needles):
+                  selected.update(range(max(0, index - 4), min(len(lines), index + 5)))
+          output = [f'head={Path(".git/HEAD").read_text().strip()}', 'status=failed', '', 'FOCUSED DIAGNOSTICS']
+          if selected:
+              previous = -2
+              for index in sorted(selected):
+                  if index != previous + 1:
+                      output.append('---')
+                  output.append(lines[index])
+                  previous = index
+          else:
+              output.append('(no focused diagnostic matched)')
+          output.extend(['', 'FINAL OUTPUT', *lines[-120:]])
+          Path('.github/solve-848-validation.log').write_text('\n'.join(output) + '\n')
+          PY
           git config user.name "OpenAI Codex"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github/solve-848-validation.log
