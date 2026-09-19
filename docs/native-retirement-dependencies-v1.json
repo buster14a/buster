@@ -562,15 +562,15 @@
       "source": "src/buster/lib/file.c",
       "provenance": "repo:src/buster/lib/file.c",
       "destination": "dependencies/project-include/buster/lib/file.c",
-      "bytes": 20628,
-      "sha256": "4f59d8a0915c14d876c4180d9dc1df93d3902bda3ea82205020672058890ddc3"
+      "bytes": 24242,
+      "sha256": "b5d721bfde0231a7f22b397d5c8fdaa020b80a3de4dee517d0ee911e0eaba194"
     },
     {
       "source": "src/buster/lib/file.h",
       "provenance": "repo:src/buster/lib/file.h",
       "destination": "dependencies/project-include/buster/lib/file.h",
-      "bytes": 4698,
-      "sha256": "324ecac4a410419bd0eadfd4aecb829db16ed4d4632bac3048c5d9ad1565cb89"
+      "bytes": 6495,
+      "sha256": "bb6d5293c63dd97b89a08af02757819a014a0477e9989b905678055f91c6904d"
     },
     {
       "source": "src/buster/lib/float.c",
@@ -618,8 +618,8 @@
       "source": "src/buster/lib/os.c",
       "provenance": "repo:src/buster/lib/os.c",
       "destination": "dependencies/project-include/buster/lib/os.c",
-      "bytes": 220763,
-      "sha256": "dbb2238c99573252b57a7bc56f1dd95bc1d6c8d98fb126a27ec6dd80b666e34c"
+      "bytes": 221008,
+      "sha256": "44562e5a2df1e52221da207e65c58bc6d25787ef3b40672220bca8120e32bc7b"
     },
     {
       "source": "src/buster/lib/os.h",
