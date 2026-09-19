@@ -20,6 +20,7 @@ HOSTED_FIXTURES = frozenset("tests/" + name + ".c" for name in (
     "basic_c_target_headers", "basic_cjson_roundtrip", "basic_doom_headless",
     "basic_lz4_roundtrip", "basic_stb_compat", "basic_yyjson_roundtrip", "basic_zlib_compat"))
 FULL_CENSUS_PROFILE = "full-census"
+# Keep the frozen population constants adjacent to the profile they constrain.
 SELF_TEST_PROFILE = "self-test"
 FULL_SUBJECT_COUNT = 410
 FULL_ROW_COUNT = 78720
