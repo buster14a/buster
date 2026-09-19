@@ -1,4 +1,4 @@
-name: PR 821 Windows spawn diagnosis
+name: PR 821 Windows environment repair
 
 on:
   push:
@@ -8,43 +8,106 @@ on:
       - '.github/workflows/pr821-windows-spawn-diagnose.yml'
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: pr821-windows-environment-repair
+  cancel-in-progress: false
 
 jobs:
-  diagnose:
-    if: github.event.head_commit.message == 'ci diagnose PR821 Windows spawn' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
+  repair:
+    if: github.event.head_commit.message == 'ci repair PR821 Windows environment' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Check out PR branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: fix/84-transactional-hermetic-spawn
-          persist-credentials: false
+          fetch-depth: 0
+          persist-credentials: true
 
-      - name: Add structured spawn failure diagnostics
+      - name: Normalize ordinary environment entries
         shell: pwsh
         run: |
           @'
           from pathlib import Path
 
-          path = Path("tools/differential.c")
-          text = path.read_text(encoding="utf-8")
-          old = "    DObservation observation = {.kind = D_SPAWN};\n    if (spawn.handle)"
-          new = """    DObservation observation = {.kind = D_SPAWN};
-              if (!spawn.handle)
+          entry = Path("src/buster/lib/entry_point.c")
+          text = entry.read_text(encoding="utf-8")
+          old = '''    SliceString8 environment_keys = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length};
+              SliceString8 environment_values = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length};
+          
+              for (u64 i = 0; i < environments_raw.length; i += 1)
               {
-                  observation.status = (u32)spawn.failure;
-                  observation.raw_status = spawn.error.v;
+                  String8 environment_raw = environments_raw.pointer[i];
+                  u64 equal_index = string_first_code_unit(environment_raw, '=');
+                  if (equal_index != BUSTER_STRING_NO_MATCH)
+                  {
+                      String8 key = string_slice(environment_raw, 0, equal_index);
+                      String8 value = string_slice(environment_raw, equal_index + 1, environment_raw.length);
+                      environment_keys.pointer[i] = key;
+                      environment_values.pointer[i] = value;
+                  }
+                  else
+                  {
+                      environment_keys.pointer[i] = (String8){0};
+                      environment_values.pointer[i] = (String8){0};
+                  }
               }
-              if (spawn.handle)"""
-          count = text.count(old)
-          if count != 1:
-              raise SystemExit(f"expected one d_observe spawn site, found {count}")
-          path.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+          '''
+          new = '''    SliceString8 environment_keys = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length)};
+              SliceString8 environment_values = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length)};
+          
+              for (u64 i = 0; i < environments_raw.length; i += 1)
+              {
+                  String8 environment_raw = environments_raw.pointer[i];
+                  u64 equal_index = string_first_code_unit(environment_raw, '=');
+                  if (equal_index != BUSTER_STRING_NO_MATCH && equal_index != 0)
+                  {
+                      u64 environment_index = environment_keys.length;
+                      String8 key = string_slice(environment_raw, 0, equal_index);
+                      String8 value = string_slice(environment_raw, equal_index + 1, environment_raw.length);
+                      environment_keys.pointer[environment_index] = key;
+                      environment_values.pointer[environment_index] = value;
+                      environment_keys.length += 1;
+                      environment_values.length += 1;
+                  }
+              }
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f"entry-point environment block match count: {text.count(old)}")
+          entry.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+
+          test = Path("src/buster/tests/os_test.c")
+          text = test.read_text(encoding="utf-8")
+          old = '''    Arena* arena = arguments->arena;
+              String8 self_arguments[] = {program_state->input.arguments.pointer[0], S8("help")};
+          
+              ProcessSpawnResult empty_arguments ='''
+          new = '''    Arena* arena = arguments->arena;
+              String8 self_arguments[] = {program_state->input.arguments.pointer[0], S8("help")};
+          
+              bool captured_environment_valid = program_state->input.environment_keys.length == program_state->input.environment_values.length;
+              for (u64 environment_index = 0; captured_environment_valid && environment_index < program_state->input.environment_keys.length;
+                   environment_index += 1)
+              {
+                  String8 key = program_state->input.environment_keys.pointer[environment_index];
+                  captured_environment_valid = key.length != 0;
+                  for (u64 code_unit = 0; captured_environment_valid && code_unit < key.length; code_unit += 1)
+                  {
+                      captured_environment_valid = key.pointer[code_unit] != '=';
+                  }
+              }
+              BUSTER_TEST(arguments, captured_environment_valid);
+          
+              ProcessSpawnResult empty_arguments ='''
+          if text.count(old) != 1:
+              raise SystemExit(f"os-test insertion match count: {text.count(old)}")
+          test.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
           '@ | python -
 
-      - name: Build and run the Windows release self-test
+      - name: Run Windows release spawn and combination regressions
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -59,6 +122,21 @@ jobs:
           cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$Driver`" test_differential --self-test 2>&1"
-          $Status = $LASTEXITCODE
-          Write-Output "PR821_DIAGNOSTIC_SELF_TEST_STATUS=$Status"
-          exit 0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish source repair
+        shell: pwsh
+        run: |
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git add src/buster/lib/entry_point.c src/buster/tests/os_test.c
+          git diff --cached --exit-code
+          if ($LASTEXITCODE -eq 0) { throw 'environment repair produced no source change' }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'runtime: normalize captured environment entries'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git push origin "HEAD:$env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
