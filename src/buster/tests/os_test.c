@@ -112,6 +112,54 @@ BUSTER_GLOBAL_LOCAL bool os_test_regular_file_exists(String8 path)
     FileStats stats = os_file_replacement_target_stats(path);
     return stats.valid && stats.kind == OS_FILE_KIND_REGULAR;
 }
+
+typedef struct OsTestProcessTreeWait OsTestProcessTreeWait;
+struct OsTestProcessTreeWait
+{
+    ProcessWaitResult waited;
+    u32 polls;
+    bool ready;
+};
+
+BUSTER_GLOBAL_LOCAL OsTestProcessTreeWait os_test_process_tree_wait(Arena* arena, ProcessSpawnResult spawn, String8 ready,
+                                                                    u32 poll_limit, u32 poll_milliseconds,
+                                                                    u64 timeout_microseconds)
+{
+    OsTestProcessTreeWait result = {0};
+    while (result.polls < poll_limit && !os_test_regular_file_exists(ready))
+    {
+        os_test_sleep_milliseconds(poll_milliseconds);
+        result.polls += 1;
+    }
+    result.ready = os_test_regular_file_exists(ready);
+    result.waited = os_process_wait_deadline(arena, spawn, result.ready ? timeout_microseconds : 1);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_process_tree_show_diagnostic(UnitTestArguments* arguments, String8 phase,
+                                                              ProcessSpawnResult spawn, OsError spawn_error,
+                                                              OsTestProcessTreeWait tree, String8 ready,
+                                                              String8 release, String8 escaped)
+{
+    String8 standard_output = {
+        .pointer = (char8*)tree.waited.streams[STANDARD_STREAM_OUTPUT].pointer,
+        .length = tree.waited.streams[STANDARD_STREAM_OUTPUT].length,
+    };
+    String8 standard_error = {
+        .pointer = (char8*)tree.waited.streams[STANDARD_STREAM_ERROR].pointer,
+        .length = tree.waited.streams[STANDARD_STREAM_ERROR].length,
+    };
+    arguments->show(arguments,
+        S8("PROCESS_TREE_READINESS_V1 phase={S8} ready={u32} polls={u32} spawn_handle={u32} spawn_group={u32} "
+           "spawn_error={u32} result={u32} platform_status={u32} timed_out={u32} termination_requested={u32} "
+           "forcibly_terminated={u32} cleanup_failed={u32} ready_path={S8} release_path={S8} escaped_path={S8} "
+           "stdout={S8} stderr={S8}\n"),
+        phase, (u32)tree.ready, tree.polls, (u32)(spawn.handle != 0), (u32)spawn.process_group, spawn_error.v,
+        (u32)tree.waited.result, tree.waited.platform_status, (u32)tree.waited.timed_out,
+        (u32)tree.waited.termination_requested, (u32)tree.waited.forcibly_terminated,
+        (u32)tree.waited.process_tree_cleanup_failed, ready, release, escaped, standard_output, standard_error);
+    return true;
+}
 #endif
 
 typedef struct OsTestLaneState OsTestLaneState;
@@ -360,6 +408,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     }
     if (string_equal(process_test_mode, S8("tree-grandchild")))
     {
+        String8 marker = S8("PROCESS_TREE_DESCENDANT_ENTERED_V1\n");
+        if (!os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR),
+                (ByteSlice){.pointer = (u8*)marker.pointer, .length = marker.length}))
+        {
+            os_exit(93);
+        }
         String8 ready = os_get_environment_variable(S8("BUSTER_OS_PROCESS_READY"));
         String8 release = os_get_environment_variable(S8("BUSTER_OS_PROCESS_RELEASE"));
         String8 escaped = os_get_environment_variable(S8("BUSTER_OS_PROCESS_ESCAPED"));
@@ -373,6 +427,12 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     }
     if (string_equal(process_test_mode, S8("tree-parent")))
     {
+        String8 marker = S8("PROCESS_TREE_PARENT_ENTERED_V1\n");
+        if (!os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR),
+                (ByteSlice){.pointer = (u8*)marker.pointer, .length = marker.length}))
+        {
+            os_exit(94);
+        }
         String8 override_keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE")};
         String8 override_values[] = {S8("tree-grandchild")};
         OsTestEnvironment child_environment = os_test_environment(arguments->arena, override_keys, override_values, BUSTER_ARRAY_LENGTH(override_keys));
@@ -1078,7 +1138,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     // The child creates a grandchild that inherits the captured stdio. A
     // deadline must return only after the whole owned tree is gone; otherwise
-    // releasing the sentinel lets the grandchild prove its escape.
+    // releasing the sentinel lets the grandchild prove its escape. On POSIX,
+    // use a lightweight shell helper so readiness does not depend on running
+    // unrelated sanitizer-heavy test modules in two nested processes.
     {
         u64 arena_position = arguments->arena->position;
         String8 ready = buster_test_temporary_path(arguments->arena, S8("process-tree-ready"), S8(".txt"));
@@ -1087,34 +1149,70 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(ready));
         BUSTER_TEST(arguments, os_file_delete(release));
         BUSTER_TEST(arguments, os_file_delete(escaped));
+#if BUSTER_LINUX || BUSTER_MACOS
+        String8 child_arguments[] = {
+            S8("/bin/sh"),
+            S8("-c"),
+            S8("printf 'PROCESS_TREE_PARENT_ENTERED_V1\\n' >&2; (printf 'PROCESS_TREE_DESCENDANT_ENTERED_V1\\n' >&2; "
+               "printf ready > \"$1\" || exit 90; while [ ! -f \"$2\" ]; do sleep 0.01; done; "
+               "printf escaped > \"$3\") & wait"),
+            S8("process-tree-helper"),
+            ready,
+            release,
+            escaped,
+        };
+        ProcessSpawnOptions options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = 1,
+            .new_process_group = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                     (SliceString8){0}, (SliceString8){0}, options);
+#else
         String8 override_keys[] = {
             S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_PROCESS_READY"), S8("BUSTER_OS_PROCESS_RELEASE"),
             S8("BUSTER_OS_PROCESS_ESCAPED"),   S8("BUSTER_TEST_JOBS"),
         };
         String8 override_values[] = {S8("tree-parent"), ready, release, escaped, S8("1")};
-        OsTestEnvironment environment = os_test_environment(arguments->arena, override_keys, override_values, BUSTER_ARRAY_LENGTH(override_keys));
+        OsTestEnvironment environment =
+            os_test_environment(arguments->arena, override_keys, override_values, BUSTER_ARRAY_LENGTH(override_keys));
         String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
         ProcessSpawnOptions options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
             .new_process_group = 1,
         };
-        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), environment.keys, environment.values, options);
+        ProcessSpawnResult spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), environment.keys, environment.values, options);
+#endif
+        OsError spawn_error = {0};
+        if (!spawn.handle)
+        {
+            spawn_error = os_get_last_error();
+        }
         BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        OsTestProcessTreeWait tree = {0};
+        bool readiness_proven = false;
         if (spawn.handle)
         {
-            // Start the termination deadline only after the grandchild has
-            // entered its parked state. Sanitizer startup can exceed two
-            // seconds on hosted machines; it is not the behavior under test.
-            for (u32 poll = 0; poll < 3000 && !os_test_regular_file_exists(ready); poll += 1)
+            // Start the behavioral deadline only after the descendant has
+            // entered its parked state. If setup never becomes ready, still
+            // clean the owned tree up fail-closed but report it as a handshake
+            // failure rather than applying the behavioral assertions.
+            tree = os_test_process_tree_wait(arguments->arena, spawn, ready, 3000, 10, 2000000);
+            readiness_proven = tree.ready;
+            if (tree.ready)
             {
-                os_test_sleep_milliseconds(10);
+                BUSTER_TEST(arguments, tree.waited.result == PROCESS_RESULT_FAILED && tree.waited.timed_out);
+                BUSTER_TEST(arguments, tree.waited.termination_requested && tree.waited.forcibly_terminated);
+                BUSTER_TEST(arguments, !tree.waited.process_tree_cleanup_failed);
             }
-            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, 2000000);
-            BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_FAILED && waited.timed_out);
-            BUSTER_TEST(arguments, waited.termination_requested && waited.forcibly_terminated);
-            BUSTER_TEST(arguments, !waited.process_tree_cleanup_failed);
         }
-        BUSTER_TEST(arguments, os_test_regular_file_exists(ready));
+        if (!readiness_proven)
+        {
+            BUSTER_TEST(arguments, os_test_process_tree_show_diagnostic(arguments, S8("setup-failure"), spawn,
+                spawn_error, tree, ready, release, escaped));
+        }
+        BUSTER_TEST(arguments, readiness_proven);
         BUSTER_TEST(arguments, os_test_create_empty_file(release));
         os_test_sleep_milliseconds(300);
         BUSTER_TEST(arguments, !os_test_regular_file_exists(escaped));
@@ -1123,6 +1221,49 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(escaped));
         arena_set_position(arguments->arena, arena_position);
     }
+
+#if BUSTER_LINUX || BUSTER_MACOS
+    // A deliberately missing readiness sentinel exercises the setup-failure
+    // classification. The owned process group must still be terminated and
+    // reaped without applying the post-readiness behavioral assertions.
+    {
+        u64 arena_position = arguments->arena->position;
+        String8 missing_ready =
+            buster_test_temporary_path(arguments->arena, S8("process-tree-missing-ready"), S8(".txt"));
+        BUSTER_TEST(arguments, os_file_delete(missing_ready));
+        String8 child_arguments[] = {S8("/bin/sh"), S8("-c"), S8("while :; do :; done")};
+        ProcessSpawnOptions options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .use_process_environment = 1,
+            .new_process_group = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                                                     (SliceString8){0}, (SliceString8){0}, options);
+        OsError spawn_error = {0};
+        if (!spawn.handle)
+        {
+            spawn_error = os_get_last_error();
+        }
+        BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        OsTestProcessTreeWait tree = {0};
+        if (spawn.handle)
+        {
+            tree = os_test_process_tree_wait(arguments->arena, spawn, missing_ready, 2, 1, 2000000);
+        }
+        BUSTER_TEST(arguments, os_test_process_tree_show_diagnostic(arguments, S8("negative-control"), spawn,
+            spawn_error, tree, missing_ready, (String8){0}, (String8){0}));
+        if (spawn.handle)
+        {
+            BUSTER_TEST(arguments, !tree.ready);
+            BUSTER_TEST(arguments, tree.waited.result == PROCESS_RESULT_FAILED && tree.waited.timed_out);
+            BUSTER_TEST(arguments, tree.waited.termination_requested && tree.waited.forcibly_terminated);
+            BUSTER_TEST(arguments, !tree.waited.process_tree_cleanup_failed);
+        }
+        BUSTER_TEST(arguments, os_file_delete(missing_ready));
+        arena_set_position(arguments->arena, arena_position);
+    }
+#endif
+
 #endif
 
 #if BUSTER_LINUX || BUSTER_MACOS
