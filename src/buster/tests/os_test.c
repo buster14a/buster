@@ -1100,27 +1100,35 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), environment.keys, environment.values, options);
         BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        bool ready_observed = false;
         if (spawn.handle)
         {
             // Start the termination deadline only after the grandchild has
-            // entered its parked state. Sanitizer startup can exceed two
-            // seconds on hosted machines; it is not the behavior under test.
-            for (u32 poll = 0; poll < 3000 && !os_test_regular_file_exists(ready); poll += 1)
+            // entered its parked state. Hosted sanitizer startup can exceed
+            // thirty seconds under load; readiness is not the timed behavior.
+            ready_observed = os_test_regular_file_exists(ready);
+            for (u32 poll = 0; poll < 12000 && !ready_observed; poll += 1)
             {
                 os_test_sleep_milliseconds(10);
+                ready_observed = os_test_regular_file_exists(ready);
             }
             ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, 2000000);
-            BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_FAILED && waited.timed_out);
-            BUSTER_TEST(arguments, waited.termination_requested && waited.forcibly_terminated);
-            BUSTER_TEST(arguments, !waited.process_tree_cleanup_failed);
+            if (ready_observed)
+            {
+                BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_FAILED && waited.timed_out);
+                BUSTER_TEST(arguments, waited.termination_requested && waited.forcibly_terminated);
+                BUSTER_TEST(arguments, !waited.process_tree_cleanup_failed);
+            }
         }
-        BUSTER_TEST(arguments, os_test_regular_file_exists(ready));
-        BUSTER_TEST(arguments, os_test_create_empty_file(release));
-        os_test_sleep_milliseconds(300);
-        BUSTER_TEST(arguments, !os_test_regular_file_exists(escaped));
-        BUSTER_TEST(arguments, os_file_delete(ready));
-        BUSTER_TEST(arguments, os_file_delete(release));
-        BUSTER_TEST(arguments, os_file_delete(escaped));
+        if (spawn.handle && BUSTER_REQUIRE(arguments, ready_observed))
+        {
+            BUSTER_TEST(arguments, os_test_create_empty_file(release));
+            os_test_sleep_milliseconds(300);
+            BUSTER_TEST(arguments, !os_test_regular_file_exists(escaped));
+            BUSTER_TEST(arguments, os_file_delete(ready));
+            BUSTER_TEST(arguments, os_file_delete(release));
+            BUSTER_TEST(arguments, os_file_delete(escaped));
+        }
         arena_set_position(arguments->arena, arena_position);
     }
 #endif
