@@ -123,6 +123,8 @@ BUSTER_GLOBAL_LOCAL int machine_line_mark_schedule(Arena* arena, u32 leaf_count,
     MachineVerifyResult verified = machine_verify_function(&function);
     status |= verified.error != MACHINE_VERIFY_NONE;
     machine_opcode_rows_prewarm();
+    MachineInstruction* input_instructions = arena_allocate(arena, MachineInstruction, function.instruction_count);
+    memcpy(input_instructions, function.instructions, sizeof(*input_instructions) * function.instruction_count);
     u64 input_end = arena->position;
     u64 expected_hash = 0;
     for (u32 sample = 0; sample < samples + 1; sample += 1)
@@ -137,7 +139,9 @@ BUSTER_GLOBAL_LOCAL int machine_line_mark_schedule(Arena* arena, u32 leaf_count,
         unsigned long long finish = machine_line_mark_bench_now();
         u32 permuted = 0;
         u64 displacement = 0;
-        bool exact = scheduled.moved && scheduled.function.line_mark_count == function.instruction_count;
+        bool exact = scheduled.moved && scheduled.function.line_mark_count == function.instruction_count &&
+                     memcmp(function.instructions, input_instructions,
+                            sizeof(*input_instructions) * function.instruction_count) == 0;
         for (u32 row = 0; exact && row < scheduled.function.line_mark_count; row += 1)
         {
             MachineLineMark mark = scheduled.function.line_marks[row];
@@ -264,6 +268,7 @@ int main(int argc, char** argv)
     {
         valid = valid && !(values[0] & (values[0] - 1));
     }
+    int status = 2;
     if (!valid)
     {
         fprintf(stderr, "usage: %s [schedule] [power-of-two leaves:32..65536] [samples:1..10000] [batch:1..1000000]\n",
@@ -273,20 +278,21 @@ int main(int argc, char** argv)
                         "[batch:1..1000000]\n",
                 argv[0]);
 #endif
-        return 2;
     }
-
-    ThreadContext* thread_context = thread_context_allocate();
-    thread_context_select(thread_context);
-    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1)});
-    int status = schedule ? machine_line_mark_schedule(arena, (u32)values[0], (u32)values[1], (u32)values[2]) : 0;
-#if BUSTER_LINE_MARK_HELPER_BENCH
-    if (remap)
+    else
     {
-        status = machine_line_mark_remap(arena, mode, (u32)values[0], (u32)values[1], (u32)values[2]);
-    }
+        ThreadContext* thread_context = thread_context_allocate();
+        thread_context_select(thread_context);
+        Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_GB(1)});
+        status = schedule ? machine_line_mark_schedule(arena, (u32)values[0], (u32)values[1], (u32)values[2]) : 0;
+#if BUSTER_LINE_MARK_HELPER_BENCH
+        if (remap)
+        {
+            status = machine_line_mark_remap(arena, mode, (u32)values[0], (u32)values[1], (u32)values[2]);
+        }
 #endif
-    arena_destroy(arena, 1);
-    thread_context_release(thread_context);
+        arena_destroy(arena, 1);
+        thread_context_release(thread_context);
+    }
     return status;
 }

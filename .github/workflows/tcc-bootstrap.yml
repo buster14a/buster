@@ -1,0 +1,42 @@
+name: TCC bootstrap
+
+# The canonical local bootstrap uses TCC. Keep this dedicated trusted-runner
+# check separate from the GitHub-hosted Clang matrix, and never execute fork
+# pull-request code on self-hosted hardware.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tcc-bootstrap-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+
+jobs:
+  bootstrap:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    name: Canonical TCC bootstrap
+    runs-on: [buster-zen5, ryzen-9700x]
+    timeout-minutes: 10
+    env:
+      LC_ALL: C
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Exercise cold and warm TCC bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v tcc
+          tcc -v
+          rm -rf .cache/bootstrap-driver
+          ./build.sh time_trace_summary_self_test
+          ./build.sh time_trace_summary_self_test

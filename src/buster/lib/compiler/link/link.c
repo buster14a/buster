@@ -1,8 +1,7 @@
 // The linker. Two public steps (link.h): link_objects merges ObjectFiles —
-// section merging, symbol resolution (ObjectSymbol.weak decides which of two
-// definitions survives instead of diagnosing a duplicate, and which
-// references leave a symbol undefined-but-optional), relocation
-// rebasing — into one
+// section merging, deterministic COFF COMDAT group resolution, ordinary
+// symbol resolution (ObjectSymbol.weak decides weak/strong precedence after
+// a group winner is known), and relocation rebasing — into one
 // combined ObjectFile, and link_native_executable lays that file out as a
 // runnable image, dispatching near the bottom to one writer per
 // target/format family: static and dynamic ELF64 for x86-64 and AArch64,
@@ -1319,10 +1318,443 @@ BUSTER_GLOBAL_LOCAL u32 link_pe_export_group_scalar(NativeExecutableLinkOptions 
     return UINT32_MAX;
 }
 
+
+typedef enum LinkComdatState
+{
+    LINK_COMDAT_STATE_UNKNOWN,
+    LINK_COMDAT_STATE_KEEP,
+    LINK_COMDAT_STATE_DISCARD,
+} LinkComdatState;
+
+typedef struct LinkComdatPlan LinkComdatPlan;
+struct LinkComdatPlan
+{
+    u64* object_offsets;
+    u8* states;
+    u64 count;
+};
+
+typedef struct LinkComdatGroup LinkComdatGroup;
+struct LinkComdatGroup
+{
+    String8 key;
+    u32 object_index;
+    u32 comdat_index;
+    ObjectComdatSelection selection;
+};
+
+typedef struct LinkComdatTable LinkComdatTable;
+struct LinkComdatTable
+{
+    LinkComdatGroup* groups;
+    u32* slots;
+    u64 capacity;
+    u32 count;
+};
+
+BUSTER_GLOBAL_LOCAL bool link_comdat_table_initialize(Arena* arena, u64 count, LinkComdatTable* table)
+{
+    bool result = table != 0;
+    if (result)
+    {
+        *table = (LinkComdatTable){0};
+        if (count)
+        {
+            result = count <= UINT64_MAX / 2;
+            u64 capacity = 1;
+            u64 required = result ? count * 2 : 0;
+            while (result && capacity < required)
+            {
+                result = capacity <= UINT64_MAX / 2;
+                if (result)
+                {
+                    capacity *= 2;
+                }
+            }
+            result = result && capacity <= UINT64_MAX / sizeof(*table->slots) && count <= UINT64_MAX / sizeof(*table->groups);
+            if (result)
+            {
+                table->groups = arena_allocate(arena, LinkComdatGroup, count);
+                table->slots = arena_allocate(arena, u32, capacity);
+                table->capacity = capacity;
+                memset(table->slots, 0xff, capacity * sizeof(*table->slots));
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u32* link_comdat_table_slot(LinkComdatTable* table, String8 key)
+{
+    u32* result = 0;
+    if (table && table->capacity)
+    {
+        u64 mask = table->capacity - 1;
+        u64 slot_index = buster_hash_64((u8*)key.pointer, key.length) & mask;
+        for (u64 probe = 0; !result && probe < table->capacity; probe += 1)
+        {
+            u32* slot = table->slots + slot_index;
+            if (*slot == UINT32_MAX || string_equal(table->groups[*slot].key, key))
+            {
+                result = slot;
+            }
+            slot_index = (slot_index + 1) & mask;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL s32 link_comdat_string_compare(String8 left, String8 right)
+{
+    u64 length = BUSTER_MIN(left.length, right.length);
+    s32 result = length ? (s32)memcmp(left.pointer, right.pointer, length) : 0;
+    if (!result && left.length != right.length)
+    {
+        result = left.length < right.length ? -1 : 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u8 link_comdat_byte(ObjectFile* object, ObjectComdat* comdat, u64 index)
+{
+    ObjectSection* section = object->sections + comdat->section;
+    u64 offset = comdat->offset + index;
+    return offset < section->data.length ? section->data.pointer[offset] : 0;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_comdat_symbol_inside(ObjectSymbol* symbol, ObjectComdat* comdat)
+{
+    bool result = symbol->section == comdat->section && symbol->value >= comdat->offset;
+    if (result)
+    {
+        u64 relative = symbol->value - comdat->offset;
+        result = relative <= comdat->size;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL s32 link_comdat_symbol_identity_compare(ObjectFile* left_object, ObjectComdat* left_comdat, u32 left_index,
+                                                            ObjectFile* right_object, ObjectComdat* right_comdat, u32 right_index)
+{
+    s32 result = 0;
+    if (left_index >= left_object->symbol_count || right_index >= right_object->symbol_count)
+    {
+        result = left_index < right_index ? -1 : left_index != right_index;
+    }
+    else
+    {
+        ObjectSymbol* left = left_object->symbols + left_index;
+        ObjectSymbol* right = right_object->symbols + right_index;
+        bool left_inside = !left->global && left->section != OBJECT_SECTION_UNDEFINED && link_comdat_symbol_inside(left, left_comdat);
+        bool right_inside = !right->global && right->section != OBJECT_SECTION_UNDEFINED && link_comdat_symbol_inside(right, right_comdat);
+        if (left_inside && right_inside)
+        {
+            u64 left_relative = left->value - left_comdat->offset;
+            u64 right_relative = right->value - right_comdat->offset;
+            if (left->kind != right->kind)
+            {
+                result = left->kind < right->kind ? -1 : 1;
+            }
+            else if (left_relative != right_relative)
+            {
+                result = left_relative < right_relative ? -1 : 1;
+            }
+            else if (left->size != right->size)
+            {
+                result = left->size < right->size ? -1 : 1;
+            }
+        }
+        else
+        {
+            result = link_comdat_string_compare(left->name, right->name);
+            if (!result && left->global != right->global)
+            {
+                result = left->global ? 1 : -1;
+            }
+            if (!result && left->kind != right->kind)
+            {
+                result = left->kind < right->kind ? -1 : 1;
+            }
+            bool left_defined = left->section != OBJECT_SECTION_UNDEFINED;
+            bool right_defined = right->section != OBJECT_SECTION_UNDEFINED;
+            if (!result && left_defined != right_defined)
+            {
+                result = left_defined ? 1 : -1;
+            }
+            if (!result && left_defined)
+            {
+                ObjectSectionKind left_kind = left_object->sections[left->section].kind;
+                ObjectSectionKind right_kind = right_object->sections[right->section].kind;
+                if (left_kind != right_kind)
+                {
+                    result = left_kind < right_kind ? -1 : 1;
+                }
+                else if (left->value != right->value)
+                {
+                    result = left->value < right->value ? -1 : 1;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL s32 link_comdat_identity_compare(ObjectFile* left_object, ObjectComdat* left,
+                                                     ObjectFile* right_object, ObjectComdat* right)
+{
+    s32 result = 0;
+    u64 shared_size = BUSTER_MIN(left->size, right->size);
+    ObjectSection* left_section = left_object->sections + left->section;
+    ObjectSection* right_section = right_object->sections + right->section;
+    if (left->offset <= left_section->data.length && right->offset <= right_section->data.length &&
+        shared_size <= left_section->data.length - left->offset && shared_size <= right_section->data.length - right->offset)
+    {
+        result = shared_size ? (s32)memcmp(left_section->data.pointer + left->offset, right_section->data.pointer + right->offset, shared_size) : 0;
+    }
+    else
+    {
+        for (u64 index = 0; !result && index < shared_size; index += 1)
+        {
+            u8 left_byte = link_comdat_byte(left_object, left, index);
+            u8 right_byte = link_comdat_byte(right_object, right, index);
+            if (left_byte != right_byte)
+            {
+                result = left_byte < right_byte ? -1 : 1;
+            }
+        }
+    }
+    if (!result && left->size != right->size)
+    {
+        result = left->size < right->size ? -1 : 1;
+    }
+    u32 shared_relocations = BUSTER_MIN(left->relocation_count, right->relocation_count);
+    for (u32 index = 0; !result && index < shared_relocations; index += 1)
+    {
+        ObjectRelocation* left_relocation = left_object->relocations + left->first_relocation + index;
+        ObjectRelocation* right_relocation = right_object->relocations + right->first_relocation + index;
+        u64 left_offset = left_relocation->offset - left->offset;
+        u64 right_offset = right_relocation->offset - right->offset;
+        if (left_offset != right_offset)
+        {
+            result = left_offset < right_offset ? -1 : 1;
+        }
+        else if (left_relocation->kind != right_relocation->kind)
+        {
+            result = left_relocation->kind < right_relocation->kind ? -1 : 1;
+        }
+        else if (left_relocation->addend != right_relocation->addend)
+        {
+            result = left_relocation->addend < right_relocation->addend ? -1 : 1;
+        }
+        else
+        {
+            result = link_comdat_symbol_identity_compare(left_object, left, left_relocation->symbol,
+                                                         right_object, right, right_relocation->symbol);
+        }
+    }
+    if (!result && left->relocation_count != right->relocation_count)
+    {
+        result = left->relocation_count < right->relocation_count ? -1 : 1;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_comdat_record_valid(ObjectFile* object, u32 index)
+{
+    bool result = object && index < object->comdat_count;
+    if (result)
+    {
+        ObjectComdat* comdat = object->comdats + index;
+        result = comdat->selection < OBJECT_COMDAT_SELECTION_COUNT && comdat->section < object->section_count;
+        if (result)
+        {
+            ObjectSection* section = object->sections + comdat->section;
+            u64 size = BUSTER_MAX(section->data.length, section->virtual_size);
+            result = comdat->offset <= size && comdat->size <= size - comdat->offset &&
+                     comdat->first_relocation <= object->relocation_count &&
+                     comdat->relocation_count <= object->relocation_count - comdat->first_relocation;
+        }
+        if (result && comdat->selection != OBJECT_COMDAT_SELECTION_NONE &&
+            comdat->selection != OBJECT_COMDAT_SELECTION_ASSOCIATIVE)
+        {
+            result = comdat->key.length && comdat->key.pointer;
+        }
+        if (result && comdat->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE)
+        {
+            result = comdat->associated < object->comdat_count && comdat->associated != index;
+        }
+        for (u32 relocation_index = 0; result && relocation_index < comdat->relocation_count; relocation_index += 1)
+        {
+            ObjectRelocation* relocation = object->relocations + comdat->first_relocation + relocation_index;
+            result = relocation->comdat == index + 1 && relocation->section == comdat->section &&
+                     relocation->offset >= comdat->offset && relocation->offset - comdat->offset < comdat->size &&
+                     relocation->symbol < object->symbol_count;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL LinkError link_comdat_plan_build(Arena* arena, ObjectFile* objects, u32 object_count,
+                                                     LinkComdatPlan* plan, String8* error_symbol)
+{
+    LinkError error = LINK_ERROR_NONE;
+    *plan = (LinkComdatPlan){0};
+    *error_symbol = (String8){0};
+    plan->object_offsets = arena_allocate(arena, u64, (u64)object_count + 1);
+    for (u32 object_index = 0; object_index < object_count && error == LINK_ERROR_NONE; object_index += 1)
+    {
+        plan->object_offsets[object_index] = plan->count;
+        if (objects[object_index].comdat_count > UINT64_MAX - plan->count)
+        {
+            error = LINK_ERROR_INVALID_INPUT;
+        }
+        else
+        {
+            plan->count += objects[object_index].comdat_count;
+        }
+    }
+    plan->object_offsets[object_count] = plan->count;
+    if (error == LINK_ERROR_NONE)
+    {
+        plan->states = arena_allocate(arena, u8, plan->count ? plan->count : 1);
+        memset(plan->states, LINK_COMDAT_STATE_UNKNOWN, plan->count);
+        LinkComdatTable table = {0};
+        if (!link_comdat_table_initialize(arena, plan->count, &table))
+        {
+            error = LINK_ERROR_INVALID_INPUT;
+        }
+        for (u32 object_index = 0; object_index < object_count && error == LINK_ERROR_NONE; object_index += 1)
+        {
+            ObjectFile* object = objects + object_index;
+            u64 base = plan->object_offsets[object_index];
+            for (u32 comdat_index = 0; comdat_index < object->comdat_count && error == LINK_ERROR_NONE; comdat_index += 1)
+            {
+                ObjectComdat* comdat = object->comdats + comdat_index;
+                u64 state_index = base + comdat_index;
+                if (!link_comdat_record_valid(object, comdat_index))
+                {
+                    error = LINK_ERROR_INVALID_INPUT;
+                }
+                else if (comdat->selection == OBJECT_COMDAT_SELECTION_NONE)
+                {
+                    plan->states[state_index] = LINK_COMDAT_STATE_KEEP;
+                }
+                else if (comdat->selection != OBJECT_COMDAT_SELECTION_ASSOCIATIVE)
+                {
+                    u32* slot = link_comdat_table_slot(&table, comdat->key);
+                    if (!slot)
+                    {
+                        error = LINK_ERROR_INVALID_INPUT;
+                    }
+                    else if (*slot == UINT32_MAX)
+                    {
+                        u32 group_index = table.count++;
+                        *slot = group_index;
+                        table.groups[group_index] = (LinkComdatGroup){
+                            .key = comdat->key,
+                            .object_index = object_index,
+                            .comdat_index = comdat_index,
+                            .selection = comdat->selection,
+                        };
+                        plan->states[state_index] = LINK_COMDAT_STATE_KEEP;
+                    }
+                    else
+                    {
+                        LinkComdatGroup* group = table.groups + *slot;
+                        ObjectFile* winner_object = objects + group->object_index;
+                        ObjectComdat* winner = winner_object->comdats + group->comdat_index;
+                        u64 winner_state = plan->object_offsets[group->object_index] + group->comdat_index;
+                        *error_symbol = comdat->key;
+                        if (group->selection != comdat->selection)
+                        {
+                            error = LINK_ERROR_COMDAT_SELECTION_MISMATCH;
+                        }
+                        else if (comdat->selection == OBJECT_COMDAT_SELECTION_NO_DUPLICATES)
+                        {
+                            error = LINK_ERROR_DUPLICATE_SYMBOL;
+                        }
+                        else if (comdat->selection == OBJECT_COMDAT_SELECTION_SAME_SIZE && winner->size != comdat->size)
+                        {
+                            error = LINK_ERROR_COMDAT_SIZE_MISMATCH;
+                        }
+                        else if (comdat->selection == OBJECT_COMDAT_SELECTION_EXACT_MATCH &&
+                                 link_comdat_identity_compare(winner_object, winner, object, comdat) != 0)
+                        {
+                            error = LINK_ERROR_COMDAT_EXACT_MATCH;
+                        }
+                        else
+                        {
+                            bool replace = comdat->selection == OBJECT_COMDAT_SELECTION_LARGEST &&
+                                           (comdat->size > winner->size ||
+                                            (comdat->size == winner->size &&
+                                             link_comdat_identity_compare(object, comdat, winner_object, winner) > 0));
+                            if (replace)
+                            {
+                                plan->states[winner_state] = LINK_COMDAT_STATE_DISCARD;
+                                plan->states[state_index] = LINK_COMDAT_STATE_KEEP;
+                                group->object_index = object_index;
+                                group->comdat_index = comdat_index;
+                            }
+                            else
+                            {
+                                plan->states[state_index] = LINK_COMDAT_STATE_DISCARD;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        bool progress = true;
+        for (u64 pass = 0; error == LINK_ERROR_NONE && progress && pass < plan->count; pass += 1)
+        {
+            progress = false;
+            for (u32 object_index = 0; object_index < object_count; object_index += 1)
+            {
+                ObjectFile* object = objects + object_index;
+                u64 base = plan->object_offsets[object_index];
+                for (u32 comdat_index = 0; comdat_index < object->comdat_count; comdat_index += 1)
+                {
+                    ObjectComdat* comdat = object->comdats + comdat_index;
+                    u64 state_index = base + comdat_index;
+                    if (comdat->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
+                        plan->states[state_index] == LINK_COMDAT_STATE_UNKNOWN)
+                    {
+                        u8 parent = plan->states[base + comdat->associated];
+                        if (parent != LINK_COMDAT_STATE_UNKNOWN)
+                        {
+                            plan->states[state_index] = parent;
+                            progress = true;
+                        }
+                    }
+                }
+            }
+        }
+        for (u64 index = 0; error == LINK_ERROR_NONE && index < plan->count; index += 1)
+        {
+            if (plan->states[index] == LINK_COMDAT_STATE_UNKNOWN)
+            {
+                error = LINK_ERROR_INVALID_INPUT;
+            }
+        }
+    }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL bool link_comdat_is_discarded(LinkComdatPlan* plan, u32 object_index, u32 comdat)
+{
+    bool result = false;
+    if (comdat)
+    {
+        result = plan->states[plan->object_offsets[object_index] + comdat - 1] == LINK_COMDAT_STATE_DISCARD;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool link_symbol_definition_set(ObjectSymbol* destination, ObjectSymbol* source, ObjectFile* object, u64* section_offsets, Arena* arena)
 {
     *destination = *source;
     destination->name = link_string_copy(arena, source->name);
+    destination->comdat = 0;
     if (source->section != OBJECT_SECTION_UNDEFINED)
     {
         if (source->section >= object->section_count)
@@ -1480,7 +1912,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         ObjectFile* object = &objects[object_index];
         if (object->error != OBJECT_ERROR_NONE || !object->sections || object->section_count > OBJECT_SECTION_COUNT ||
             (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations) ||
-            (object->debug_module_count && !object->debug_modules))
+            (object->comdat_count && !object->comdats) || (object->debug_module_count && !object->debug_modules))
         {
             result.error = LINK_ERROR_INVALID_INPUT;
             return result;
@@ -1519,6 +1951,15 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             section_sizes[section->kind] = aligned + section_size;
             section_alignments[section->kind] = BUSTER_MAX(section_alignments[section->kind], alignment);
         }
+    }
+    LinkComdatPlan comdat_plan = {0};
+    String8 comdat_error_symbol = {0};
+    LinkError comdat_error = link_comdat_plan_build(arena, objects, object_count, &comdat_plan, &comdat_error_symbol);
+    if (comdat_error != LINK_ERROR_NONE)
+    {
+        result.error = comdat_error;
+        result.symbol = link_string_copy(arena, comdat_error_symbol);
+        return result;
     }
     result.object = (ObjectFile){
         .sections = arena_allocate(arena, ObjectSection, OBJECT_SECTION_COUNT),
@@ -1629,13 +2070,29 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
             }
-            if (source->section != OBJECT_SECTION_UNDEFINED &&
-                (source->section >= object->section_count ||
-                 source->value > BUSTER_MAX(object->sections[source->section].data.length, object->sections[source->section].virtual_size) ||
-                 source->size > BUSTER_MAX(object->sections[source->section].data.length, object->sections[source->section].virtual_size) - source->value))
+            if (source->comdat > object->comdat_count ||
+                (source->section != OBJECT_SECTION_UNDEFINED &&
+                 (source->section >= object->section_count ||
+                  source->value > BUSTER_MAX(object->sections[source->section].data.length, object->sections[source->section].virtual_size) ||
+                  source->size > BUSTER_MAX(object->sections[source->section].data.length, object->sections[source->section].virtual_size) - source->value)))
             {
                 result.error = LINK_ERROR_INVALID_INPUT;
                 return result;
+            }
+            ObjectSymbol discarded_source = {0};
+            if (link_comdat_is_discarded(&comdat_plan, object_index, source->comdat))
+            {
+                if (!source->global)
+                {
+                    continue;
+                }
+                discarded_source = *source;
+                discarded_source.value = 0;
+                discarded_source.size = 0;
+                discarded_source.section = OBJECT_SECTION_UNDEFINED;
+                discarded_source.comdat = 0;
+                discarded_source.weak = true;
+                source = &discarded_source;
             }
             u32 destination_index = UINT32_MAX;
             u32* global_slot = 0;
@@ -1719,6 +2176,15 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
         for (u32 relocation_index = 0; relocation_index < object->relocation_count; relocation_index += 1)
         {
             ObjectRelocation source = object->relocations[relocation_index];
+            if (source.comdat > object->comdat_count)
+            {
+                result.error = LINK_ERROR_INVALID_INPUT;
+                return result;
+            }
+            if (link_comdat_is_discarded(&comdat_plan, object_index, source.comdat))
+            {
+                continue;
+            }
             if (source.section >= object->section_count || source.symbol >= object->symbol_count || symbol_maps[object_index][source.symbol] == UINT32_MAX)
             {
                 result.error = LINK_ERROR_INVALID_INPUT;
@@ -1728,6 +2194,7 @@ LinkObjectResult link_objects(Arena* arena, ObjectFile* objects, u32 object_coun
             source.section = (u32)kind;
             source.offset += offsets[object->relocations[relocation_index].section];
             source.symbol = symbol_maps[object_index][source.symbol];
+            source.comdat = 0;
             result.object.relocations[result.object.relocation_count++] = source;
         }
     }
@@ -11186,6 +11653,9 @@ String8 link_error_name(LinkError error)
         S8_INITIALIZER("invalid input"),
         S8_INITIALIZER("target mismatch"),
         S8_INITIALIZER("duplicate symbol"),
+        S8_INITIALIZER("COMDAT selection mismatch"),
+        S8_INITIALIZER("COMDAT size mismatch"),
+        S8_INITIALIZER("COMDAT exact-match mismatch"),
         S8_INITIALIZER("unresolved symbol"),
         S8_INITIALIZER("object write"),
         S8_INITIALIZER("file write"),
