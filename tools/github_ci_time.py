@@ -22,13 +22,17 @@ PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS x86-64", "macOS AArch64",
              "Windows x86-64", "Windows AArch64")
 MOBILE = ("Android x86-64", "iOS x86-64", "iOS AArch64")
 SHARDED_JOBS = PLATFORMS + MOBILE + ("Workflow lint", "CI complete")
-NATIVE = tuple(name + " native" for name in PLATFORMS if not name.startswith("Windows"))
+UNIX_NATIVE = tuple(name + " native" for name in PLATFORMS if not name.startswith("Windows"))
+NATIVE = tuple(name + " native" for name in PLATFORMS)
+LEGACY_PARTITIONED_JOBS = SHARDED_JOBS + UNIX_NATIVE
 PARTITIONED_JOBS = SHARDED_JOBS + NATIVE
 UEFI = ("UEFI firmware boot",)
 ANALYZER = ("Clang analyzer shards",)
+LEGACY_SUITE_JOBS = LEGACY_PARTITIONED_JOBS + UEFI + ANALYZER
 SUITE_JOBS = PARTITIONED_JOBS + UEFI + ANALYZER
 COMBINATION_SHARDS = ("release", "checks")
 COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS for shard in COMBINATION_SHARDS)
+LEGACY_COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
@@ -49,8 +53,10 @@ def measure(run):
     result = None
     jobs = run.get("jobs", [])
     names = sorted(job.get("name", "") for job in jobs)
-    combinations = names == sorted(COMBINATION_JOBS)
-    suites = names == sorted(PARTITIONED_JOBS) or names == sorted(SUITE_JOBS) or combinations
+    combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
+    suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
+                       sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS),
+                       sorted(LEGACY_COMBINATION_JOBS), sorted(COMBINATION_JOBS))
     sharded = names == sorted(SHARDED_JOBS) or suites
     if run.get("status") != "completed":
         reason = "not-completed"
@@ -87,7 +93,10 @@ def measure(run):
                     if name == "Linux x86-64":
                         required.add("Test (Android)")
             elif name in NATIVE:
-                required.update(("Execution-mode matrix", "Native configuration differential matrix"))
+                required.add("Execution-mode matrix (Windows)" if name.startswith("Windows")
+                             else "Execution-mode matrix")
+                if not name.startswith("Windows"):
+                    required.add("Native configuration differential matrix")
             elif name.startswith("iOS"):
                 required.add("Test (iOS simulator)")
             elif name.startswith("Android"):
@@ -203,11 +212,20 @@ def validate_required_jobs(jobs, run_id, run_attempt, head_sha):
                 errors.append("CI complete is not the current active attempt")
         elif job.get("status") != "completed" or job.get("conclusion") != "success":
             errors.append(f"{name}: required job did not complete successfully")
+        required = set()
         if name in COMBINATION_PLATFORMS:
-            required = {"Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
-                        "Combination matrix (Windows)" if name.startswith("Windows") else "Combination matrix (Linux, macOS)"}
+            required.update(("Install verified Zig", "Desktop result and reproduction", "Retain desktop logs",
+                             "Combination matrix (Windows)" if name.startswith("Windows")
+                             else "Combination matrix (Linux, macOS)"))
             if name.endswith(" release"):
                 required.update(("Workflow tool regression tests", "Bootstrap wrapper regression tests"))
+        elif name in NATIVE:
+            required.update(("Native result and reproduction",
+                             "Execution-mode matrix (Windows)" if name.startswith("Windows")
+                             else "Execution-mode matrix"))
+            if not name.startswith("Windows"):
+                required.add("Native configuration differential matrix")
+        if required:
             steps = job.get("steps", [])
             if not isinstance(steps, list):
                 errors.append(f"{name}: malformed step records")

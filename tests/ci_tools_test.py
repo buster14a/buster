@@ -1323,8 +1323,9 @@ class TimingTests(unittest.TestCase):
         for name in github_ci_time.NATIVE:
             job = copy.deepcopy(run["jobs"][0])
             job["name"] = name
-            job["steps"] = [{"name": step, "conclusion": "success"} for step in (
-                "Execution-mode matrix", "Native configuration differential matrix")]
+            steps = (("Execution-mode matrix (Windows)",) if name.startswith("Windows") else
+                     ("Execution-mode matrix", "Native configuration differential matrix"))
+            job["steps"] = [{"name": step, "conclusion": "success"} for step in steps]
             run["jobs"].append(job)
         return run
 
@@ -1343,10 +1344,10 @@ class TimingTests(unittest.TestCase):
             run["jobs"].append(job)
         return run
 
-    def test_suite_matrix_counts_all_fifteen_jobs(self):
+    def test_suite_matrix_counts_all_seventeen_jobs(self):
         sample, reason = github_ci_time.measure(self.suite_sample())
         self.assertIsNone(reason)
-        self.assertEqual(sample["runner_seconds"], 900)
+        self.assertEqual(sample["runner_seconds"], 1020)
         report = github_ci_time.summarize({"runs": [self.sharded_sample(),
             dict(self.suite_sample(), id=2)]})
         self.assertEqual(len(report["cohorts"]), 2)
@@ -1354,7 +1355,7 @@ class TimingTests(unittest.TestCase):
     def test_current_matrix_counts_uefi_and_analyzer_cost(self):
         sample, reason = github_ci_time.measure(self.current_sample())
         self.assertIsNone(reason)
-        self.assertEqual(sample["runner_seconds"], 1020)
+        self.assertEqual(sample["runner_seconds"], 1140)
 
     def test_suite_matrix_rejects_missing_duplicate_failed_and_skipped_coverage(self):
         for index in range(len(github_ci_time.PARTITIONED_JOBS)):
@@ -1369,7 +1370,7 @@ class TimingTests(unittest.TestCase):
                 run["jobs"][index]["conclusion"] = conclusion
                 self.assertIsNone(github_ci_time.measure(run)[0])
         for index in range(len(github_ci_time.SHARDED_JOBS), len(github_ci_time.PARTITIONED_JOBS)):
-            for step in range(2):
+            for step in range(len(self.suite_sample()["jobs"][index]["steps"])):
                 for conclusion in ("failure", "cancelled", "skipped", None):
                     run = self.suite_sample()
                     run["jobs"][index]["steps"][step]["conclusion"] = conclusion

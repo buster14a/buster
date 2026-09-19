@@ -178,6 +178,28 @@ class NativePartitionTests(unittest.TestCase):
             self.assertFalse(selections[0] & selections[1])
             self.assertEqual(selections[0] | selections[1], full)
 
+    def test_windows_aarch64_policy_is_explicit_and_nonempty(self):
+        expected_anchors = {
+            "x86_64": (28, 6, 22, "46ffb69c2ceae9c0"),
+            "aarch64": (19, 2, 17, "709a010f922e385b"),
+        }
+        for architecture, anchor in expected_anchors.items():
+            manifest = self.plans["windows", architecture, "combinations"]
+            policy = manifest["policy"]
+            self.assertEqual((policy["row_count"], policy["required_count"],
+                              policy["excluded_count"], policy["fingerprint"]), anchor)
+            rows = manifest["expected"]
+            self.assertEqual(len({row["id"] for row in rows}), len(rows))
+            required = [row for row in rows if row["state"] == "required"]
+            excluded = [row for row in rows if row["state"] == "excluded"]
+            self.assertEqual(len(required), anchor[1])
+            self.assertEqual(len(excluded), anchor[2])
+            self.assertTrue(all(row["owner_shard"] in github_ci_time.COMBINATION_SHARDS for row in required))
+            self.assertTrue(all(row["exclusion"] for row in excluded))
+        arm = self.plans["windows", "aarch64", "combinations"]
+        self.assertEqual(Counter(row["compiler"] for row in arm["expected"] if row["state"] == "required"),
+                         Counter(("clang", "cl")))
+
     def test_consumer_accepts_each_complete_native_selection(self):
         for key, plan in self.plans.items():
             with self.subTest(lane=key):
@@ -314,6 +336,11 @@ class CompletionGateTests(unittest.TestCase):
                          "Combination matrix (Windows)" if name.startswith("Windows") else "Combination matrix (Linux, macOS)"]
                 if name.endswith(" release"):
                     steps += ["Workflow tool regression tests", "Bootstrap wrapper regression tests"]
+            elif name in github_ci_time.NATIVE:
+                steps = ["Native result and reproduction",
+                         "Execution-mode matrix (Windows)" if name.startswith("Windows") else "Execution-mode matrix"]
+                if not name.startswith("Windows"):
+                    steps.append("Native configuration differential matrix")
             jobs.append({"id": number + 1, "name": name, "run_id": 123, "run_attempt": 1, "head_sha": "a" * 40,
                          "status": "in_progress" if name == "CI complete" else "completed",
                          "conclusion": None if name == "CI complete" else "success",
@@ -323,13 +350,14 @@ class CompletionGateTests(unittest.TestCase):
     def check(self, jobs, attempt=1):
         return github_ci_time.validate_required_jobs(jobs, 123, attempt, "a" * 40)
 
-    def test_all_twenty_three_jobs_and_exact_twelve_desktop_shards(self):
-        self.assertEqual(len(github_ci_time.COMBINATION_JOBS), 23)
+    def test_all_twenty_five_jobs_and_exact_twelve_desktop_shards(self):
+        self.assertEqual(len(github_ci_time.COMBINATION_JOBS), 25)
         self.assertEqual(len(github_ci_time.COMBINATION_PLATFORMS), 12)
         self.assertEqual(self.check(self.sample()), [])
 
     def test_missing_duplicate_failed_cancelled_and_skipped_jobs_fail(self):
-        for index in range(23):
+        total = len(github_ci_time.COMBINATION_JOBS)
+        for index in range(total):
             jobs = self.sample()
             jobs.pop(index)
             self.assertTrue(self.check(jobs))
@@ -341,8 +369,10 @@ class CompletionGateTests(unittest.TestCase):
                     jobs = self.sample()
                     jobs[index]["conclusion"] = conclusion
                     self.assertTrue(self.check(jobs))
-        for index in range(12):
-            for step in range(len(self.sample()[index]["steps"])):
+        for index, job in enumerate(self.sample()):
+            if job["name"] not in github_ci_time.COMBINATION_PLATFORMS + github_ci_time.NATIVE:
+                continue
+            for step in range(len(job["steps"])):
                 for conclusion in ("failure", "cancelled", "skipped", None):
                     jobs = self.sample()
                     jobs[index]["steps"][step]["conclusion"] = conclusion
@@ -380,14 +410,15 @@ class CompletionGateTests(unittest.TestCase):
 
     def test_api_gate_paginates_latest_jobs_and_rejects_partial_inventory(self):
         jobs = self.sample()
+        total = len(jobs)
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
-        responses = [run, {"total_count": 23, "jobs": jobs[:10]}, {"total_count": 23, "jobs": jobs[10:]}]
+        responses = [run, {"total_count": total, "jobs": jobs[:10]}, {"total_count": total, "jobs": jobs[10:]}]
         with mock.patch.object(github_ci_time, "api_get", side_effect=responses) as fetch:
             self.assertTrue(github_ci_time.require_jobs(args)["success"])
             self.assertIn("filter=all", fetch.call_args_list[1].args[1])
             self.assertIn("page=2", fetch.call_args_list[2].args[1])
-        for last in ({"total_count": 23, "jobs": []}, {"total_count": 22, "jobs": jobs[10:]}):
+        for last in ({"total_count": total, "jobs": []}, {"total_count": total - 1, "jobs": jobs[10:]}):
             with mock.patch.object(github_ci_time, "api_get", side_effect=responses[:2] + [last]):
                 with self.assertRaises(ValueError):
                     github_ci_time.require_jobs(args)
@@ -410,6 +441,11 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("BUSTER_MATRIX_SHARD: ${{ matrix.shard }}", desktop)
         self.assertIn("matrix.shard == 'release'", desktop)
         self.assertIn("name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-", desktop)
+        native = workflow.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        native_names = re.findall(r"^          - name: (.+ native)$", native, re.M)
+        self.assertEqual(Counter(native_names), Counter(github_ci_time.NATIVE))
+        self.assertIn("Execution-mode matrix (Windows)", native)
+        self.assertIn("test_mode_matrix --config Release", native)
         aggregate = workflow.split("\n  complete:", 1)[1]
         self.assertIn("actions: read", aggregate)
         self.assertIn("github_ci_time.py require-jobs", aggregate)
@@ -429,18 +465,20 @@ class CompletionGateTests(unittest.TestCase):
                 "Clang analyzer shards": ("Exercise analyzer failure and coverage controls", "Compare reference analysis and aggregate all module shards"),
             }.get(name, ())
             if name in github_ci_time.NATIVE:
-                required = ("Execution-mode matrix", "Native configuration differential matrix")
+                required = (("Execution-mode matrix (Windows)",) if name.startswith("Windows") else
+                            ("Execution-mode matrix", "Native configuration differential matrix"))
             elif name in github_ci_time.MOBILE:
                 required = ("Test (Android)" if name.startswith("Android") else "Test (iOS simulator)",)
-            job["steps"] += [{"name": step, "conclusion": "success"} for step in required]
+            existing = {step["name"] for step in job["steps"]}
+            job["steps"] += [{"name": step, "conclusion": "success"} for step in required if step not in existing]
         run = {"id": 123, "head_sha": "a" * 40, "workflow_blob_sha": "b" * 40, "run_attempt": 1,
                "status": "completed", "conclusion": "success", "created_at": "2026-09-16T12:00:00Z", "jobs": jobs}
         measurement, reason = github_ci_time.measure(run)
         self.assertIsNone(reason)
-        self.assertEqual(measurement["runner_seconds"], 23 * 60)
+        self.assertEqual(measurement["runner_seconds"], 25 * 60)
         self.assertEqual(measurement["elapsed_seconds"], 70)
         self.assertEqual(set(measurement["job_queue_seconds"].values()), {5})
-        for index in range(23):
+        for index in range(len(jobs)):
             bad = copy.deepcopy(run)
             bad["jobs"].pop(index)
             self.assertIsNone(github_ci_time.measure(bad)[0])

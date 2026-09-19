@@ -117,7 +117,7 @@ ARCHIVED_TARGETS = (
 ARCHIVED_FRONTENDS = ("local-backed-canonical", "direct-ssa")
 ARCHIVED_PICS = ("0", "1")
 ARCHIVED_ALLOCATORS = ("mir-stack", "fast", "quality")
-SUPPORT_CONTRACT_SHA256 = "42149a58107e46d05a3ef6d6b6f63df5923de2260b7b28be6325708e7a3d80ab"
+SUPPORT_CONTRACT_SHA256 = "8648b81e7c39c514d2036bb242b5ff43dfa9ffc17d67c4bbb19d2a141ed6c8d8"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
