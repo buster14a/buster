@@ -3372,6 +3372,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
                                          ? C_TYPE_FLOAT : C_TYPE_DOUBLE;
                     return c_parse_expression_scalar_type(result, kind);
                 }
+                CIrSse2ImmediateShiftBuiltin shift = {0};
+                if (c_semantic_sse2_immediate_shift_builtin(name, &shift))
+                {
+                    CTypeId element = c_parse_expression_scalar_type(result, shift.lane_width == 32 ? C_TYPE_INT : C_TYPE_LONG_LONG);
+                    return c_parse_add_type(result, (CType){.kind = C_TYPE_VECTOR, .element_type = element, .vector_byte_size = 16,
+                        .return_type = C_TYPE_ID_INVALID, .array_bound = C_ARRAY_BOUND_INVALID, .is_complete = true});
+                }
                 CIrSimdBuiltin simd = {0};
                 if (c_semantic_simd_builtin(name, &simd))
                 {
@@ -19058,8 +19065,7 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
         {
             String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[cursor]);
             bool parenthesized = cursor + 1 < frame->end && c_token_is_punctuator(&preprocess.tokens[cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
-            bool unevaluated = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name) ||
-                               string_equal(name, S8("__builtin_constant_p"));
+            bool unevaluated = string_equal(name, S8("sizeof")) || c_parse_alignof_word(name);
             if (unevaluated && parenthesized)
             {
                 u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
@@ -19085,9 +19091,28 @@ BUSTER_C_INTERNAL u32 c_parse_static_initializer_call(CTypeParseMachine* machine
                                          !c_token_is_punctuator(&preprocess.tokens[cursor - 1], C_PUNCTUATOR_ARROW)))
             {
                 CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[cursor]);
-                if (parenthesized && entity.value >= result->entity_count && c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_NONE &&
-                    !c_ir_math_builtin_link_name(name).length && !string_equal(name, S8("__builtin_offsetof")) &&
-                    !c_parse_type_name_start_word_token(preprocess, preprocess.tokens[cursor])) bad = cursor;
+                if (parenthesized && entity.value >= result->entity_count && !string_equal(name, S8("__builtin_offsetof")) &&
+                    !c_parse_type_name_start_word_token(preprocess, preprocess.tokens[cursor]))
+                {
+                    u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor + 1);
+                    bool constant = false;
+                    if (close < frame->end && c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_COMPLEX)
+                    {
+                        u32 comma = c_parse_constraint_expression_end(result, preprocess, cursor + 2, close);
+                        u32 limit = comma < close ? c_parse_constraint_expression_end(result, preprocess, comma + 1, close) : close;
+                        CParseConstant real = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, cursor + 2, comma);
+                        CParseConstant imaginary = comma < close
+                            ? c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, comma + 1, limit) : (CParseConstant){0};
+                        constant = comma < close && limit == close && real.valid && imaginary.valid && (real.is_float || imaginary.is_float);
+                    }
+                    else if (close < frame->end && c_ir_math_builtin_link_name(name).length)
+                    {
+                        CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, cursor, close + 1);
+                        constant = value.valid;
+                    }
+                    if (!constant) bad = cursor;
+                    else frame->cursor = close + 1;
+                }
                 if (entity.value < result->entity_count)
                 {
                     CEntity value = result->entities[entity.value];
@@ -19352,6 +19377,9 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
             u32 storage = UINT32_MAX;
             bool thread_local = false;
             u32 call = c_parse_static_initializer_call(machine, result, preprocess, scope, start, end, &storage, &thread_local);
+            if (call < preprocess.token_count && string_starts_with_sequence(shape.message, S8("cannot fold '")) &&
+                string_ends_with_sequence(shape.message, S8("in a static initializer"))) shape.message = (String8){0};
+            if (generic.message.length && string_starts_with_sequence(shape.message, S8("cannot fold '_Generic'"))) shape.message = (String8){0};
             if (shape.message.length)
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[shape.token]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -19597,8 +19625,14 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                 {
                     CDeclaration function = result->declarations[declaration_index];
                     u32 function_name = function.syntax_declaration ? function.syntax_declaration->function_name_token : location;
-                    c_parse_lowering_constraint_consider(diagnostic,
-                        string_format(result->arena, S8("could not lower static initializer for local '{S8}'"), entity->name), start, function_name);
+                    String8 message = string_format(result->arena, S8("could not lower static initializer for local '{S8}'"), entity->name);
+                    if (call < preprocess.token_count && c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[call])) == C_SYMBOL_BUILTIN_NONE)
+                    {
+                        message = string_format(result->arena, S8("could not lower static initializer for local '{S8}': cannot fold the call to '{S8}' in a static initializer"),
+                            entity->name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[call]));
+                        function_name = call;
+                    }
+                    c_parse_lowering_constraint_consider(diagnostic, message, start, function_name);
                 }
             }
         }
@@ -20278,6 +20312,42 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         }
         String8 message = count < minimum || count > maximum ? S8("could not prepare C calls") : (String8){0};
         u32 location = close;
+        if (builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
+        {
+            CIrSse2ImmediateShiftBuiltin shift = {0};
+            if (c_semantic_sse2_immediate_shift_builtin(name, &shift))
+            {
+                if (count != 2)
+                {
+                    message = string_format(result->arena, S8("{S8} takes 2 arguments"), name);
+                    location = index + 1;
+                }
+                else
+                {
+                    CTypeId type = C_TYPE_ID_INVALID;
+                    c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, starts[0], ends[0], &type);
+                    CType vector = type.value < result->type_count ? result->types[type.value] : (CType){0};
+                    IrType element = c_parse_constant_scalar_type(result, preprocess.target, vector.element_type);
+                    if (vector.kind != C_TYPE_VECTOR || vector.vector_byte_size != 16 ||
+                        element.kind != IR_TYPE_INTEGER || element.bit_width != shift.lane_width)
+                    {
+                        message = string_format(result->arena,
+                            S8("argument 1 of {S8} must be a 16-byte integer vector with {u32} lanes of {u32} bits"),
+                            name, (u32)shift.lane_count, (u32)shift.lane_width);
+                        location = starts[0];
+                    }
+                    else
+                    {
+                        CParseConstant immediate = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope, starts[1], ends[1]);
+                        if (!immediate.valid || immediate.is_float)
+                        {
+                            message = string_format(result->arena, S8("argument 2 of {S8} must be an integer constant"), name);
+                            location = starts[1];
+                        }
+                    }
+                }
+            }
+        }
         if (builtin == C_SYMBOL_BUILTIN_SIMD)
         {
             CIrSimdBuiltin simd = {0};
@@ -20662,7 +20732,7 @@ BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine,
                         u32 limit = c_parse_constraint_expression_end(result, preprocess, argument, close);
                         if (c_parse_label_expression(machine, result, preprocess, scope, labels, argument, limit))
                         {
-                            message = S8("a label address may not be passed to a function");
+                            message = S8("a label address may not escape through a function call");
                             location = index;
                         }
                         argument = limit + 1;
