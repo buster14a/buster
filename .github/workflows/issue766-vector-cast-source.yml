@@ -19,19 +19,20 @@ jobs:
         with:
           ref: 1d71d10df9853360ca7961aeddd01675a7de1af7
           persist-credentials: false
-      - name: Print vector conversion implementation and call sites
+      - name: Print explicit vector cast lowering
         shell: bash
         run: |
           set -euo pipefail
           file=src/buster/lib/compiler/frontend/c/c_gen.c
 
-          echo '=== cast body 7320-7750 ==='
-          sed -n '7320,7750p' "$file"
-          echo '=== vector alias symbol ==='
-          grep -n 'c_ir_emit_vector_alias_conversion' "$file" || true
-          echo '=== vector conversion terms ==='
-          grep -niE 'vector.*(alias|convert|cast)|(alias|convert|cast).*vector' "$file" | sed -n '1,240p' || true
-          echo '=== matching tests and fixtures ==='
-          grep -RFn 'vector alias' src/buster/tests tests docs/agents/frontend | sed -n '1,120p' || true
-          grep -RFn 'same-width' src/buster/tests tests docs/agents/frontend | sed -n '1,120p' || true
-          grep -RFn '__m128i' tests src/buster/tests | sed -n '1,160p' || true
+          echo '=== representation alias helper and surrounding code ==='
+          grep -n 'c_ir_emit_representation_alias_conversion' "$file" || true
+          sed -n '6360,6525p' "$file"
+
+          echo '=== explicit cast lowering call sites ==='
+          sed -n '13820,14030p' "$file"
+          grep -nE 'FRAME.*CAST|CAST.*FRAME|as\.cast|cast_type' "$file" | sed -n '1,240p' || true
+
+          echo '=== cast-validation helpers ==='
+          grep -nE 'explicit.*cast|cast.*valid|vector.*size|size.*vector' "$file" | sed -n '1,260p' || true
+          grep -RFn '__builtin_convertvector' tests src/buster/tests | sed -n '1,120p' || true
