@@ -16787,7 +16787,8 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CParseResult* result, 
         CType* type = entity && entity->type.value < result->type_count ? result->types + entity->type.value : 0;
         if (type && type->is_const)
         {
-            c_parse_lowering_constraint_consider(diagnostic, S8("assignment operand is not a modifiable place"), index, UINT32_MAX);
+            c_parse_lowering_constraint_consider(diagnostic, S8("assignment operand is not a modifiable place"), index,
+                                                 index + 1 < end ? index + 1 : index);
         }
     }
 }
@@ -16814,7 +16815,7 @@ BUSTER_C_INTERNAL void c_parse_validate_return_statements(CParseResult* result, 
         {
             String8 message = has_value ? S8("return statement has a value but the parsed function return type is void")
                                        : S8("return statement has no value but the parsed function return type is non-void");
-            c_parse_lowering_constraint_consider(diagnostic, message, index, UINT32_MAX);
+            c_parse_lowering_constraint_consider(diagnostic, message, index, index);
         }
     }
 }
@@ -16891,11 +16892,11 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
         }
         if (entity->is_static_storage)
         {
-            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have static storage duration"), start, UINT32_MAX);
+            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have static storage duration"), start, start);
         }
         else if (c_parse_declarator_has_initializer(preprocess, start, end))
         {
-            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have an initializer"), start, UINT32_MAX);
+            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have an initializer"), start, start);
         }
     }
 }
