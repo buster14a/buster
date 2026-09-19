@@ -14292,6 +14292,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             .next_in_scope = C_ENTITY_ID_INVALID,
             .declaration_index = declaration_index,
             .declaration_token_plus_one = name_index + 1,
+            .declaration_statement_start = start,
             .declaration_token_start = segment_start,
             .declaration_token_count = segment_end - segment_start,
             .alignment_start = declarator_alignment_start,
@@ -16890,13 +16891,17 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
         {
             continue;
         }
+        u32 body_start = declaration_index < result->declaration_count ? result->declarations[declaration_index].body_start : UINT32_MAX;
+        u32 location = entity->declaration_statement_start >= body_start && entity->declaration_statement_start <= start
+                           ? entity->declaration_statement_start
+                           : start;
         if (entity->is_static_storage)
         {
-            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have static storage duration"), start, start);
+            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have static storage duration"), start, location);
         }
         else if (c_parse_declarator_has_initializer(preprocess, start, end))
         {
-            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have an initializer"), start, start);
+            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have an initializer"), start, location);
         }
     }
 }
