@@ -1,0 +1,39 @@
+name: Start issue 789 Zen 5 audit
+
+on:
+  push:
+    branches:
+      - audit/789-fast-live-range-worklist-20260918
+
+permissions:
+  contents: write
+
+jobs:
+  start:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Trigger the dedicated audit and remove this helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/zen5-audit.yml')
+          text = path.read_text()
+          marker = 'name: Zen 5 throughput audit\n'
+          if text.count(marker) != 1:
+              raise SystemExit('zen5 audit workflow header changed')
+          path.write_text(text.replace(marker, marker + '# Issue 789: FAST stack-slot liveness worklist candidate.\n', 1))
+          PY
+          rm .github/workflows/codex-789-start-audit.yml
+          git config user.name "OpenAI Codex"
+          git config user.email "noreply@openai.com"
+          git add .github/workflows/zen5-audit.yml .github/workflows/codex-789-start-audit.yml
+          git commit -m "ci: run issue 789 Zen 5 audit"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
