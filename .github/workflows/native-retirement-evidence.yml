@@ -34,9 +34,10 @@ permissions:
   contents: read
 
 env:
-  # PRs validate GitHub's exact integration commit. A manual run validates the
-  # exact revision selected in the workflow-dispatch UI.
-  BUSTER_RETIREMENT_CANDIDATE: ${{ github.sha }}
+  # github.sha is GitHub's synthetic merge commit on pull_request. Native
+  # retirement must qualify the immutable proposed head itself; manual runs
+  # retain the exact revision selected in the workflow-dispatch UI.
+  BUSTER_RETIREMENT_CANDIDATE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   census:
