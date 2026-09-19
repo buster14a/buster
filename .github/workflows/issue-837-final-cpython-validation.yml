@@ -56,14 +56,16 @@ jobs:
           CC=gcc-13 CFLAGS='-g -O3' MODULE_BUILDTYPE=static "$CPYTHON_SOURCE/configure"
 
       - name: Compile both Blake2 units in the complete frontend and allocator matrix
+        id: direct
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ide="$GITHUB_WORKSPACE/build/Release/ide"
           output="$RUNNER_TEMP/issue-837-objects"
           mkdir -p "$output"
           common=(
-            cc -g -O3 -std=c11 -DPy_BUILD_CORE_BUILTIN
+            cc -g -O3 -DPy_BUILD_CORE_BUILTIN
             -isystem /usr/include/x86_64-linux-gnu
             -isystem /usr/include
             -isystem "$LLVM_SOURCE/clang/lib/Headers"
@@ -75,6 +77,8 @@ jobs:
             -I"$CPYTHON_BUILD"
             -I"$CPYTHON_SOURCE/Include"
           )
+          failures=0
+          : > issue-837-direct-matrix.log
           for frontend in local-backed-canonical direct-ssa; do
             case "$frontend" in
               local-backed-canonical) frontend_flag=-fno-frontend-ssa ;;
@@ -84,16 +88,25 @@ jobs:
               for unit in blake2s blake2b; do
                 source="$CPYTHON_SOURCE/Modules/_blake2/${unit}_impl.c"
                 object="$output/${unit}-${frontend}-${allocator}.o"
-                echo "ISSUE_837_COMPILE unit=$unit frontend=$frontend allocator=$allocator"
+                echo "ISSUE_837_COMPILE unit=$unit frontend=$frontend allocator=$allocator" | \
+                  tee -a issue-837-direct-matrix.log
                 "$ide" "${common[@]}" "$frontend_flag" \
-                  "-fregister-allocator=$allocator" -c "$source" -o "$object"
-                test -s "$object"
+                  "-fregister-allocator=$allocator" -c "$source" -o "$object" \
+                  2>&1 | tee -a issue-837-direct-matrix.log
+                status=${PIPESTATUS[0]}
+                if test "$status" -ne 0 || ! test -s "$object"; then
+                  echo "ISSUE_837_COMPILE_FAILED unit=$unit frontend=$frontend allocator=$allocator status=$status" | \
+                    tee -a issue-837-direct-matrix.log
+                  failures=$((failures + 1))
+                fi
               done
             done
           done
           count="$(find "$output" -maxdepth 1 -type f -name '*.o' | wc -l)"
+          echo "ISSUE_837_DIRECT_MATRIX objects=$count failures=$failures" | tee -a issue-837-direct-matrix.log
+          printf '%s\n' "$failures" > issue-837-direct-matrix.status
+          test "$failures" -eq 0
           test "$count" -eq 16
-          echo "ISSUE_837_DIRECT_MATRIX status=pass objects=$count"
 
       - name: Continue the canonical CPython harness and retain its next blocker
         id: harness
@@ -106,14 +119,20 @@ jobs:
           printf '%s\n' "$status" > issue-837-cpython.status
           exit "$status"
 
-      - name: Reduce a canonical-harness build failure
+      - name: Reduce and classify qualification results
         if: ${{ always() }}
         shell: bash
         run: |
           set -uo pipefail
-          status="$(cat issue-837-cpython.status 2>/dev/null || printf '125')"
-          echo "ISSUE_837_CANONICAL_HARNESS status=$status"
-          root="$(sed -n 's/^CPYTHON_HARNESS .* output=\([^ ]*\).*$/\1/p' issue-837-cpython.log | tail -n1)"
+          direct_failures="$(cat issue-837-direct-matrix.status 2>/dev/null || printf '125')"
+          harness_status="$(cat issue-837-cpython.status 2>/dev/null || printf '125')"
+          echo "ISSUE_837_DIRECT_MATRIX failures=$direct_failures"
+          echo "ISSUE_837_CANONICAL_HARNESS status=$harness_status"
+
+          root=""
+          if test -f issue-837-cpython.log; then
+            root="$(sed -n 's/^CPYTHON_HARNESS .* output=\([^ ]*\).*$/\1/p' issue-837-cpython.log | tail -n1)"
+          fi
           if test -n "$root" && test -d "$root"; then
             echo "ISSUE_837_CANONICAL_ROOT path=$root"
             while IFS= read -r directory; do
@@ -129,13 +148,21 @@ jobs:
               echo "::endgroup::"
             done < <(find "$root" -mindepth 1 -maxdepth 2 -type f -name Makefile -printf '%h\n' | sort -u)
           fi
+
           grep -h -E 'error:|could not lower|unsupported option|make: \*\*\*' \
-            issue-837-cpython.log issue-837-*-diagnostic.log 2>/dev/null || true
-          if grep -h -E '__builtin_ia32_(pslldi128|psllqi128|psradi128|psrldi128|psrlqi128)' \
-              issue-837-cpython.log issue-837-*-diagnostic.log 2>/dev/null; then
+            issue-837-direct-matrix.log issue-837-cpython.log issue-837-*-diagnostic.log \
+            2>/dev/null || true
+          if grep -h -E 'could not lower.*__builtin_ia32_(pslldi128|psllqi128|psradi128|psrldi128|psrlqi128)' \
+              issue-837-direct-matrix.log issue-837-cpython.log issue-837-*-diagnostic.log \
+              2>/dev/null; then
             echo 'error: the issue #837 builtin blocker is still present' >&2
             exit 1
           fi
+          if test "$direct_failures" != 0; then
+            echo 'error: one or more pinned Blake2 matrix cells did not compile' >&2
+            exit 1
+          fi
+          echo "ISSUE_837_ACCEPTANCE direct_matrix=pass canonical_harness_status=$harness_status"
 
       - name: Publish validation diagnostics
         if: ${{ always() }}
@@ -143,9 +170,11 @@ jobs:
         with:
           name: issue-837-final-cpython-${{ github.run_id }}
           path: |
+            issue-837-direct-matrix.log
+            issue-837-direct-matrix.status
             issue-837-cpython.log
             issue-837-cpython.status
             issue-837-*-diagnostic.log
             issue-837-*-diagnostic.status
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
