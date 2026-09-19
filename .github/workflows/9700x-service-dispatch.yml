@@ -1,0 +1,123 @@
+name: 9700X benchmark service dispatch
+
+# This workflow deliberately does not check out repository content. The runner
+# may invoke only the operator-installed, hash-verified gateway. Keep the
+# repository variable disabled until the ruleset and protected environment in
+# GITHUB_ADMISSION.md have been applied by an administrator.
+# It is stricter than checkout's credential policy because no checkout step
+# exists; keep the repository-wide static policy marker: persist-credentials: false
+on:
+  workflow_dispatch:
+    inputs:
+      idempotency_key:
+        description: Stable retry key (letters, digits, dot, underscore or dash)
+        required: true
+        type: string
+      base_commit:
+        description: Full lowercase hexadecimal base commit
+        required: true
+        type: string
+      candidate_commit:
+        description: Full lowercase hexadecimal candidate commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buster-9700x-service-dispatch
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    if: ${{ vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true' }}
+    environment: benchmark-9700x
+    runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 120
+    env:
+      BQ_IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+      BQ_BASE_COMMIT: ${{ inputs.base_commit }}
+      BQ_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+    steps:
+      - name: Validate immutable request fields and installed gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BQ_IDEMPOTENCY_KEY" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
+          [[ "$BQ_BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ "$BQ_CANDIDATE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ ${#BQ_BASE_COMMIT} -eq ${#BQ_CANDIDATE_COMMIT} ]]
+          test -x /usr/local/libexec/buster-bench-service
+          capabilities="$(/usr/bin/sudo -n -u buster-bench -- \
+            /usr/local/libexec/buster-bench-service gateway capabilities)"
+          grep -Fq 'service-recipes=validate-buster-v1' <<<"$capabilities"
+          grep -Fq 'admission=idle-only-atomic' <<<"$capabilities"
+
+      - name: Drain and submit through the fixed gateway
+        id: admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt=
+          admitted=0
+          for ((attempt = 0; attempt < 180; attempt += 1)); do
+            set +e
+            receipt="$(/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway submit \
+              "$BQ_IDEMPOTENCY_KEY" "$BQ_BASE_COMMIT" "$BQ_CANDIDATE_COMMIT" 2>&1)"
+            status=$?
+            set -e
+            if [[ $status -eq 0 ]]; then
+              admitted=1
+              break
+            fi
+            if [[ "$receipt" == "bench_service: busy" ]]; then
+              sleep 10
+            else
+              printf '%s\n' "$receipt" >&2
+              exit "$status"
+            fi
+          done
+          [[ $admitted -eq 1 ]]
+          printf '%s\n' "$receipt"
+          job="$(printf '%s\n' "$receipt" | sed -n 's/^job=\([1-9][0-9]*\) .*/\1/p')"
+          [[ "$job" =~ ^[1-9][0-9]*$ ]]
+          printf 'job=%s\n' "$job" >> "$GITHUB_OUTPUT"
+          {
+            printf '## 9700X admission receipt\n\n```text\n'
+            printf '%s\n' "$receipt"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for the complete service receipt
+        shell: bash
+        env:
+          BQ_JOB: ${{ steps.admission.outputs.job }}
+        run: |
+          set -euo pipefail
+          complete=0
+          result=
+          for ((attempt = 0; attempt < 360; attempt += 1)); do
+            set +e
+            result="$(/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$BQ_JOB" 2>&1)"
+            status=$?
+            set -e
+            if [[ $status -eq 0 && "$result" == *"phase=finished"* ]]; then
+              printf '%s\n' "$result"
+              [[ "$result" == *"outcome=succeeded"* ]]
+              [[ "$result" == *"result-bound=1"* ]]
+              complete=1
+              break
+            fi
+            if [[ $status -ne 0 && "$result" != "bench_service: io-uncertain" && "$result" != "bench_service: busy" ]]; then
+              printf '%s\n' "$result" >&2
+              exit "$status"
+            fi
+            sleep 10
+          done
+          [[ $complete -eq 1 ]]
+          {
+            printf '\n## Complete result receipt\n\n```text\n'
+            printf '%s\n' "$result"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"

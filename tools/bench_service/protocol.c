@@ -15,7 +15,8 @@ typedef enum BqOperation
 {
     BQ_OP_CAPABILITIES = 1, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT,
     BQ_OP_CANCEL, BQ_OP_LOGS, BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE,
-    BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE, BQ_OP_WORKER_RUN
+    BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE, BQ_OP_WORKER_RUN,
+    BQ_OP_SUBMIT_EXCLUSIVE
 } BqOperation;
 
 typedef struct BqPacket
@@ -40,7 +41,8 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
     "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 "
     "blocked-recipes=native-retirement-performance-v1\n"
     "profile=smoke validity=not-evaluated materialization=read-only workspace=per-attempt\n"
-    "worker=fixed-systemd-service dispatch=fixed-registry validation=vertical-slice retirement=blocked "
+    "worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic "
+    "retirement=blocked "
 #ifdef __linux__
     "transport=unix-seqpacket authentication=peer-uid-gid\n"
 #else
@@ -122,14 +124,15 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
                 valid = valid && bq_u64(data + 8) == next;
             }
         }
-        else if (operation >= BQ_OP_SUBMIT && operation <= BQ_OP_CANCEL)
+        else if ((operation >= BQ_OP_SUBMIT && operation <= BQ_OP_CANCEL) || operation == BQ_OP_SUBMIT_EXCLUSIVE)
         {
+            bool submission = operation == BQ_OP_SUBMIT || operation == BQ_OP_SUBMIT_EXCLUSIVE;
             valid = (length == 124 || length == BQ_CONTROL_BODY) &&
-                    (operation == BQ_OP_SUBMIT || request->size == BQ_CONTROL_HEADER + 8);
+                    (submission || request->size == BQ_CONTROL_HEADER + 8);
             if (valid)
             {
                 valid = bq_u64(data + 4) != 0 &&
-                        (operation == BQ_OP_SUBMIT || bq_u64(data + 4) == bq_u64(arguments)) &&
+                        (submission || bq_u64(data + 4) == bq_u64(arguments)) &&
                         bq_u32(data + 28) <= BQ_FINISHED && bq_u32(data + 32) <= BQ_INTERRUPTED &&
                         bq_u32(data + 36) == BQ_NOT_EVALUATED && bq_u32(data + 40) <= 1 &&
                         bq_u32(data + 44) <= 1 && bq_u32(data + 48) <= BQ_PENDING_CAP &&
@@ -175,21 +178,32 @@ BUSTER_GLOBAL_LOCAL BqError bq_dispatch(BqQueue* queue, u8 const* input, u32 siz
         u8 const* body = input + BQ_CONTROL_HEADER;
         if (operation == BQ_OP_CAPABILITIES && !length)
         {
-            error = BQ_OK;
             char const* capabilities = schema == 1 ? bq_capabilities_v1 : bq_capabilities_v2;
             u32 capabilities_size = schema == 1 ? (u32)sizeof(bq_capabilities_v1) - 1 : (u32)sizeof(bq_capabilities_v2) - 1;
-            output_size = 4 + capabilities_size;
-            memcpy(output + 4, capabilities, capabilities_size);
+            if (capabilities_size <= BQ_CONTROL_BODY - 4)
+            {
+                error = BQ_OK;
+                output_size = 4 + capabilities_size;
+                memcpy(output + 4, capabilities, capabilities_size);
+            }
         }
         else if (queue->poisoned || queue->journal_fd < 0)
         {
             error = BQ_IO;
         }
-        else if (operation == BQ_OP_SUBMIT && length <= BQ_REQUEST_CAP)
+        else if ((operation == BQ_OP_SUBMIT || operation == BQ_OP_SUBMIT_EXCLUSIVE) && length <= BQ_REQUEST_CAP)
         {
             BqRequest request = {.size = length};
             memcpy(request.bytes, body, length);
-            error = schema == 1 && bq_recipe_real(&request) ? BQ_BAD_REQUEST : bq_submit(queue, &request, &id);
+            if (schema == 1 && bq_recipe_real(&request))
+            {
+                error = BQ_BAD_REQUEST;
+            }
+            else
+            {
+                error = operation == BQ_OP_SUBMIT_EXCLUSIVE ? bq_submit_exclusive(queue, &request, &id) :
+                                                              bq_submit(queue, &request, &id);
+            }
         }
         else if ((operation == BQ_OP_STATUS || operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL) && length == 8)
         {
