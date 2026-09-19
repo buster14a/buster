@@ -1,0 +1,697 @@
+line_count=5879
+@@ 7-13 @@
+7: TEST_ARENA_V1 kind=module module=byte_writer_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+8: TEST_ARENA_V1 kind=module module=byte_writer_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+9: TEST_ARENA_TOP_V1 module=byte_writer_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+10: TEST_MODULE_TIMING index=0 module=byte_writer_tests duration_ns=20118 passed=484 failed=0 assertions=484 status=pass
+11: Launched [2755]: "build/ide test" 
+12: Process [2755]: Time (user): 0:0 s,us, (system): 0:1708 s,us. Max RSS: 4232 KB. PF (soft): 257, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 0, (invol): 0
+13: Launched [2756]: "build/ide test" 
+@@ 32-58 @@
+32: TEST_ARENA_V1 kind=module module=arena_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=435 peak_bytes=307 after=128 live_bytes=0 rewind=0
+33: TEST_ARENA_V1 kind=module module=arena_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+34: TEST_ARENA_TOP_V1 module=arena_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+35: TEST_MODULE_TIMING index=1 module=arena_tests duration_ns=27326191 passed=122 failed=0 assertions=122 status=pass
+36: TEST_ARENA_V1 kind=module module=integer_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+37: TEST_ARENA_V1 kind=module module=integer_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+38: TEST_ARENA_V1 kind=module module=integer_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+39: TEST_ARENA_TOP_V1 module=integer_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+40: TEST_MODULE_TIMING index=2 module=integer_tests duration_ns=6943 passed=20 failed=0 assertions=20 status=pass
+41: TEST_ARENA_V1 kind=module module=sanitizer_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+42: TEST_ARENA_V1 kind=module module=sanitizer_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+43: TEST_ARENA_V1 kind=module module=sanitizer_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+44: TEST_ARENA_TOP_V1 module=sanitizer_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+45: TEST_MODULE_TIMING index=3 module=sanitizer_tests duration_ns=1563 passed=0 failed=0 assertions=0 status=pass
+46: TEST_ARENA_V1 kind=module module=hash_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+47: TEST_ARENA_V1 kind=module module=hash_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+48: TEST_ARENA_V1 kind=module module=hash_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+49: TEST_ARENA_TOP_V1 module=hash_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+50: TEST_MODULE_TIMING index=4 module=hash_tests duration_ns=21394514 passed=705 failed=0 assertions=705 status=pass
+51: TEST_ARENA_V1 kind=module module=simd_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+52: TEST_ARENA_V1 kind=module module=simd_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+53: TEST_ARENA_V1 kind=module module=simd_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+54: TEST_ARENA_TOP_V1 module=simd_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+55: TEST_MODULE_TIMING index=5 module=simd_tests duration_ns=33723 passed=157 failed=0 assertions=157 status=pass
+56: Launched [2765]: "build/ide test" 
+57: Process [2765]: Time (user): 0:27053 s,us, (system): 0:15390 s,us. Max RSS: 4392 KB. PF (soft): 2951, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 37, (invol): 5
+58: Launched [2776]: "build/ide test" 
+@@ 69-75 @@
+69: TEST_ARENA_V1 kind=module module=string_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=462 peak_bytes=334 after=128 live_bytes=0 rewind=0
+70: TEST_ARENA_V1 kind=module module=string_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+71: TEST_ARENA_TOP_V1 module=string_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+72: TEST_MODULE_TIMING index=6 module=string_tests duration_ns=331424153 passed=161607 failed=0 assertions=161607 status=pass
+73: Launched [2831]: "build/ide test" 
+74: Process [2831]: Time (user): 0:198172 s,us, (system): 0:109163 s,us. Max RSS: 5088 KB. PF (soft): 21156, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 290, (invol): 17
+75: Launched [2908]: "build/ide test" 
+@@ 117-123 @@
+117: TEST_ARENA_V1 kind=module module=os_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=22388608 peak_bytes=22388480 after=128 live_bytes=0 rewind=0
+118: TEST_ARENA_V1 kind=module module=os_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=4161 peak_bytes=4097 after=64 live_bytes=0 rewind=0
+119: TEST_ARENA_TOP_V1 module=os_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+120: TEST_MODULE_TIMING index=7 module=os_tests duration_ns=4370672142 passed=894 failed=0 assertions=894 status=pass
+121: TEST_ARENA_V1 kind=fixture module=file_tests fixture=file_test_write_failures index=0 arena_slot=0 start=4328 end=397980 retained_bytes=393652 high_water=397981 peak_bytes=393653 after=4328 live_bytes=0 rewind=1
+122: TEST_ARENA_V1 kind=fixture module=file_tests fixture=file_test_write_failures index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=192 peak_bytes=64 after=128 live_bytes=0 rewind=0
+123: TEST_ARENA_V1 kind=fixture module=file_tests fixture=file_test_write_failures index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+@@ 130-136 @@
+130: TEST_ARENA_V1 kind=fixture module=file_tests fixture=file_test_copy_contents index=3 arena_slot=0 start=4328 end=398347 retained_bytes=394019 high_water=594972 peak_bytes=590644 after=4328 live_bytes=0 rewind=1
+131: TEST_ARENA_V1 kind=fixture module=file_tests fixture=file_test_copy_contents index=3 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=234 peak_bytes=106 after=128 live_bytes=0 rewind=0
+132: TEST_ARENA_V1 kind=fixture module=file_tests fixture=file_test_copy_contents index=3 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+133: FILE_COPY_ALIAS kind=case case_insensitive=0 lookup_error=2 create_error=0 status=1 error=0 cleanup=0
+134: FILE_COPY_ALIAS kind=hard_link link_status=0
+135: FILE_COPY_ALIAS kind=symbolic_link link_status=0
+136: TEST_ARENA_V1 kind=fixture module=file_tests fixture=file_test_copy_aliases index=4 arena_slot=0 start=4328 end=5694 retained_bytes=1366 high_water=5725 peak_bytes=1397 after=4328 live_bytes=0 rewind=1
+@@ 149-165 @@
+149: TEST_ARENA_V1 kind=module module=file_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=561 peak_bytes=433 after=128 live_bytes=0 rewind=0
+150: TEST_ARENA_V1 kind=module module=file_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+151: TEST_ARENA_TOP_V1 module=file_tests fixtures=6 retained_fixture=file_test_copy_contents retained_bytes=394019 peak_fixture=file_test_copy_contents peak_bytes=590644
+152: TEST_MODULE_TIMING index=8 module=file_tests duration_ns=111156271 passed=599 failed=0 assertions=599 status=pass
+153: TEST_ARENA_V1 kind=module module=target_tests fixture=body index=0 arena_slot=0 start=4328 end=32788 retained_bytes=28460 high_water=32788 peak_bytes=28460 after=4328 live_bytes=0 rewind=1
+154: TEST_ARENA_V1 kind=module module=target_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+155: TEST_ARENA_V1 kind=module module=target_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+156: TEST_ARENA_TOP_V1 module=target_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+157: TEST_MODULE_TIMING index=9 module=target_tests duration_ns=8554674 passed=6519 failed=0 assertions=6519 status=pass
+158: TEST_ARENA_V1 kind=module module=truetype_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=1086968 peak_bytes=1082640 after=4328 live_bytes=0 rewind=1
+159: TEST_ARENA_V1 kind=module module=truetype_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+160: TEST_ARENA_V1 kind=module module=truetype_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+161: TEST_ARENA_TOP_V1 module=truetype_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+162: TEST_MODULE_TIMING index=10 module=truetype_tests duration_ns=53907596 passed=65 failed=0 assertions=65 status=pass
+163: TEST_ARENA_V1 kind=fixture module=c_frontend_tests fixture=c_test_parser_body_frame_storage index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+164: TEST_ARENA_V1 kind=fixture module=c_frontend_tests fixture=c_test_parser_body_frame_storage index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2507216 peak_bytes=2507088 after=128 live_bytes=0 rewind=0
+165: TEST_ARENA_V1 kind=fixture module=c_frontend_tests fixture=c_test_parser_body_frame_storage index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=26987 peak_bytes=26923 after=64 live_bytes=0 rewind=0
+@@ 533-539 @@
+533: TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=52502912 peak_bytes=52502784 after=128 live_bytes=0 rewind=0
+534: TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=4280968 peak_bytes=4280904 after=64 live_bytes=0 rewind=0
+535: TEST_ARENA_TOP_V1 module=c_frontend_tests fixtures=123 retained_fixture=c_test_frontend_lex_preprocess retained_bytes=49996561 peak_fixture=c_test_frontend_lex_preprocess peak_bytes=49996561
+536: TEST_MODULE_TIMING index=11 module=c_frontend_tests duration_ns=4924057259 passed=596833 failed=0 assertions=596833 status=pass
+537: TEST_ARENA_V1 kind=fixture module=c_once_tests fixture=c_once_test_import_growth index=0 arena_slot=0 start=4328 end=4510 retained_bytes=182 high_water=4510 peak_bytes=182 after=4328 live_bytes=0 rewind=1
+538: TEST_ARENA_V1 kind=fixture module=c_once_tests fixture=c_once_test_import_growth index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=883968 peak_bytes=883840 after=128 live_bytes=0 rewind=0
+539: TEST_ARENA_V1 kind=fixture module=c_once_tests fixture=c_once_test_import_growth index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=3136 peak_bytes=3072 after=64 live_bytes=0 rewind=0
+@@ 573-579 @@
+573: TEST_ARENA_V1 kind=module module=c_once_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2434631 peak_bytes=2434503 after=128 live_bytes=0 rewind=0
+574: TEST_ARENA_V1 kind=module module=c_once_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=3136 peak_bytes=3072 after=64 live_bytes=0 rewind=0
+575: TEST_ARENA_TOP_V1 module=c_once_tests fixtures=10 retained_fixture=c_once_test_table_hashes retained_bytes=1810 peak_fixture=c_once_test_table_hashes peak_bytes=1810
+576: TEST_MODULE_TIMING index=12 module=c_once_tests duration_ns=41116608 passed=47432 failed=0 assertions=47432 status=pass
+577: Launched [3603]: "/usr/bin/clang -E -P -std=gnu17 /tmp/buster-tests-2754-1-60446302182/macro-conditional-reference-2754.c" 
+578: Process [3603]: Time (user): 0:9574 s,us, (system): 0:11702 s,us. Max RSS: 203856 KB. PF (soft): 2828, (hard): 72. Block (input): 8280, (output): 0. CTX SW (vol): 73, (invol): 0
+579: Launched [3604]: "/usr/bin/gcc -E -P -std=gnu17 /tmp/buster-tests-2754-1-60446302182/macro-conditional-reference-2754.c" 
+@@ 586-592 @@
+586: TEST_ARENA_V1 kind=module module=c_macro_conditional_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1455151 peak_bytes=1455023 after=128 live_bytes=0 rewind=0
+587: TEST_ARENA_V1 kind=module module=c_macro_conditional_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=199144 peak_bytes=199080 after=64 live_bytes=0 rewind=0
+588: TEST_ARENA_TOP_V1 module=c_macro_conditional_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+589: TEST_MODULE_TIMING index=13 module=c_macro_conditional_tests duration_ns=79660629 passed=288 failed=0 assertions=288 status=pass
+590: Launched [3608]: "build/ide cc -std=c11 -O0 -nostdinc -fwrapv -fno-strict-aliasing -funsigned-char -ffrontend-ssa -fregister-allocator=none -target x86_64-unknown-linux-gnu /tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-0/base.c -o /tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-0/base.exe" 
+591: Process [3608]: Time (user): 0:55812 s,us, (system): 0:6976 s,us. Max RSS: 204908 KB. PF (soft): 3751, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+592: Launched [3609]: "/tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-0/base.exe" 
+@@ 683-689 @@
+683: Process [3655]: Time (user): 0:56990 s,us, (system): 0:6998 s,us. Max RSS: 205036 KB. PF (soft): 3779, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 2
+684: Launched [3657]: "/tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-11/transformed.exe" 
+685: Process [3657]: Time (user): 0:246 s,us, (system): 0:0 s,us. Max RSS: 205036 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+686: METAMORPHIC target=linux-x64 allocator=none pairs=12 executed=12 unexecuted=0 failed=0
+687: Launched [3658]: "build/ide cc -std=c11 -O0 -nostdinc -fwrapv -fno-strict-aliasing -funsigned-char -ffrontend-ssa -fregister-allocator=mir-stack -target x86_64-unknown-linux-gnu /tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-12/base.c -o /tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-12/base.exe" 
+688: Process [3658]: Time (user): 0:52341 s,us, (system): 0:8888 s,us. Max RSS: 205036 KB. PF (soft): 3686, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 2, (invol): 2
+689: Launched [3659]: "/tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-12/base.exe" 
+@@ 780-786 @@
+780: Process [3704]: Time (user): 0:50484 s,us, (system): 0:11106 s,us. Max RSS: 205164 KB. PF (soft): 3718, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 4, (invol): 2
+781: Launched [3705]: "/tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-23/transformed.exe" 
+782: Process [3705]: Time (user): 0:269 s,us, (system): 0:0 s,us. Max RSS: 205164 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+783: METAMORPHIC target=linux-x64 allocator=mir-stack pairs=12 executed=12 unexecuted=0 failed=0
+784: Launched [3706]: "build/ide cc -std=c11 -O0 -nostdinc -fwrapv -fno-strict-aliasing -funsigned-char -ffrontend-ssa -fregister-allocator=fast -target x86_64-unknown-linux-gnu /tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-24/base.c -o /tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-24/base.exe" 
+785: Process [3706]: Time (user): 0:50951 s,us, (system): 0:9990 s,us. Max RSS: 205164 KB. PF (soft): 3684, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 2
+786: Launched [3707]: "/tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-24/base.exe" 
+@@ 877-883 @@
+877: Process [3753]: Time (user): 0:51667 s,us, (system): 0:9117 s,us. Max RSS: 205164 KB. PF (soft): 3713, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 1
+878: Launched [3754]: "/tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-35/transformed.exe" 
+879: Process [3754]: Time (user): 0:238 s,us, (system): 0:0 s,us. Max RSS: 205164 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+880: METAMORPHIC target=linux-x64 allocator=fast pairs=12 executed=12 unexecuted=0 failed=0
+881: Launched [3755]: "build/ide cc -std=c11 -O0 -nostdinc -fwrapv -fno-strict-aliasing -funsigned-char -ffrontend-ssa -fregister-allocator=quality -target x86_64-unknown-linux-gnu /tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-36/base.c -o /tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-36/base.exe" 
+882: Process [3755]: Time (user): 0:51040 s,us, (system): 0:9007 s,us. Max RSS: 205164 KB. PF (soft): 3698, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 6, (invol): 2
+883: Launched [3756]: "/tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-36/base.exe" 
+@@ 974-1057 @@
+974: Process [3801]: Time (user): 0:54024 s,us, (system): 0:7003 s,us. Max RSS: 205164 KB. PF (soft): 3720, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 2, (invol): 2
+975: Launched [3802]: "/tmp/buster-tests-2754-1-60446302182/metamorphic-2754/work-47/transformed.exe" 
+976: Process [3802]: Time (user): 0:241 s,us, (system): 0:0 s,us. Max RSS: 205164 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+977: METAMORPHIC target=linux-x64 allocator=quality pairs=12 executed=12 unexecuted=0 failed=0
+978: TEST_ARENA_V1 kind=module module=metamorphic_tests fixture=body index=0 arena_slot=0 start=4328 end=4590 retained_bytes=262 high_water=2682012 peak_bytes=2677684 after=4328 live_bytes=0 rewind=1
+979: TEST_ARENA_V1 kind=module module=metamorphic_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=3200 peak_bytes=3072 after=128 live_bytes=0 rewind=0
+980: TEST_ARENA_V1 kind=module module=metamorphic_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=640 peak_bytes=576 after=64 live_bytes=0 rewind=0
+981: TEST_ARENA_TOP_V1 module=metamorphic_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+982: TEST_MODULE_TIMING index=14 module=metamorphic_tests duration_ns=6093025897 passed=115 failed=0 assertions=115 status=pass
+983: TEST_ARENA_V1 kind=module module=aarch64_encoding_tests fixture=body index=0 arena_slot=0 start=4328 end=13364 retained_bytes=9036 high_water=13364 peak_bytes=9036 after=4328 live_bytes=0 rewind=1
+984: TEST_ARENA_V1 kind=module module=aarch64_encoding_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+985: TEST_ARENA_V1 kind=module module=aarch64_encoding_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+986: TEST_ARENA_TOP_V1 module=aarch64_encoding_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+987: TEST_MODULE_TIMING index=15 module=aarch64_encoding_tests duration_ns=2732431346 passed=236732 failed=0 assertions=236732 status=pass
+988: TEST_ARENA_V1 kind=module module=aarch64_exact_bridge_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+989: TEST_ARENA_V1 kind=module module=aarch64_exact_bridge_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+990: TEST_ARENA_V1 kind=module module=aarch64_exact_bridge_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+991: TEST_ARENA_TOP_V1 module=aarch64_exact_bridge_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+992: TEST_MODULE_TIMING index=16 module=aarch64_exact_bridge_tests duration_ns=31109 passed=102 failed=0 assertions=102 status=pass
+993: TEST_ARENA_V1 kind=module module=aarch64_control_semantics_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+994: TEST_ARENA_V1 kind=module module=aarch64_control_semantics_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+995: TEST_ARENA_V1 kind=module module=aarch64_control_semantics_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+996: TEST_ARENA_TOP_V1 module=aarch64_control_semantics_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+997: TEST_MODULE_TIMING index=17 module=aarch64_control_semantics_tests duration_ns=366979 passed=3377 failed=0 assertions=3377 status=pass
+998: TEST_ARENA_V1 kind=module module=aarch64_system_registers_tests fixture=body index=0 arena_slot=0 start=4328 end=4340 retained_bytes=12 high_water=4340 peak_bytes=12 after=4328 live_bytes=0 rewind=1
+999: TEST_ARENA_V1 kind=module module=aarch64_system_registers_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1000: TEST_ARENA_V1 kind=module module=aarch64_system_registers_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1001: TEST_ARENA_TOP_V1 module=aarch64_system_registers_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1002: TEST_MODULE_TIMING index=18 module=aarch64_system_registers_tests duration_ns=2053455 passed=108 failed=0 assertions=108 status=pass
+1003: TEST_ARENA_V1 kind=module module=aarch64_semantics_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1004: TEST_ARENA_V1 kind=module module=aarch64_semantics_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1005: TEST_ARENA_V1 kind=module module=aarch64_semantics_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1006: TEST_ARENA_TOP_V1 module=aarch64_semantics_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1007: TEST_MODULE_TIMING index=19 module=aarch64_semantics_tests duration_ns=32530286 passed=215 failed=0 assertions=215 status=pass
+1008: TEST_ARENA_V1 kind=module module=aarch64_system_semantics_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1009: TEST_ARENA_V1 kind=module module=aarch64_system_semantics_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1010: TEST_ARENA_V1 kind=module module=aarch64_system_semantics_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1011: TEST_ARENA_TOP_V1 module=aarch64_system_semantics_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1012: TEST_MODULE_TIMING index=20 module=aarch64_system_semantics_tests duration_ns=39860501 passed=694 failed=0 assertions=694 status=pass
+1013: TEST_ARENA_V1 kind=module module=aarch64_syntax_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1014: TEST_ARENA_V1 kind=module module=aarch64_syntax_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1015: TEST_ARENA_V1 kind=module module=aarch64_syntax_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1016: TEST_ARENA_TOP_V1 module=aarch64_syntax_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1017: TEST_MODULE_TIMING index=21 module=aarch64_syntax_tests duration_ns=423284239 passed=112 failed=0 assertions=112 status=pass
+1018: TEST_ARENA_V1 kind=module module=aarch64_semantic_vm_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1019: TEST_ARENA_V1 kind=module module=aarch64_semantic_vm_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1020: TEST_ARENA_V1 kind=module module=aarch64_semantic_vm_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1021: TEST_ARENA_TOP_V1 module=aarch64_semantic_vm_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1022: TEST_MODULE_TIMING index=22 module=aarch64_semantic_vm_tests duration_ns=206550333 passed=90 failed=0 assertions=90 status=pass
+1023: TEST_ARENA_V1 kind=module module=aarch64_direct_simd_tests fixture=body index=0 arena_slot=0 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=1
+1024: TEST_ARENA_V1 kind=module module=aarch64_direct_simd_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1025: TEST_ARENA_V1 kind=module module=aarch64_direct_simd_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1026: TEST_ARENA_TOP_V1 module=aarch64_direct_simd_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1027: TEST_MODULE_TIMING index=23 module=aarch64_direct_simd_tests duration_ns=300642159 passed=152 failed=0 assertions=152 status=pass
+1028: TEST_ARENA_V1 kind=module module=aarch64_complex_simd_tests fixture=body index=0 arena_slot=0 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=1
+1029: TEST_ARENA_V1 kind=module module=aarch64_complex_simd_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1030: TEST_ARENA_V1 kind=module module=aarch64_complex_simd_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1031: TEST_ARENA_TOP_V1 module=aarch64_complex_simd_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1032: TEST_MODULE_TIMING index=24 module=aarch64_complex_simd_tests duration_ns=393424578 passed=32 failed=0 assertions=32 status=pass
+1033: A64_MEMORY_CENSUS rows=559 source_rows=559 seed_rows=559 representative_ok=480 representative_range=56 representative_reserved=23 representative_target_mismatch=0 representative_other=0 generated_words=5814 legal_candidates=4820 exercised_rows=535
+1034: TEST_ARENA_V1 kind=module module=aarch64_memory_semantics_tests fixture=body index=0 arena_slot=0 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=1
+1035: TEST_ARENA_V1 kind=module module=aarch64_memory_semantics_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1036: TEST_ARENA_V1 kind=module module=aarch64_memory_semantics_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1037: TEST_ARENA_TOP_V1 module=aarch64_memory_semantics_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1038: TEST_MODULE_TIMING index=25 module=aarch64_memory_semantics_tests duration_ns=1939779755 passed=18 failed=0 assertions=18 status=pass
+1039: TEST_ARENA_V1 kind=module module=aarch64_alias_projection_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1040: TEST_ARENA_V1 kind=module module=aarch64_alias_projection_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1041: TEST_ARENA_V1 kind=module module=aarch64_alias_projection_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1042: TEST_ARENA_TOP_V1 module=aarch64_alias_projection_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1043: TEST_MODULE_TIMING index=26 module=aarch64_alias_projection_tests duration_ns=932330 passed=28 failed=0 assertions=28 status=pass
+1044: A64_DIRECT_SIMD_COVERAGE rows=390 executable=390 transform=263 bindings=658 spellings=392 covered=390 remaining=0 covered_transform=263 covered_no_transform=127 uncovered_transform=0 uncovered_no_transform=0
+1045: TEST_ARENA_V1 kind=module module=assembly_tests fixture=body index=0 arena_slot=0 start=4328 end=7407746 retained_bytes=7403418 high_water=7407746 peak_bytes=7403418 after=4328 live_bytes=0 rewind=1
+1046: TEST_ARENA_V1 kind=module module=assembly_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=431248 peak_bytes=431120 after=128 live_bytes=0 rewind=0
+1047: TEST_ARENA_V1 kind=module module=assembly_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1048: TEST_ARENA_TOP_V1 module=assembly_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1049: TEST_MODULE_TIMING index=27 module=assembly_tests duration_ns=347589438 passed=6179 failed=0 assertions=6179 status=pass
+1050: TEST_ARENA_V1 kind=module module=x86_64_forwarding_tests fixture=body index=0 arena_slot=0 start=4328 end=11464 retained_bytes=7136 high_water=11464 peak_bytes=7136 after=4328 live_bytes=0 rewind=1
+1051: TEST_ARENA_V1 kind=module module=x86_64_forwarding_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=144 peak_bytes=16 after=128 live_bytes=0 rewind=0
+1052: TEST_ARENA_V1 kind=module module=x86_64_forwarding_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1053: TEST_ARENA_TOP_V1 module=x86_64_forwarding_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1054: TEST_MODULE_TIMING index=28 module=x86_64_forwarding_tests duration_ns=453712 passed=13113 failed=0 assertions=13113 status=pass
+1055: X86_SOURCE_REACHABILITY form=9842 canonical=1 direct=1 operands=2 source=1 match=1 diag=9 direct_bytes=3:72 source_bytes=3:72 mismatch=4294967295:0:0 class=0
+1056: X86_SOURCE_REACHABILITY form=6939 canonical=1 direct=1 operands=4 source=1 match=1 diag=9 direct_bytes=6:98 source_bytes=6:98 mismatch=4294967295:0:0 class=0
+1057: X86_SOURCE_REACHABILITY form=567 canonical=1 direct=1 operands=3 source=1 match=1 diag=9 direct_bytes=6:98 source_bytes=6:98 mismatch=4294967295:0:0 class=0
+@@ 1176-1187 @@
+1176: TEST_ARENA_V1 kind=module module=x86_64_metadata_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=15344 peak_bytes=15216 after=128 live_bytes=0 rewind=0
+1177: TEST_ARENA_V1 kind=module module=x86_64_metadata_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1178: TEST_ARENA_TOP_V1 module=x86_64_metadata_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1179: TEST_MODULE_TIMING index=29 module=x86_64_metadata_tests duration_ns=2232893939 passed=1617 failed=0 assertions=1617 status=pass
+1180: TEST_ARENA_V1 kind=module module=x86_64_tls_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1181: TEST_ARENA_V1 kind=module module=x86_64_tls_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1182: TEST_ARENA_V1 kind=module module=x86_64_tls_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1183: TEST_ARENA_TOP_V1 module=x86_64_tls_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1184: TEST_MODULE_TIMING index=30 module=x86_64_tls_tests duration_ns=14695173 passed=294552 failed=0 assertions=294552 status=pass
+1185: TEST_ARENA_V1 kind=fixture module=executable_padding_tests fixture=assembly_unit_number_boundary_tests index=0 arena_slot=0 start=4328 end=126212 retained_bytes=121884 high_water=126212 peak_bytes=121884 after=4328 live_bytes=0 rewind=1
+1186: TEST_ARENA_V1 kind=fixture module=executable_padding_tests fixture=assembly_unit_number_boundary_tests index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=5200 peak_bytes=5072 after=128 live_bytes=0 rewind=0
+1187: TEST_ARENA_V1 kind=fixture module=executable_padding_tests fixture=assembly_unit_number_boundary_tests index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+@@ 1189-1215 @@
+1189: TEST_ARENA_V1 kind=module module=executable_padding_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=5200 peak_bytes=5072 after=128 live_bytes=0 rewind=0
+1190: TEST_ARENA_V1 kind=module module=executable_padding_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1191: TEST_ARENA_TOP_V1 module=executable_padding_tests fixtures=1 retained_fixture=assembly_unit_number_boundary_tests retained_bytes=121884 peak_fixture=assembly_unit_number_boundary_tests peak_bytes=121884
+1192: TEST_MODULE_TIMING index=31 module=executable_padding_tests duration_ns=8183375 passed=33062 failed=0 assertions=33062 status=pass
+1193: TEST_ARENA_V1 kind=module module=x86_64_got_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1194: TEST_ARENA_V1 kind=module module=x86_64_got_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1195: TEST_ARENA_V1 kind=module module=x86_64_got_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1196: TEST_ARENA_TOP_V1 module=x86_64_got_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1197: TEST_MODULE_TIMING index=32 module=x86_64_got_tests duration_ns=5837260 passed=156385 failed=0 assertions=156385 status=pass
+1198: TEST_ARENA_V1 kind=module module=x86_64_completion_census_tests fixture=body index=0 arena_slot=0 start=4328 end=60425258 retained_bytes=60420930 high_water=60425258 peak_bytes=60420930 after=4328 live_bytes=0 rewind=1
+1199: TEST_ARENA_V1 kind=module module=x86_64_completion_census_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=15344 peak_bytes=15216 after=128 live_bytes=0 rewind=0
+1200: TEST_ARENA_V1 kind=module module=x86_64_completion_census_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1201: TEST_ARENA_TOP_V1 module=x86_64_completion_census_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1202: TEST_MODULE_TIMING index=33 module=x86_64_completion_census_tests duration_ns=3515913740 passed=34046 failed=0 assertions=34046 status=pass
+1203: TEST_ARENA_V1 kind=module module=ir_tests fixture=body index=0 arena_slot=0 start=4328 end=1491248 retained_bytes=1486920 high_water=7921672 peak_bytes=7917344 after=4328 live_bytes=0 rewind=1
+1204: TEST_ARENA_V1 kind=module module=ir_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=3308280 peak_bytes=3308152 after=128 live_bytes=0 rewind=0
+1205: TEST_ARENA_V1 kind=module module=ir_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=393784 peak_bytes=393720 after=64 live_bytes=0 rewind=0
+1206: TEST_ARENA_TOP_V1 module=ir_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1207: TEST_MODULE_TIMING index=34 module=ir_tests duration_ns=68539454 passed=348737 failed=0 assertions=348737 status=pass
+1208: TEST_ARENA_V1 kind=module module=vector_contract_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1209: TEST_ARENA_V1 kind=module module=vector_contract_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1873228 peak_bytes=1873100 after=128 live_bytes=0 rewind=0
+1210: TEST_ARENA_V1 kind=module module=vector_contract_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=393856 peak_bytes=393792 after=64 live_bytes=0 rewind=0
+1211: TEST_ARENA_TOP_V1 module=vector_contract_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1212: TEST_MODULE_TIMING index=35 module=vector_contract_tests duration_ns=158748376 passed=3056 failed=0 assertions=3056 status=pass
+1213: Launched [3814]: "/usr/bin/clang -O2 /tmp/buster-tests-2754-1-60446302182/buster-llvm-consumer-2754.bc -o /tmp/buster-tests-2754-1-60446302182/buster-llvm-consumer-2754" 
+1214: Process [3814]: Time (user): 0:26813 s,us, (system): 0:34234 s,us. Max RSS: 239068 KB. PF (soft): 7471, (hard): 220. Block (input): 20176, (output): 0. CTX SW (vol): 230, (invol): 1
+1215: Launched [3817]: "/tmp/buster-tests-2754-1-60446302182/buster-llvm-consumer-2754" 
+@@ 1366-1377 @@
+1366: TEST_ARENA_V1 kind=module module=llvm_bitcode_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2429609 peak_bytes=2429481 after=128 live_bytes=0 rewind=0
+1367: TEST_ARENA_V1 kind=module module=llvm_bitcode_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=367100 peak_bytes=367036 after=64 live_bytes=0 rewind=0
+1368: TEST_ARENA_TOP_V1 module=llvm_bitcode_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1369: TEST_MODULE_TIMING index=36 module=llvm_bitcode_tests duration_ns=3104090461 passed=467 failed=0 assertions=467 status=pass
+1370: TEST_ARENA_V1 kind=module module=machine_selection_tests fixture=body index=0 arena_slot=0 start=4328 end=13698723 retained_bytes=13694395 high_water=13698723 peak_bytes=13694395 after=4328 live_bytes=0 rewind=1
+1371: TEST_ARENA_V1 kind=module module=machine_selection_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=20984 peak_bytes=20856 after=128 live_bytes=0 rewind=0
+1372: TEST_ARENA_V1 kind=module module=machine_selection_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1373: TEST_ARENA_TOP_V1 module=machine_selection_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1374: TEST_MODULE_TIMING index=37 module=machine_selection_tests duration_ns=4679591 passed=631 failed=0 assertions=631 status=pass
+1375: TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_value_capacity index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1376: TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_value_capacity index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=2688 peak_bytes=2560 after=128 live_bytes=0 rewind=0
+1377: TEST_ARENA_V1 kind=fixture module=machine_tests fixture=machine_test_debug_value_capacity index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=4224 peak_bytes=4160 after=64 live_bytes=0 rewind=0
+@@ 1497-1545 @@
+1497: TEST_ARENA_V1 kind=module module=machine_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=10440186 peak_bytes=10440058 after=128 live_bytes=0 rewind=0
+1498: TEST_ARENA_V1 kind=module module=machine_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=997028 peak_bytes=996964 after=64 live_bytes=0 rewind=0
+1499: TEST_ARENA_TOP_V1 module=machine_tests fixtures=39 retained_fixture=machine_test_stack_aliases retained_bytes=25278904 peak_fixture=machine_test_stack_aliases peak_bytes=25278904
+1500: TEST_MODULE_TIMING index=38 module=machine_tests duration_ns=3481129031 passed=507800 failed=0 assertions=507800 status=pass
+1501: TEST_ARENA_V1 kind=module module=codegen_tests fixture=body index=0 arena_slot=0 start=4328 end=31693336 retained_bytes=31689008 high_water=31693336 peak_bytes=31689008 after=4328 live_bytes=0 rewind=1
+1502: TEST_ARENA_V1 kind=module module=codegen_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=5735864 peak_bytes=5735736 after=128 live_bytes=0 rewind=0
+1503: TEST_ARENA_V1 kind=module module=codegen_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=1760880 peak_bytes=1760816 after=64 live_bytes=0 rewind=0
+1504: TEST_ARENA_TOP_V1 module=codegen_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1505: TEST_MODULE_TIMING index=39 module=codegen_tests duration_ns=238459313 passed=7011 failed=0 assertions=7011 status=pass
+1506: TEST_ARENA_V1 kind=module module=aarch64_stride_tests fixture=body index=0 arena_slot=0 start=4328 end=9302164 retained_bytes=9297836 high_water=9302164 peak_bytes=9297836 after=4328 live_bytes=0 rewind=1
+1507: TEST_ARENA_V1 kind=module module=aarch64_stride_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=13552 peak_bytes=13424 after=128 live_bytes=0 rewind=0
+1508: TEST_ARENA_V1 kind=module module=aarch64_stride_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1509: TEST_ARENA_TOP_V1 module=aarch64_stride_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1510: TEST_MODULE_TIMING index=40 module=aarch64_stride_tests duration_ns=3671164 passed=98 failed=0 assertions=98 status=pass
+1511: TEST_ARENA_V1 kind=module module=debug_model_tests fixture=body index=0 arena_slot=0 start=4328 end=9800 retained_bytes=5472 high_water=1841948 peak_bytes=1837620 after=4328 live_bytes=0 rewind=1
+1512: TEST_ARENA_V1 kind=module module=debug_model_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1513: TEST_ARENA_V1 kind=module module=debug_model_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1514: TEST_ARENA_TOP_V1 module=debug_model_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1515: TEST_MODULE_TIMING index=41 module=debug_model_tests duration_ns=8025510 passed=668 failed=0 assertions=668 status=pass
+1516: TEST_ARENA_V1 kind=module module=dwarf_tests fixture=body index=0 arena_slot=0 start=4328 end=135432 retained_bytes=131104 high_water=135432 peak_bytes=131104 after=4328 live_bytes=0 rewind=1
+1517: TEST_ARENA_V1 kind=module module=dwarf_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1518: TEST_ARENA_V1 kind=module module=dwarf_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1519: TEST_ARENA_TOP_V1 module=dwarf_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1520: TEST_MODULE_TIMING index=42 module=dwarf_tests duration_ns=97874 passed=104 failed=0 assertions=104 status=pass
+1521: CODEVIEW_SCOPE_ALLOCATION functions=256 scopes=768 bytes=177440
+1522: CODEVIEW_SCOPE_ALLOCATION functions=1024 scopes=3072 bytes=707360
+1523: TEST_ARENA_V1 kind=module module=codeview_tests fixture=body index=0 arena_slot=0 start=4328 end=2866232 retained_bytes=2861904 high_water=2866232 peak_bytes=2861904 after=4328 live_bytes=0 rewind=1
+1524: TEST_ARENA_V1 kind=module module=codeview_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=194 peak_bytes=66 after=128 live_bytes=0 rewind=0
+1525: TEST_ARENA_V1 kind=module module=codeview_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1526: TEST_ARENA_TOP_V1 module=codeview_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1527: TEST_MODULE_TIMING index=43 module=codeview_tests duration_ns=7777955 passed=46742 failed=0 assertions=46742 status=pass
+1528: TEST_ARENA_V1 kind=module module=pdb_tests fixture=body index=0 arena_slot=0 start=4328 end=7681444 retained_bytes=7677116 high_water=7681444 peak_bytes=7677116 after=4328 live_bytes=0 rewind=1
+1529: TEST_ARENA_V1 kind=module module=pdb_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+1530: TEST_ARENA_V1 kind=module module=pdb_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1531: TEST_ARENA_TOP_V1 module=pdb_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1532: TEST_MODULE_TIMING index=44 module=pdb_tests duration_ns=828347787 passed=24848 failed=0 assertions=24848 status=pass
+1533: TEST_ARENA_V1 kind=module module=object_tests fixture=body index=0 arena_slot=0 start=4328 end=5120288 retained_bytes=5115960 high_water=5155189 peak_bytes=5150861 after=4328 live_bytes=0 rewind=1
+1534: TEST_ARENA_V1 kind=module module=object_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=54779 peak_bytes=54651 after=128 live_bytes=0 rewind=0
+1535: TEST_ARENA_V1 kind=module module=object_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1536: TEST_ARENA_TOP_V1 module=object_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1537: TEST_MODULE_TIMING index=45 module=object_tests duration_ns=13494319 passed=105433 failed=0 assertions=105433 status=pass
+1538: TEST_ARENA_V1 kind=module module=jit_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+1539: TEST_ARENA_V1 kind=module module=jit_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=156 peak_bytes=28 after=128 live_bytes=0 rewind=0
+1540: TEST_ARENA_V1 kind=module module=jit_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1541: TEST_ARENA_TOP_V1 module=jit_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1542: TEST_MODULE_TIMING index=46 module=jit_tests duration_ns=334949 passed=149 failed=0 assertions=149 status=pass
+1543: Launched [4003]: "/tmp/buster-tests-2754-1-60446302182/buster-native-link-test-2754" 
+1544: Process [4003]: Time (user): 0:0 s,us, (system): 0:372 s,us. Max RSS: 643404 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+1545: Launched [4004]: "/tmp/buster-tests-2754-1-60446302182/buster-native-libc-link-test-2754" 
+@@ 1552-1563 @@
+1552: TEST_ARENA_V1 kind=module module=link_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=4198512 peak_bytes=4198384 after=128 live_bytes=0 rewind=0
+1553: TEST_ARENA_V1 kind=module module=link_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=3704 peak_bytes=3640 after=64 live_bytes=0 rewind=0
+1554: TEST_ARENA_TOP_V1 module=link_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1555: TEST_MODULE_TIMING index=47 module=link_tests duration_ns=142694028 passed=71241 failed=0 assertions=71241 status=pass
+1556: TEST_ARENA_V1 kind=module module=gpu_pipeline_tests fixture=body index=0 arena_slot=0 start=4328 end=64242 retained_bytes=59914 high_water=64242 peak_bytes=59914 after=4328 live_bytes=0 rewind=1
+1557: TEST_ARENA_V1 kind=module module=gpu_pipeline_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=218 peak_bytes=90 after=128 live_bytes=0 rewind=0
+1558: TEST_ARENA_V1 kind=module module=gpu_pipeline_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+1559: TEST_ARENA_TOP_V1 module=gpu_pipeline_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+1560: TEST_MODULE_TIMING index=48 module=gpu_pipeline_tests duration_ns=1180998 passed=219 failed=0 assertions=219 status=pass
+1561: Launched [4007]: "build/ide cc -E /tmp/buster-tests-2754-1-60446302182/diagnostic-write-input-2754.c -o /tmp/buster-tests-2754-1-60446302182/diagnostic-write-missing-parent-2754/output.i" 
+1562: Process [4007]: Time (user): 0:0 s,us, (system): 0:2037 s,us. Max RSS: 643404 KB. PF (soft): 336, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+1563: TEST_ARENA_V1 kind=fixture module=compiler_diagnostic_tests fixture=compiler_diagnostic_test_write_failures index=0 arena_slot=0 start=4328 end=4732 retained_bytes=404 high_water=4732 peak_bytes=404 after=4328 live_bytes=0 rewind=1
+@@ 1570-1576 @@
+1570: TEST_ARENA_V1 kind=module module=compiler_diagnostic_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1529445 peak_bytes=1529317 after=128 live_bytes=0 rewind=0
+1571: TEST_ARENA_V1 kind=module module=compiler_diagnostic_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=159552 peak_bytes=159488 after=64 live_bytes=0 rewind=0
+1572: TEST_ARENA_TOP_V1 module=compiler_diagnostic_tests fixtures=2 retained_fixture=compiler_diagnostic_test_read_failures retained_bytes=1270185 peak_fixture=compiler_diagnostic_test_read_failures peak_bytes=1273464
+1573: TEST_MODULE_TIMING index=49 module=compiler_diagnostic_tests duration_ns=35734429 passed=236 failed=0 assertions=236 status=pass
+1574: Launched [4008]: "build/ide cc -E -std=c23 -x c tests/basic_c_preprocess_boundaries.txt" 
+1575: Process [4008]: Time (user): 0:0 s,us, (system): 0:2515 s,us. Max RSS: 643404 KB. PF (soft): 339, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 1
+1576: Launched [4009]: "build/ide cc -E -std=c23 -x c -o /tmp/buster-tests-2754-1-60446302182/buster-preprocess-boundaries-2754.i tests/basic_c_preprocess_boundaries.txt" 
+@@ 2116-2122 @@
+2116: Launched [4268]: "/usr/bin/cc -O2 -fno-pic -g0 -c tests/basic_c_parameter_alignment_caller.c -o /tmp/buster-tests-2754-1-60446302182/buster-parameter-alignment-host-2754-0.o" 
+2117: tests/basic_c_parameter_alignment_caller.c: In function ‘main’:
+2118: tests/basic_c_parameter_alignment_caller.c:11:19: note: the ABI for passing parameters with 64-byte alignment has changed in GCC 4.6
+2119:    11 |         failed |= parameter_aligned64(b);
+2120:       |                   ^~~~~~~~~~~~~~~~~~~~~~
+2121: Process [4268]: Time (user): 0:15841 s,us, (system): 0:7951 s,us. Max RSS: 643404 KB. PF (soft): 2188, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 7, (invol): 1
+2122: Launched [4271]: "/usr/bin/cc -O2 -fno-pic -g0 -c tests/basic_c_parameter_alignment_observer.c -o /tmp/buster-tests-2754-1-60446302182/buster-parameter-alignment-host-2754-1.o" 
+@@ 4109-4134 @@
+4109: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=assembly_output_path index=48 arena_slot=0 start=4328 end=1397276 retained_bytes=1392948 high_water=1397276 peak_bytes=1392948 after=4328 live_bytes=0 rewind=1
+4110: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=assembly_output_path index=48 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=119808 peak_bytes=119680 after=128 live_bytes=0 rewind=0
+4111: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=assembly_output_path index=48 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=2872 peak_bytes=2808 after=64 live_bytes=0 rewind=0
+4112: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4113: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4114: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4115: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4116: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4117: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4118: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4119: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4120: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4121: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4122: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4123: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4124: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4125: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4126: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4127: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4128: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4129: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4130: fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8322
+4131: fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8325
+4132: Launched [5663]: "/usr/bin/cc -nostdinc -fno-pic -fno-pie -g0 -O2 -c -o /tmp/buster-tests-2754-1-60446302182/buster-c-host-no-pic-2754.o tests/basic_c_pic.c" 
+4133: Process [5663]: Time (user): 0:15230 s,us, (system): 0:7961 s,us. Max RSS: 643404 KB. PF (soft): 2226, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 7, (invol): 0
+4134: Launched [5666]: "/usr/bin/cc -nostdinc -fPIC -g0 -O2 -c -o /tmp/buster-tests-2754-1-60446302182/buster-c-host-pic-2754.o tests/basic_c_pic.c" 
+@@ 4463-4470 @@
+4463: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_float_abi_path index=97 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=5904 peak_bytes=5840 after=64 live_bytes=0 rewind=0
+4464: Launched [5759]: "/tmp/buster-tests-2754-1-60446302182/buster-c-abi-2754" 
+4465: Process [5759]: Time (user): 0:0 s,us, (system): 0:896 s,us. Max RSS: 658904 KB. PF (soft): 61, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4466: Error creating a process: "No such file or directory" => qemu-aarch64 --version
+4467: Failed to launch [0]: "qemu-aarch64 --version" 
+4468: Launched [5761]: "/tmp/buster-tests-2754-1-60446302182/buster-c-i128-binary-2754-0-none.elf" 
+4469: Process [5761]: Time (user): 0:289 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 9, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4470: Launched [5762]: "/tmp/buster-tests-2754-1-60446302182/buster-c-i128-binary-2754-0-mir-stack.elf" 
+@@ 4547-4554 @@
+4547: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_simd_avx512_path index=105 arena_slot=0 start=4328 end=4393 retained_bytes=65 high_water=4393 peak_bytes=65 after=4328 live_bytes=0 rewind=1
+4548: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_simd_avx512_path index=105 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1385984 peak_bytes=1385856 after=128 live_bytes=0 rewind=0
+4549: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_simd_avx512_path index=105 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=33032 peak_bytes=32968 after=64 live_bytes=0 rewind=0
+4550: Error creating a process: "No such file or directory" => wine --version
+4551: Failed to launch [0]: "wine --version" 
+4552: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_simd_baseline_path index=106 arena_slot=0 start=4328 end=19036116 retained_bytes=19031788 high_water=19036116 peak_bytes=19031788 after=4328 live_bytes=0 rewind=1
+4553: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_simd_baseline_path index=106 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=99300 peak_bytes=99172 after=128 live_bytes=0 rewind=0
+4554: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_simd_baseline_path index=106 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=72 peak_bytes=8 after=64 live_bytes=0 rewind=0
+@@ 4721-4742 @@
+4721: Process [5868]: Time (user): 0:629 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4722: Launched [5869]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-0-1" 
+4723: Process [5869]: Time (user): 0:565 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4724: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4725: Launched [5870]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-1-0" 
+4726: Process [5870]: Time (user): 0:0 s,us, (system): 0:675 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4727: Launched [5871]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-1-1" 
+4728: Process [5871]: Time (user): 0:0 s,us, (system): 0:592 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4729: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4730: Launched [5872]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-2-0" 
+4731: Process [5872]: Time (user): 0:0 s,us, (system): 0:616 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4732: Launched [5873]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-2-1" 
+4733: Process [5873]: Time (user): 0:531 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 55, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4734: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4735: Launched [5874]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-3-0" 
+4736: Process [5874]: Time (user): 0:588 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4737: Launched [5875]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-3-1" 
+4738: Process [5875]: Time (user): 0:518 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4739: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4740: Launched [5876]: "/usr/bin/cc -DOVERALIGNED_STACK_OBSERVE=1 -DOVERALIGNED_STACK_SCALAR_ONLY=1 -O0 -fno-pic -g0 -c -o /tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-host-2754-0.o tests/basic_c_overaligned_stack_caller.c" 
+4741: Process [5876]: Time (user): 0:18429 s,us, (system): 0:5915 s,us. Max RSS: 658904 KB. PF (soft): 2252, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 7, (invol): 0
+4742: Launched [5879]: "/usr/bin/cc -DOVERALIGNED_STACK_OBSERVE=1 -DOVERALIGNED_STACK_SCALAR_ONLY=1 -O0 -fno-pic -g0 -c -o /tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-host-2754-1.o tests/basic_c_overaligned_stack_callee.c" 
+@@ 4747-4768 @@
+4747: Process [5885]: Time (user): 0:0 s,us, (system): 0:691 s,us. Max RSS: 658904 KB. PF (soft): 55, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4748: Launched [5886]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-0-1" 
+4749: Process [5886]: Time (user): 0:0 s,us, (system): 0:578 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4750: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4751: Launched [5887]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-1-0" 
+4752: Process [5887]: Time (user): 0:0 s,us, (system): 0:666 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4753: Launched [5888]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-1-1" 
+4754: Process [5888]: Time (user): 0:0 s,us, (system): 0:572 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4755: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4756: Launched [5889]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-2-0" 
+4757: Process [5889]: Time (user): 0:572 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 55, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4758: Launched [5890]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-2-1" 
+4759: Process [5890]: Time (user): 0:520 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 55, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4760: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4761: Launched [5891]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-3-0" 
+4762: Process [5891]: Time (user): 0:575 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4763: Launched [5892]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-3-1" 
+4764: Process [5892]: Time (user): 0:535 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4765: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4766: Launched [5893]: "/usr/bin/cc -DOVERALIGNED_STACK_OBSERVE=1 -DOVERALIGNED_STACK_SCALAR_ONLY=1 -O0 -fno-pic -g0 -c -o /tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-host-2754-0.o tests/basic_c_overaligned_stack_caller.c" 
+4767: Process [5893]: Time (user): 0:17480 s,us, (system): 0:6839 s,us. Max RSS: 658904 KB. PF (soft): 2249, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 7, (invol): 0
+4768: Launched [5896]: "/usr/bin/cc -DOVERALIGNED_STACK_OBSERVE=1 -DOVERALIGNED_STACK_SCALAR_ONLY=1 -O0 -fno-pic -g0 -c -o /tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-host-2754-1.o tests/basic_c_overaligned_stack_callee.c" 
+@@ 4773-4794 @@
+4773: Process [5902]: Time (user): 0:603 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4774: Launched [5903]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-0-1" 
+4775: Process [5903]: Time (user): 0:543 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4776: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4777: Launched [5904]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-1-0" 
+4778: Process [5904]: Time (user): 0:600 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4779: Launched [5905]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-1-1" 
+4780: Process [5905]: Time (user): 0:525 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4781: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4782: Launched [5906]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-2-0" 
+4783: Process [5906]: Time (user): 0:639 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 1
+4784: Launched [5907]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-2-1" 
+4785: Process [5907]: Time (user): 0:534 s,us, (system): 0:0 s,us. Max RSS: 658904 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4786: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4787: Launched [5908]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-3-0" 
+4788: Process [5908]: Time (user): 0:573 s,us, (system): 0:0 s,us. Max RSS: 658936 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4789: Launched [5909]: "/tmp/buster-tests-2754-1-60446302182/buster-c-overaligned-pair-2754-3-1" 
+4790: Process [5909]: Time (user): 0:543 s,us, (system): 0:0 s,us. Max RSS: 658936 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4791: os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13360
+4792: Launched [5910]: "/tmp/buster-tests-2754-1-60446302182/buster-c-function-pointer-declarators-2754" 
+4793: Process [5910]: Time (user): 0:223 s,us, (system): 0:0 s,us. Max RSS: 658940 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+4794: Launched [5911]: "/tmp/buster-tests-2754-1-60446302182/buster-c-function-pointer-declarators-2754" 
+@@ 5237-5252 @@
+5237: Process [6158]: Time (user): 0:175 s,us, (system): 0:0 s,us. Max RSS: 675712 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5238: Launched [6159]: "/tmp/buster-tests-2754-1-60446302182/buster-c-bit-field-layout-2754" 
+5239: Process [6159]: Time (user): 0:0 s,us, (system): 0:208 s,us. Max RSS: 675712 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5240: os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:15141
+5241: Launched [6160]: "/tmp/buster-tests-2754-1-60446302182/buster-c-bit-field-layout-2754" 
+5242: Process [6160]: Time (user): 0:177 s,us, (system): 0:0 s,us. Max RSS: 675968 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5243: os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:15141
+5244: Launched [6161]: "/tmp/buster-tests-2754-1-60446302182/buster-c-bit-field-layout-2754" 
+5245: Process [6161]: Time (user): 0:176 s,us, (system): 0:0 s,us. Max RSS: 675968 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5246: os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:15141
+5247: Launched [6162]: "/tmp/buster-tests-2754-1-60446302182/buster-c-bit-field-layout-2754" 
+5248: Process [6162]: Time (user): 0:169 s,us, (system): 0:0 s,us. Max RSS: 675968 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5249: os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:15141
+5250: Launched [6163]: "/tmp/buster-tests-2754-1-60446302182/buster-c-shift-operand-types-2754" 
+5251: Process [6163]: Time (user): 0:190 s,us, (system): 0:0 s,us. Max RSS: 675968 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5252: Launched [6164]: "/tmp/buster-tests-2754-1-60446302182/buster-c-shift-operand-types-2754" 
+@@ 5862-5879 @@
+5862: TEST_ARENA_V1 kind=module module=compiler_driver_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=199236148 peak_bytes=199236020 after=128 live_bytes=0 rewind=0
+5863: TEST_ARENA_V1 kind=module module=compiler_driver_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=46799408 peak_bytes=46799344 after=64 live_bytes=0 rewind=0
+5864: TEST_ARENA_TOP_V1 module=compiler_driver_tests fixtures=125 retained_fixture=c_vector_half_element_path retained_bytes=52997058 peak_fixture=c_vector_half_element_path peak_bytes=52997058
+5865: TEST_MODULE_TIMING index=50 module=compiler_driver_tests duration_ns=58691389454 passed=39123 failed=36 assertions=39159 status=fail
+5866: TEST_ARENA_V1 kind=module module=compiler_driver_object_path_tests fixture=body index=0 arena_slot=0 start=4328 end=5814 retained_bytes=1486 high_water=9445 peak_bytes=5117 after=4328 live_bytes=0 rewind=1
+5867: TEST_ARENA_V1 kind=module module=compiler_driver_object_path_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=66416 peak_bytes=66288 after=128 live_bytes=0 rewind=0
+5868: TEST_ARENA_V1 kind=module module=compiler_driver_object_path_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=72 peak_bytes=8 after=64 live_bytes=0 rewind=0
+5869: TEST_ARENA_TOP_V1 module=compiler_driver_object_path_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+5870: TEST_MODULE_TIMING index=51 module=compiler_driver_object_path_tests duration_ns=3920533 passed=22 failed=0 assertions=22 status=pass
+5871: TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+5872: TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+5873: TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+5874: TEST_ARENA_TOP_V1 module=x86_64_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+5875: TEST_MODULE_TIMING index=52 module=x86_64_tests duration_ns=355768 passed=18 failed=0 assertions=18 status=pass
+5876: [2753057/2753093] Unit tests
+5877: [52/53] Module tests
+5878: [0/0] External tests
+5879: full_suite=1
+
+@@ final-200 @@
+5680: Launched [6367]: "/tmp/buster-tests-2754-1-60446302182/buster-c-weak-alias-2754-0" 
+5681: Process [6367]: Time (user): 0:229 s,us, (system): 0:0 s,us. Max RSS: 680712 KB. PF (soft): 8, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5682: Launched [6368]: "/tmp/buster-tests-2754-1-60446302182/buster-c-weak-alias-2754-1" 
+5683: Process [6368]: Time (user): 0:198 s,us, (system): 0:0 s,us. Max RSS: 680712 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5684: Launched [6369]: "/tmp/buster-tests-2754-1-60446302182/buster-c-weak-alias-2754-2" 
+5685: Process [6369]: Time (user): 0:185 s,us, (system): 0:0 s,us. Max RSS: 680712 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5686: Launched [6370]: "/tmp/buster-tests-2754-1-60446302182/buster-c-weak-alias-2754-3" 
+5687: Process [6370]: Time (user): 0:172 s,us, (system): 0:0 s,us. Max RSS: 680712 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5688: Launched [6371]: "/tmp/buster-tests-2754-1-60446302182/buster-c-register-variable-2754-0" 
+5689: Process [6371]: Time (user): 0:232 s,us, (system): 0:0 s,us. Max RSS: 680712 KB. PF (soft): 8, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5690: Launched [6372]: "/tmp/buster-tests-2754-1-60446302182/buster-c-register-variable-2754-1" 
+5691: Process [6372]: Time (user): 0:0 s,us, (system): 0:231 s,us. Max RSS: 680712 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 0, (invol): 0
+5692: Launched [6373]: "/tmp/buster-tests-2754-1-60446302182/buster-c-register-variable-2754-2" 
+5693: Process [6373]: Time (user): 0:206 s,us, (system): 0:0 s,us. Max RSS: 680840 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5694: Launched [6374]: "/tmp/buster-tests-2754-1-60446302182/buster-c-register-variable-2754-3" 
+5695: Process [6374]: Time (user): 0:198 s,us, (system): 0:0 s,us. Max RSS: 680840 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5696: Launched [6375]: "/tmp/buster-tests-2754-1-60446302182/buster-c-integer-to-pointer-2754-0" 
+5697: Process [6375]: Time (user): 0:175 s,us, (system): 0:0 s,us. Max RSS: 680840 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5698: Launched [6376]: "/tmp/buster-tests-2754-1-60446302182/buster-c-integer-to-pointer-2754-1" 
+5699: Process [6376]: Time (user): 0:0 s,us, (system): 0:219 s,us. Max RSS: 680840 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5700: Launched [6377]: "/tmp/buster-tests-2754-1-60446302182/buster-c-integer-to-pointer-2754-2" 
+5701: Process [6377]: Time (user): 0:179 s,us, (system): 0:0 s,us. Max RSS: 680840 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5702: Launched [6378]: "/tmp/buster-tests-2754-1-60446302182/buster-c-integer-to-pointer-2754-3" 
+5703: Process [6378]: Time (user): 0:167 s,us, (system): 0:0 s,us. Max RSS: 680840 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5704: Launched [6379]: "/tmp/buster-tests-2754-1-60446302182/buster-c-main-implicit-return-2754-0" 
+5705: Process [6379]: Time (user): 0:0 s,us, (system): 0:202 s,us. Max RSS: 680840 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5706: Launched [6380]: "/tmp/buster-tests-2754-1-60446302182/buster-c-main-implicit-return-2754-1" 
+5707: Process [6380]: Time (user): 0:0 s,us, (system): 0:193 s,us. Max RSS: 680840 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5708: Launched [6381]: "/tmp/buster-tests-2754-1-60446302182/buster-c-main-implicit-return-2754-2" 
+5709: Process [6381]: Time (user): 0:0 s,us, (system): 0:179 s,us. Max RSS: 680840 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5710: Launched [6382]: "/tmp/buster-tests-2754-1-60446302182/buster-c-main-implicit-return-2754-3" 
+5711: Process [6382]: Time (user): 0:0 s,us, (system): 0:197 s,us. Max RSS: 680840 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5712: Launched [6383]: "/tmp/buster-tests-2754-1-60446302182/buster-c-pointer-to-array-place-2754-0" 
+5713: Process [6383]: Time (user): 0:190 s,us, (system): 0:0 s,us. Max RSS: 680972 KB. PF (soft): 9, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5714: Launched [6384]: "/tmp/buster-tests-2754-1-60446302182/buster-c-pointer-to-array-place-2754-1" 
+5715: Process [6384]: Time (user): 0:184 s,us, (system): 0:0 s,us. Max RSS: 680972 KB. PF (soft): 8, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5716: Launched [6385]: "/tmp/buster-tests-2754-1-60446302182/buster-c-pointer-to-array-place-2754-2" 
+5717: Process [6385]: Time (user): 0:0 s,us, (system): 0:211 s,us. Max RSS: 680972 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5718: Launched [6386]: "/tmp/buster-tests-2754-1-60446302182/buster-c-pointer-to-array-place-2754-3" 
+5719: Process [6386]: Time (user): 0:180 s,us, (system): 0:0 s,us. Max RSS: 680972 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5720: Launched [6387]: "/tmp/buster-tests-2754-1-60446302182/buster-c-lazy-operand-argument-2754-0" 
+5721: Process [6387]: Time (user): 0:0 s,us, (system): 0:211 s,us. Max RSS: 680972 KB. PF (soft): 8, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5722: Launched [6388]: "/tmp/buster-tests-2754-1-60446302182/buster-c-lazy-operand-argument-2754-1" 
+5723: Process [6388]: Time (user): 0:185 s,us, (system): 0:0 s,us. Max RSS: 680972 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5724: Launched [6389]: "/tmp/buster-tests-2754-1-60446302182/buster-c-lazy-operand-argument-2754-2" 
+5725: Process [6389]: Time (user): 0:179 s,us, (system): 0:0 s,us. Max RSS: 680972 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5726: Launched [6390]: "/tmp/buster-tests-2754-1-60446302182/buster-c-lazy-operand-argument-2754-3" 
+5727: Process [6390]: Time (user): 0:190 s,us, (system): 0:0 s,us. Max RSS: 681100 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5728: Launched [6391]: "/tmp/buster-tests-2754-1-60446302182/buster-c-thread-local-models-2754-0-0" 
+5729: Process [6391]: Time (user): 0:618 s,us, (system): 0:0 s,us. Max RSS: 681284 KB. PF (soft): 54, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5730: Launched [6392]: "/tmp/buster-tests-2754-1-60446302182/buster-c-thread-local-models-2754-0-1" 
+5731: Process [6392]: Time (user): 0:579 s,us, (system): 0:0 s,us. Max RSS: 681284 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5732: Launched [6393]: "/tmp/buster-tests-2754-1-60446302182/buster-c-thread-local-models-2754-1-0" 
+5733: Process [6393]: Time (user): 0:598 s,us, (system): 0:0 s,us. Max RSS: 681284 KB. PF (soft): 54, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5734: Launched [6394]: "/tmp/buster-tests-2754-1-60446302182/buster-c-thread-local-models-2754-1-1" 
+5735: Process [6394]: Time (user): 0:545 s,us, (system): 0:0 s,us. Max RSS: 681284 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5736: Launched [6395]: "/tmp/buster-tests-2754-1-60446302182/buster-c-thread-local-models-2754-2-0" 
+5737: Process [6395]: Time (user): 0:0 s,us, (system): 0:552 s,us. Max RSS: 681284 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5738: Launched [6396]: "/tmp/buster-tests-2754-1-60446302182/buster-c-thread-local-models-2754-2-1" 
+5739: Process [6396]: Time (user): 0:515 s,us, (system): 0:0 s,us. Max RSS: 681348 KB. PF (soft): 54, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5740: Launched [6397]: "/tmp/buster-tests-2754-1-60446302182/buster-c-thread-local-models-2754-3-0" 
+5741: Process [6397]: Time (user): 0:0 s,us, (system): 0:559 s,us. Max RSS: 681348 KB. PF (soft): 55, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5742: Launched [6398]: "/tmp/buster-tests-2754-1-60446302182/buster-c-thread-local-models-2754-3-1" 
+5743: Process [6398]: Time (user): 0:511 s,us, (system): 0:0 s,us. Max RSS: 681348 KB. PF (soft): 56, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5744: Launched [6399]: "/tmp/buster-tests-2754-1-60446302182/buster-c-type-generic-math-2754-0" 
+5745: Process [6399]: Time (user): 0:205 s,us, (system): 0:0 s,us. Max RSS: 681356 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5746: Launched [6400]: "/tmp/buster-tests-2754-1-60446302182/buster-c-type-generic-math-2754-1" 
+5747: Process [6400]: Time (user): 0:181 s,us, (system): 0:0 s,us. Max RSS: 681484 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5748: Launched [6401]: "/tmp/buster-tests-2754-1-60446302182/buster-c-type-generic-math-2754-2" 
+5749: Process [6401]: Time (user): 0:173 s,us, (system): 0:0 s,us. Max RSS: 681484 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5750: Launched [6402]: "/tmp/buster-tests-2754-1-60446302182/buster-c-type-generic-math-2754-3" 
+5751: Process [6402]: Time (user): 0:169 s,us, (system): 0:0 s,us. Max RSS: 681484 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5752: Launched [6403]: "/tmp/buster-tests-2754-1-60446302182/buster-c-local-typedef-attribute-2754" 
+5753: Process [6403]: Time (user): 0:166 s,us, (system): 0:0 s,us. Max RSS: 681544 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5754: Launched [6404]: "/tmp/buster-tests-2754-1-60446302182/buster-c-offsetof-subscript-2754" 
+5755: Process [6404]: Time (user): 0:159 s,us, (system): 0:0 s,us. Max RSS: 681544 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5756: Launched [6405]: "/tmp/buster-tests-2754-1-60446302182/buster-c-member-chain-place-2754-0" 
+5757: Process [6405]: Time (user): 0:0 s,us, (system): 0:220 s,us. Max RSS: 681544 KB. PF (soft): 10, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5758: Launched [6406]: "/tmp/buster-tests-2754-1-60446302182/buster-c-member-chain-place-2754-1" 
+5759: Process [6406]: Time (user): 0:188 s,us, (system): 0:0 s,us. Max RSS: 681740 KB. PF (soft): 8, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5760: Launched [6407]: "/tmp/buster-tests-2754-1-60446302182/buster-c-member-chain-place-2754-2" 
+5761: Process [6407]: Time (user): 0:171 s,us, (system): 0:0 s,us. Max RSS: 681740 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5762: Launched [6408]: "/tmp/buster-tests-2754-1-60446302182/buster-c-member-chain-place-2754-3" 
+5763: Process [6408]: Time (user): 0:169 s,us, (system): 0:0 s,us. Max RSS: 681740 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5764: Launched [6409]: "/tmp/buster-tests-2754-1-60446302182/buster-c-void-size-2754-0" 
+5765: Process [6409]: Time (user): 0:186 s,us, (system): 0:0 s,us. Max RSS: 681740 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5766: Launched [6410]: "/tmp/buster-tests-2754-1-60446302182/buster-c-void-size-2754-1" 
+5767: Process [6410]: Time (user): 0:180 s,us, (system): 0:0 s,us. Max RSS: 681740 KB. PF (soft): 8, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5768: Launched [6411]: "/tmp/buster-tests-2754-1-60446302182/buster-c-void-size-2754-2" 
+5769: Process [6411]: Time (user): 0:181 s,us, (system): 0:0 s,us. Max RSS: 681868 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5770: Launched [6412]: "/tmp/buster-tests-2754-1-60446302182/buster-c-void-size-2754-3" 
+5771: Process [6412]: Time (user): 0:178 s,us, (system): 0:0 s,us. Max RSS: 681868 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5772: Launched [6413]: "/tmp/buster-tests-2754-1-60446302182/buster-c-volatile-aggregate-2754-0" 
+5773: Process [6413]: Time (user): 0:201 s,us, (system): 0:0 s,us. Max RSS: 681868 KB. PF (soft): 10, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5774: Launched [6414]: "/tmp/buster-tests-2754-1-60446302182/buster-c-volatile-aggregate-2754-1" 
+5775: Process [6414]: Time (user): 0:195 s,us, (system): 0:0 s,us. Max RSS: 681996 KB. PF (soft): 9, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5776: Launched [6415]: "/tmp/buster-tests-2754-1-60446302182/buster-c-volatile-aggregate-2754-2" 
+5777: Process [6415]: Time (user): 0:193 s,us, (system): 0:0 s,us. Max RSS: 681996 KB. PF (soft): 8, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5778: Launched [6416]: "/tmp/buster-tests-2754-1-60446302182/buster-c-volatile-aggregate-2754-3" 
+5779: Process [6416]: Time (user): 0:197 s,us, (system): 0:0 s,us. Max RSS: 682124 KB. PF (soft): 8, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5780: Launched [6417]: "/tmp/buster-tests-2754-1-60446302182/buster-c-global-asm-entry-2754" 
+5781: Process [6417]: Time (user): 0:253 s,us, (system): 0:0 s,us. Max RSS: 682312 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5782: Launched [6418]: "/tmp/buster-tests-2754-1-60446302182/buster-c-global-asm-weak-link-2754-0" 
+5783: Process [6418]: Time (user): 0:209 s,us, (system): 0:0 s,us. Max RSS: 682312 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5784: Launched [6419]: "/tmp/buster-tests-2754-1-60446302182/buster-c-global-asm-weak-link-2754-1" 
+5785: Process [6419]: Time (user): 0:208 s,us, (system): 0:0 s,us. Max RSS: 682312 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5786: Launched [6420]: "/tmp/buster-tests-2754-1-60446302182/buster-c-global-asm-weak-link-2754-2" 
+5787: Process [6420]: Time (user): 0:192 s,us, (system): 0:0 s,us. Max RSS: 682312 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5788: Launched [6421]: "/tmp/buster-tests-2754-1-60446302182/buster-c-global-asm-weak-link-2754-3" 
+5789: Process [6421]: Time (user): 0:0 s,us, (system): 0:203 s,us. Max RSS: 682312 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5790: Launched [6422]: "/tmp/buster-tests-2754-1-60446302182/buster-c-inline-asm-symbol-run-2754-0" 
+5791: Process [6422]: Time (user): 0:197 s,us, (system): 0:0 s,us. Max RSS: 682312 KB. PF (soft): 9, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5792: Launched [6423]: "/tmp/buster-tests-2754-1-60446302182/buster-c-inline-asm-symbol-run-2754-1" 
+5793: Process [6423]: Time (user): 0:197 s,us, (system): 0:0 s,us. Max RSS: 682380 KB. PF (soft): 9, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5794: Launched [6424]: "/tmp/buster-tests-2754-1-60446302182/buster-c-inline-asm-symbol-run-2754-2" 
+5795: Process [6424]: Time (user): 0:213 s,us, (system): 0:0 s,us. Max RSS: 682636 KB. PF (soft): 9, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5796: Launched [6425]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-0-0" 
+5797: Process [6425]: Time (user): 0:172 s,us, (system): 0:0 s,us. Max RSS: 682824 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5798: Launched [6426]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-0-1" 
+5799: Process [6426]: Time (user): 0:176 s,us, (system): 0:0 s,us. Max RSS: 683016 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5800: Launched [6427]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-0-2" 
+5801: Process [6427]: Time (user): 0:0 s,us, (system): 0:204 s,us. Max RSS: 683272 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5802: Launched [6428]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-1-0" 
+5803: Process [6428]: Time (user): 0:169 s,us, (system): 0:0 s,us. Max RSS: 683400 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5804: Launched [6429]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-1-1" 
+5805: Process [6429]: Time (user): 0:167 s,us, (system): 0:0 s,us. Max RSS: 683528 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5806: Launched [6430]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-1-2" 
+5807: Process [6430]: Time (user): 0:168 s,us, (system): 0:0 s,us. Max RSS: 683656 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5808: Launched [6431]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-2-0" 
+5809: Process [6431]: Time (user): 0:173 s,us, (system): 0:0 s,us. Max RSS: 683784 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5810: Launched [6432]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-2-1" 
+5811: Process [6432]: Time (user): 0:0 s,us, (system): 0:189 s,us. Max RSS: 684040 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5812: Launched [6433]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-2-2" 
+5813: Process [6433]: Time (user): 0:159 s,us, (system): 0:0 s,us. Max RSS: 684168 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5814: Launched [6434]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-3-0" 
+5815: Process [6434]: Time (user): 0:183 s,us, (system): 0:0 s,us. Max RSS: 684556 KB. PF (soft): 9, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5816: Launched [6435]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-3-1" 
+5817: Process [6435]: Time (user): 0:174 s,us, (system): 0:0 s,us. Max RSS: 684556 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5818: Launched [6436]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-3-2" 
+5819: Process [6436]: Time (user): 0:177 s,us, (system): 0:0 s,us. Max RSS: 684812 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5820: Launched [6437]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-4-0" 
+5821: Process [6437]: Time (user): 0:191 s,us, (system): 0:0 s,us. Max RSS: 685000 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5822: Launched [6438]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-4-1" 
+5823: Process [6438]: Time (user): 0:191 s,us, (system): 0:0 s,us. Max RSS: 685192 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5824: Launched [6439]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-4-2" 
+5825: Process [6439]: Time (user): 0:178 s,us, (system): 0:0 s,us. Max RSS: 685448 KB. PF (soft): 7, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5826: Launched [6440]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-5-0" 
+5827: Process [6440]: Time (user): 0:179 s,us, (system): 0:0 s,us. Max RSS: 685576 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5828: Launched [6441]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-5-1" 
+5829: Process [6441]: Time (user): 0:169 s,us, (system): 0:0 s,us. Max RSS: 685832 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5830: Launched [6442]: "/tmp/buster-tests-2754-1-60446302182/buster-c-asm-sse-operand-2754-5-2" 
+5831: Process [6442]: Time (user): 0:173 s,us, (system): 0:0 s,us. Max RSS: 685832 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5832: Launched [6443]: "/tmp/buster-tests-2754-1-60446302182/buster-c-weak-undefined-link-2754-0" 
+5833: weak reference bound to the library
+5834: Process [6443]: Time (user): 0:578 s,us, (system): 0:0 s,us. Max RSS: 686216 KB. PF (soft): 58, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5835: Launched [6444]: "/tmp/buster-tests-2754-1-60446302182/buster-c-weak-undefined-link-2754-1" 
+5836: weak reference bound to the library
+5837: Process [6444]: Time (user): 0:525 s,us, (system): 0:0 s,us. Max RSS: 686472 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5838: Launched [6445]: "/tmp/buster-tests-2754-1-60446302182/buster-c-weak-undefined-link-2754-2" 
+5839: weak reference bound to the library
+5840: Process [6445]: Time (user): 0:503 s,us, (system): 0:0 s,us. Max RSS: 686728 KB. PF (soft): 57, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5841: Launched [6446]: "/tmp/buster-tests-2754-1-60446302182/buster-c-weak-undefined-link-2754-3" 
+5842: weak reference bound to the library
+5843: Process [6446]: Time (user): 0:509 s,us, (system): 0:0 s,us. Max RSS: 686856 KB. PF (soft): 58, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5844: Launched [6447]: "/tmp/buster-tests-2754-1-60446302182/buster-asm-unit-program-2754" 
+5845: Process [6447]: Time (user): 0:175 s,us, (system): 0:0 s,us. Max RSS: 686856 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5846: Launched [6448]: "/tmp/buster-tests-2754-1-60446302182/buster-asm-unit-mixed-2754" 
+5847: Process [6448]: Time (user): 0:171 s,us, (system): 0:0 s,us. Max RSS: 687044 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5848: Launched [6449]: "/tmp/buster-tests-2754-1-60446302182/buster-asm-abs32-2754" 
+5849: Process [6449]: Time (user): 0:156 s,us, (system): 0:0 s,us. Max RSS: 687044 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5850: Launched [6450]: "/tmp/buster-tests-2754-1-60446302182/buster-c-export-dynamic-2754" 
+5851: Process [6450]: Time (user): 0:617 s,us, (system): 0:0 s,us. Max RSS: 687876 KB. PF (soft): 63, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5852: Launched [6451]: "/tmp/buster-tests-2754-1-60446302182/buster-c-multi-driver-2754" 
+5853: Process [6451]: Time (user): 0:0 s,us, (system): 0:213 s,us. Max RSS: 688004 KB. PF (soft): 6, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 1
+5854: Launched [6452]: "/tmp/buster-tests-2754-1-60446302182/buster-c-mixed-driver-2754" 
+5855: Process [6452]: Time (user): 0:176 s,us, (system): 0:0 s,us. Max RSS: 688004 KB. PF (soft): 4, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5856: Launched [6453]: "/tmp/buster-tests-2754-1-60446302182/buster-c-archive-driver-2754" 
+5857: Process [6453]: Time (user): 0:0 s,us, (system): 0:183 s,us. Max RSS: 688004 KB. PF (soft): 5, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+5858: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_float_abi_windows_path index=124 arena_slot=0 start=4328 end=2493420 retained_bytes=2489092 high_water=2493420 peak_bytes=2489092 after=4328 live_bytes=0 rewind=1
+5859: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_float_abi_windows_path index=124 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=82668143 peak_bytes=82668015 after=128 live_bytes=0 rewind=0
+5860: TEST_ARENA_V1 kind=fixture module=compiler_driver_tests fixture=c_float_abi_windows_path index=124 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=3018624 peak_bytes=3018560 after=64 live_bytes=0 rewind=0
+5861: TEST_ARENA_V1 kind=module module=compiler_driver_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=53001386 peak_bytes=52997058 after=4328 live_bytes=0 rewind=1
+5862: TEST_ARENA_V1 kind=module module=compiler_driver_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=199236148 peak_bytes=199236020 after=128 live_bytes=0 rewind=0
+5863: TEST_ARENA_V1 kind=module module=compiler_driver_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=46799408 peak_bytes=46799344 after=64 live_bytes=0 rewind=0
+5864: TEST_ARENA_TOP_V1 module=compiler_driver_tests fixtures=125 retained_fixture=c_vector_half_element_path retained_bytes=52997058 peak_fixture=c_vector_half_element_path peak_bytes=52997058
+5865: TEST_MODULE_TIMING index=50 module=compiler_driver_tests duration_ns=58691389454 passed=39123 failed=36 assertions=39159 status=fail
+5866: TEST_ARENA_V1 kind=module module=compiler_driver_object_path_tests fixture=body index=0 arena_slot=0 start=4328 end=5814 retained_bytes=1486 high_water=9445 peak_bytes=5117 after=4328 live_bytes=0 rewind=1
+5867: TEST_ARENA_V1 kind=module module=compiler_driver_object_path_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=66416 peak_bytes=66288 after=128 live_bytes=0 rewind=0
+5868: TEST_ARENA_V1 kind=module module=compiler_driver_object_path_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=72 peak_bytes=8 after=64 live_bytes=0 rewind=0
+5869: TEST_ARENA_TOP_V1 module=compiler_driver_object_path_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+5870: TEST_MODULE_TIMING index=51 module=compiler_driver_object_path_tests duration_ns=3920533 passed=22 failed=0 assertions=22 status=pass
+5871: TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=0 start=4328 end=4328 retained_bytes=0 high_water=4328 peak_bytes=0 after=4328 live_bytes=0 rewind=1
+5872: TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+5873: TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+5874: TEST_ARENA_TOP_V1 module=x86_64_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+5875: TEST_MODULE_TIMING index=52 module=x86_64_tests duration_ns=355768 passed=18 failed=0 assertions=18 status=pass
+5876: [2753057/2753093] Unit tests
+5877: [52/53] Module tests
+5878: [0/0] External tests
+5879: full_suite=1
