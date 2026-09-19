@@ -23,12 +23,6 @@ jobs:
         with:
           persist-credentials: true
           fetch-depth: 0
-      - name: Install native service test compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends tcc
       - name: Commit, validate, and publish the clean repair
         shell: bash
         run: |
@@ -110,7 +104,9 @@ jobs:
           python3 tools/native_retirement_materializer_test.py -v
           python3 tools/native_retirement_performance_identity_test.py -v
           python3 tools/native_retirement_performance_binding_test.py -v
-          ./build.sh bench_service self-test
+          driver="$RUNNER_TEMP/buster-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$driver" bench_service self-test
           if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
             git status --short
             echo 'validation changed tracked files' >&2
