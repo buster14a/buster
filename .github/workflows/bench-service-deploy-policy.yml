@@ -1,0 +1,40 @@
+name: Benchmark service deploy policy
+
+on:
+  pull_request:
+    paths:
+      - 'tools/bench_service/deploy/**'
+      - 'tests/bench_service_deploy_policy_test.py'
+      - '.github/workflows/bench-service-deploy-policy.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/bench_service/deploy/**'
+      - 'tests/bench_service_deploy_policy_test.py'
+      - '.github/workflows/bench-service-deploy-policy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-service-deploy-policy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Benchmark service deploy policy
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Compile installer and verifier
+        run: |
+          python3 -m py_compile \
+            tools/bench_service/deploy/install_9700x.py \
+            tools/bench_service/deploy/verify_9700x.py
+      - name: Prove fixed fail-closed deployment policy
+        run: python3 -B tests/bench_service_deploy_policy_test.py
