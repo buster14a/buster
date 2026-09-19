@@ -1068,7 +1068,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, waited.streamed_total == BUSTER_KB(480));
                 BUSTER_TEST(arguments, waited.dropped_total == 0);
             }
-            FileStats stats = os_file_get_stats(overflow_file, (FileStatsOptions){.size = 1});
+            FileStats stats = os_file_get_stats(overflow_file, (FileStatsOptions){.size = 1, .identity = 1});
             BUSTER_TEST(arguments, stats.valid && stats.kind == OS_FILE_KIND_REGULAR && stats.size == BUSTER_KB(480));
             BUSTER_TEST(arguments, os_file_close(overflow_file));
             BUSTER_TEST(arguments, os_file_delete(overflow_path));

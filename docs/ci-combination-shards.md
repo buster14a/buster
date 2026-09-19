@@ -34,9 +34,12 @@ required configuration exactly once.
 
 The canonical producer and all its consumers remain in one job: there is no
 cross-job compiler artifact handoff or second canonical compiler build.
-Unix native mode/differential suites still share their own pre-existing
-producer; mobile, UEFI and the independent analyzer jobs are unchanged.
-Intel macOS retains its existing direct-matrix/self-host exception.
+All six desktop platforms have independent native execution-mode jobs; the four
+Unix native jobs additionally share their producer with the differential corpus.
+Mobile, UEFI and the independent analyzer jobs are unchanged. Intel macOS
+retains its existing direct-matrix/self-host exception. The exact Windows mode
+and compiler/configuration contract is documented in
+[Windows CI coverage](windows-ci-coverage.md).
 
 The wrapper step keeps its checkout/cancellation lifecycle guard on both
 shards. Its checks-shard body reports `owned-by-release-shard` and exits
@@ -73,10 +76,13 @@ validated on the executing runner. A checks completion explicitly says
 
 * All six job groups (`lint`, `test`, `native`, `mobile`, `uefi`, `analyzer`)
   must succeed, with the existing real-shell negative controls retained.
-* The read-only Actions job inventory must contain the exact 23 expected job
-  identities, including all twelve desktop shard names. Every completed job
-  must succeed, and each desktop job must have completed its applicable matrix,
-  coverage-summary, tool-setup, shared-regression and log-upload steps.
+* The read-only Actions job inventory must contain the exact 25 expected job
+  identities: all twelve desktop shard names, all six native names, three
+  mobile names, UEFI, analyzer, lint and the active aggregate. Every completed
+  job must succeed. Each desktop job must complete its applicable matrix,
+  coverage summary, tool setup, shared regressions and log upload; each native
+  job must complete its applicable mode result, and Unix native jobs must also
+  complete the differential result.
 
 For a platform's unchanged full required set E, the native producer and
 independent consumer agree on disjoint selections R and C with R ∪ C = E.
@@ -147,9 +153,12 @@ python3 tools/check_action_pins.py
 Native tests export all six policies and all three selections from a temporary
 instrumented copy of the real driver. Their fixture mode is deliberately
 unacceptable as CI evidence. They verify unchanged anchors, exact/disjoint
-ownership, shared-tree validation, invalid-selector non-mutation, consumer
-rejection of shrinkage/foreign rows, missing jobs, pagination and rerun rules.
-The existing coverage tests retain real executable/hash/re-probe controls.
+ownership, the Windows x86-64 `28/6/22` and AArch64 `19/2/17` policy counts,
+nonempty AArch64 Clang/MSVC coverage, explicit exclusion reasons, shared-tree
+validation, invalid-selector non-mutation, consumer rejection of
+shrinkage/foreign rows, missing jobs, native-step evidence, pagination and
+rerun rules. The existing coverage tests retain real executable/hash/re-probe
+controls.
 
 ## Performance qualification — required before closing #333
 
@@ -168,12 +177,14 @@ python3 tools/github_ci_time.py summarize baseline-runs.json --output baseline-s
 python3 tools/github_ci_time.py summarize candidate-runs.json --output candidate-summary.json
 ```
 
-The collector understands the historical 6/11/15/17-job layouts and this
-23-job layout. All 23 execution intervals count toward candidate runner
-seconds, including the aggregate inventory check. It reports whole-workflow
-elapsed time, execution span, initial queue delay, individual job durations and
-job queue delays when API creation timestamps exist (otherwise `null`, never
-imputed zero). Missing successful steps or shard identities reject a sample.
+The collector understands the historical 6/11/15/17/23-job layouts and the
+current 25-job layout. All 25 execution intervals count toward candidate runner
+seconds, including both Windows mode lanes and the aggregate inventory check.
+It reports whole-workflow elapsed time, execution span, initial queue delay,
+individual job durations and job queue delays when API creation timestamps
+exist (otherwise `null`, never imputed zero). Missing successful steps or shard
+identities reject a sample. Historical 23-job and current 25-job workflow blobs
+remain separate cohorts.
 
 Compare medians and retain individual shard distributions. Inspect
 `result.json` cache/image fields and `BUSTER_MATRIX_PARTITION`/step logs for

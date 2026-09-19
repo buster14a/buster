@@ -9,10 +9,12 @@
 // honest.
 //
 // The three formats spell "this definition may be dropped for another one"
-// differently — COFF selectany COMDAT, ELF STB_WEAK, Mach-O N_WEAK_DEF — and
-// all three read into ObjectSymbol.weak, which link_objects arbitrates on.
-// ELF and Mach-O write it back out; COFF cannot, because a COMDAT needs its
-// own section and this model merges sections by kind.
+// differently. ELF STB_WEAK and Mach-O N_WEAK_DEF read into ObjectSymbol.weak.
+// COFF first preserves each source section's COMDAT key, selection, parent,
+// byte range and relocation range in ObjectFile.comdats; link_objects resolves
+// those groups before ordinary weak/strong arbitration. ELF and Mach-O write
+// weak definitions back out. COFF still cannot synthesize them because a
+// COMDAT needs its own section and the producer model merges sections by kind.
 //
 // DWARF 4/5 section payloads are carried without parsing unit headers;
 // object_debug_section_kind_from_name defines the supported section family.
@@ -5475,24 +5477,15 @@ enum
     OBJECT_COFF_STORAGE_EXTERNAL = 2,
     OBJECT_COFF_STORAGE_STATIC = 3,
     OBJECT_COFF_STORAGE_WEAK_EXTERNAL = 105,
-    OBJECT_COFF_COMDAT_NONE = 0,
-    OBJECT_COFF_COMDAT_NO_DUPLICATES = 1,
-    OBJECT_COFF_COMDAT_ANY = 2,
-    OBJECT_COFF_COMDAT_SAME_SIZE = 3,
-    OBJECT_COFF_COMDAT_EXACT_MATCH = 4,
-    OBJECT_COFF_COMDAT_ASSOCIATIVE = 5,
-    OBJECT_COFF_COMDAT_LARGEST = 6,
     OBJECT_COFF_COMDAT_PENDING = 0xff,
 };
 
-// Every selection but NODUPLICATES lets the linker keep one definition and
-// drop the rest, so all of them become replaceable definitions.  SAME_SIZE
-// and EXACT_MATCH are not verified and LARGEST takes the first definition
-// rather than the biggest one: sections are merged by kind here, so no
-// per-COMDAT identity survives into the linker to compare or re-pick with.
+// Ordinary symbol arbitration still needs to know that a selected COMDAT
+// definition yields to a strong non-COMDAT definition. The dedicated COMDAT
+// phase decides which contribution survives before that arbitration runs.
 BUSTER_GLOBAL_LOCAL bool object_coff_comdat_is_replaceable(u8 selection)
 {
-    return selection >= OBJECT_COFF_COMDAT_ANY && selection <= OBJECT_COFF_COMDAT_LARGEST;
+    return selection >= OBJECT_COMDAT_SELECTION_ANY && selection <= OBJECT_COMDAT_SELECTION_LARGEST;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, Target target)
@@ -5577,6 +5570,34 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     if (read_ok)
     {
         section_comdat_selections = arena_allocate(arena, u8, section_count);
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u32), BUSTER_ALIGN_OF(u32)))
+        {
+            read_ok = false;
+        }
+    }
+    u32* section_comdat_indices = 0;
+    if (read_ok)
+    {
+        section_comdat_indices = arena_allocate(arena, u32, section_count);
+        memset(section_comdat_indices, 0xff, (u64)section_count * sizeof(*section_comdat_indices));
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(u16), BUSTER_ALIGN_OF(u16)))
+        {
+            read_ok = false;
+        }
+    }
+    u16* section_comdat_associations = 0;
+    if (read_ok)
+    {
+        section_comdat_associations = arena_allocate(arena, u16, section_count);
+        memset(section_comdat_associations, 0, (u64)section_count * sizeof(*section_comdat_associations));
+        if (!object_reader_arena_can_allocate_count(arena, section_count, sizeof(ObjectComdat), BUSTER_ALIGN_OF(ObjectComdat)))
+        {
+            read_ok = false;
+        }
+    }
+    if (read_ok)
+    {
+        result.comdats = arena_allocate(arena, ObjectComdat, section_count);
     }
     if (read_ok)
     {
@@ -5643,7 +5664,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             if (read_ok)
             {
                 section_comdat_selections[section_index] =
-                    characteristics & OBJECT_COFF_SECTION_LINK_COMDAT ? OBJECT_COFF_COMDAT_PENDING : OBJECT_COFF_COMDAT_NONE;
+                    characteristics & OBJECT_COFF_SECTION_LINK_COMDAT ? OBJECT_COFF_COMDAT_PENDING : OBJECT_COMDAT_SELECTION_NONE;
             }
             bool is_thread_local = false;
             if (read_ok)
@@ -5750,6 +5771,19 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 {
                     base = aligned_base;
                 }
+            }
+            if (read_ok && section_comdat_selections[section_index] == OBJECT_COFF_COMDAT_PENDING)
+            {
+                u32 comdat_index = result.comdat_count++;
+                section_comdat_indices[section_index] = comdat_index;
+                result.comdats[comdat_index] = (ObjectComdat){
+                    .offset = base,
+                    .size = raw_size - prefix_size,
+                    .section = (u32)kind,
+                    .source_section = section_index,
+                    .associated = OBJECT_COMDAT_ASSOCIATED_NONE,
+                    .selection = OBJECT_COMDAT_SELECTION_NONE,
+                };
             }
             if (read_ok)
             {
@@ -5913,7 +5947,26 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 if (section_number > 0 && storage == OBJECT_COFF_STORAGE_STATIC && auxiliary_count &&
                     section_comdat_selections[section_number - 1] == OBJECT_COFF_COMDAT_PENDING)
                 {
-                    section_comdat_selections[section_number - 1] = bytes.pointer[source + COFF_SYMBOL_SIZE + 14];
+                    u16 section_index = (u16)section_number - 1;
+                    u8 selection = bytes.pointer[source + COFF_SYMBOL_SIZE + 14];
+                    if (selection >= OBJECT_COMDAT_SELECTION_NO_DUPLICATES && selection < OBJECT_COMDAT_SELECTION_COUNT)
+                    {
+                        section_comdat_selections[section_index] = selection;
+                        u32 comdat_index = section_comdat_indices[section_index];
+                        if (comdat_index == UINT32_MAX)
+                        {
+                            read_ok = false;
+                        }
+                        else
+                        {
+                            result.comdats[comdat_index].selection = (ObjectComdatSelection)selection;
+                            if (selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
+                                !object_read_u16(bytes, source + COFF_SYMBOL_SIZE + 12, &section_comdat_associations[section_index]))
+                            {
+                                read_ok = false;
+                            }
+                        }
+                    }
                 }
             }
             if (read_ok)
@@ -5993,14 +6046,22 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                     if (read_ok)
                     {
                         destination_index = result.symbol_count++;
+                        u32 comdat_index = section_number ? section_comdat_indices[section_index] : UINT32_MAX;
                         result.symbols[destination_index] = (ObjectSymbol){
                             .name = string_duplicate_arena(arena, name, false),
                             .value = section_number ? symbol_base + symbol_value : 0,
                             .section = section_number ? section_kinds[section_index] : OBJECT_SECTION_UNDEFINED,
+                            .comdat = comdat_index == UINT32_MAX ? 0 : comdat_index + 1,
                             .kind = symbol_type & 0x20 ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                             .global = storage == OBJECT_COFF_STORAGE_EXTERNAL || storage == OBJECT_COFF_STORAGE_WEAK_EXTERNAL,
                             .weak = section_number != 0 && object_coff_comdat_is_replaceable(section_comdat_selections[section_index]),
                         };
+                        if (comdat_index != UINT32_MAX && result.symbols[destination_index].global &&
+                            result.comdats[comdat_index].selection != OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
+                            !result.comdats[comdat_index].key.length)
+                        {
+                            result.comdats[comdat_index].key = result.symbols[destination_index].name;
+                        }
                         symbol_map[source_index] = destination_index;
                     }
                 }
@@ -6008,6 +6069,34 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             if (read_ok)
             {
                 source_index += (u32)auxiliary_count + 1;
+            }
+        }
+    }
+    if (read_ok)
+    {
+        for (u32 comdat_index = 0; comdat_index < result.comdat_count && read_ok; comdat_index += 1)
+        {
+            ObjectComdat* comdat = result.comdats + comdat_index;
+            if (comdat->selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE)
+            {
+                u16 associated_section = section_comdat_associations[comdat->source_section];
+                if (!associated_section || associated_section > section_count ||
+                    section_comdat_indices[associated_section - 1] == UINT32_MAX ||
+                    section_comdat_indices[associated_section - 1] == comdat_index)
+                {
+                    read_ok = false;
+                }
+                else
+                {
+                    comdat->associated = section_comdat_indices[associated_section - 1];
+                }
+            }
+            else if (comdat->selection != OBJECT_COMDAT_SELECTION_NONE && !comdat->key.length)
+            {
+                // A COMDAT without an external leader cannot participate in
+                // key arbitration. Preserve the previous hard-definition
+                // behavior instead of silently discarding it.
+                comdat->selection = OBJECT_COMDAT_SELECTION_NONE;
             }
         }
     }
@@ -6035,6 +6124,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             if (section_kinds[section_index] == UINT32_MAX)
             {
                 continue;
+            }
+            u32 source_comdat_index = section_comdat_indices[section_index];
+            if (source_comdat_index != UINT32_MAX)
+            {
+                result.comdats[source_comdat_index].first_relocation = result.relocation_count;
             }
             for (u16 relocation_index = 0; relocation_index < relocation_count && read_ok; relocation_index += 1)
             {
@@ -6298,13 +6392,19 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 }
                 if (read_ok)
                 {
-                    result.relocations[result.relocation_count++] = (ObjectRelocation){
-                        .addend = addend,
-                        .offset = section_bases[section_index] + source_offset,
-                        .section = section_kinds[section_index],
-                        .symbol = symbol_map[source_symbol],
-                        .kind = kind,
-                    };
+                    u32 destination_relocation = result.relocation_count++;
+                        result.relocations[destination_relocation] = (ObjectRelocation){
+                            .addend = addend,
+                            .offset = section_bases[section_index] + source_offset,
+                            .section = section_kinds[section_index],
+                            .symbol = symbol_map[source_symbol],
+                            .comdat = source_comdat_index == UINT32_MAX ? 0 : source_comdat_index + 1,
+                            .kind = kind,
+                        };
+                        if (source_comdat_index != UINT32_MAX)
+                        {
+                            result.comdats[source_comdat_index].relocation_count += 1;
+                        }
                 }
             }
         }
@@ -6513,6 +6613,56 @@ bool object_mach_compact_decode(Arena* arena, ByteSlice text, u32 function_offse
         }
     }
 
+    return false;
+}
+
+// LLVM's Mach-O linker splits __eh_frame into CFI records before it
+// processes symbols. A symbol inside a record is therefore a misaligned
+// subsection boundary. Difference relocations use the record start and carry
+// the field's intra-record displacement in the inline addend.
+BUSTER_GLOBAL_LOCAL bool object_mach_eh_frame_record_start(ByteSlice bytes, u64 field_offset, u64 field_size, u64* record_start)
+{
+    if (!record_start || (bytes.length && !bytes.pointer) || field_offset > bytes.length || field_size > bytes.length - field_offset)
+    {
+        return false;
+    }
+    u64 offset = 0;
+    while (offset < bytes.length)
+    {
+        u64 remaining = bytes.length - offset;
+        if (remaining < sizeof(u32))
+        {
+            return false;
+        }
+        u32 length32 = 0;
+        memcpy(&length32, bytes.pointer + offset, sizeof(length32));
+        if (!length32)
+        {
+            return false;
+        }
+        u64 header_size = sizeof(u32);
+        u64 payload_size = length32;
+        if (length32 == UINT32_MAX)
+        {
+            header_size = sizeof(u32) + sizeof(u64);
+            if (remaining < header_size)
+            {
+                return false;
+            }
+            memcpy(&payload_size, bytes.pointer + offset + sizeof(u32), sizeof(payload_size));
+        }
+        if (header_size > remaining || payload_size > remaining - header_size)
+        {
+            return false;
+        }
+        u64 end = offset + header_size + payload_size;
+        if (field_offset >= offset && field_offset < end && field_size <= end - field_offset)
+        {
+            *record_start = offset;
+            return true;
+        }
+        offset = end;
+    }
     return false;
 }
 
@@ -7270,13 +7420,38 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             subtractor = &result.symbols[symbol_map[subtractor_source_symbol]];
                         }
                         u64 place = 0;
+                        u64 place_adjustment = 0;
                         if (read_ok)
                         {
                             place = section_bases[section_index] + (u64)source_offset_u32;
-                            if (place < section_bases[section_index] || subtractor->section != (u32)current_section_kind || subtractor->value != place)
+                            if (place < section_bases[section_index] || subtractor->section != (u32)current_section_kind)
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                 read_ok = false;
+                            }
+                        }
+                        // Older Buster objects named the relocated field itself.
+                        // Keep reading that shape, but require new __eh_frame
+                        // objects to name the containing CFI record boundary.
+                        if (read_ok && subtractor->value != place)
+                        {
+                            u64 record_start = 0;
+                            ByteSlice section_bytes = {
+                                .pointer = bytes.pointer + raw_offset,
+                                .length = section_size,
+                            };
+                            bool record_valid = current_section_kind == OBJECT_SECTION_UNWIND &&
+                                                object_mach_eh_frame_record_start(section_bytes, source_offset_u32, sizeof(u32), &record_start);
+                            if (!record_valid || record_start > source_offset_u32 ||
+                                section_bases[section_index] > UINT64_MAX - record_start ||
+                                subtractor->value != section_bases[section_index] + record_start)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            if (read_ok)
+                            {
+                                place_adjustment = (u64)source_offset_u32 - record_start;
                             }
                         }
                         u32 stored = 0;
@@ -7288,10 +7463,24 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                 read_ok = false;
                             }
                         }
+                        s64 canonical_addend = 0;
+                        if (read_ok)
+                        {
+                            canonical_addend = (s32)stored;
+                            if (place_adjustment > (u64)INT64_MAX || canonical_addend > INT64_MAX - (s64)place_adjustment)
+                            {
+                                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                                read_ok = false;
+                            }
+                            else
+                            {
+                                canonical_addend += (s64)place_adjustment;
+                            }
+                        }
                         if (read_ok)
                         {
                             result.relocations[result.relocation_count++] = (ObjectRelocation){
-                                .addend = (s32)stored,
+                                .addend = canonical_addend,
                                 .offset = place,
                                 .section = (u32)current_section_kind,
                                 .symbol = symbol_map[target_source_symbol],
@@ -11508,9 +11697,23 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     };
     u32 section_count = object->section_count;
     u32 prel32_count = 0;
+    u64* prel32_place_offsets = arena_allocate(arena, u64, object->relocation_count);
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
-        prel32_count += object_mach_place_difference(object, &object->relocations[relocation]);
+        ObjectRelocation* source = object->relocations + relocation;
+        prel32_place_offsets[relocation] = UINT64_MAX;
+        if (object_mach_place_difference(object, source))
+        {
+            u64 place_offset = source->offset;
+            if (object->sections[source->section].kind == OBJECT_SECTION_UNWIND &&
+                !object_mach_eh_frame_record_start(object->sections[source->section].data, source->offset, sizeof(u32), &place_offset))
+            {
+                result.error = OBJECT_ERROR_INVALID_INPUT;
+                return result;
+            }
+            prel32_place_offsets[relocation] = place_offset;
+            prel32_count += 1;
+        }
     }
     if (prel32_count > UINT32_MAX - object->symbol_count || object->symbol_count + prel32_count > 0x00ffffff)
     {
@@ -11522,7 +11725,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     u32 next_place_symbol = object->symbol_count;
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
-        prel32_place_symbols[relocation] = object_mach_place_difference(object, &object->relocations[relocation]) ? next_place_symbol++ : UINT32_MAX;
+        prel32_place_symbols[relocation] = prel32_place_offsets[relocation] != UINT64_MAX ? next_place_symbol++ : UINT32_MAX;
     }
     if (section_count > (UINT32_MAX - MACH_SEGMENT_COMMAND_SIZE) / MACH_SECTION_SIZE)
     {
@@ -11573,15 +11776,33 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
             }
             else if (place_difference)
             {
-                // Both architectures encode S + A - P as a symbol difference.
-                // Unlike x86 instruction relocations, this pair has no -4
-                // bias. Rewrite even a zero addend to discard stale slot bytes.
-                if (addend < INT32_MIN || addend > INT32_MAX)
+                // Mach-O computes target - base + inline. For CFI the base is
+                // the record boundary R, while the canonical relocation is
+                // target + A - field. Store A - (field - R).
+                u64 place_offset = prel32_place_offsets[relocation];
+                if (place_offset > source->offset || addend < INT32_MIN || addend > INT32_MAX)
                 {
                     buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                     break;
                 }
-                object_write_u32_at(&buffer, section_offsets[section] + source->offset, (u32)(s32)addend);
+                u64 adjustment = source->offset - place_offset;
+                bool wire_valid = adjustment <= (u64)INT64_MAX;
+                s64 wire_addend = 0;
+                if (wire_valid)
+                {
+                    s64 signed_adjustment = (s64)adjustment;
+                    wire_valid = addend >= INT64_MIN + signed_adjustment;
+                    if (wire_valid)
+                    {
+                        wire_addend = addend - signed_adjustment;
+                    }
+                }
+                if (!wire_valid || wire_addend < INT32_MIN || wire_addend > INT32_MAX)
+                {
+                    buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
+                    break;
+                }
+                object_write_u32_at(&buffer, section_offsets[section] + source->offset, (u32)(s32)wire_addend);
             }
             else if (addend && source->kind != OBJECT_RELOCATION_AARCH64_CALL26 && source->kind != OBJECT_RELOCATION_AARCH64_JUMP26 &&
                      source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGE21 && source->kind != OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12 &&
@@ -11653,7 +11874,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     for (u32 symbol = object->symbol_count; symbol < symbol_count; symbol += 1)
     {
         symbol_name_offsets[symbol] = (u32)(buffer.count - string_offset);
-        String8 name = string_format(arena, S8("L_buster_eh_place_{u32}"), symbol - object->symbol_count);
+        String8 name = string_format(arena, S8("L_buster_difference_base_{u32}"), symbol - object->symbol_count);
         object_buffer_write(&buffer, name.pointer, name.length);
         object_buffer_write(&buffer, &zero, 1);
     }
@@ -11686,7 +11907,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
         buffer.bytes[offset + 4] = 0x0e;
         buffer.bytes[offset + 5] = (u8)(source->section + 1);
-        object_write_u64_at(&buffer, offset + 8, section_addresses[source->section] + source->offset);
+        object_write_u64_at(&buffer, offset + 8, section_addresses[source->section] + prel32_place_offsets[relocation]);
     }
     object_write_u32_at(&buffer, 0, 0xfeedfacf);
     object_write_u32_at(&buffer, 4, object->target.cpu_arch == CPU_ARCH_X86_64 ? 0x01000007 : 0x0100000c);

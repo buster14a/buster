@@ -2664,10 +2664,6 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_compact_virtual_registers(Arena* arena,
     return mutable_count;
 }
 
-// Staged debug values double from this floor; most functions publish
-// fewer values than one growth step.
-#define MACHINE_DEBUG_VALUE_STAGE_MINIMUM 64u
-
 // Debug-value selection facts. Debug info is on by default, so every native
 // compile builds `MachineDebugValue` tables. The lookups each table entry needs
 // -- which virtual registers carry an IR value, which instruction produced a
@@ -2935,6 +2931,7 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_local_place(IrFunction* function, Ma
     return place;
 }
 
+#if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL IrValueId machine_debug_block_value(IrFunction* function, IrDebugLocal const* local, u32 block_index)
 {
     IrBlock const* block = function->blocks + block_index;
@@ -2956,28 +2953,21 @@ BUSTER_GLOBAL_LOCAL IrValueId machine_debug_block_value(IrFunction* function, Ir
     }
     return value;
 }
+#endif
 
-BUSTER_GLOBAL_LOCAL MachineDebugValue* machine_debug_values_reserve(Arena* arena, MachineDebugValue* values, u32 count, u32* capacity)
+typedef struct MachineDebugBlockValue MachineDebugBlockValue;
+struct MachineDebugBlockValue
 {
-    MachineDebugValue* result = values;
-    if (count >= *capacity)
-    {
-        u32 grown = *capacity ? *capacity * 2u : MACHINE_DEBUG_VALUE_STAGE_MINIMUM;
-        result = arena_allocate(arena, MachineDebugValue, grown);
-        if (count)
-        {
-            memcpy(result, values, sizeof(*result) * (u64)count);
-        }
-        *capacity = grown;
-    }
-    return result;
-}
+    IrValueId value;
+    u32 debug_index;
+    u32 first_instruction;
+    u32 instruction_count;
+};
 
-// Debug values in one pass over the debug locals: each local's place is
-// computed once, and the block values a place-less local contributes are
-// appended as they are found. The staged array doubles in scratch and is
-// copied into an exact-size table, so the caller's arena still receives one
-// allocation sized by the values that exist.
+// Resolve place-less locals block-major, while each block's IR and CFG rows are
+// hot, then stably group the compact results by debug-local index. The final
+// walk therefore retains the original local-major/block-major table order
+// without chasing one block and its parameter list again for every local.
 BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* program, IrFunction* ir_function,
                                                      MachineFunction* machine_function, u32 const* value_stack_slots,
                                                      u32 const* value_indirect_slots)
@@ -2986,6 +2976,7 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
     if (result && ir_function->debug_local_count)
     {
         TemporalArena scratch = scratch_begin(&arena, 1);
+        u32 debug_count = ir_function->debug_local_count;
         IrValueId* local_places = arena_allocate(scratch.arena, IrValueId, ir_function->local_count ? ir_function->local_count : 1);
         memset(local_places, 0xff, sizeof(*local_places) * (u64)ir_function->local_count);
         for (u32 instruction_index = 0; instruction_index < ir_function->instruction_count; instruction_index += 1)
@@ -2999,20 +2990,173 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
         }
         MachineDebugFacts facts = {0};
         machine_debug_facts_build(scratch.arena, ir_function, machine_function, &facts);
-        MachineDebugValue* staged = 0;
-        u32 staged_capacity = 0;
-        u32 value_count = 0;
+
+        IrValueId* debug_places = arena_allocate(scratch.arena, IrValueId, debug_count);
+        memset(debug_places, 0xff, sizeof(*debug_places) * (u64)debug_count);
+        u32* unresolved = arena_allocate(scratch.arena, u32, debug_count);
+        u32 unresolved_count = 0;
         u32 parameter_ordinal = 0;
-        for (u32 debug_index = 0; result && debug_index < ir_function->debug_local_count; debug_index += 1)
+        for (u32 debug_index = 0; debug_index < debug_count; debug_index += 1)
         {
-            IrDebugLocal* local = ir_function->debug_locals + debug_index;
+            IrDebugLocal const* local = ir_function->debug_locals + debug_index;
             if (local->id.value == IR_ID_UNDERLYING_INVALID)
             {
                 continue;
             }
             IrValueId place = machine_debug_local_place(ir_function, machine_function, &facts, local_places, local, parameter_ordinal);
             parameter_ordinal += local->is_parameter;
-            u32 emitted = 0;
+            debug_places[debug_index] = place;
+            if (place.value == IR_ID_UNDERLYING_INVALID)
+            {
+                unresolved[unresolved_count++] = debug_index;
+            }
+        }
+
+        u32 local_slot_count = 8u;
+        while (local_slot_count / 2u < unresolved_count && local_slot_count < (1u << 30))
+        {
+            local_slot_count *= 2u;
+        }
+        result = unresolved_count <= local_slot_count / 2u;
+        u32 local_slot_mask = local_slot_count - 1u;
+        u32* local_keys = arena_allocate(scratch.arena, u32, local_slot_count);
+        u32* local_heads = arena_allocate(scratch.arena, u32, local_slot_count);
+        u32* local_next = arena_allocate(scratch.arena, u32, unresolved_count ? unresolved_count : 1u);
+        memset(local_heads, 0xff, sizeof(*local_heads) * (u64)local_slot_count);
+        for (u32 unresolved_index = 0; result && unresolved_index < unresolved_count; unresolved_index += 1)
+        {
+            u32 key = ir_function->debug_locals[unresolved[unresolved_index]].id.value;
+            u32 slot = machine_debug_wide_slot(key, local_slot_mask);
+            while (local_heads[slot] != UINT32_MAX && local_keys[slot] != key)
+            {
+                slot = (slot + 1u) & local_slot_mask;
+            }
+            if (local_heads[slot] == UINT32_MAX)
+            {
+                local_keys[slot] = key;
+            }
+            local_next[unresolved_index] = local_heads[slot];
+            local_heads[slot] = unresolved_index;
+        }
+
+        u32* block_value_counts = arena_allocate(scratch.arena, u32, debug_count);
+        memset(block_value_counts, 0, sizeof(*block_value_counts) * (u64)debug_count);
+        IrValueId* block_values = arena_allocate(scratch.arena, IrValueId, unresolved_count ? unresolved_count : 1u);
+        MachineBuilderStream block_value_stream;
+        machine_stream_initialize(&block_value_stream, sizeof(MachineDebugBlockValue));
+        for (u32 block_index = 0; result && unresolved_count && block_index < ir_function->block_count; block_index += 1)
+        {
+            IrBlock const* block = ir_function->blocks + block_index;
+            IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
+            for (u32 unresolved_index = 0; unresolved_index < unresolved_count; unresolved_index += 1)
+            {
+                IrDebugLocal const* local = ir_function->debug_locals + unresolved[unresolved_index];
+                block_values[unresolved_index] = block->local_values && local->id.value < ir_function->local_count
+                                                     ? block->local_values[local->id.value]
+                                                     : IR_VALUE_ID_INVALID;
+            }
+            for (u32 parameter_index = 0; parameter_index < published->parameter_count; parameter_index += 1)
+            {
+                IrCfgParameter const* parameter = ir_function->published_cfg->parameters + published->parameter_offset + parameter_index;
+                u32 key = parameter->canonical_local.value;
+                u32 slot = machine_debug_wide_slot(key, local_slot_mask);
+                while (local_heads[slot] != UINT32_MAX && local_keys[slot] != key)
+                {
+                    slot = (slot + 1u) & local_slot_mask;
+                }
+                if (local_heads[slot] != UINT32_MAX)
+                {
+                    for (u32 unresolved_index = local_heads[slot]; unresolved_index != UINT32_MAX;
+                         unresolved_index = local_next[unresolved_index])
+                    {
+                        if (block_values[unresolved_index].value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            block_values[unresolved_index] = parameter->value;
+                        }
+                    }
+                }
+            }
+            if (published->instruction_count)
+            {
+                for (u32 unresolved_index = 0; result && unresolved_index < unresolved_count; unresolved_index += 1)
+                {
+                    IrValueId value = block_values[unresolved_index];
+                    if (value.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        u32 debug_index = unresolved[unresolved_index];
+                        result = block_value_stream.total_count < UINT32_MAX && block_value_counts[debug_index] < UINT32_MAX;
+                        if (result)
+                        {
+                            MachineDebugBlockValue* row = (MachineDebugBlockValue*)machine_stream_append(scratch.arena, &block_value_stream);
+                            *row = (MachineDebugBlockValue){
+                                .value = value,
+                                .debug_index = debug_index,
+                                .first_instruction = block->first_instruction.value,
+                                .instruction_count = published->instruction_count,
+                            };
+                            block_value_counts[debug_index] += 1u;
+                        }
+                    }
+                }
+            }
+        }
+
+        u32* block_value_offsets = arena_allocate(scratch.arena, u32, (u64)debug_count + 1u);
+        u32 block_value_total = 0;
+        for (u32 debug_index = 0; result && debug_index < debug_count; debug_index += 1)
+        {
+            block_value_offsets[debug_index] = block_value_total;
+            result = block_value_counts[debug_index] <= UINT32_MAX - block_value_total;
+            block_value_total += result ? block_value_counts[debug_index] : 0;
+        }
+        block_value_offsets[debug_count] = block_value_total;
+        result = result && block_value_total == block_value_stream.total_count;
+        MachineDebugBlockValue* ordered_block_values =
+            result ? arena_allocate(scratch.arena, MachineDebugBlockValue, block_value_total ? block_value_total : 1u) : 0;
+        u32* block_value_cursors = result ? arena_allocate(scratch.arena, u32, debug_count) : 0;
+        if (result)
+        {
+            memcpy(block_value_cursors, block_value_offsets, sizeof(*block_value_cursors) * (u64)debug_count);
+            for (MachineBuilderChunk const* chunk = block_value_stream.first; chunk; chunk = chunk->next)
+            {
+                MachineDebugBlockValue const* rows = (MachineDebugBlockValue const*)(chunk + 1);
+                for (u32 row_index = 0; row_index < chunk->count; row_index += 1)
+                {
+                    MachineDebugBlockValue row = rows[row_index];
+                    ordered_block_values[block_value_cursors[row.debug_index]++] = row;
+                }
+            }
+            for (u32 debug_index = 0; debug_index < debug_count; debug_index += 1)
+            {
+                result = result && block_value_cursors[debug_index] == block_value_offsets[debug_index + 1u];
+            }
+        }
+
+        u64 capacity64 = 0;
+        for (u32 debug_index = 0; result && debug_index < debug_count; debug_index += 1)
+        {
+            IrDebugLocal const* local = ir_function->debug_locals + debug_index;
+            if (local->id.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            u32 contribution = debug_places[debug_index].value != IR_ID_UNDERLYING_INVALID
+                                   ? 1u
+                                   : block_value_counts[debug_index] ? block_value_counts[debug_index] : 1u;
+            result = contribution <= UINT32_MAX - capacity64;
+            capacity64 += result ? contribution : 0;
+        }
+        u32 capacity = result ? (u32)capacity64 : 0;
+        MachineDebugValue* values = result ? arena_allocate(arena, MachineDebugValue, capacity ? capacity : 1u) : 0;
+        u32 value_count = 0;
+        for (u32 debug_index = 0; result && debug_index < debug_count; debug_index += 1)
+        {
+            IrDebugLocal const* local = ir_function->debug_locals + debug_index;
+            if (local->id.value == IR_ID_UNDERLYING_INVALID)
+            {
+                continue;
+            }
+            IrValueId place = debug_places[debug_index];
             if (place.value != IR_ID_UNDERLYING_INVALID)
             {
                 IrInstructionId first = IR_INSTRUCTION_ID_INVALID;
@@ -3025,62 +3169,34 @@ BUSTER_GLOBAL_LOCAL bool machine_debug_values_build(Arena* arena, IrProgram* pro
                     first = definition;
                 }
                 u32 instruction_count = first.value < ir_function->instruction_count ? ir_function->instruction_count - first.value : 0;
-                result = value_count < UINT32_MAX;
-                if (result)
+                values[value_count++] = machine_debug_value_make(program, ir_function, &facts, value_stack_slots, value_indirect_slots,
+                                                                 local->id, place,
+                                                                 first.value < ir_function->instruction_count ? first.value : UINT32_MAX,
+                                                                 instruction_count);
+            }
+            else if (block_value_counts[debug_index])
+            {
+                for (u32 block_value_index = block_value_offsets[debug_index];
+                     block_value_index < block_value_offsets[debug_index + 1u]; block_value_index += 1)
                 {
-                    staged = machine_debug_values_reserve(scratch.arena, staged, value_count, &staged_capacity);
-                    staged[value_count] = machine_debug_value_make(program, ir_function, &facts, value_stack_slots, value_indirect_slots,
-                                                                   local->id, place,
-                                                                   first.value < ir_function->instruction_count ? first.value : UINT32_MAX,
-                                                                   instruction_count);
-                    value_count += 1u;
-                    emitted += 1u;
+                    MachineDebugBlockValue const* row = ordered_block_values + block_value_index;
+                    values[value_count++] = machine_debug_value_make(program, ir_function, &facts, value_stack_slots, value_indirect_slots,
+                                                                     local->id, row->value, row->first_instruction,
+                                                                     row->instruction_count);
                 }
             }
             else
             {
-                for (u32 block_index = 0; result && block_index < ir_function->block_count; block_index += 1)
-                {
-                    IrBlock* block = ir_function->blocks + block_index;
-                    IrCfgBlock const* published = ir_function->published_cfg->blocks + block_index;
-                    IrValueId value = machine_debug_block_value(ir_function, local, block_index);
-                    if (value.value != IR_ID_UNDERLYING_INVALID && published->instruction_count)
-                    {
-                        result = value_count < UINT32_MAX;
-                        if (result)
-                        {
-                            staged = machine_debug_values_reserve(scratch.arena, staged, value_count, &staged_capacity);
-                            staged[value_count] = machine_debug_value_make(program, ir_function, &facts, value_stack_slots, value_indirect_slots,
-                                                                           local->id, value, block->first_instruction.value,
-                                                                           published->instruction_count);
-                            value_count += 1u;
-                            emitted += 1u;
-                        }
-                    }
-                }
-            }
-            if (result && !emitted)
-            {
-                result = value_count < UINT32_MAX;
-                if (result)
-                {
-                    staged = machine_debug_values_reserve(scratch.arena, staged, value_count, &staged_capacity);
-                    staged[value_count] = (MachineDebugValue){
-                        .local = local->id,
-                        .first_instruction = UINT32_MAX,
-                        .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
-                    };
-                    value_count += 1u;
-                }
+                values[value_count++] = (MachineDebugValue){
+                    .local = local->id,
+                    .first_instruction = UINT32_MAX,
+                    .kind = MACHINE_DEBUG_VALUE_UNAVAILABLE,
+                };
             }
         }
+        result = result && value_count == capacity;
         if (result)
         {
-            MachineDebugValue* values = arena_allocate(arena, MachineDebugValue, value_count ? value_count : 1);
-            if (value_count)
-            {
-                memcpy(values, staged, sizeof(*values) * (u64)value_count);
-            }
             machine_function->debug_values = values;
             machine_function->debug_value_count = value_count;
         }

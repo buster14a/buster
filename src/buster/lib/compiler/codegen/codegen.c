@@ -9470,24 +9470,69 @@ BUSTER_GLOBAL_LOCAL u32 codegen_machine_debug_physical_bucket(s32 physical_regis
                                                                                                    : CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT;
 }
 
-BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_append(u32* cursors, u32* rows, u32 bucket, u32 row)
+typedef struct CodegenMachineDebugIndexEvent CodegenMachineDebugIndexEvent;
+struct CodegenMachineDebugIndexEvent
 {
-    if (rows)
-    {
-        rows[cursors[bucket]] = row;
-    }
-    cursors[bucket] += 1u;
+    u32 bucket;
+    u32 row;
+};
+
+BUSTER_CT_CHECK(CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT == 64u);
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_event_append(Arena* arena, MachineBuilderStream* events, u32* counts, u32 bucket, u32 row)
+{
+    CodegenMachineDebugIndexEvent* event = (CodegenMachineDebugIndexEvent*)machine_stream_append(arena, events);
+    *event = (CodegenMachineDebugIndexEvent){.bucket = bucket, .row = row};
+    counts[bucket] += 1u;
 }
 
-// One pass over the function that either counts bucket entries or writes them,
-// selected by whether the row arrays are present. Both passes visit the same
-// rows in the same order, so the second one fills every bucket ascending.
-BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_scan(MachineFunction const* function, MachineStackPlacement const* placement,
-                                                           CodegenMachineDebugIndex const* index, u8 const* referenced, u32* subject_cursors,
-                                                           u32* physical_cursors, u32* subject_rows, u32* physical_rows)
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_subject_event(Arena* arena, MachineBuilderStream* events, u32* counts, u32* last_rows,
+                                                                    u32 subject, u32 row)
+{
+    if (last_rows[subject] != row)
+    {
+        last_rows[subject] = row;
+        codegen_machine_debug_index_event_append(arena, events, counts, subject, row);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_physical_event(Arena* arena, MachineBuilderStream* events, u32* counts,
+                                                                     u64* seen, bool* unmapped_seen, s32 physical_register, u32 row)
+{
+    u32 bucket = codegen_machine_debug_physical_bucket(physical_register);
+    bool append = false;
+    if (bucket < 64u)
+    {
+        u64 bit = UINT64_C(1) << bucket;
+        append = (*seen & bit) == 0;
+        *seen |= bit;
+    }
+    else
+    {
+        append = !*unmapped_seen;
+        *unmapped_seen = true;
+    }
+    if (append)
+    {
+        codegen_machine_debug_index_event_append(arena, events, counts, bucket, row);
+    }
+}
+
+// Decode each MIR row once. Compact events retain source order, so a stable
+// bucket scatter below produces the same ascending row lists as the old
+// count-and-fill pair of whole-function scans. A row appears only once in a
+// subject or physical bucket: replay processes the complete row and all of its
+// edits at that stop, so duplicate stops carried no information.
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_collect(Arena* arena, MachineFunction const* function,
+                                                              MachineStackPlacement const* placement,
+                                                              CodegenMachineDebugIndex const* index, u8 const* referenced,
+                                                              u32* subject_last_rows, u32* subject_counts, u32* physical_counts,
+                                                              MachineBuilderStream* subject_events, MachineBuilderStream* physical_events)
 {
     for (u32 row = 0; row < function->instruction_count; row += 1)
     {
+        u64 physical_seen = 0;
+        bool unmapped_seen = false;
         MachineInstruction const* instruction = function->instructions + row;
         MachineOpcodeRow opcode_row = machine_instruction_opcode_row(function, instruction);
         u64 clobbers = opcode_row.clobber_mask;
@@ -9495,7 +9540,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_scan(MachineFunction const*
         {
             u32 physical = trailing_zeroes_u64(clobbers);
             clobbers &= clobbers - 1u;
-            codegen_machine_debug_index_append(physical_cursors, physical_rows, codegen_machine_debug_physical_bucket((s32)physical), row);
+            codegen_machine_debug_index_physical_event(arena, physical_events, physical_counts, &physical_seen, &unmapped_seen,
+                                                        (s32)physical, row);
         }
         MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
         for (u32 operand_index = 0; info && operand_index < info->operand_count; operand_index += 1)
@@ -9505,12 +9551,14 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_scan(MachineFunction const*
             if (role != MACHINE_OPERAND_ROLE_NONE && machine_ref_kind(operand) == MACHINE_REF_VIRTUAL_REGISTER &&
                 machine_ref_payload(operand) < function->virtual_register_count && referenced[machine_ref_payload(operand)])
             {
-                codegen_machine_debug_index_append(subject_cursors, subject_rows, machine_ref_payload(operand), row);
+                codegen_machine_debug_index_subject_event(arena, subject_events, subject_counts, subject_last_rows,
+                                                           machine_ref_payload(operand), row);
             }
             if (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE)
             {
                 u32 physical = placement->operand_registers[(u64)row * MACHINE_INSTRUCTION_OPERAND_COUNT + operand_index];
-                codegen_machine_debug_index_append(physical_cursors, physical_rows, codegen_machine_debug_physical_bucket((s32)physical), row);
+                codegen_machine_debug_index_physical_event(arena, physical_events, physical_counts, &physical_seen, &unmapped_seen,
+                                                            (s32)physical, row);
             }
         }
         for (u32 edit_index = index->row_edits[row]; edit_index < index->row_edits[row + 1u]; edit_index += 1)
@@ -9519,18 +9567,31 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_scan(MachineFunction const*
             if ((edit->kind == MACHINE_EDIT_SPILL || edit->kind == MACHINE_EDIT_RELOAD) && edit->subject < function->virtual_register_count &&
                 referenced[edit->subject])
             {
-                codegen_machine_debug_index_append(subject_cursors, subject_rows, edit->subject, row);
+                codegen_machine_debug_index_subject_event(arena, subject_events, subject_counts, subject_last_rows, edit->subject, row);
             }
             if (codegen_machine_debug_edit_writes_register(edit))
             {
-                codegen_machine_debug_index_append(physical_cursors, physical_rows, codegen_machine_debug_physical_bucket((s32)edit->location),
-                                                   row);
+                codegen_machine_debug_index_physical_event(arena, physical_events, physical_counts, &physical_seen, &unmapped_seen,
+                                                            (s32)edit->location, row);
             }
             if (edit->kind == MACHINE_EDIT_COPY)
             {
-                codegen_machine_debug_index_append(physical_cursors, physical_rows, codegen_machine_debug_physical_bucket((s32)edit->subject),
-                                                   row);
+                codegen_machine_debug_index_physical_event(arena, physical_events, physical_counts, &physical_seen, &unmapped_seen,
+                                                            (s32)edit->subject, row);
             }
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_scatter(MachineBuilderStream const* events, u32* cursors, u32* rows)
+{
+    for (MachineBuilderChunk const* chunk = events->first; chunk; chunk = chunk->next)
+    {
+        CodegenMachineDebugIndexEvent const* entries = (CodegenMachineDebugIndexEvent const*)(chunk + 1);
+        for (u32 entry = 0; entry < chunk->count; entry += 1)
+        {
+            CodegenMachineDebugIndexEvent event = entries[entry];
+            rows[cursors[event.bucket]++] = event.row;
         }
     }
 }
@@ -9540,6 +9601,8 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
 {
     u32 row_count = function->instruction_count;
     u32 edit_count = placement->edit_count;
+    u32 spill_edits = 0;
+    u32 remat_edits = 0;
     // A whole-function replay consumes every edit as the BEFORE or AFTER part
     // of the row it walks, and rejects the stream when any edit is left over.
     // The same fact is a sorted, in-range, two-phase check made once here.
@@ -9547,7 +9610,10 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
     MachinePoint previous_point = 0;
     for (u32 edit_index = 0; edit_index < edit_count; edit_index += 1)
     {
-        MachinePoint point = placement->edits[edit_index].point;
+        MachineEdit const* edit = placement->edits + edit_index;
+        MachinePoint point = edit->point;
+        spill_edits += edit->kind == MACHINE_EDIT_SPILL;
+        remat_edits += edit->kind == MACHINE_EDIT_REMATERIALIZE;
         MachinePointPhase phase = machine_point_phase(point);
         index->edits_valid = index->edits_valid && (phase == MACHINE_POINT_BEFORE || phase == MACHINE_POINT_AFTER) &&
                              machine_point_instruction(point) < row_count && point >= previous_point;
@@ -9567,17 +9633,21 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
     // Only virtual registers a debug value names are ever replayed. Indexing
     // the rest would scatter several writes per row across the whole register
     // file for lists nothing reads.
-    u8* referenced = arena_allocate(arena, u8, function->virtual_register_count ? function->virtual_register_count : 1u);
+    TemporalArena event_scratch = scratch_begin(&arena, 1);
+    u8* referenced = arena_allocate(event_scratch.arena, u8, function->virtual_register_count ? function->virtual_register_count : 1u);
     memset(referenced, 0, sizeof(u8) * (u64)(function->virtual_register_count ? function->virtual_register_count : 1u));
+    u32 referenced_count = 0;
     for (u32 value_index = 0; value_index < function->debug_value_count; value_index += 1)
     {
         MachineDebugValue const* value = function->debug_values + value_index;
         for (u32 piece_index = 0; piece_index < BUSTER_MIN(value->piece_count, (u8)BUSTER_ARRAY_LENGTH(value->pieces)); piece_index += 1)
         {
             MachineRef piece = value->pieces[piece_index];
-            if (machine_ref_kind(piece) == MACHINE_REF_VIRTUAL_REGISTER && machine_ref_payload(piece) < function->virtual_register_count)
+            u32 payload = machine_ref_payload(piece);
+            if (machine_ref_kind(piece) == MACHINE_REF_VIRTUAL_REGISTER && payload < function->virtual_register_count && !referenced[payload])
             {
-                referenced[machine_ref_payload(piece)] = 1u;
+                referenced[payload] = 1u;
+                referenced_count += 1u;
             }
         }
     }
@@ -9585,11 +9655,21 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
     u32 physical_bucket_count = CODEGEN_MACHINE_DEBUG_PHYSICAL_LIMIT + 1u;
     index->subject_offsets = arena_allocate(arena, u32, (u64)subject_bucket_count + 1u);
     index->physical_offsets = arena_allocate(arena, u32, (u64)physical_bucket_count + 1u);
-    u32* subject_cursors = arena_allocate(arena, u32, subject_bucket_count);
-    u32* physical_cursors = arena_allocate(arena, u32, physical_bucket_count);
+    u32* subject_cursors = arena_allocate(event_scratch.arena, u32, subject_bucket_count);
+    u32* physical_cursors = arena_allocate(event_scratch.arena, u32, physical_bucket_count);
     memset(subject_cursors, 0, sizeof(u32) * (u64)subject_bucket_count);
     memset(physical_cursors, 0, sizeof(u32) * (u64)physical_bucket_count);
-    codegen_machine_debug_index_scan(function, placement, index, referenced, subject_cursors, physical_cursors, 0, 0);
+    MachineBuilderStream subject_events;
+    MachineBuilderStream physical_events;
+    machine_stream_initialize(&subject_events, sizeof(CodegenMachineDebugIndexEvent));
+    machine_stream_initialize(&physical_events, sizeof(CodegenMachineDebugIndexEvent));
+    if (referenced_count)
+    {
+        u32* subject_last_rows = arena_allocate(event_scratch.arena, u32, subject_bucket_count);
+        memset(subject_last_rows, 0xff, sizeof(*subject_last_rows) * (u64)subject_bucket_count);
+        codegen_machine_debug_index_collect(event_scratch.arena, function, placement, index, referenced, subject_last_rows, subject_cursors,
+                                            physical_cursors, &subject_events, &physical_events);
+    }
     u32 subject_total = 0;
     for (u32 bucket = 0; bucket < subject_bucket_count; bucket += 1)
     {
@@ -9610,15 +9690,9 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_debug_index_build(Arena* arena, Machine
     index->physical_offsets[physical_bucket_count] = physical_total;
     index->subject_rows = arena_allocate(arena, u32, subject_total ? subject_total : 1u);
     index->physical_rows = arena_allocate(arena, u32, physical_total ? physical_total : 1u);
-    codegen_machine_debug_index_scan(function, placement, index, referenced, subject_cursors, physical_cursors, index->subject_rows,
-                                     index->physical_rows);
-    u32 spill_edits = 0;
-    u32 remat_edits = 0;
-    for (u32 edit_index = 0; edit_index < edit_count; edit_index += 1)
-    {
-        spill_edits += placement->edits[edit_index].kind == MACHINE_EDIT_SPILL;
-        remat_edits += placement->edits[edit_index].kind == MACHINE_EDIT_REMATERIALIZE;
-    }
+    codegen_machine_debug_index_scatter(&subject_events, subject_cursors, index->subject_rows);
+    codegen_machine_debug_index_scatter(&physical_events, physical_cursors, index->physical_rows);
+    scratch_end(event_scratch);
     u32* home_keys = arena_allocate(arena, u32, spill_edits ? spill_edits : 1u);
     u32* home_rows = arena_allocate(arena, u32, spill_edits ? spill_edits : 1u);
     u32* remat_keys = arena_allocate(arena, u32, remat_edits ? remat_edits : 1u);

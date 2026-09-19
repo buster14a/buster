@@ -4896,6 +4896,7 @@ struct CIrSsaEvent
 struct CIrDirectSsa
 {
     CIrSsaSlot* slots;
+    u32* slot_indices;
     CIrSsaRead* reads;
     CIrSsaEvent* events;
     CIrSsaLocal* locals;
@@ -5017,26 +5018,29 @@ BUSTER_C_INTERNAL void c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
     u32 capacity = ssa->slot_capacity ? ssa->slot_capacity * 2 : 64;
     IR_CONSTRUCTION_RECORD(SSA_SLOT_GROWS, 1);
     CIrSsaSlot* slots = arena_allocate(builder->scratch_arena, CIrSsaSlot, capacity);
+    u32* slot_indices = arena_allocate(builder->scratch_arena, u32, capacity / 2);
     memset(slots, 0, sizeof(*slots) * capacity);
     IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_GROWS, ssa->predecessor_offsets != 0);
-    IR_CONSTRUCTION_RECORD(SSA_SLOT_GROW_VISITS, ssa->slot_capacity);
+    IR_CONSTRUCTION_RECORD(SSA_SLOT_GROW_VISITS, ssa->slot_count);
     IR_CONSTRUCTION_RECORD(SSA_SLOT_CLEAR_BYTES, sizeof(*slots) * (u64)capacity);
-    for (u32 index = 0; index < ssa->slot_capacity; index += 1)
+    // Rehash only occupied rows. The compact physical-slot index follows key
+    // insertion order, so growth remains deterministic without scanning the
+    // half-empty hash table.
+    for (u32 index = 0; index < ssa->slot_count; index += 1)
     {
-        CIrSsaSlot entry = ssa->slots[index];
-        if (entry.block_plus_one)
+        CIrSsaSlot entry = ssa->slots[ssa->slot_indices[index]];
+        u32 slot = c_ir_ssa_hash(entry.block_plus_one, entry.local, capacity - 1);
+        IR_CONSTRUCTION_RECORD(SSA_SLOT_REHASH_PROBES, 1);
+        while (slots[slot].block_plus_one)
         {
-            u32 slot = c_ir_ssa_hash(entry.block_plus_one, entry.local, capacity - 1);
             IR_CONSTRUCTION_RECORD(SSA_SLOT_REHASH_PROBES, 1);
-            while (slots[slot].block_plus_one)
-            {
-                IR_CONSTRUCTION_RECORD(SSA_SLOT_REHASH_PROBES, 1);
-                slot = (slot + 1) & (capacity - 1);
-            }
-            slots[slot] = entry;
+            slot = (slot + 1) & (capacity - 1);
         }
+        slots[slot] = entry;
+        slot_indices[index] = slot;
     }
     ssa->slots = slots;
+    ssa->slot_indices = slot_indices;
     ssa->slot_capacity = capacity;
 }
 
@@ -5076,7 +5080,7 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
             }
         }
         ssa->slots[slot] = (CIrSsaSlot){.block_plus_one = block + 1, .local = local, .value = IR_VALUE_ID_INVALID};
-        ssa->slot_count += 1;
+        ssa->slot_indices[ssa->slot_count++] = slot;
         IR_CONSTRUCTION_RECORD(SSA_SLOT_INSERTS, 1);
     }
     return ssa->slots + slot;
@@ -7275,8 +7279,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_atomic_aggregate_conversion(CIntegerIrBuil
 
 // Reinterpret equal-sized representations through typed views of a private
 // slot; every load/store remains type-correct without inventing an IR bitcast.
-// Compatible vector typedefs use this for their identical lane representation,
-// and Darwin x86 compiler-rt calls use it for the integer carrier of binary16.
+// Compatible vector typedefs and explicit equal-size vector casts use this,
+// as do Darwin x86 compiler-rt calls for the integer carrier of binary16.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_representation_alias_conversion(CIntegerIrBuilder* builder, IrValueId value, IrTypeId target_type,
                                                                         IrSourceRange source)
 {
@@ -21898,10 +21902,28 @@ BUSTER_C_INTERNAL bool c_ir_apply_operation(CIntegerIrBuilder* builder, CConditi
         u32 first = *value_count - 1;
         IrType* source_type = ir_type_from_id(&builder->program->types, builder->function->values[values[first].value].canonical_type);
         IrType* destination_type = ir_type_from_id(&builder->program->types, cast_type);
-        IrValueId result = destination_type && destination_type->kind == IR_TYPE_VOID ? c_ir_emit_integer_value(builder, 0, false, (CToken){0})
-                           : source_type && source_type->kind == IR_TYPE_ARRAY && destination_type && destination_type->kind == IR_TYPE_POINTER
-                               ? c_ir_decay_array(builder, values[first], cast_type, source)
-                               : c_ir_emit_cast(builder, values[first], cast_type, source);
+        IrValueId result;
+        if (destination_type && destination_type->kind == IR_TYPE_VOID)
+        {
+            result = c_ir_emit_integer_value(builder, 0, false, (CToken){0});
+        }
+        else if (source_type && source_type->kind == IR_TYPE_ARRAY && destination_type && destination_type->kind == IR_TYPE_POINTER)
+        {
+            result = c_ir_decay_array(builder, values[first], cast_type, source);
+        }
+        else if (source_type && destination_type && source_type != destination_type &&
+                 source_type->kind == IR_TYPE_VECTOR && destination_type->kind == IR_TYPE_VECTOR &&
+                 source_type->layout.resolved && destination_type->layout.resolved && source_type->layout.size == destination_type->layout.size)
+        {
+            // GNU explicit vector casts reinterpret the complete representation,
+            // independently of lane shape. Implicit conversions keep the stricter
+            // compatible-lane rules in c_ir_emit_cast.
+            result = c_ir_emit_representation_alias_conversion(builder, values[first], cast_type, source);
+        }
+        else
+        {
+            result = c_ir_emit_cast(builder, values[first], cast_type, source);
+        }
         if (result.value == IR_ID_UNDERLYING_INVALID)
         {
             return false;

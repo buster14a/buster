@@ -49,6 +49,10 @@ typedef enum CompilerDriverLanguage
     COMPILER_DRIVER_LANGUAGE_SPIRV_BINARY,
     COMPILER_DRIVER_LANGUAGE_METAL_AIR,
     COMPILER_DRIVER_LANGUAGE_ASSEMBLY,
+    // C tokens whose preprocessing directives and macro expansion have
+    // already completed (`.i` / `-x cpp-output`). Kept after the existing
+    // values so adding the phase distinction does not renumber the API.
+    COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT,
     COMPILER_DRIVER_LANGUAGE_COUNT,
 } CompilerDriverLanguage;
 
@@ -79,6 +83,11 @@ typedef struct CompilerDriverInvocation CompilerDriverInvocation;
 struct CompilerDriverInvocation
 {
     String8* input_paths;
+    // Parsed command lines snapshot the active -x selection beside
+    // every input. When this pointer is non-null it is authoritative
+    // and contains exactly input_count entries. API-built legacy
+    // invocations leave it null and continue to use language globally.
+    CompilerDriverLanguage* input_languages;
     String8* include_paths;
     String8* system_include_paths;
     // Parsed command lines populate only this ordered stream. The separate
@@ -117,6 +126,8 @@ struct CompilerDriverInvocation
     GpuTarget gpu_target;
     Target target;
     u32 input_count;
+    // Zero when input_languages is null; otherwise exactly input_count.
+    u32 input_language_count;
     // -fcompile-jobs=N: opt-in lanes for consecutive native C link inputs.
     // Zero/default is one. The caller owns its total process/thread budget;
     // this does not infer available RAM from the TU's virtual reservation.
