@@ -1,0 +1,176 @@
+name: Issue 84 final hardening v2
+
+on:
+  push:
+    branches: [fix/84-transactional-hermetic-spawn]
+    paths:
+      - '.github/workflows/issue84-follow-up-v2.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: issue84-final-hardening-v2
+  cancel-in-progress: false
+
+jobs:
+  apply-test-rebind:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out integrated issue branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: fix/84-transactional-hermetic-spawn
+          fetch-depth: 0
+
+      - name: Apply reviewed hardening patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/issue84-follow-up.patch.gz.b64" <<'PATCH'
+          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
+          PATCH
+          base64 --decode "$RUNNER_TEMP/issue84-follow-up.patch.gz.b64" | gzip -d > "$RUNNER_TEMP/issue84-follow-up.patch"
+          printf '%s  %s\n' bf6ff5339da9993c877cfe3b2d6bb0009322616f5f3395e91106b7d9bf0bf88e "$RUNNER_TEMP/issue84-follow-up.patch" | sha256sum --check --strict
+          git apply --check --whitespace=error-all "$RUNNER_TEMP/issue84-follow-up.patch"
+          git apply "$RUNNER_TEMP/issue84-follow-up.patch"
+          git diff --check
+
+      - name: Build and run registered Linux tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          build/build generate --cc clang --ci --linker DEFAULT
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          BUSTER_TEST_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=2 build/build build --config Debug -t ide
+          BUSTER_TEST_JOBS=1 build/Debug/ide test --ci=1
+
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: external/doom
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: external/musl
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Rebind exact hardened tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
+          set +e
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)" > "$RUNNER_TEMP/pre-refresh-external.out" 2> "$RUNNER_TEMP/pre-refresh-external.err"
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/pre-refresh-external.out"
+          cat "$RUNNER_TEMP/pre-refresh-external.err" >&2
+          if [[ $status -ne 0 ]]; then
+            grep -F 'external closure source identity mismatch:' "$RUNNER_TEMP/pre-refresh-external.err"
+          fi
+          python3 tools/native_retirement_rebind.py refresh --repo-root "$(pwd)" | tee "$RUNNER_TEMP/issue84-rebind.json"
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)"
+          python3 tools/native_retirement_rebind.py refresh --repo-root "$(pwd)" | tee "$RUNNER_TEMP/issue84-rebind-idempotent.json"
+          grep -F '"status": "current"' "$RUNNER_TEMP/issue84-rebind-idempotent.json"
+          python3 tools/native_retirement_rebind_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)"
+          git diff --check
+
+      - name: Commit final issue solution
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/issue84-follow-up.yml .github/workflows/issue84-follow-up-v2.yml
+          git add \
+            .github/workflows/issue84-follow-up.yml \
+            .github/workflows/issue84-follow-up-v2.yml \
+            src/buster/lib/os.c \
+            src/buster/apps/ide/ide.c \
+            src/buster/tests/os_test.c \
+            docs/native-retirement-dependencies-v1.json \
+            docs/native-retirement-census.md \
+            tools/native_retirement_census.c \
+            tools/native_retirement_contract.py
+          cat > "$RUNNER_TEMP/expected-paths" <<'PATHS'
+          .github/workflows/issue84-follow-up-v2.yml
+          .github/workflows/issue84-follow-up.yml
+          docs/native-retirement-census.md
+          docs/native-retirement-dependencies-v1.json
+          src/buster/apps/ide/ide.c
+          src/buster/lib/os.c
+          src/buster/tests/os_test.c
+          tools/native_retirement-census.c
+          tools/native_retirement_contract.py
+          PATHS
+          git diff --cached --name-only | sort > "$RUNNER_TEMP/actual-paths"
+          sort "$RUNNER_TEMP/expected-paths" -o "$RUNNER_TEMP/expected-paths"
+          diff -u "$RUNNER_TEMP/expected-paths" "$RUNNER_TEMP/actual-paths"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(os): complete transactional spawn hardening'
+          git push origin HEAD:fix/84-transactional-hermetic-spawn
