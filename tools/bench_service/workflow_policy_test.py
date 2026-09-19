@@ -9,14 +9,78 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
+SERVICE = ROOT / "tools" / "bench_service"
 DISPATCH = WORKFLOWS / "9700x-service-dispatch.yml"
+POLICY = WORKFLOWS / "bench-service-policy.yml"
+EXCLUSIVE_TEST = SERVICE / "exclusive_admission_test.c"
 OLD_AUDIT = WORKFLOWS / "zen5-audit.yml"
+
+SOURCE_REQUIREMENTS = {
+    "exclusive_admission.c": (
+        "BqError bq_submit_exclusive",
+        "queue->needs_reconciliation",
+        "bq_pending(&queue->state)",
+        "bq_append(queue, BQ_SUBMIT",
+    ),
+    "main.c": (
+        '#include "exclusive_admission.c"',
+        "operation = BQ_OP_SUBMIT_EXCLUSIVE",
+    ),
+    "protocol.c": (
+        "BQ_OP_SUBMIT_EXCLUSIVE",
+        "bq_submit_exclusive(queue",
+    ),
+    "transport.c": (
+        "operation == BQ_OP_SUBMIT_EXCLUSIVE",
+    ),
+}
 
 
 def main() -> int:
     errors: list[str] = []
     if OLD_AUDIT.exists():
         errors.append("zen5-audit.yml still permits checked-out code on the benchmark host")
+
+    if not POLICY.is_file():
+        errors.append("missing bench-service-policy.yml")
+    else:
+        policy = POLICY.read_text(encoding="utf-8")
+        if re.search(r"(?m)^\s+(?:paths|paths-ignore):\s*$", policy):
+            errors.append("required workflow-policy check must run for every pull request")
+        for marker in (
+            "pull_request:",
+            "merge_group:",
+            "types: [checks_requested]",
+            "tools/bench_service/exclusive_admission_test.c",
+            '"$RUNNER_TEMP/exclusive-admission-test"',
+        ):
+            if marker not in policy:
+                errors.append(f"workflow-policy check is missing marker: {marker}")
+
+    if not EXCLUSIVE_TEST.is_file():
+        errors.append("missing exclusive_admission_test.c")
+    else:
+        test = EXCLUSIVE_TEST.read_text(encoding="utf-8")
+        for marker in (
+            "bq_submit_exclusive",
+            "BQ_UNSUPPORTED",
+            "BQ_CONFLICT",
+            "BQ_BUSY",
+            "BQ_RECONCILIATION_REQUIRED",
+        ):
+            if marker not in test:
+                errors.append(f"exclusive-admission regression test is missing marker: {marker}")
+
+    for name, markers in SOURCE_REQUIREMENTS.items():
+        path = SERVICE / name
+        if not path.is_file():
+            errors.append(f"missing service source: {name}")
+            continue
+        source = path.read_text(encoding="utf-8")
+        for marker in markers:
+            if marker not in source:
+                errors.append(f"{name} is missing exclusive-admission marker: {marker}")
+
     if not DISPATCH.is_file():
         errors.append("missing 9700x-service-dispatch.yml")
         return report(errors)
@@ -35,6 +99,7 @@ def main() -> int:
     required = (
         "workflow_dispatch:",
         "environment: benchmark-9700x",
+        "github.ref == 'refs/heads/main'",
         "vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true'",
         "runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
         "group: buster-9700x-service-dispatch",

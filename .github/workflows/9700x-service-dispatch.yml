@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   submit:
-    if: ${{ vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true' }}
     environment: benchmark-9700x
     runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
     timeout-minutes: 120
