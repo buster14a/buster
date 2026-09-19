@@ -2848,6 +2848,7 @@ IrAbiConvention ir_abi_convention_for_target(Target target)
 
 IrProgram ir_program_initialize(Arena* arena, u32 module_count, u32 type_capacity, u32 symbol_capacity, u32 source_capacity)
 {
+    IR_CONSTRUCTION_RECORD(PROGRAM_STARTS, 1);
     IrProgram program = {0};
     if (arena)
     {
@@ -4078,6 +4079,7 @@ bool ir_abi_value_is_aarch64_even_integer_pair(IrProgram* program, IrTypeId type
 
 IrTypeId ir_program_add_type(IrProgram* program, IrType type)
 {
+    IR_CONSTRUCTION_RECORD(TYPE_APPENDS, 1);
     IrTypeId result;
     if (!program || program->types.count >= program->types.capacity)
     {
@@ -4098,6 +4100,7 @@ IrTypeId ir_program_add_type(IrProgram* program, IrType type)
 
 IrSymbolId ir_program_add_symbol(IrProgram* program, IrSymbol symbol)
 {
+    IR_CONSTRUCTION_RECORD(SYMBOL_APPENDS, 1);
     IrSymbolId result;
     if (!program || program->symbols.count >= program->symbols.capacity)
     {
@@ -4172,6 +4175,7 @@ IrFunction* ir_module_add_function(Arena* arena, IrModule* module, IrFunction fu
 
 IrGlobal* ir_module_add_global(Arena* arena, IrModule* module, IrGlobal global)
 {
+    IR_CONSTRUCTION_RECORD(GLOBAL_APPENDS, 1);
     if (!arena || !module)
     {
         return 0;
