@@ -532,9 +532,9 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 if (function->state == IR_FUNCTION_LOWERED)
                 {
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
-                    u32 instructions_before = function->instruction_count;
+                    u64 promoted_before = module->local_promotion.promoted_locals;
                     ir_promote_function(program, function, &module->local_promotion);
-                    if (linear_orders && function->instruction_count != instructions_before)
+                    if (linear_orders && module->local_promotion.promoted_locals != promoted_before)
                     {
                         linear_orders[index] = false;
                     }
