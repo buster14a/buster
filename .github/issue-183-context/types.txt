@@ -1,0 +1,471 @@
+===== src/buster/lib/compiler/frontend/c/c.h =====
+--- lines 583-1051 ---
+   583:     u32 alignment;
+   584: };
+   585: 
+   586: typedef struct CPreprocessResult CPreprocessResult;
+   587: struct CPreprocessResult
+   588: {
+   589:     CToken* tokens;
+   590:     // Base of the spelling space every token offset points into.
+   591:     char8 const* spelling_base;
+   592:     // Null for hand-built results; token locations then recover as zero.
+   593:     CSourceMapRecovery* recovery;
+   594:     // The identifier intern table the tokens' symbol ids point into; arena
+   595:     // resident so parse and lowering can intern on demand. Null for
+   596:     // hand-built results.
+   597:     CSymbolTable* symbols;
+   598:     CDiagnostic* diagnostics;
+   599:     String8* files;
+   600:     // Sorted (token index, alignment) spans replacing a per-token field;
+   601:     // null with count 0 for hand-built results, which query as alignment 0.
+   602:     CPackAlignment* pack_changes;
+   603:     // The data layout and the measurement tables; see CPreprocessDetail for
+   604:     // why they are not members here. Null for hand-built results.
+   605:     CPreprocessDetail* detail;
+   606:     Target target;
+   607:     u64 token_count;
+   608:     u64 diagnostic_count;
+   609:     u64 error_count;
+   610:     u64 warning_count;
+   611:     u64 diagnostic_capacity;
+   612:     u32 file_count;
+   613:     CPreprocessDialect dialect;
+   614:     u32 pack_change_count;
+   615: };
+   616: 
+   617: // Hand-built results carry no detail block and read as an all-zero one, which
+   618: // is exactly what their inline members held before the split.
+   619: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CPreprocessDetail const* c_preprocess_detail(CPreprocessResult preprocess)
+   620: {
+   621:     static CPreprocessDetail const c_preprocess_detail_empty = {0};
+   622:     return preprocess.detail ? preprocess.detail : &c_preprocess_detail_empty;
+   623: }
+   624: 
+   625: typedef u32 CIdUnderlying;
+   626: 
+   627: typedef struct CNodeId CNodeId;
+   628: struct CNodeId
+   629: {
+   630:     CIdUnderlying value;
+   631: };
+   632: 
+   633: typedef struct CTypeId CTypeId;
+   634: struct CTypeId
+   635: {
+   636:     CIdUnderlying value;
+   637: };
+   638: 
+   639: typedef struct CEntityId CEntityId;
+   640: struct CEntityId
+   641: {
+   642:     CIdUnderlying value;
+   643: };
+   644: 
+   645: typedef struct CScopeId CScopeId;
+   646: struct CScopeId
+   647: {
+   648:     CIdUnderlying value;
+   649: };
+   650: 
+   651: #define C_ID_UNDERLYING_INVALID UINT32_MAX
+   652: #define C_NODE_ID_INVALID ((CNodeId){.value = C_ID_UNDERLYING_INVALID})
+   653: #define C_TYPE_ID_INVALID ((CTypeId){.value = C_ID_UNDERLYING_INVALID})
+   654: #define C_ENTITY_ID_INVALID ((CEntityId){.value = C_ID_UNDERLYING_INVALID})
+   655: #define C_SCOPE_ID_INVALID ((CScopeId){.value = C_ID_UNDERLYING_INVALID})
+   656: #define C_ARRAY_BOUND_INVALID UINT32_MAX
+   657: 
+   658: BUSTER_CT_CHECK(sizeof(CNodeId) == sizeof(CIdUnderlying));
+   659: BUSTER_CT_CHECK(sizeof(CTypeId) == sizeof(CIdUnderlying));
+   660: BUSTER_CT_CHECK(sizeof(CEntityId) == sizeof(CIdUnderlying));
+   661: BUSTER_CT_CHECK(sizeof(CScopeId) == sizeof(CIdUnderlying));
+   662: 
+   663: typedef enum CTypeKind
+   664: {
+   665:     C_TYPE_INVALID,
+   666:     C_TYPE_VOID,
+   667:     C_TYPE_BOOL,
+   668:     C_TYPE_CHAR,
+   669:     C_TYPE_SIGNED_CHAR,
+   670:     C_TYPE_UNSIGNED_CHAR,
+   671:     C_TYPE_SHORT,
+   672:     C_TYPE_UNSIGNED_SHORT,
+   673:     C_TYPE_INT,
+   674:     C_TYPE_UNSIGNED_INT,
+   675:     C_TYPE_LONG,
+   676:     C_TYPE_UNSIGNED_LONG,
+   677:     C_TYPE_LONG_LONG,
+   678:     C_TYPE_UNSIGNED_LONG_LONG,
+   679:     C_TYPE_INT128,
+   680:     C_TYPE_UNSIGNED_INT128,
+   681:     // IEEE-754 binary16, spelled `_Float16`.  It is a real type, not a
+   682:     // storage-only alias: it has its own two-byte layout, its own rank below
+   683:     // `float` in the usual arithmetic conversions, and its own place in the
+   684:     // vector element ladder.  Clang's `avx512fp16intrin.h` declares
+   685:     // `__m512h` out of it, which is what brought it in.
+   686:     C_TYPE_FLOAT16,
+   687:     C_TYPE_BFLOAT16,
+   688:     C_TYPE_FLOAT,
+   689:     C_TYPE_DOUBLE,
+   690:     C_TYPE_LONG_DOUBLE,
+   691:     // The three C99 complex types and the `_Float16 _Complex` extension
+   692:     // beside them. Each is laid out as two contiguous elements of its
+   693:     // underlying real type -- real part first -- which is both what the
+   694:     // psABIs specify and what lets the IR model them as two-field
+   695:     // aggregates (see c_ir_scalar_type). Clang's `_mm512_set1_pch` takes a
+   696:     // `_Float16 _Complex` parameter, which is what brought the half form in.
+   697:     C_TYPE_FLOAT16_COMPLEX,
+   698:     C_TYPE_FLOAT_COMPLEX,
+   699:     C_TYPE_DOUBLE_COMPLEX,
+   700:     C_TYPE_LONG_DOUBLE_COMPLEX,
+   701:     C_TYPE_VA_LIST,
+   702:     C_TYPE_NULLPTR,
+   703:     C_TYPE_POINTER,
+   704:     C_TYPE_ARRAY,
+   705:     C_TYPE_VECTOR,
+   706:     C_TYPE_FUNCTION,
+   707:     C_TYPE_STRUCT,
+   708:     C_TYPE_UNION,
+   709:     C_TYPE_ENUM,
+   710:     C_TYPE_COUNT,
+   711: } CTypeKind;
+   712: 
+   713: // The complex kinds and their underlying real kind, in both directions. Every
+   714: // complex question in the frontend goes through these three so the mapping
+   715: // lives in one place; `c_type_kind_complex_of` returns C_TYPE_INVALID for a
+   716: // real kind that has no complex counterpart (C only defines the three).
+   717: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_type_kind_is_complex(CTypeKind kind)
+   718: {
+   719:     return kind == C_TYPE_FLOAT16_COMPLEX || kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
+   720: }
+   721: 
+   722: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_element(CTypeKind kind)
+   723: {
+   724:     return kind == C_TYPE_FLOAT16_COMPLEX       ? C_TYPE_FLOAT16
+   725:            : kind == C_TYPE_FLOAT_COMPLEX       ? C_TYPE_FLOAT
+   726:            : kind == C_TYPE_DOUBLE_COMPLEX      ? C_TYPE_DOUBLE
+   727:            : kind == C_TYPE_LONG_DOUBLE_COMPLEX ? C_TYPE_LONG_DOUBLE
+   728:                                                 : C_TYPE_INVALID;
+   729: }
+   730: 
+   731: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_of(CTypeKind kind)
+   732: {
+   733:     return kind == C_TYPE_FLOAT16       ? C_TYPE_FLOAT16_COMPLEX
+   734:            : kind == C_TYPE_FLOAT       ? C_TYPE_FLOAT_COMPLEX
+   735:            : kind == C_TYPE_DOUBLE      ? C_TYPE_DOUBLE_COMPLEX
+   736:            : kind == C_TYPE_LONG_DOUBLE ? C_TYPE_LONG_DOUBLE_COMPLEX
+   737:                                         : C_TYPE_INVALID;
+   738: }
+   739: 
+   740: typedef struct CArrayBound CArrayBound;
+   741: struct CArrayBound
+   742: {
+   743:     u64 inferred_count;
+   744:     u32 token_start;
+   745:     u32 token_count;
+   746:     bool is_static;
+   747:     bool is_star;
+   748:     bool has_inferred_count;
+   749:     u8 reserved;
+   750: };
+   751: 
+   752: typedef struct CType CType;
+   753: struct CType
+   754: {
+   755:     String8 tag;
+   756:     // The scope a tagged aggregate was declared in, so two block-scope
+   757:     // definitions of one tag in sibling functions stay two types -- clang's
+   758:     // xmmintrin.h defines `struct __mm_storeh_pi_struct` inside two
+   759:     // intrinsics -- and a reference resolves to the innermost visible one.
+   760:     // Meaningful only for struct/union/enum types with a tag; everything
+   761:     // else leaves it zero, which is the file scope.
+   762:     CScopeId tag_scope;
+   763:     CTypeId element_type;
+   764:     CTypeId return_type;
+   765:     CTypeId unqualified_type;
+   766:     u32 array_bound;
+   767:     u32 parameter_start;
+   768:     u32 parameter_count;
+   769:     u32 member_start;
+   770:     u32 member_count;
+   771:     u32 enum_member_start;
+   772:     u32 enum_member_count;
+   773:     u32 definition_start;
+   774:     u32 definition_token_count;
+   775:     u32 vector_byte_size;
+   776:     CTypeKind kind;
+   777:     bool is_const;
+   778:     bool is_volatile;
+   779:     bool is_restrict;
+   780:     bool is_atomic;
+   781:     bool is_variadic;
+   782:     bool is_complete;
+   783:     // GNU's transparent_union: a parameter of this union type accepts an
+   784:     // argument of any member's type, passed as that member's own bits.
+   785:     bool is_transparent_union;
+   786:     bool has_unqualified_type;
+   787:     // The function type was written `()`, with no parameter list at all --
+   788:     // not `(void)`, which declares zero parameters. C11 6.2.7p3 makes an
+   789:     // unprototyped declaration compatible with a non-variadic prototype, so
+   790:     // musl's `long __syscall_cp_asm();` and the eight-parameter prototype
+   791:     // beside it declare one function rather than two conflicting ones.
+   792:     bool is_unprototyped;
+   793: };
+   794: 
+   795: typedef struct CMember CMember;
+   796: struct CMember
+   797: {
+   798:     String8 name;
+   799:     CSourceLocation location;
+   800:     CTypeId type;
+   801:     u32 alignment_start;
+   802:     u32 alignment_count;
+   803:     u32 bit_width;
+   804:     u32 bit_width_token_start;
+   805:     u32 bit_width_token_count;
+   806:     bool is_bit_field;
+   807:     // A GNU `packed` attribute on this member alone
+   808:     // (`struct { char c; int i __attribute__((packed)); }`): the member is
+   809:     // placed at byte alignment, which also stops it from raising the
+   810:     // aggregate's own alignment.
+   811:     bool is_packed;
+   812:     u8 reserved[2];
+   813: };
+   814: 
+   815: // One `_Alignas(...)` or GNU `aligned(...)` request, as either the type it
+   816: // names or the token range of its constant expression. Which of the two
+   817: // spellings wrote it is not stored: token_start is always two tokens past the
+   818: // keyword -- the keyword and its `(` -- so c_alignment_specifier_is_standard
+   819: // reads it back out of the token stream, and this table is sized at one record
+   820: // per token of the translation unit, where a flag word would commit four more
+   821: // bytes per token for a fact only a rejected request ever asks about.
+   822: typedef struct CAlignmentSpecifier CAlignmentSpecifier;
+   823: struct CAlignmentSpecifier
+   824: {
+   825:     CTypeId type;
+   826:     u32 token_start;
+   827:     u32 token_count;
+   828: };
+   829: 
+   830: // The GNU attributes a struct or union definition carries on the definition
+   831: // itself, either before the tag (`struct __attribute__((packed)) P { ... }`)
+   832: // or after the closing brace (`struct P { ... } __attribute__((packed));`).
+   833: // They live in a side table rather than in CType because the population is a
+   834: // handful of aggregates in a translation unit while the type table is tens of
+   835: // thousands of entries: a flag word per type would grow every one of them.
+   836: // Both layout engines -- the sizeof folding in c_parse.c and the IR layout in
+   837: // c_gen.c -- read this table, and they must agree or a folded sizeof
+   838: // contradicts the object it sizes.
+   839: typedef struct CAggregateAttributes CAggregateAttributes;
+   840: struct CAggregateAttributes
+   841: {
+   842:     u32 type_index;
+   843:     // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
+   844:     u32 alignment_start;
+   845:     u32 alignment_count;
+   846:     bool is_packed;
+   847:     u8 reserved[3];
+   848: };
+   849: 
+   850: // The alignment a declarator wrote on the *type* it declares rather than on an
+   851: // object it declares: `typedef int cache_line __attribute__((aligned(64)))`.
+   852: // GNU `aligned` there sets the alignment of the type, so unlike every other
+   853: // alignment record in this file it *replaces* the natural alignment instead of
+   854: // raising it, and it is the one place the attribute lowers one without
+   855: // `packed` -- `typedef int pair __attribute__((aligned(2)))` is two-byte
+   856: // aligned in both GCC and Clang. The record keys on the alias copy the
+   857: // declarator made, never on the type it aliases, so `int` keeps its own
+   858: // alignment -- and on every qualified copy of that alias, because a qualifier
+   859: // cannot take an alignment away and the qualified copy points past the alias
+   860: // at the type it strips to (#714). It lives in a side table for the reason
+   861: // CParseResult.noreturn_function_types does: the population is a handful of
+   862: // typedefs per translation unit against a type table of tens of thousands of
+   863: // entries, so a field on CType would cost every one of them.
+   864: typedef struct CTypeAlignment CTypeAlignment;
+   865: struct CTypeAlignment
+   866: {
+   867:     u32 type_index;
+   868:     // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
+   869:     u32 alignment_start;
+   870:     u32 alignment_count;
+   871: };
+   872: 
+   873: typedef struct CEnumMember CEnumMember;
+   874: struct CEnumMember
+   875: {
+   876:     String8 name;
+   877:     CSourceLocation location;
+   878:     // Interned id of `name`, carried from the declaring token so the entity
+   879:     // filed from this record is keyed without a second intern; 0 when the
+   880:     // parse ran without a symbol table.  It sits in the alignment hole
+   881:     // ahead of `value`, so the record's size is unchanged.
+   882:     u32 symbol;
+   883:     u64 value;
+   884:     bool is_negative;
+   885:     u8 reserved[7];
+   886: };
+   887: BUSTER_CT_CHECK(sizeof(CEnumMember) == 56);
+   888: 
+   889: typedef struct CParameter CParameter;
+   890: struct CParameter
+   891: {
+   892:     String8 name;
+   893:     CSourceLocation location;
+   894:     CTypeId type;
+   895:     CEntityId entity;
+   896:     // Interned id of `name`, as CEnumMember.symbol; fills the tail padding.
+   897:     u32 symbol;
+   898: };
+   899: BUSTER_CT_CHECK(sizeof(CParameter) == 48);
+   900: 
+   901: typedef struct CParserDeclaration CParserDeclaration;
+   902: 
+   903: typedef enum CEntityKind
+   904: {
+   905:     C_ENTITY_OBJECT,
+   906:     C_ENTITY_FUNCTION,
+   907:     C_ENTITY_TYPEDEF,
+   908:     C_ENTITY_PARAMETER,
+   909:     C_ENTITY_LOCAL,
+   910:     C_ENTITY_ENUMERATOR,
+   911:     C_ENTITY_COUNT,
+   912: } CEntityKind;
+   913: 
+   914: typedef struct CEntity CEntity;
+   915: struct CEntity
+   916: {
+   917:     String8 name;
+   918:     // Interned id of `name` (0 when the parse ran without a symbol table);
+   919:     // the scope-lookup buckets and chains key on it.
+   920:     u32 symbol;
+   921:     CSourceLocation location;
+   922:     CTypeId type;
+   923:     CScopeId scope;
+   924:     CEntityId next_in_scope;
+   925:     CEntityId next_in_lookup;
+   926:     CEntityId next_typedef_in_lookup;
+   927:     CEntityId next_by_name;
+   928:     u32 declaration_index;
+   929:     u32 declaration_token_plus_one;
+   930:     u32 declaration_token_start;
+   931:     u32 declaration_token_count;
+   932:     u32 alignment_start;
+   933:     u32 alignment_count;
+   934:     CEntityKind kind;
+   935:     bool is_definition;
+   936:     bool is_static_storage;
+   937:     bool is_thread_local;
+   938:     bool is_constexpr;
+   939:     bool has_constant_value;
+   940:     bool constant_is_negative;
+   941:     bool has_cleanup;
+   942:     bool cleanup_attribute_checked;
+   943:     // Register storage on a local. Only the local declarator path records it,
+   944:     // and only one reader needs it: an assembler label on a `register` local
+   945:     // binds a machine register instead of renaming a symbol.
+   946:     bool is_register;
+   947:     u8 reserved[1];
+   948:     CEntityId cleanup_function;
+   949:     u32 cleanup_attribute_token;
+   950:     u32 cleanup_attribute_end;
+   951:     u64 constant_value;
+   952: };
+   953: 
+   954: // One shadowed binding, restored when the scope that shadowed it closes.
+   955: typedef struct CParseBindingUndo CParseBindingUndo;
+   956: struct CParseBindingUndo
+   957: {
+   958:     u32 symbol;
+   959:     CEntityId previous;
+   960: };
+   961: 
+   962: typedef struct CScope CScope;
+   963: struct CScope
+   964: {
+   965:     CScopeId parent;
+   966:     CEntityId first_entity;
+   967:     CEntityId last_entity;
+   968:     u32 token_start;
+   969:     u32 token_end;
+   970:     u32 entity_count;
+   971: };
+   972: 
+   973: typedef struct CIdentifierUse CIdentifierUse;
+   974: struct CIdentifierUse
+   975: {
+   976:     u32 token_index;
+   977:     CEntityId entity;
+   978:     CScopeId scope;
+   979: };
+   980: 
+   981: typedef enum CDeclarationKind
+   982: {
+   983:     C_DECLARATION_OBJECT,
+   984:     C_DECLARATION_FUNCTION,
+   985:     C_DECLARATION_TYPEDEF,
+   986:     C_DECLARATION_TYPE,
+   987:     C_DECLARATION_ASSEMBLY,
+   988:     C_DECLARATION_COUNT,
+   989: } CDeclarationKind;
+   990: 
+   991: typedef struct CDeclaration CDeclaration;
+   992: struct CDeclaration
+   993: {
+   994:     String8 name;
+   995:     CSourceLocation location;
+   996:     u32 token_start;
+   997:     u32 token_count;
+   998:     // The one declarator this declaration owns out of a comma-separated list,
+   999:     // initializer included and the separating ',' or ';' excluded. Zero count
+  1000:     // means the declaration was not split and owns its whole token range;
+  1001:     // token_start/token_count always span the declaration specifiers, which
+  1002:     // every declarator of the list shares.
+  1003:     u32 declarator_start;
+  1004:     u32 declarator_count;
+  1005:     u32 body_start;
+  1006:     u32 body_token_count;
+  1007:     u32 parameter_start;
+  1008:     u32 parameter_count;
+  1009:     u32 alignment_start;
+  1010:     u32 alignment_count;
+  1011:     CTypeId type;
+  1012:     CTypeId base_type;
+  1013:     CEntityId entity;
+  1014:     CScopeId scope;
+  1015:     CParserDeclaration* syntax_declaration;
+  1016:     CDeclarationKind kind;
+  1017:     bool is_definition;
+  1018:     bool is_variadic;
+  1019:     bool is_constexpr;
+  1020:     // Set on the second and later declarators of a list: the specifiers were
+  1021:     // already parsed for the first one, so base_type is supplied rather than
+  1022:     // recomputed.
+  1023:     bool is_declarator_continuation;
+  1024: };
+  1025: 
+  1026: typedef struct CDeferredStaticAssert CDeferredStaticAssert;
+  1027: struct CDeferredStaticAssert
+  1028: {
+  1029:     u32 token_start;
+  1030:     u32 token_count;
+  1031:     CScopeId scope;
+  1032:     CSourceLocation location;
+  1033: };
+  1034: 
+  1035: typedef enum CParserDeclarationKind
+  1036: {
+  1037:     C_PARSER_DECLARATION_OBJECT,
+  1038:     C_PARSER_DECLARATION_FUNCTION,
+  1039:     C_PARSER_DECLARATION_TYPEDEF,
+  1040:     C_PARSER_DECLARATION_TYPE,
+  1041:     C_PARSER_DECLARATION_STATIC_ASSERT,
+  1042:     C_PARSER_DECLARATION_ASSEMBLY,
+  1043:     C_PARSER_DECLARATION_UNKNOWN,
+  1044:     C_PARSER_DECLARATION_COUNT,
+  1045: } CParserDeclarationKind;
+  1046: 
+  1047: typedef struct CParserExpression CParserExpression;
+  1048: struct CParserExpression
+  1049: {
+  1050:     u32 token_start;
+  1051:     u32 token_count;
