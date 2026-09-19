@@ -991,3 +991,15 @@ struct CSemanticAsmOperand
 
 BUSTER_C_EXTERN String8 c_semantic_asm_special_operands_message(Target target, String8 assembly, u64 const* constraints,
     CSemanticAsmOperand const* operands, u32 operand_count, u32 output_count, bool rbx_clobber);
+
+typedef struct CIrSse2ImmediateShiftBuiltin CIrSse2ImmediateShiftBuiltin;
+struct CIrSse2ImmediateShiftBuiltin
+{
+    String8 name;
+    IrBinaryOperation operation;
+    u8 lane_width;
+    u8 lane_count;
+    u8 reserved[2];
+};
+
+BUSTER_C_EXTERN bool c_semantic_sse2_immediate_shift_builtin(String8 name, CIrSse2ImmediateShiftBuiltin* entry);

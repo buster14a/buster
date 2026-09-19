@@ -2140,16 +2140,6 @@ BUSTER_C_INTERNAL CIrMemoryBuiltin c_ir_memory_builtin(String8 name)
 // each one selects an ordinary canonical vector operation and a required
 // 128-bit lane shape. Keeping the count as a folded immediate preserves the
 // intrinsic contract while allowing every vector-capable backend to lower it.
-typedef struct CIrSse2ImmediateShiftBuiltin CIrSse2ImmediateShiftBuiltin;
-struct CIrSse2ImmediateShiftBuiltin
-{
-    String8 name;
-    IrBinaryOperation operation;
-    u8 lane_width;
-    u8 lane_count;
-    u8 reserved[2];
-};
-
 BUSTER_C_INTERNAL CIrSse2ImmediateShiftBuiltin const c_ir_sse2_immediate_shift_builtins[] = {
     {S8_INITIALIZER("__builtin_ia32_pslldi128"), IR_BINARY_VECTOR_SHIFT_LEFT, 32, 4, {0}},
     {S8_INITIALIZER("__builtin_ia32_psllqi128"), IR_BINARY_VECTOR_SHIFT_LEFT, 64, 2, {0}},
@@ -2173,6 +2163,14 @@ BUSTER_C_INTERNAL u32 c_ir_sse2_immediate_shift_builtin(String8 name)
         }
     }
     return result;
+}
+
+BUSTER_C_SHARED bool c_semantic_sse2_immediate_shift_builtin(String8 name, CIrSse2ImmediateShiftBuiltin* entry)
+{
+    u32 index = c_ir_sse2_immediate_shift_builtin(name);
+    bool found = index != C_IR_SSE2_IMMEDIATE_SHIFT_NONE;
+    if (found) *entry = c_ir_sse2_immediate_shift_builtins[index];
+    return found;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_vector_splat(CIntegerIrBuilder* builder, IrValueId value, IrTypeId vector_type,
