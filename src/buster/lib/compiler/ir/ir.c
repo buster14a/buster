@@ -4366,6 +4366,8 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
             .value = function->instruction_count++,
         };
         function->instructions[id.value] = instruction;
+        BUSTER_CHECK(UINT64_MAX - function->operand_total >= instruction.operand_count);
+        function->operand_total += instruction.operand_count;
         if ((IR_OPCODE_SUMMARY_TRACKED >> instruction.opcode) & 1)
         {
             function->opcode_summary |= IR_OPCODE_BIT(instruction.opcode);
@@ -4392,20 +4394,94 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(IrValidationError err
     };
 }
 
-IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners)
+typedef struct IrValidatedInstructionOrder IrValidatedInstructionOrder;
+struct IrValidatedInstructionOrder
+{
+    Arena* arena;
+    IrInstructionId* instructions;
+    u32* block_offsets;
+    u32 instruction_capacity;
+    u32 block_capacity;
+    u32 instruction_count;
+    u32 block_count;
+    bool moved;
+    bool valid;
+};
+
+typedef struct IrValidatedInstructionOrders IrValidatedInstructionOrders;
+struct IrValidatedInstructionOrders
+{
+    Arena* arena;
+    IrValidatedInstructionOrder* functions;
+    IrBlockId* owners;
+    u32 function_count;
+    u32 owner_capacity;
+};
+
+BUSTER_GLOBAL_LOCAL void ir_validated_instruction_orders_invalidate(IrValidatedInstructionOrders* orders)
+{
+    if (orders && orders->functions)
+    {
+        for (u32 index = 0; index < orders->function_count; index += 1)
+        {
+            orders->functions[index].valid = false;
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL IrValidatedInstructionOrder* ir_validated_instruction_order_prepare(IrValidatedInstructionOrders* orders,
+                                                                                         u32 function_index, IrFunction* function)
+{
+    IrValidatedInstructionOrder* result = 0;
+    if (orders && orders->arena && orders->functions && function_index < orders->function_count &&
+        function->block_count != UINT32_MAX)
+    {
+        result = orders->functions + function_index;
+        u32 block_capacity = function->block_count + 1;
+        if (result->block_capacity < block_capacity)
+        {
+            result->block_offsets = arena_allocate(orders->arena, u32, block_capacity);
+            result->block_capacity = block_capacity;
+        }
+        if (result->instruction_capacity < function->instruction_count)
+        {
+            result->instructions = arena_allocate(orders->arena, IrInstructionId, function->instruction_count);
+            result->instruction_capacity = function->instruction_count;
+        }
+        result->arena = orders->arena;
+        result->instruction_count = function->instruction_count;
+        result->block_count = function->block_count;
+        result->moved = false;
+        result->valid = false;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrInstructionOwnership ir_function_instruction_owners_with_order(IrFunction* function, IrBlockId* owners,
+                                                                                      IrValidatedInstructionOrder* order)
 {
     IrInstructionOwnership result = {
         .error = IR_VALIDATION_NONE,
         .block = IR_BLOCK_ID_INVALID,
         .instruction = IR_INSTRUCTION_ID_INVALID,
     };
-    if (!function || (function->instruction_count && !owners))
+    if (order)
+    {
+        order->valid = false;
+    }
+    if (!function || (function->instruction_count && !owners) ||
+        (order && (order->instruction_count != function->instruction_count || order->block_count != function->block_count ||
+                   order->block_capacity < function->block_count + 1 ||
+                   (function->instruction_count && (!order->instructions || order->instruction_capacity < function->instruction_count)) ||
+                   !order->block_offsets)))
     {
         result.error = IR_VALIDATION_INVALID_ID;
         return result;
     }
     // IR_ID_UNDERLYING_INVALID is UINT32_MAX, so the unowned marker is a byte
-    // fill; the walk below is the only part that costs a pass.
+    // fill; the walk below is the only part that costs a pass. Preparation can
+    // retain its compact ID stream and block offsets until publication, where
+    // they replace a second walk over the much wider instruction rows.
     memset(owners, 0xff, sizeof(*owners) * function->instruction_count);
     u32 owned_count = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
@@ -4413,6 +4489,10 @@ IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBl
         IrBlock* block = function->blocks + block_index;
         IrInstructionId tail = IR_INSTRUCTION_ID_INVALID;
         IrInstructionId id = block->first_instruction;
+        if (order)
+        {
+            order->block_offsets[block_index] = owned_count;
+        }
         while (id.value != IR_ID_UNDERLYING_INVALID)
         {
             if (id.value >= function->instruction_count)
@@ -4436,6 +4516,11 @@ IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBl
                 return result;
             }
             owners[id.value] = block->id;
+            if (order)
+            {
+                order->instructions[owned_count] = id;
+                order->moved |= id.value != owned_count;
+            }
             owned_count += 1;
             tail = id;
             id = ir_block_next_instruction(function, block, id);
@@ -4451,6 +4536,10 @@ IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBl
             return result;
         }
     }
+    if (order)
+    {
+        order->block_offsets[function->block_count] = owned_count;
+    }
     if (owned_count != function->instruction_count)
     {
         for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
@@ -4465,20 +4554,35 @@ IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBl
             }
         }
     }
+    if (order)
+    {
+        order->valid = true;
+    }
     return result;
+}
+
+IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners)
+{
+    return ir_function_instruction_owners_with_order(function, owners, 0);
 }
 
 // Runs the ownership proof over every lowered function ahead of the
 // per-instruction checks, so those can walk `next` without a cycle guard and
 // can trust that block->last_instruction really terminates its chain. One
-// scratch array sized to the largest function serves the whole module.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* module)
+// scratch array sized to the largest function serves the whole module. A
+// preparation workspace also retains the already-proven compact order.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* module, IrValidatedInstructionOrders* orders)
 {
     IrValidationResult result = {
         .function = IR_FUNCTION_ID_INVALID,
         .block = IR_BLOCK_ID_INVALID,
         .instruction = IR_INSTRUCTION_ID_INVALID,
     };
+    ir_validated_instruction_orders_invalidate(orders);
+    if (orders && (orders->function_count != module->function_count || (orders->function_count && !orders->functions) || !orders->arena))
+    {
+        result.error = IR_VALIDATION_INVALID_ID;
+    }
     u32 capacity = 0;
     for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
     {
@@ -4504,10 +4608,26 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
             }
         }
     }
+    TemporalArena scratch = {0};
+    bool scratch_active = false;
+    IrBlockId* owners = 0;
     if (result.error == IR_VALIDATION_NONE)
     {
-        TemporalArena scratch = scratch_begin(0, 0);
-        IrBlockId* owners = arena_allocate(scratch.arena, IrBlockId, capacity);
+        if (orders)
+        {
+            if (orders->owner_capacity < capacity)
+            {
+                orders->owners = arena_allocate(orders->arena, IrBlockId, capacity);
+                orders->owner_capacity = capacity;
+            }
+            owners = orders->owners;
+        }
+        else
+        {
+            scratch = scratch_begin(0, 0);
+            scratch_active = true;
+            owners = arena_allocate(scratch.arena, IrBlockId, capacity);
+        }
         for (u32 function_index = 0; function_index < module->function_count && result.error == IR_VALIDATION_NONE; function_index += 1)
         {
             IrFunction* function = module->functions + function_index;
@@ -4515,18 +4635,31 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
             {
                 continue;
             }
+            IrValidatedInstructionOrder* order = orders ? ir_validated_instruction_order_prepare(orders, function_index, function) : 0;
+            if (orders && !order)
+            {
+                result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+                break;
+            }
             IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
             IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, function->block_count);
             IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, function->instruction_count);
             IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(*owners) * function->instruction_count);
-            IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
+            IrInstructionOwnership ownership = ir_function_instruction_owners_with_order(function, owners, order);
             if (ownership.error != IR_VALIDATION_NONE)
             {
                 result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
                 break;
             }
         }
+    }
+    if (scratch_active)
+    {
         scratch_end(scratch);
+    }
+    if (result.error != IR_VALIDATION_NONE)
+    {
+        ir_validated_instruction_orders_invalidate(orders);
     }
     return result;
 }
@@ -5712,10 +5845,12 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
     return result;
 }
 
-IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_module_with_orders(IrProgram* program, IrModule* module,
+                                                                                  IrValidatedInstructionOrders* orders)
 {
     IrValidationResult result = ir_validation_ok();
     IR_CONSTRUCTION_RECORD(VALIDATION_CALLS, 1);
+    ir_validated_instruction_orders_invalidate(orders);
     if (!program || !module || (program->module_count && !program->modules) ||
         (program->types.count && !program->types.types) || (program->symbols.count && !program->symbols.symbols) ||
         (module->function_count && !module->functions) || (module->global_count && !module->globals) ||
@@ -5725,7 +5860,7 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
     }
     else
     {
-        result = ir_validate_module_ownership(module);
+        result = ir_validate_module_ownership(module, orders);
         for (u32 global_index = 0; global_index < module->global_count && result.error == IR_VALIDATION_NONE; global_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_GLOBALS, 1);
@@ -5766,7 +5901,16 @@ IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* mo
             }
         }
     }
+    if (result.error != IR_VALIDATION_NONE)
+    {
+        ir_validated_instruction_orders_invalidate(orders);
+    }
     return result;
+}
+
+IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
+{
+    return ir_validate_canonical_module_with_orders(program, module, 0);
 }
 
 #include <buster/lib/compiler/ir/ir_cfg.c>

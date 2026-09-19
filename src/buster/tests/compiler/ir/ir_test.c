@@ -1478,13 +1478,17 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     if (summary_function)
     {
         BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
+        IrValueId summary_operands[3] = {{.value = 0}, {.value = 1}, {.value = 2}};
         ir_function_add_instruction(arguments->arena, summary_function,
                                     (IrInstruction){
+                                        .operands = summary_operands,
+                                        .operand_count = BUSTER_ARRAY_LENGTH(summary_operands),
                                         .result = IR_VALUE_ID_INVALID,
                                         .opcode = IR_OPCODE_INLINE_ASSEMBLY,
                                         .next = IR_INSTRUCTION_ID_INVALID,
                                     },
                                     (IrSourceRange){0});
+        BUSTER_TEST(arguments, summary_function->operand_total == BUSTER_ARRAY_LENGTH(summary_operands));
         BUSTER_TEST(arguments, ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
         BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD)));
     }

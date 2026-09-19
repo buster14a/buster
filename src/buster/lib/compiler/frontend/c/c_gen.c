@@ -29298,6 +29298,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuild
                 }
                 IR_CONSTRUCTION_RECORD(PLACE_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_LOAD);
                 IR_CONSTRUCTION_RECORD(PLACE_ATOMIC_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_ATOMIC_LOAD);
+                BUSTER_CHECK(builder->function->operand_total >= definition->operand_count);
+                builder->function->operand_total -= definition->operand_count;
                 builder->function->instruction_count -= 1;
                 c_ir_vla_value_forget(builder, (IrValueId){.value = builder->function->value_count - 1});
                 builder->function->value_count -= 1;
@@ -29372,7 +29374,30 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
                     current_block->last_instruction = definition_id;
                     builder->last_instruction = definition_id;
                     builder->previous_instruction_known = false;
-                    builder->function->instruction_count = definition_id.value + 1;
+                    u32 retained_instruction_count = definition_id.value + 1;
+                    for (u32 removed_index = retained_instruction_count; removed_index < builder->function->instruction_count; removed_index += 1)
+                    {
+                        u32 removed_operands = builder->function->instructions[removed_index].operand_count;
+                        BUSTER_CHECK(builder->function->operand_total >= removed_operands);
+                        builder->function->operand_total -= removed_operands;
+                    }
+                    builder->function->instruction_count = retained_instruction_count;
+                    // This rare speculative suffix rollback can remove any
+                    // tracked opcode. Rebuild the compact word here so later
+                    // absence queries stay exact without steady-state scans.
+                    if (builder->function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN)
+                    {
+                        u64 summary = IR_OPCODE_SUMMARY_KNOWN;
+                        for (u32 row_index = 0; row_index < retained_instruction_count; row_index += 1)
+                        {
+                            u32 opcode = builder->function->instructions[row_index].opcode;
+                            if ((IR_OPCODE_SUMMARY_TRACKED >> opcode) & 1)
+                            {
+                                summary |= IR_OPCODE_BIT(opcode);
+                            }
+                        }
+                        builder->function->opcode_summary = summary;
+                    }
                     builder->function->value_count = candidate.value + 1;
                     for (u32 shape_index = 0; shape_index < builder->vla_value_capacity; shape_index += 1)
                     {

@@ -7327,48 +7327,63 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         selector.argument_values[argument_index] = IR_ID_UNDERLYING_INVALID;
     }
     // Local promotion, the mem2reg the machine path was built for: a
-    // scalar local whose address never leaves a load or a store needs no
-    // memory at all. Eligibility by type is derived from the stable
-    // value-definition table while the target-order arrays below are
-    // initialized; disqualification still happens on every use that is not
-    // the place operand of a same-width scalar load or store: a field or
-    // index selection, an address handed to a call, a mixed-width access,
-    // and the atomic forms all keep the local in its slot. The byte size
-    // is recorded so the width check needs no second type walk.
-    //
-    // The width is filled from the row side, because a local is a property
-    // of its defining row and only a minority of rows define one. Asking the
-    // question per value instead — read `values[i].definition`, then follow
-    // it into `instructions[]` — is a random 64-byte fetch per value for the
-    // two fields `opcode` and `result`, and it was the single hottest line in
-    // the 2026-08-22T084855Z cache-miss survey: 6,17% of the compile's DRAM
-    // fills there, 23,58% in this function. The row scan reads the same bytes
-    // in address order, and the walk immediately below wants them next.
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    // scalar or vector local whose address never escapes a same-width load or
+    // store needs no frame slot. The producer already records one place per
+    // source local, so follow that compact table to the defining LOCAL row.
+    // The value-definition-result round trip rejects a stale/popped row.
+    if (!program->disable_target_local_promotion && function->local_places)
     {
-        IrInstruction* instruction = function->instructions + instruction_index;
-        // The value's own definition still has to agree: a popped row keeps
-        // its opcode, so the round trip is what makes this the same set the
-        // per-value form selected.
-        if (program->disable_target_local_promotion || instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value >= function->value_count ||
-            function->values[instruction->result.value].definition.value != instruction_index)
+        for (u32 local_index = 0; local_index < function->local_count; local_index += 1)
         {
-            continue;
+            IrValueId place = function->local_places[local_index];
+            if (place.value >= function->value_count)
+            {
+                continue;
+            }
+            IrInstructionId definition = function->values[place.value].definition;
+            if (definition.value >= function->instruction_count)
+            {
+                continue;
+            }
+            IrInstruction* instruction = function->instructions + definition.value;
+            if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value != place.value ||
+                instruction->canonical_local.value != local_index || function->values[place.value].definition.value != definition.value)
+            {
+                continue;
+            }
+            MachineTypeClass local_class = machine_x64_type_class(&selector, function->values[place.value].canonical_type);
+            if ((local_class.flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER) && (local_class.size_log2 == 2 || local_class.size_log2 == 3))
+            {
+                value_uses[place.value].promotable_width = 1u << local_class.size_log2;
+            }
+            else if ((local_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER) && selector.vector_registers_supported)
+            {
+                value_uses[place.value].promotable_width = 64;
+            }
         }
-        u32 value_index = instruction->result.value;
-        MachineTypeClass local_class = machine_x64_type_class(&selector, function->values[value_index].canonical_type);
-        if ((local_class.flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER) && (local_class.size_log2 == 2 || local_class.size_log2 == 3))
+    }
+    else if (!program->disable_target_local_promotion)
+    {
+        // Conservative compatibility for hand-built/uncertified IR that does
+        // not carry the producer table.
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
         {
-            value_uses[value_index].promotable_width = 1u << local_class.size_log2;
-        }
-        // Vector locals promote under the same rule: a 64-byte value whose
-        // address never leaves a same-width load or store lives in a ZMM-class
-        // register and its accesses become vector copies, which is where the
-        // kernels' named chunk variables stop round-tripping through the
-        // frame.
-        else if ((local_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER) && selector.vector_registers_supported)
-        {
-            value_uses[value_index].promotable_width = 64;
+            IrInstruction* instruction = function->instructions + instruction_index;
+            if (instruction->opcode != IR_OPCODE_LOCAL || instruction->result.value >= function->value_count ||
+                function->values[instruction->result.value].definition.value != instruction_index)
+            {
+                continue;
+            }
+            u32 value_index = instruction->result.value;
+            MachineTypeClass local_class = machine_x64_type_class(&selector, function->values[value_index].canonical_type);
+            if ((local_class.flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER) && (local_class.size_log2 == 2 || local_class.size_log2 == 3))
+            {
+                value_uses[value_index].promotable_width = 1u << local_class.size_log2;
+            }
+            else if ((local_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER) && selector.vector_registers_supported)
+            {
+                value_uses[value_index].promotable_width = 64;
+            }
         }
     }
     // Canonical publication owns instruction spans. This pass gathers value

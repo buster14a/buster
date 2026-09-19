@@ -235,7 +235,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_instruction_span_tests(UnitTestArgumen
     function.instruction_canonical_sources = sources;
     function.extra_instructions = extra_ids;
     function.extras = extras;
-    BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+    BUSTER_TEST(arguments, ir_test_function_publish_cfg_with_order(arguments->arena, &function).error == IR_VALIDATION_NONE);
     IrPublishedCfg const* cfg = function.published_cfg;
     BUSTER_TEST(arguments, cfg && cfg->instruction_remap && cfg->instruction_count == 5);
     if (cfg && cfg->instruction_remap)

@@ -539,9 +539,11 @@ BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT < 63);
 // An opcode absent from this list must never be queried: add it here in the
 // same change that adds the query. Unknown summaries remain conservative.
 #define IR_OPCODE_SUMMARY_TRACKED                                                                                                      \
-    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |          \
-     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) |                                       \
-     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY))
+    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_SAVE) |                   \
+     IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH) |       \
+     IR_OPCODE_BIT(IR_OPCODE_CALL) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) |                     \
+     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) |                             \
+     IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY))
 
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 
@@ -726,6 +728,9 @@ struct IrFunction
     // instead of rescanning every row for a handful of rare ones. The summary
     // only ever over-approximates: popping a lowered row leaves its bit set.
     u64 opcode_summary;
+    // Exact for summary-known builder-owned rows. Unknown/hand-built functions
+    // retain the conservative scan path instead of trusting the zero default.
+    u64 operand_total;
 };
 
 typedef struct IrModuleAssembly IrModuleAssembly;
@@ -1067,6 +1072,9 @@ BUSTER_F_DECL IrValidationResult ir_validate_canonical_module(IrProgram* program
 // source provenance and relocations. Explicit mutators must invalidate BEFORE
 // writing rows/CFG/value data and reacquire their mutable builder pointers.
 BUSTER_F_DECL IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function);
+#if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL IrValidationResult ir_test_function_publish_cfg_with_order(Arena* arena, IrFunction* function);
+#endif
 // Verifiers can also inspect mutable builders. Published consumers should use
 // the span directly; this compatibility helper keeps validation on one path.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE IrInstructionId ir_block_next_instruction(IrFunction const* function, IrBlock const* block,

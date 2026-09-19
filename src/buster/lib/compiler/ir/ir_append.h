@@ -42,6 +42,8 @@ static IR_APPEND_UNUSED BUSTER_INLINE IrInstructionId ir_instruction_append_trus
         result = (IrInstructionId){.value = instruction_count};
         function->instructions[instruction_count] = instruction;
         function->instruction_count = instruction_count + 1;
+        BUSTER_CHECK(UINT64_MAX - function->operand_total >= instruction.operand_count);
+        function->operand_total += instruction.operand_count;
         if ((IR_OPCODE_SUMMARY_TRACKED >> instruction.opcode) & 1)
         {
             function->opcode_summary |= IR_OPCODE_BIT(instruction.opcode);

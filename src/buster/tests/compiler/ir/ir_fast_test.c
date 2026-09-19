@@ -222,6 +222,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         }
         scratch_end(reuse_temporary);
     }
+    // Summary-known admission consumes producer facts without touching the
+    // advertised instruction population. Either probe would fault or attempt
+    // impossible work if the old whole-row scan returned.
+    IrProgram fact_program = {.arena = arguments->arena, .disable_local_promotion = true, .fast_passes = IR_FAST_ALL};
+    IrFunction fact_budget = {.state = IR_FUNCTION_LOWERED, .instruction_count = UINT32_MAX,
+                              .operand_total = IR_FAST_WORK_BUDGET + 1, .opcode_summary = IR_OPCODE_SUMMARY_KNOWN};
+    IrFastStatistics fact_budget_statistics = ir_test_fast_function(&fact_program, &fact_budget);
+    BUSTER_TEST(arguments, fact_budget_statistics.budget_skips == 1 && fact_budget_statistics.provenance_skips == 0);
+    IrFunction fact_provenance = {.state = IR_FUNCTION_LOWERED, .instruction_count = UINT32_MAX,
+                                  .opcode_summary = IR_OPCODE_SUMMARY_KNOWN | IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS)};
+    IrFastStatistics fact_provenance_statistics = ir_test_fast_function(&fact_program, &fact_provenance);
+    BUSTER_TEST(arguments, fact_provenance_statistics.provenance_skips == 1 && fact_provenance_statistics.budget_skips == 0);
+
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
     // the advertised value population. This is not a valid-IR certification test.

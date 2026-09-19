@@ -241,45 +241,102 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunc
 }
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* arena, Arena* scratch, IrFunction* function,
-                                                                      IrPublishedCfg* cfg, IrCfgBlock* blocks)
+                                                                      IrPublishedCfg* cfg, IrCfgBlock* blocks,
+                                                                      IrValidatedInstructionOrder const* order)
 {
     IrValidationResult result = ir_validation_ok();
     u32 count = function->instruction_count;
-    IrInstructionId* remap = arena_allocate(scratch, IrInstructionId, count);
-    u32* inverse = arena_allocate(scratch, u32, count);
-    memset(remap, 0xff, sizeof(*remap) * count);
+    IrInstructionId* remap = 0;
+    u32* inverse = 0;
     u32 cursor = 0;
     bool moved = false;
-    for (u32 index = 0; index < function->block_count && result.error == IR_VALIDATION_NONE; index += 1)
+    bool reuse = order && order->valid && order->instruction_count == count && order->block_count == function->block_count &&
+                 order->block_offsets && (!count || order->instructions);
+    if (reuse)
     {
-        IrBlock* block = function->blocks + index;
-        IrInstructionId id = block->first_instruction;
-        IrInstructionId last = IR_INSTRUCTION_ID_INVALID;
-        blocks[index].first_instruction = cursor;
-        while (id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
+        if (order->block_offsets[0] != 0 || order->block_offsets[function->block_count] != count)
         {
-            if (id.value >= count || remap[id.value].value != IR_ID_UNDERLYING_INVALID)
+            result.error = IR_VALIDATION_INSTRUCTION_OWNERSHIP;
+        }
+        for (u32 index = 0; index < function->block_count && result.error == IR_VALIDATION_NONE; index += 1)
+        {
+            u32 first = order->block_offsets[index];
+            u32 end = order->block_offsets[index + 1];
+            if (first != cursor || end <= first || end > count)
             {
-                result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, id);
+                result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, function->blocks[index].id,
+                                             function->blocks[index].last_instruction);
             }
             else
             {
-                moved |= id.value != cursor;
-                remap[id.value].value = cursor;
-                inverse[cursor++] = id.value;
-                last = id;
-                id = function->instructions[id.value].next;
+                blocks[index].first_instruction = first;
+                blocks[index].instruction_count = end - first;
+                cursor = end;
             }
         }
-        blocks[index].instruction_count = cursor - blocks[index].first_instruction;
-        if (result.error == IR_VALIDATION_NONE && last.value != block->last_instruction.value)
+        moved = order->moved;
+        if (result.error == IR_VALIDATION_NONE && moved)
         {
-            result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, block->last_instruction);
+            remap = arena_allocate(scratch, IrInstructionId, count);
+            inverse = arena_allocate(scratch, u32, count);
+            memset(remap, 0xff, sizeof(*remap) * count);
+            for (u32 index = 0; index < count && result.error == IR_VALIDATION_NONE; index += 1)
+            {
+                u32 old = order->instructions[index].value;
+                if (old >= count || remap[old].value != IR_ID_UNDERLYING_INVALID)
+                {
+                    result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, IR_BLOCK_ID_INVALID,
+                                                 order->instructions[index]);
+                }
+                else
+                {
+                    remap[old].value = index;
+                    inverse[index] = old;
+                }
+            }
+        }
+        if (result.error == IR_VALIDATION_NONE)
+        {
+            IR_CONSTRUCTION_RECORD(CFG_ORDER_REUSES, 1);
+            IR_CONSTRUCTION_RECORD(CFG_ORDER_REUSE_ROWS, count);
         }
     }
-    if (result.error == IR_VALIDATION_NONE && cursor != count)
+    else
     {
-        result.error = IR_VALIDATION_INSTRUCTION_OWNERSHIP;
+        remap = arena_allocate(scratch, IrInstructionId, count);
+        inverse = arena_allocate(scratch, u32, count);
+        memset(remap, 0xff, sizeof(*remap) * count);
+        for (u32 index = 0; index < function->block_count && result.error == IR_VALIDATION_NONE; index += 1)
+        {
+            IrBlock* block = function->blocks + index;
+            IrInstructionId id = block->first_instruction;
+            IrInstructionId last = IR_INSTRUCTION_ID_INVALID;
+            blocks[index].first_instruction = cursor;
+            while (id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
+            {
+                if (id.value >= count || remap[id.value].value != IR_ID_UNDERLYING_INVALID)
+                {
+                    result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, id);
+                }
+                else
+                {
+                    moved |= id.value != cursor;
+                    remap[id.value].value = cursor;
+                    inverse[cursor++] = id.value;
+                    last = id;
+                    id = function->instructions[id.value].next;
+                }
+            }
+            blocks[index].instruction_count = cursor - blocks[index].first_instruction;
+            if (result.error == IR_VALIDATION_NONE && last.value != block->last_instruction.value)
+            {
+                result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, block->last_instruction);
+            }
+        }
+        if (result.error == IR_VALIDATION_NONE && cursor != count)
+        {
+            result.error = IR_VALIDATION_INSTRUCTION_OWNERSHIP;
+        }
     }
     for (u32 index = 0; index < function->value_count && result.error == IR_VALIDATION_NONE; index += 1)
     {
@@ -455,7 +512,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_published_cfg(IrFunction* fun
     return result;
 }
 
-IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_function_publish_cfg_with_order(Arena* arena, IrFunction* function,
+                                                                                IrValidatedInstructionOrder const* order)
 {
     IrValidationResult result = ir_validation_ok();
     if (!arena || !function || !function->block_count || !function->blocks || !function->instructions ||
@@ -654,7 +712,7 @@ IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
                     .argument_count = (u32)argument_count, .allocated_bytes = sizeof(*cfg) + sizeof(*blocks) * (u64)count +
                         (sizeof(*edges) + sizeof(*predecessors)) * edge_count + sizeof(*parameters) * parameter_count +
                         sizeof(*arguments) * argument_count};
-                result = ir_cfg_publish_instruction_rows(arena, temporary.arena, function, cfg, blocks);
+                result = ir_cfg_publish_instruction_rows(arena, temporary.arena, function, cfg, blocks, order);
                 if (result.error == IR_VALIDATION_NONE)
                 {
                     for (u32 block = 0; block < count; block += 1)
@@ -679,3 +737,43 @@ IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
     }
     return result;
 }
+
+
+IrValidationResult ir_function_publish_cfg(Arena* arena, IrFunction* function)
+{
+    return ir_function_publish_cfg_with_order(arena, function, 0);
+}
+
+#if BUSTER_INCLUDE_TESTS
+IrValidationResult ir_test_function_publish_cfg_with_order(Arena* arena, IrFunction* function)
+{
+    IrValidationResult result = ir_validation_ok();
+    if (!arena || !function)
+    {
+        result.error = IR_VALIDATION_INVALID_ID;
+    }
+    else
+    {
+        TemporalArena storage = scratch_begin(&arena, 1);
+        IrValidatedInstructionOrder order = {.arena = storage.arena};
+        order.block_capacity = function->block_count + 1;
+        order.block_offsets = arena_allocate(storage.arena, u32, order.block_capacity);
+        order.instruction_capacity = function->instruction_count;
+        order.instructions = arena_allocate(storage.arena, IrInstructionId, order.instruction_capacity);
+        order.block_count = function->block_count;
+        order.instruction_count = function->instruction_count;
+        IrBlockId* owners = arena_allocate(storage.arena, IrBlockId, function->instruction_count);
+        IrInstructionOwnership ownership = ir_function_instruction_owners_with_order(function, owners, &order);
+        if (ownership.error == IR_VALIDATION_NONE)
+        {
+            result = ir_function_publish_cfg_with_order(arena, function, &order);
+        }
+        else
+        {
+            result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
+        }
+        scratch_end(storage);
+    }
+    return result;
+}
+#endif
