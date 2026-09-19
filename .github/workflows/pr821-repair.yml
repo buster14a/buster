@@ -44,27 +44,27 @@ jobs:
 
           differential = Path("tools/differential.c")
           text = differential.read_text()
-          call = re.compile(
-              r"(os_process_spawn\(args,\s*&\(Os_Process_Options\)\{"
-              r"(?:(?!\}\s*,\s*&output).)*?"
-              r"\.capture_limit\s*=\s*TO_MB\(64\))"
-              r"(\s*\})",
-              re.S,
+          pattern = re.compile(
+              r"(?P<indent>^[ \t]*)"
+              r"(?P<value>\.capture_limit\s*=\s*TO_MB\(64\))"
+              r"(?P<gap>\s*)}",
+              re.MULTILINE,
           )
-          matches = list(call.finditer(text))
+          matches = list(pattern.finditer(text))
           if len(matches) != 1:
-              raise SystemExit(f"tools/differential.c: expected one self-test spawn initializer, found {len(matches)}")
+              for index, line in enumerate(text.splitlines(), 1):
+                  if "capture_limit" in line or "os_process_spawn" in line:
+                      print(f"DIFFERENTIAL_CONTEXT {index}: {line}")
+              raise SystemExit(f"tools/differential.c: expected one self-test capture-limit initializer, found {len(matches)}")
           match = matches[0]
-          body = match.group(0)
-          if ".search_path" in body:
-              raise SystemExit("tools/differential.c: self-test spawn already has search_path")
-          patched = re.sub(
-              r"(\.capture_limit\s*=\s*TO_MB\(64\))",
-              r"\1,\n                                                  .search_path = true",
-              body,
-              count=1,
+          context = text[max(0, match.start() - 600):match.end() + 200]
+          if "os_process_spawn" not in context or ".search_path" in context:
+              raise SystemExit("tools/differential.c: capture-limit match is not the expected unqualified self-test spawn")
+          replacement = (
+              f"{match.group('indent')}{match.group('value')},\n"
+              f"{match.group('indent')}.search_path = true{match.group('gap')}}}"
           )
-          differential.write_text(text[:match.start()] + patched + text[match.end():])
+          differential.write_text(text[:match.start()] + replacement + text[match.end():])
 
           needles = ("weird_kind", "no-shell metachar")
           found = False
@@ -73,8 +73,8 @@ jobs:
               hits = [i for i, line in enumerate(lines) if any(needle in line for needle in needles)]
               for i in hits:
                   found = True
-                  lo = max(0, i - 24)
-                  hi = min(len(lines), i + 25)
+                  lo = max(0, i - 30)
+                  hi = min(len(lines), i + 31)
                   print(f"PR821_MAC_CONTEXT_BEGIN {file}:{i + 1}")
                   for number in range(lo, hi):
                       print(f"{number + 1:6}: {lines[number]}")
