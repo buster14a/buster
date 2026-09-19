@@ -182,21 +182,6 @@ BUSTER_C_INTERNAL u64* c_declaration_specifier_sets_build(Arena* arena, CPreproc
 // the module's initializer list. musl spells its whole public surface this
 // way -- `weak_alias(__libc_malloc, malloc)` expands to both of the first two
 // at once -- so they are found in one walk.
-typedef struct CDeclarationBinding CDeclarationBinding;
-struct CDeclarationBinding
-{
-    String8 alias_target;
-    // IR_INITIALIZER_PRIORITY_NONE when the attribute named no priority; the
-    // written value otherwise. Meaningful only while the matching flag is set,
-    // because zero is a priority a program may write.
-    u32 constructor_priority;
-    u32 destructor_priority;
-    bool is_weak;
-    bool is_constructor;
-    bool is_destructor;
-    u8 reserved[5];
-};
-
 // `constructor(101)`: the optional priority a GNU initializer attribute takes.
 // A malformed or out-of-range argument leaves the priority unset rather than
 // refusing the attribute, which keeps the function in the array where clang
@@ -305,7 +290,7 @@ BUSTER_C_INTERNAL void c_declaration_binding_scan(Arena* arena, CPreprocessResul
 // Both token ranges a declaration can carry attributes in: the specifiers
 // every declarator of a list shares, and, when the list was split, this
 // declarator's own tokens.
-BUSTER_C_INTERNAL CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
+BUSTER_C_SHARED CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration)
 {
     CDeclarationBinding result = {0};
     u32 end = declaration.body_start ? declaration.body_start - 1 : declaration.token_start + declaration.token_count;
@@ -456,7 +441,7 @@ BUSTER_C_INTERNAL String8 c_ir_scalar_type_name(CTypeKind kind)
     return (String8){0};
 }
 
-BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
+BUSTER_C_SHARED bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
 {
     TargetDataLayout layout = target_data_layout(target);
     *ir_kind = IR_TYPE_INTEGER;
@@ -1835,30 +1820,6 @@ struct CIrLabel
     IrBlockId block;
 };
 
-typedef enum CIrConstantValueKind
-{
-    C_IR_CONSTANT_INVALID,
-    C_IR_CONSTANT_UNKNOWN,
-    C_IR_CONSTANT_INTEGER,
-    C_IR_CONSTANT_FLOAT,
-    C_IR_CONSTANT_POINTER,
-    C_IR_CONSTANT_LVALUE,
-} CIrConstantValueKind;
-
-typedef struct CIrConstantValue CIrConstantValue;
-struct CIrConstantValue
-{
-    IrTypeId type;
-    IrSymbolId symbol;
-    s64 addend;
-    // Integer values, or the target raw image of a wide floating constant.
-    // Narrow floating constants alone use the f64 carrier below.
-    u64 integer;
-    u64 integer_high;
-    f64 floating;
-    CIrConstantValueKind kind;
-};
-
 typedef struct CIrConstantOperator CIrConstantOperator;
 struct CIrConstantOperator
 {
@@ -1966,33 +1927,6 @@ BUSTER_C_INTERNAL CIrAlignmentStatus c_ir_alignment_evaluate(CIntegerIrBuilder* 
 BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out);
 
 typedef struct CIrPreparedCall CIrPreparedCall;
-typedef enum CIrAtomicBuiltin
-{
-    C_IR_ATOMIC_BUILTIN_LOAD,
-    C_IR_ATOMIC_BUILTIN_STORE,
-    C_IR_ATOMIC_BUILTIN_INIT,
-    C_IR_ATOMIC_BUILTIN_FETCH_ADD,
-    C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT,
-    C_IR_ATOMIC_BUILTIN_FETCH_AND,
-    C_IR_ATOMIC_BUILTIN_FETCH_OR,
-    C_IR_ATOMIC_BUILTIN_FETCH_XOR,
-    C_IR_ATOMIC_BUILTIN_FETCH_NAND,
-    C_IR_ATOMIC_BUILTIN_EXCHANGE,
-    C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG,
-    C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK,
-    C_IR_ATOMIC_BUILTIN_THREAD_FENCE,
-    C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE,
-    // GCC's legacy full barrier, which takes no ordering argument because it
-    // is always sequentially consistent.
-    C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE,
-    C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE,
-    // GNU-only: an exchange of one into a byte-sized flag reported as a
-    // boolean, and the store of zero that releases it again.
-    C_IR_ATOMIC_BUILTIN_TEST_AND_SET,
-    C_IR_ATOMIC_BUILTIN_CLEAR,
-    C_IR_ATOMIC_BUILTIN_COUNT,
-} CIrAtomicBuiltin;
-
 // The block-memory builtins, in the order of the two tables below.
 // C_IR_MEMORY_BUILTIN_COUNT doubles as the "not one of these" value, the same
 // convention CIrAtomicBuiltin uses.
@@ -2131,7 +2065,7 @@ struct CIrGenericTypePrediction
     u8 reserved[3];
 };
 
-BUSTER_C_INTERNAL String8 c_ir_math_builtin_link_name(String8 name)
+BUSTER_C_SHARED String8 c_ir_math_builtin_link_name(String8 name)
 {
     struct
     {
@@ -2248,27 +2182,6 @@ BUSTER_C_INTERNAL IrValueId c_ir_vector_splat(CIntegerIrBuilder* builder, IrValu
 // IMMEDIATE is an ordinary expression that gets lowered and then checked (and
 // converted, where C's usual conversions would have done it anyway); IMMEDIATE
 // is constant-evaluated from its tokens and never becomes a value.
-typedef enum CIrSimdArgument
-{
-    C_IR_SIMD_ARGUMENT_ADDRESS,
-    C_IR_SIMD_ARGUMENT_MASK,
-    C_IR_SIMD_ARGUMENT_VECTOR,
-    C_IR_SIMD_ARGUMENT_BYTE,
-    C_IR_SIMD_ARGUMENT_WORD,
-    C_IR_SIMD_ARGUMENT_IMMEDIATE,
-} CIrSimdArgument;
-
-typedef struct CIrSimdBuiltin CIrSimdBuiltin;
-struct CIrSimdBuiltin
-{
-    String8 name;
-    u8 operation;
-    u8 arguments[4];
-    u32 immediate_limit;
-};
-
-// The whole vocabulary, in one table. An immediate is always last, so lowering
-// walks the operands in order and evaluates the tail constant afterwards.
 BUSTER_C_INTERNAL CIrSimdBuiltin const c_ir_simd_builtins[] = {
     { S8_INITIALIZER("__builtin_buster_simd_load"), IR_SIMD_LOAD, { C_IR_SIMD_ARGUMENT_ADDRESS }, 0 },
     { S8_INITIALIZER("__builtin_buster_simd_load_masked"),
@@ -2354,17 +2267,53 @@ BUSTER_C_INTERNAL u32 c_ir_simd_builtin(String8 name)
 // that differ; `new_value` distinguishes `__atomic_add_fetch`, which answers
 // the updated value, from `__atomic_fetch_add`, which answers the previous one.
 // Both families lower to the same IR: only the surface differs.
-typedef struct CIrAtomicBuiltinSpelling CIrAtomicBuiltinSpelling;
-struct CIrAtomicBuiltinSpelling
+BUSTER_C_SHARED bool c_semantic_simd_builtin(String8 name, CIrSimdBuiltin* entry)
 {
-    CIrAtomicBuiltin builtin;
-    bool gnu;
-    bool new_value;
-    bool generic;
-    bool sequential;
-};
+    u32 index = c_ir_simd_builtin(name);
+    bool found = index != C_IR_SIMD_BUILTIN_NONE;
+    if (found) *entry = c_ir_simd_builtins[index];
+    return found;
+}
 
-BUSTER_C_INTERNAL CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name)
+BUSTER_C_SHARED u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spelling)
+{
+    u32 expected_count = spelling.builtin == C_IR_ATOMIC_BUILTIN_LOAD   ? 2
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_INIT ? 2
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ||
+                                 spelling.builtin == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK
+                             ? 5
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_THREAD_FENCE ||
+                                 spelling.builtin == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
+                                 spelling.builtin == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE
+                             ? 1
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE ? 0
+                                                                                             : 3;
+    // GNU's `_n`, generic pointer, and legacy `__sync_*` families
+    // share operations but not argument shapes.
+    if (spelling.generic)
+    {
+        expected_count = spelling.builtin == C_IR_ATOMIC_BUILTIN_LOAD ? 3
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_EXCHANGE ? 4
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ? 6
+                                                                                                    : 3;
+    }
+    else if (spelling.sequential)
+    {
+        expected_count = 2;
+    }
+    else if (spelling.gnu)
+    {
+        expected_count = spelling.builtin == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG   ? 6
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE            ? 2
+                         : spelling.builtin == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
+                                 spelling.builtin == C_IR_ATOMIC_BUILTIN_CLEAR
+                             ? 2
+                             : expected_count;
+    }
+    return expected_count;
+}
+
+BUSTER_C_SHARED CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name)
 {
     struct
     {
@@ -3221,10 +3170,10 @@ BUSTER_C_INTERNAL bool c_ir_constant_cast(CIntegerIrBuilder* builder, const CIrC
 BUSTER_C_INTERNAL f64 c_ir_constant_integer_to_float(const CIrConstantValue* source_input, IrType* type, u32 precision);
 BUSTER_C_INTERNAL u64 c_ir_float16_bits_from_f64(f64 value);
 BUSTER_C_INTERNAL f64 c_ir_float16_to_f64(u64 bits);
-BUSTER_C_INTERNAL f64 c_ir_float16_round(f64 value);
+BUSTER_C_SHARED f64 c_ir_float16_round(f64 value);
 BUSTER_C_INTERNAL u64 c_ir_bfloat16_bits_from_f64(f64 value);
 BUSTER_C_INTERNAL f64 c_ir_bfloat16_to_f64(u64 bits);
-BUSTER_C_INTERNAL f64 c_ir_bfloat16_round(f64 value);
+BUSTER_C_SHARED f64 c_ir_bfloat16_round(f64 value);
 BUSTER_C_INTERNAL bool c_ir_constant_float_literal(CIntegerIrBuilder* builder, String8 spelling, CIrConstantValue* result);
 BUSTER_C_INTERNAL void c_ir_constant_store_bits(IrProgram* program, IrType* type, u8* bytes, u64 offset, u64 bits, bool sign_extend);
 // The same store through an explicit unit width, which is what a bit-field
@@ -8809,39 +8758,26 @@ BUSTER_C_INTERNAL CArrayBound c_ir_vla_bound_expression(CPreprocessResult prepro
 BUSTER_C_INTERNAL bool c_ir_prepare_vla_layout(CIntegerIrBuilder* builder, CTypeId array_type, CToken token, bool parameter, bool pointer,
                                                 CIrVlaLayout* result);
 
-BUSTER_C_INTERNAL bool c_ir_integer_literal_fits(CIntegerIrBuilder* builder, CTypeKind kind, u64 value)
+BUSTER_C_INTERNAL bool c_semantic_integer_literal_fits(Target target, u64 const* limits, CTypeKind kind, u64 value)
 {
-    u64 limit = builder->literal_limits[kind];
-    if (limit)
+    u64 limit = limits ? limits[kind] : 0;
+    if (!limit)
     {
-        return value <= limit;
+        IrTypeKind ir_kind = IR_TYPE_VOID;
+        u32 width = 0;
+        u32 alignment = 0;
+        bool sign = false;
+        if (c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) && width)
+        {
+            limit = width >= 64 ? sign ? (u64)INT64_MAX : UINT64_MAX : (UINT64_C(1) << (width - (sign ? 1u : 0u))) - 1;
+        }
     }
-    IrTypeId type = builder->scalar_types[kind];
-    IrType* integer = ir_type_from_id(&builder->program->types, type);
-    bool result;
-    if (!integer || integer->kind != IR_TYPE_INTEGER)
-    {
-        result = false;
-    }
-    else if (integer->bit_width >= 64)
-    {
-        result = !integer->is_signed || value <= INT64_MAX;
-    }
-    else if (!integer->is_signed)
-    {
-        result = value <= (((u64)1 << integer->bit_width) - 1);
-    }
-    else
-    {
-        result = value <= (((u64)1 << (integer->bit_width - 1)) - 1);
-    }
-
-    return result;
+    return limit && value <= limit;
 }
 
-BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
+BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 const* limits, String8 spelling, u64 value)
 {
-    IrTypeId result = IR_TYPE_ID_INVALID;
+    CTypeKind result = C_TYPE_INVALID;
     bool suffix_valid = true;
     bool decimal = !spelling.length || spelling.pointer[0] != '0';
     bool is_unsigned = false;
@@ -8951,14 +8887,20 @@ BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder,
         }
     }
 #undef C_INTEGER_LITERAL_CANDIDATE
-    for (u32 index = 0; result.value == IR_ID_UNDERLYING_INVALID && index < candidate_count; index += 1)
+    for (u32 index = 0; result == C_TYPE_INVALID && index < candidate_count; index += 1)
     {
-        if (c_ir_integer_literal_fits(builder, candidates[index], value))
+        if (c_semantic_integer_literal_fits(target, limits, candidates[index], value))
         {
-            result = builder->scalar_types[candidates[index]];
+            result = candidates[index];
         }
     }
     return result;
+}
+
+BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
+{
+    CTypeKind kind = c_semantic_integer_literal_kind(builder->target, builder->literal_limits, spelling, value);
+    return kind != C_TYPE_INVALID ? builder->scalar_types[kind] : IR_TYPE_ID_INVALID;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, CToken token)
@@ -9071,7 +9013,7 @@ BUSTER_C_INTERNAL u32 c_ir_float_suffix(String8 spelling, char8* code_out)
     return length;
 }
 
-BUSTER_C_INTERNAL bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out)
+BUSTER_C_SHARED bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out)
 {
     spelling.length -= c_ir_float_suffix(spelling, suffix_out);
     bool hexadecimal = spelling.length >= 2 && spelling.pointer[0] == '0' && (spelling.pointer[1] == 'x' || spelling.pointer[1] == 'X');
@@ -10728,9 +10670,9 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left,
 // gives it the infinity or the signed zero, and musl spells `INFINITY` as
 // `1e5000f` whenever the compiler does not offer the GNU builtins, which is
 // how an overflowing literal reaches a static initializer in the first place.
-BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 token_index, bool negative, CIrExt80Value* value_out)
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CPreprocessResult preprocess, u32 token_index, bool negative, CIrExt80Value* value_out)
 {
-    String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]);
+    String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[token_index]);
     u64 significand = 0;
     u16 exponent_sign = 0;
     bool floating = c_number_is_float(spelling);
@@ -10789,24 +10731,26 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
         u64 integer = 0;
         if (c_conditional_number(spelling, &integer))
         {
-            IrTypeId integer_type_id = c_ir_integer_literal_type(builder, spelling, integer);
-            IrType* integer_type = ir_type_from_id(&builder->program->types, integer_type_id);
-            if (!integer_type || !c_ir_constant_type_is_integer(integer_type))
+            CTypeKind kind = c_semantic_integer_literal_kind(preprocess.target, 0, spelling, integer);
+            IrType integer_type = {0};
+            u32 alignment = 0;
+            if (!c_ir_scalar_type_properties(preprocess.target, kind, &integer_type.kind, &integer_type.bit_width, &integer_type.is_signed, &alignment) ||
+                integer_type.kind != IR_TYPE_INTEGER)
             {
                 return false;
             }
             if (negative)
             {
-                if (integer_type->is_signed)
+                if (integer_type.is_signed)
                 {
                     negative = integer != 0;
                 }
                 else
                 {
                     integer = 0 - integer;
-                    if (integer_type->bit_width < 64)
+                    if (integer_type.bit_width < 64)
                     {
-                        integer &= ((u64)1 << integer_type->bit_width) - 1;
+                        integer &= ((u64)1 << integer_type.bit_width) - 1;
                     }
                     // Unary minus on an unsigned integer wraps in that
                     // integer type before the conversion to long double.
@@ -10853,7 +10797,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 to
 typedef struct CIrExt80Fold CIrExt80Fold;
 struct CIrExt80Fold
 {
-    CIntegerIrBuilder* builder;
+    CPreprocessResult preprocess;
     u32 cursor;
     u32 limit;
     u32 depth;
@@ -10873,18 +10817,18 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
         fold->blame = fold->cursor < fold->limit ? fold->cursor : (fold->limit ? fold->limit - 1 : 0);
         return false;
     }
-    CToken const* token = &fold->builder->preprocess.tokens[fold->cursor];
+    CToken const* token = &fold->preprocess.tokens[fold->cursor];
     if (c_token_is_punctuator(token, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
     {
         bool negative = c_token_is_punctuator(token, C_PUNCTUATOR_MINUS);
         fold->cursor += 1;
-        if (fold->cursor < fold->limit && fold->builder->preprocess.tokens[fold->cursor].kind == C_TOKEN_PREPROCESSING_NUMBER)
+        if (fold->cursor < fold->limit && fold->preprocess.tokens[fold->cursor].kind == C_TOKEN_PREPROCESSING_NUMBER)
         {
             // A sign directly on a literal converts in that literal's own
             // type, which is where the unsigned wrap has to happen.
             u32 number = fold->cursor;
             fold->cursor += 1;
-            if (!c_ir_ext80_fold_number(fold->builder, number, negative, value_out))
+            if (!c_ir_ext80_fold_number(fold->preprocess, number, negative, value_out))
             {
                 fold->blame = number;
                 return false;
@@ -10903,7 +10847,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
     }
     if (c_token_is_punctuator(token, C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        u32 close = c_ir_matching_delimiter(fold->builder->preprocess, fold->cursor, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS,
+        u32 close = c_ir_matching_delimiter(fold->preprocess, fold->cursor, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS,
                                             C_PUNCTUATOR_RIGHT_PARENTHESIS);
         if (close == UINT32_MAX)
         {
@@ -10927,7 +10871,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
     {
         u32 number = fold->cursor;
         fold->cursor += 1;
-        if (!c_ir_ext80_fold_number(fold->builder, number, false, value_out))
+        if (!c_ir_ext80_fold_number(fold->preprocess, number, false, value_out))
         {
             fold->blame = number;
             return false;
@@ -10943,15 +10887,15 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
     // `(0.0f/0.0f)`) already fold through the number and operator paths
     // above; these are the same values written the other way.
     if (token->kind == C_TOKEN_IDENTIFIER && fold->cursor + 1 < fold->limit &&
-        c_token_is_punctuator(&fold->builder->preprocess.tokens[fold->cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        c_token_is_punctuator(&fold->preprocess.tokens[fold->cursor + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
     {
-        String8 link_name = c_ir_math_builtin_link_name(c_token_spelling(fold->builder->preprocess.spelling_base, *token));
+        String8 link_name = c_ir_math_builtin_link_name(c_token_spelling(fold->preprocess.spelling_base, *token));
         bool quiet_nan = string_equal(link_name, S8("nan")) || string_equal(link_name, S8("nanf"));
         bool infinity = string_equal(link_name, S8("inff")) || string_equal(link_name, S8("huge_val"));
         if (quiet_nan || infinity)
         {
             u32 open = fold->cursor + 1;
-            u32 close = c_ir_matching_delimiter(fold->builder->preprocess, open, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+            u32 close = c_ir_matching_delimiter(fold->preprocess, open, fold->limit, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
             if (close == UINT32_MAX)
             {
                 fold->blame = fold->cursor;
@@ -10960,8 +10904,8 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_primary(CIrExt80Fold* fold, CIrExt80Value
             // Only the default payload folds: `__builtin_nan("")` is the
             // quiet NaN every hosted header spells, and a non-empty payload
             // string names a different value.
-            String8 payload = close == open + 2 && fold->builder->preprocess.tokens[open + 1].kind == C_TOKEN_STRING_LITERAL
-                                  ? c_token_spelling(fold->builder->preprocess.spelling_base, fold->builder->preprocess.tokens[open + 1])
+            String8 payload = close == open + 2 && fold->preprocess.tokens[open + 1].kind == C_TOKEN_STRING_LITERAL
+                                  ? c_token_spelling(fold->preprocess.spelling_base, fold->preprocess.tokens[open + 1])
                                   : (String8){0};
             bool empty_payload = payload.length == 2 && payload.pointer[0] == '"' && payload.pointer[1] == '"';
             if (quiet_nan ? !empty_payload : close != open + 1)
@@ -10988,7 +10932,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_term(CIrExt80Fold* fold, CIrExt80Value* v
     }
     while (fold->cursor < fold->limit)
     {
-        CToken const* token = &fold->builder->preprocess.tokens[fold->cursor];
+        CToken const* token = &fold->preprocess.tokens[fold->cursor];
         bool multiply = c_token_is_punctuator(token, C_PUNCTUATOR_STAR);
         if (!multiply && !c_token_is_punctuator(token, C_PUNCTUATOR_SLASH))
         {
@@ -11020,7 +10964,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_sum(CIrExt80Fold* fold, CIrExt80Value* va
     }
     while (fold->cursor < fold->limit)
     {
-        CToken const* token = &fold->builder->preprocess.tokens[fold->cursor];
+        CToken const* token = &fold->preprocess.tokens[fold->cursor];
         bool add = c_token_is_punctuator(token, C_PUNCTUATOR_PLUS);
         if (!add && !c_token_is_punctuator(token, C_PUNCTUATOR_MINUS))
         {
@@ -11046,31 +10990,33 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_sum(CIrExt80Fold* fold, CIrExt80Value* va
 // The entry point both static x87 writers use: the scalar global and one
 // element of an aggregate.  Anything the grammar above does not cover keeps
 // the refusal, with the diagnostic naming the token it stopped at.
-BUSTER_C_INTERNAL bool c_ir_ext80_fold_initializer(CIntegerIrBuilder* builder, u32 start, u32 end, u64* significand_out, u16* exponent_sign_out)
+BUSTER_C_SHARED bool c_semantic_ext80_fold_initializer(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end,
+                                                         u64* significand_out, u16* exponent_sign_out, String8* message, u32* location)
 {
-    CIrExt80Fold fold = {
-        .builder = builder,
-        .cursor = start,
-        .limit = end,
-        .blame = start,
-    };
+    CIrExt80Fold fold = {.preprocess = preprocess, .cursor = start, .limit = end, .blame = start};
     CIrExt80Value value = {0};
     bool folded = start < end && c_ir_ext80_fold_sum(&fold, &value);
-    if (!folded || fold.cursor != end)
+    bool valid = folded && fold.cursor == end;
+    if (!valid)
     {
         u32 blame = folded ? fold.cursor : fold.blame;
-        String8 spelling = blame < builder->preprocess.token_count
-                               ? c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[blame])
-                               : (String8){0};
-        builder->failure_message =
-            spelling.length ? string_format(builder->arena, S8("cannot fold '{S8}' in an x86 long double static initializer"), spelling)
-                            : S8("unsupported x86 long double static initializer");
-        builder->failure_token_index = blame;
-        return false;
+        String8 spelling = blame < preprocess.token_count ? c_token_spelling(preprocess.spelling_base, preprocess.tokens[blame]) : (String8){0};
+        *message = spelling.length ? string_format(arena, S8("cannot fold '{S8}' in an x86 long double static initializer"), spelling)
+                                   : S8("unsupported x86 long double static initializer");
+        *location = blame;
     }
-    *significand_out = value.significand;
-    *exponent_sign_out = value.exponent_sign;
-    return true;
+    else
+    {
+        *significand_out = value.significand;
+        *exponent_sign_out = value.exponent_sign;
+    }
+    return valid;
+}
+
+BUSTER_C_INTERNAL bool c_ir_ext80_fold_initializer(CIntegerIrBuilder* builder, u32 start, u32 end, u64* significand_out, u16* exponent_sign_out)
+{
+    return c_semantic_ext80_fold_initializer(builder->arena, builder->preprocess, start, end, significand_out, exponent_sign_out,
+                                             &builder->failure_message, &builder->failure_token_index);
 }
 
 BUSTER_C_INTERNAL bool c_ir_ext80_static_scalar_target(Target target, IrType* type)
@@ -14693,7 +14639,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name(CIntegerIrBuilder* builder, u32 start,
 BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
 
 BUSTER_C_INTERNAL bool c_ir_global_initializer(CIntegerIrBuilder* builder, CDeclaration declaration, IrType* type, IrGlobal* global);
-BUSTER_C_INTERNAL bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out);
+BUSTER_C_SHARED bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out);
 
 BUSTER_C_INTERNAL bool c_ir_constexpr_initializer_valid(IrType* type, IrGlobal* initializer)
 {
@@ -18895,39 +18841,9 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             u32 starts[6] = {0};
             u32 ends[6] = {0};
             u32 argument_count = 0;
-            u32 expected_count = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_LOAD   ? 2
-                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_INIT ? 2
-                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ||
-                                         selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK
-                                     ? 5
-                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_THREAD_FENCE ||
-                                         selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE ||
-                                         selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE
-                                     ? 1
-                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE ? 0
-                                                                                                     : 3;
-            // GNU's `_n`, generic pointer, and legacy `__sync_*` families
-            // share operations but not argument shapes.
-            if (selected->builtin_atomic_generic)
-            {
-                expected_count = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_LOAD ? 3
-                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_EXCHANGE ? 4
-                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ? 6
-                                                                                                            : 3;
-            }
-            else if (selected->builtin_atomic_sequential)
-            {
-                expected_count = 2;
-            }
-            else if (selected->builtin_atomic_gnu)
-            {
-                expected_count = selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG   ? 6
-                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE            ? 2
-                                 : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_TEST_AND_SET ||
-                                         selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_CLEAR
-                                     ? 2
-                                     : expected_count;
-            }
+            u32 expected_count = c_semantic_atomic_builtin_arity((CIrAtomicBuiltinSpelling){
+                .builtin = selected->builtin_atomic, .gnu = selected->builtin_atomic_gnu,
+                .generic = selected->builtin_atomic_generic, .sequential = selected->builtin_atomic_sequential});
             IrSourceRange source = c_ir_token_source_range(builder, token);
             // `__sync_synchronize()` is the one atomic builtin with an empty
             // argument list, which the argument scan reports as malformed.
@@ -34432,8 +34348,9 @@ BUSTER_C_INTERNAL void c_ir_lower_declaration_or_assignment_list_step(CIntegerIr
     c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
 }
 
-BUSTER_C_INTERNAL u32 c_ir_inline_assembly_type_class(IrType* type)
+BUSTER_C_SHARED u32 c_semantic_asm_type_class(IrType* type)
 {
+    u32 result = IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
     if (type && type->layout.resolved && type->layout.size && type->layout.size <= 8)
     {
         switch (type->kind)
@@ -34441,9 +34358,11 @@ BUSTER_C_INTERNAL u32 c_ir_inline_assembly_type_class(IrType* type)
         case IR_TYPE_BOOLEAN:
         case IR_TYPE_INTEGER:
         case IR_TYPE_ENUM:
-            return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
+            result = IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER;
+            break;
         case IR_TYPE_POINTER:
-            return IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
+            result = IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER;
+            break;
         case IR_TYPE_VOID:
         case IR_TYPE_FLOAT:
         case IR_TYPE_VA_LIST:
@@ -34459,7 +34378,7 @@ BUSTER_C_INTERNAL u32 c_ir_inline_assembly_type_class(IrType* type)
         }
     }
 
-    return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
+    return result;
 }
 
 // What GNU's 'x' may carry. The SSE register class holds a floating-point
@@ -34467,7 +34386,7 @@ BUSTER_C_INTERNAL u32 c_ir_inline_assembly_type_class(IrType* type)
 // x86-64 math puts there; the x87 `long double` is a different register file
 // and is not one of these, and an integer would need a move between files that
 // no operand here performs.
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_vector_operand(IrType* type)
+BUSTER_C_SHARED bool c_semantic_asm_vector_operand(IrType* type)
 {
     return type && type->layout.resolved && type->kind == IR_TYPE_FLOAT && (type->layout.size == 4 || type->layout.size == 8);
 }
@@ -34477,7 +34396,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_vector_operand(IrType* type)
 // codegen_canonical_x64_type_is_f80 makes -- a float whose bit width is 80 in a
 // sixteen-byte slot -- because a `long double` that is an f64 or an f128 is a
 // different register file on the target that spells it that way.
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_x87_operand(IrType* type)
+BUSTER_C_SHARED bool c_semantic_asm_x87_operand(IrType* type)
 {
     return type && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.resolved && type->layout.size == 16;
 }
@@ -34490,8 +34409,8 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_operand_types_compatible(CIntegerIrB
     }
     IrType* output_type = ir_type_from_id(&builder->program->types, builder->function->values[output.value].canonical_type);
     IrType* input_type = ir_type_from_id(&builder->program->types, builder->function->values[input.value].canonical_type);
-    u32 output_class = c_ir_inline_assembly_type_class(output_type);
-    u32 input_class = c_ir_inline_assembly_type_class(input_type);
+    u32 output_class = c_semantic_asm_type_class(output_type);
+    u32 input_class = c_semantic_asm_type_class(input_type);
     return output_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID && output_class == input_class && output_type->layout.size == input_type->layout.size;
 }
 
@@ -34524,24 +34443,18 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint_class_supported(CIntegerI
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_decimal_reference(String8 bytes, u32* index_out)
+BUSTER_C_SHARED bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_out)
 {
-    if (!bytes.pointer || !bytes.length || !index_out)
-    {
-        return false;
-    }
+    bool valid = bytes.pointer && bytes.length && index_out;
     u64 value = 0;
-    for (u64 index = 0; index < bytes.length; index += 1)
+    for (u64 index = 0; valid && index < bytes.length; index += 1)
     {
         u8 digit = (u8)bytes.pointer[index];
-        if (digit < '0' || digit > '9' || value > (UINT32_MAX - (digit - '0')) / 10)
-        {
-            return false;
-        }
-        value = value * 10 + (digit - '0');
+        valid = digit >= '0' && digit <= '9' && value <= (UINT32_MAX - (digit - '0')) / 10;
+        if (valid) value = value * 10 + (digit - '0');
     }
-    *index_out = (u32)value;
-    return true;
+    if (valid) *index_out = (u32)value;
+    return valid;
 }
 
 // The x86-64 register names a local register variable may bind, paired with the
@@ -34581,6 +34494,26 @@ BUSTER_C_INTERNAL bool c_ir_aarch64_inline_assembly_register(String8 name, u32* 
         *register_out = (u32)number;
     }
     return valid;
+}
+
+BUSTER_C_SHARED u64 c_semantic_asm_bound_register(Target target, String8 label)
+{
+    u64 result = IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ir_bound_register_names); index += 1)
+    {
+        if (target.cpu_arch == CPU_ARCH_X86_64 && string_equal(c_ir_bound_register_names[index].name, label))
+        {
+            result = c_ir_bound_register_names[index].constraint;
+        }
+    }
+    u32 physical_register = UINT32_MAX;
+    if (target.cpu_arch == CPU_ARCH_AARCH64 && c_ir_aarch64_inline_assembly_register(label, &physical_register) &&
+        (physical_register <= 15 || physical_register >= 19))
+    {
+        result = IR_INLINE_ASSEMBLY_CONSTRAINT_R | IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER |
+                 ((u64)physical_register << IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_SHIFT);
+    }
+    return result;
 }
 
 // The assembler label of a declaration, read from the declaration's own tokens.
@@ -34662,20 +34595,10 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_bound_register(CIntegerIrBuilder* bu
     {
         label = string_slice(label, 1, label.length);
     }
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(c_ir_bound_register_names); index += 1)
+    u64 bound = c_semantic_asm_bound_register(builder->target, label);
+    if (bound != IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT)
     {
-        if (builder->target.cpu_arch == CPU_ARCH_X86_64 && string_equal(c_ir_bound_register_names[index].name, label))
-        {
-            *constraint_out = c_ir_bound_register_names[index].constraint;
-            return true;
-        }
-    }
-    u32 physical_register = UINT32_MAX;
-    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && c_ir_aarch64_inline_assembly_register(label, &physical_register) &&
-        (physical_register <= 15 || physical_register >= 19))
-    {
-        *constraint_out = IR_INLINE_ASSEMBLY_CONSTRAINT_R | IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER |
-                          ((u64)physical_register << IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_SHIFT);
+        *constraint_out = bound;
         return true;
     }
     builder->failure_message = string_format(builder->arena, S8("unsupported register '{S8}' bound to a local register variable"), label);
@@ -34809,7 +34732,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             break;
         default:
         {
-            if (!c_ir_inline_assembly_decimal_reference((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, &match_index))
+            if (!c_semantic_asm_decimal_reference((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, &match_index))
             {
                 builder->failure_message = S8("malformed asm matching constraint");
                 return false;
@@ -34820,7 +34743,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
         }
     }
     else if (bytes.length > 1 && bytes.pointer[0] >= '0' && bytes.pointer[0] <= '9' &&
-             c_ir_inline_assembly_decimal_reference((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, &match_index))
+             c_semantic_asm_decimal_reference((String8){.pointer = (char8*)bytes.pointer, .length = bytes.length}, &match_index))
     {
         matching = true;
     }
@@ -34876,7 +34799,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             builder->failure_message = S8("unsupported asm constraint for target");
             return false;
         }
-        if (!c_ir_inline_assembly_vector_operand(operand_type))
+        if (!c_semantic_asm_vector_operand(operand_type))
         {
             builder->failure_message = S8("an asm operand in the SSE register class must be a float or a double");
             return false;
@@ -34893,7 +34816,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
             builder->failure_message = S8("unsupported asm constraint for target");
             return false;
         }
-        if (!c_ir_inline_assembly_x87_operand(operand_type))
+        if (!c_semantic_asm_x87_operand(operand_type))
         {
             builder->failure_message = S8("an asm operand on the x87 register stack must be a long double");
             return false;
@@ -34901,7 +34824,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     }
     if (matching)
     {
-        if (c_ir_inline_assembly_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID)
+        if (c_semantic_asm_type_class(operand_type) == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID)
         {
             builder->failure_message = S8("asm matching operands must be supported scalar values");
             return false;
@@ -34972,14 +34895,14 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_constraint(CIntegerIrBuilder* builde
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* builder, String8 clobber)
+BUSTER_C_SHARED bool c_semantic_asm_clobber_valid(Target target, String8 clobber)
 {
     bool result = false;
     if (string_equal(clobber, S8("memory")) || string_equal(clobber, S8("cc")))
     {
         result = true;
     }
-    else if (builder->target.cpu_arch == CPU_ARCH_X86_64)
+    else if (target.cpu_arch == CPU_ARCH_X86_64)
     {
         if (clobber.length >= 4 && clobber.pointer[0] == 'x' && clobber.pointer[1] == 'm' && clobber.pointer[2] == 'm')
         {
@@ -34988,7 +34911,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
             result = c_conditional_number(suffix, &number) && number <= 15 &&
                      (suffix.length == 1 || (suffix.length == 2 && suffix.pointer[0] == '1'));
         }
-        else if (!target_uses_llp64_data_model(builder->target) ||
+        else if (!target_uses_llp64_data_model(target) ||
                  (!string_equal(clobber, S8("rsi")) && !string_equal(clobber, S8("esi")) && !string_equal(clobber, S8("si")) &&
                   !string_equal(clobber, S8("sil")) && !string_equal(clobber, S8("rdi")) && !string_equal(clobber, S8("edi")) &&
                   !string_equal(clobber, S8("di")) && !string_equal(clobber, S8("dil"))))
@@ -35019,7 +34942,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_valid(CIntegerIrBuilder* bui
             }
         }
     }
-    else if (builder->target.cpu_arch == CPU_ARCH_AARCH64)
+    else if (target.cpu_arch == CPU_ARCH_AARCH64)
     {
         if (clobber.length >= 2 && (clobber.pointer[0] == 'x' || clobber.pointer[0] == 'w'))
         {
@@ -35058,7 +34981,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
                 .pointer = (char8*)name.pointer,
                 .length = name.length,
             };
-            if (!c_ir_inline_assembly_clobber_valid(builder, clobber))
+            if (!c_semantic_asm_clobber_valid(builder->target, clobber))
             {
                 return false;
             }
@@ -35086,57 +35009,71 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_parse(CIntegerIrBuilder* bu
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobber_matches_constraint(CIntegerIrBuilder* builder, String8 clobber, u64 constraint)
+BUSTER_C_SHARED bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint)
 {
-    if (builder->target.cpu_arch == CPU_ARCH_AARCH64 && IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint))
+    bool matches = false;
+    if (target.cpu_arch == CPU_ARCH_AARCH64 && IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint))
     {
         u32 physical_register = UINT32_MAX;
-        return c_ir_aarch64_inline_assembly_register(clobber, &physical_register) &&
+        matches = c_ir_aarch64_inline_assembly_register(clobber, &physical_register) &&
                physical_register == IR_INLINE_ASSEMBLY_CONSTRAINT_PHYSICAL_REGISTER_INDEX(constraint);
     }
-    switch (constraint & 0xff)
+    else
     {
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_A:
-        return string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) ||
-               string_equal(clobber, S8("al"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_B:
-        return string_equal(clobber, S8("rbx")) || string_equal(clobber, S8("ebx")) || string_equal(clobber, S8("bx")) ||
-               string_equal(clobber, S8("bl"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_C:
-        return string_equal(clobber, S8("rcx")) || string_equal(clobber, S8("ecx")) || string_equal(clobber, S8("cx")) ||
-               string_equal(clobber, S8("cl"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_D:
-        return string_equal(clobber, S8("rdx")) || string_equal(clobber, S8("edx")) || string_equal(clobber, S8("dx")) ||
-               string_equal(clobber, S8("dl"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_SI:
-        return string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) || string_equal(clobber, S8("si")) ||
-               string_equal(clobber, S8("sil"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_DI:
-        return string_equal(clobber, S8("rdi")) || string_equal(clobber, S8("edi")) || string_equal(clobber, S8("di")) ||
-               string_equal(clobber, S8("dil"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_R8:
-        return string_equal(clobber, S8("r8"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_R9:
-        return string_equal(clobber, S8("r9"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_R10:
-        return string_equal(clobber, S8("r10"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_R11:
-        return string_equal(clobber, S8("r11"));
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_R:
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_M:
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_X:
-    // `st` names the top of the x87 stack, which is where a 't' operand sits,
-    // and the two are written together on purpose rather than in conflict:
-    // musl's `llrintl` declares the clobber to say that its `fistpll` popped
-    // the operand it was handed. The conflict rule is about a clobber that
-    // destroys an operand the emitter still has to read back, and that is not
-    // this.
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_T:
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_U:
-    case IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT:
-        break;
+        switch (constraint & 0xff)
+        {
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_A:
+            matches = string_equal(clobber, S8("rax")) || string_equal(clobber, S8("eax")) || string_equal(clobber, S8("ax")) ||
+                   string_equal(clobber, S8("al"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_B:
+            matches = string_equal(clobber, S8("rbx")) || string_equal(clobber, S8("ebx")) || string_equal(clobber, S8("bx")) ||
+                   string_equal(clobber, S8("bl"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_C:
+            matches = string_equal(clobber, S8("rcx")) || string_equal(clobber, S8("ecx")) || string_equal(clobber, S8("cx")) ||
+                   string_equal(clobber, S8("cl"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_D:
+            matches = string_equal(clobber, S8("rdx")) || string_equal(clobber, S8("edx")) || string_equal(clobber, S8("dx")) ||
+                   string_equal(clobber, S8("dl"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_SI:
+            matches = string_equal(clobber, S8("rsi")) || string_equal(clobber, S8("esi")) || string_equal(clobber, S8("si")) ||
+                   string_equal(clobber, S8("sil"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_DI:
+            matches = string_equal(clobber, S8("rdi")) || string_equal(clobber, S8("edi")) || string_equal(clobber, S8("di")) ||
+                   string_equal(clobber, S8("dil"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_R8:
+            matches = string_equal(clobber, S8("r8"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_R9:
+            matches = string_equal(clobber, S8("r9"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_R10:
+            matches = string_equal(clobber, S8("r10"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_R11:
+            matches = string_equal(clobber, S8("r11"));
+            break;
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_R:
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_M:
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_X:
+        // `st` names the top of the x87 stack, which is where a 't' operand sits,
+        // and the two are written together on purpose rather than in conflict:
+        // musl's `llrintl` declares the clobber to say that its `fistpll` popped
+        // the operand it was handed. The conflict rule is about a clobber that
+        // destroys an operand the emitter still has to read back, and that is not
+        // this.
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_T:
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_U:
+        case IR_INLINE_ASSEMBLY_CONSTRAINT_COUNT:
+            break;
+        }
     }
-    return false;
+    return matches;
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_conflict(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
@@ -35145,7 +35082,7 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_conflict(CIntegerIrBuilder*
     {
         for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
         {
-            if (c_ir_inline_assembly_clobber_matches_constraint(builder, state->clobbers[clobber_index], state->constraints[operand_index]))
+            if (c_semantic_asm_clobber_matches_constraint(builder->target, state->clobbers[clobber_index], state->constraints[operand_index]))
             {
                 builder->failure_message = S8("asm operand constraint conflicts with its clobber list");
                 return true;
@@ -35155,20 +35092,21 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_clobbers_conflict(CIntegerIrBuilder*
     return false;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_fixed_operands_conflict(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
+BUSTER_C_SHARED bool c_semantic_asm_fixed_operands_conflict(u64 const* constraints, u32 count)
 {
-    for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
+    bool conflict = false;
+    for (u32 operand_index = 0; !conflict && operand_index < count; operand_index += 1)
     {
-        u64 constraint = state->constraints[operand_index];
+        u64 constraint = constraints[operand_index];
         u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
         bool physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(constraint);
         if (!physical && !IR_INLINE_ASSEMBLY_CONSTRAINT_IS_FIXED(constraint_class))
         {
             continue;
         }
-        for (u32 previous_index = 0; previous_index < operand_index; previous_index += 1)
+        for (u32 previous_index = 0; !conflict && previous_index < operand_index; previous_index += 1)
         {
-            u64 previous_constraint = state->constraints[previous_index];
+            u64 previous_constraint = constraints[previous_index];
             u64 previous_class = previous_constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
             bool previous_physical = IR_INLINE_ASSEMBLY_CONSTRAINT_HAS_PHYSICAL_REGISTER(previous_constraint);
             bool same_register = physical && previous_physical
@@ -35177,24 +35115,30 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_fixed_operands_conflict(CIntegerIrBu
                                      : !physical && !previous_physical && previous_class == constraint_class;
             if (same_register)
             {
-                bool current_output = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
-                bool previous_output = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
-                bool current_read_write = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
-                bool previous_read_write = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
-                bool current_early_clobber = (state->constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
-                bool previous_early_clobber = (state->constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
+                bool current_output = (constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+                bool previous_output = (constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+                bool current_read_write = (constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+                bool previous_read_write = (constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+                bool current_early_clobber = (constraints[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
+                bool previous_early_clobber = (constraints[previous_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_EARLY_CLOBBER) != 0;
                 bool output_input_pair = current_output != previous_output &&
                                          ((current_output && !current_read_write && !current_early_clobber) ||
                                           (previous_output && !previous_read_write && !previous_early_clobber));
                 if (!output_input_pair)
                 {
-                    builder->failure_message = S8("asm fixed-register operands conflict without a supported matching constraint");
-                    return true;
+                    conflict = true;
                 }
             }
         }
     }
-    return false;
+    return conflict;
+}
+
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_fixed_operands_conflict(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
+{
+    bool conflict = c_semantic_asm_fixed_operands_conflict(state->constraints, state->operand_count);
+    if (conflict) builder->failure_message = S8("asm fixed-register operands conflict without a supported matching constraint");
+    return conflict;
 }
 
 // The x87 stack is a stack rather than a set of registers, so what an asm may
@@ -35209,14 +35153,15 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_fixed_operands_conflict(CIntegerIrBu
 //     with exactly one x87 operand and that operand is an input. A popped
 //     output is one the emitter would have to read back out of a register the
 //     template already discarded.
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_x87_operands_valid(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
+BUSTER_C_SHARED String8 c_semantic_asm_x87_operands_message(u64 const* constraints, u32 count, bool stack_clobber)
 {
+    String8 message = {0};
     u32 top_count = 0;
     u32 below_count = 0;
     bool top_is_output = false;
-    for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
+    for (u32 operand_index = 0; operand_index < count; operand_index += 1)
     {
-        u64 constraint = state->constraints[operand_index];
+        u64 constraint = constraints[operand_index];
         u64 constraint_class = constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK;
         if (constraint_class == IR_INLINE_ASSEMBLY_CONSTRAINT_T)
         {
@@ -35228,27 +35173,28 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_x87_operands_valid(CIntegerIrBuilder
             below_count += 1;
         }
     }
-    bool stack_clobber = false;
-    for (u32 clobber_index = 0; clobber_index < state->clobber_count; clobber_index += 1)
-    {
-        stack_clobber |= string_equal(state->clobbers[clobber_index], S8("st"));
-    }
     if (top_count > 1 || below_count > 1)
     {
-        builder->failure_message = S8("asm names an x87 stack position more than once");
-        return false;
+        message = S8("asm names an x87 stack position more than once");
     }
-    if (below_count && !top_count)
+    else if (below_count && !top_count)
     {
-        builder->failure_message = S8("an asm operand in x87 st(1) requires one in st(0)");
-        return false;
+        message = S8("an asm operand in x87 st(1) requires one in st(0)");
     }
-    if (stack_clobber && (top_count != 1 || below_count || top_is_output))
+    else if (stack_clobber && (top_count != 1 || below_count || top_is_output))
     {
-        builder->failure_message = S8("an asm that clobbers st must take exactly one x87 input and no output");
-        return false;
+        message = S8("an asm that clobbers st must take exactly one x87 input and no output");
     }
-    return true;
+    return message;
+}
+
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_x87_operands_valid(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
+{
+    bool stack_clobber = false;
+    for (u32 index = 0; index < state->clobber_count; index += 1) stack_clobber |= string_equal(state->clobbers[index], S8("st"));
+    String8 message = c_semantic_asm_x87_operands_message(state->constraints, state->operand_count, stack_clobber);
+    if (message.length) builder->failure_message = message;
+    return !message.length;
 }
 
 BUSTER_C_INTERNAL bool c_ir_inline_assembly_labels_parse(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, u32 start, u32 end)
@@ -35506,142 +35452,95 @@ BUSTER_C_INTERNAL bool c_ir_inline_assembly_substitute_named_operands(CIntegerIr
     return true;
 }
 
-BUSTER_C_INTERNAL bool c_ir_inline_assembly_special_literal_operands_valid(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, String8 assembly)
+BUSTER_C_SHARED String8 c_semantic_asm_special_operands_message(Target target, String8 assembly, u64 const* constraints,
+    CSemanticAsmOperand const* operands, u32 operand_count, u32 output_count, bool rbx_clobber)
 {
+    String8 message = {0};
     bool cpuid = string_equal(assembly, S8("cpuid"));
     bool xgetbv = string_equal(assembly, S8("xgetbv"));
-    if ((!cpuid && !xgetbv) || !builder || !state || builder->target.cpu_arch != CPU_ARCH_X86_64)
+    if ((cpuid || xgetbv) && target.cpu_arch == CPU_ARCH_X86_64)
     {
-        return true;
-    }
-
-    String8 failure_message = cpuid ? S8("cpuid inline assembly requires fixed register operands")
-                                    : S8("xgetbv inline assembly requires fixed register operands");
-    bool output_roles[4] = {0};
-    bool input_roles[4] = {0};
-    u32 output_count = state->output_count;
-    if (output_count > state->operand_count)
-    {
-        builder->failure_message = failure_message;
-        return false;
-    }
-
-    // The emitter's fixed-register loads/stores support scalar values whose
-    // storage occupies one, two, four, or eight bytes.  The instruction
-    // itself consumes/writes the low 32 bits; x86-64 zero-extension makes an
-    // eight-byte result well-defined, while a tied input still has to retain
-    // the usual exact-width compatibility checked by the constraint parser.
-    for (u32 operand_index = 0; operand_index < state->operand_count; operand_index += 1)
-    {
-        IrValueId operand = state->operands[operand_index];
-        if (operand.value >= builder->function->value_count)
+        String8 failure = cpuid ? S8("cpuid inline assembly requires fixed register operands")
+                               : S8("xgetbv inline assembly requires fixed register operands");
+        bool output_roles[4] = {0};
+        bool input_roles[4] = {0};
+        bool valid = output_count <= operand_count;
+        for (u32 index = 0; valid && index < operand_count; index += 1)
         {
-            builder->failure_message = failure_message;
-            return false;
-        }
-        IrType* operand_type = ir_type_from_id(&builder->program->types, builder->function->values[operand.value].canonical_type);
-        u32 operand_class = c_ir_inline_assembly_type_class(operand_type);
-        if ((operand_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER && operand_class != IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER) ||
-            !operand_type->layout.resolved ||
-            (operand_type->layout.size != 1 && operand_type->layout.size != 2 && operand_type->layout.size != 4 && operand_type->layout.size != 8))
-        {
-            builder->failure_message = failure_message;
-            return false;
-        }
-        u64 constraint = state->constraints[operand_index];
-        u32 constraint_class = (u32)(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
-        bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
-        bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
-        bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
-        if (constraint_class > IR_INLINE_ASSEMBLY_CONSTRAINT_D || (read_write && !output))
-        {
-            builder->failure_message = failure_message;
-            return false;
-        }
-        if (operand_index < output_count)
-        {
-            if (!output || matching || output_roles[constraint_class])
+            CSemanticAsmOperand operand = operands[index];
+            u64 constraint = constraints[index];
+            u32 role = (u32)(constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
+            bool output = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_OUTPUT) != 0;
+            bool read_write = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) != 0;
+            bool matching = (constraint & IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH) != 0;
+            valid = (operand.type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INTEGER || operand.type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_POINTER) &&
+                    (operand.size == 1 || operand.size == 2 || operand.size == 4 || operand.size == 8) &&
+                    role <= IR_INLINE_ASSEMBLY_CONSTRAINT_D && (!read_write || output);
+            if (!valid) break;
+            if (index < output_count)
             {
-                builder->failure_message = failure_message;
-                return false;
+                valid = output && !matching && !output_roles[role] &&
+                        (!read_write || (cpuid && (role == IR_INLINE_ASSEMBLY_CONSTRAINT_A || role == IR_INLINE_ASSEMBLY_CONSTRAINT_C)));
+                output_roles[role] = true;
+                if (read_write) input_roles[role] = true;
             }
-            output_roles[constraint_class] = true;
-            if (cpuid)
+            else
             {
-                if (read_write && constraint_class != IR_INLINE_ASSEMBLY_CONSTRAINT_A && constraint_class != IR_INLINE_ASSEMBLY_CONSTRAINT_C)
+                valid = !output && !read_write && !input_roles[role];
+                if (matching)
                 {
-                    builder->failure_message = failure_message;
-                    return false;
+                    u32 match = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
+                    valid &= match < output_count && output_roles[role];
+                    if (valid)
+                        valid = !(constraints[match] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) &&
+                                (constraints[match] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) == role &&
+                                operands[match].size == operand.size && operands[match].type_class == operand.type_class;
                 }
-                if (read_write)
-                {
-                    input_roles[constraint_class] = true;
-                }
-            }
-            else if (read_write)
-            {
-                builder->failure_message = failure_message;
-                return false;
-            }
-            continue;
-        }
-        if (output || read_write)
-        {
-            builder->failure_message = failure_message;
-            return false;
-        }
-        if (matching)
-        {
-            u32 match_index = IR_INLINE_ASSEMBLY_CONSTRAINT_MATCH_INDEX(constraint);
-            if (match_index >= output_count || !output_roles[constraint_class] ||
-                (state->constraints[match_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_READ_WRITE) ||
-                (state->constraints[match_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK) != constraint_class ||
-                !c_ir_inline_assembly_operand_types_compatible(builder, state->operands[match_index], operand))
-            {
-                builder->failure_message = failure_message;
-                return false;
+                input_roles[role] = true;
             }
         }
-        if (input_roles[constraint_class])
+        if (valid && cpuid)
         {
-            builder->failure_message = failure_message;
-            return false;
+            valid = input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_A] && input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C] &&
+                    !input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] && !input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_D];
+            // RBX is callee-saved; the emitter only preserves the architectural
+            // write when an output or clobber declares it.
+            if (valid && !output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] && !rbx_clobber)
+                message = S8("cpuid inline assembly must expose or clobber RBX");
         }
-        input_roles[constraint_class] = true;
+        else if (valid)
+            valid = input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C] && !input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_A] &&
+                    !input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] && !input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_D] &&
+                    !output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] && !output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C];
+        if (!valid) message = failure;
     }
+    return message;
+}
 
-    // CPUID consumes EAX and ECX.  XGETBV consumes ECX and has no input role
-    // in EAX/EDX; its optional outputs are pure stores only.
-    if (cpuid)
+BUSTER_C_INTERNAL bool c_ir_inline_assembly_special_literal_operands_valid(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state, String8 assembly)
+{
+    bool valid = true;
+    if (builder && state && builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+        (string_equal(assembly, S8("cpuid")) || string_equal(assembly, S8("xgetbv"))))
     {
-        if (!input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_A] || !input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C] || input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] ||
-            input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_D])
+        CSemanticAsmOperand* operands = arena_allocate(builder->temporary_arena, CSemanticAsmOperand, state->operand_count);
+        for (u32 index = 0; index < state->operand_count; index += 1)
         {
-            builder->failure_message = failure_message;
-            return false;
+            IrValueId operand = state->operands[index];
+            IrType* type = operand.value < builder->function->value_count
+                ? ir_type_from_id(&builder->program->types, builder->function->values[operand.value].canonical_type) : 0;
+            operands[index] = (CSemanticAsmOperand){.size = type && type->layout.resolved ? type->layout.size : 0,
+                .type_class = c_semantic_asm_type_class(type)};
         }
-        // CPUID overwrites EBX even when the source omits that result.  RBX
-        // is callee-saved in both x86-64 ABIs, and the canonical emitter's
-        // prologue preserves it only when a fixed B operand or RBX-family
-        // clobber makes the architectural side effect explicit.
-        bool preserves_rbx = output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B];
-        for (u32 clobber_index = 0; clobber_index < state->clobber_count && !preserves_rbx; clobber_index += 1)
-        {
-            preserves_rbx = c_ir_inline_assembly_clobber_matches_constraint(builder, state->clobbers[clobber_index], IR_INLINE_ASSEMBLY_CONSTRAINT_B);
-        }
-        if (!preserves_rbx)
-        {
-            builder->failure_message = S8("cpuid inline assembly must expose or clobber RBX");
-            return false;
-        }
+        bool rbx_clobber = false;
+        for (u32 index = 0; !rbx_clobber && index < state->clobber_count; index += 1)
+            rbx_clobber = c_semantic_asm_clobber_matches_constraint(builder->target, state->clobbers[index], IR_INLINE_ASSEMBLY_CONSTRAINT_B);
+        String8 message = c_semantic_asm_special_operands_message(builder->target, assembly, state->constraints, operands,
+            state->operand_count, state->output_count, rbx_clobber);
+        valid = !message.length;
+        if (!valid) builder->failure_message = message;
     }
-    else if (!input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C] || input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_A] || input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] ||
-             input_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_D] || output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_B] || output_roles[IR_INLINE_ASSEMBLY_CONSTRAINT_C])
-    {
-        builder->failure_message = failure_message;
-        return false;
-    }
-    return true;
+    return valid;
 }
 
 BUSTER_C_INTERNAL bool c_ir_finish_inline_assembly(CIntegerIrBuilder* builder, CIrLowerInlineAssemblyState* state)
@@ -38752,7 +38651,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_body(CIntegerIrBuilder* builder, CDeclaration 
     return lowered.success;
 }
 
-BUSTER_C_INTERNAL bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out)
+BUSTER_C_SHARED bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out)
 {
     // A declarator split out of a comma-separated list owns only its own
     // segment; scanning the whole declaration would hand it the initializer of
@@ -43037,25 +42936,18 @@ BUSTER_C_INTERNAL CIrConstantValue c_ir_constant_integer(IrTypeId type, u64 valu
     };
 }
 
-typedef struct CIrWideInteger CIrWideInteger;
-struct CIrWideInteger
-{
-    u64 low;
-    u64 high;
-};
-
-BUSTER_C_INTERNAL CIrWideInteger c_ir_wide_negate(CIrWideInteger value)
+BUSTER_C_SHARED CIrWideInteger c_ir_wide_negate(CIrWideInteger value)
 {
     CIrWideInteger result = {.low = 0 - value.low, .high = ~value.high + (value.low == 0)};
     return result;
 }
 
-BUSTER_C_INTERNAL bool c_ir_wide_less(CIrWideInteger left, CIrWideInteger right)
+BUSTER_C_SHARED bool c_ir_wide_less(CIrWideInteger left, CIrWideInteger right)
 {
     return left.high < right.high || (left.high == right.high && left.low < right.low);
 }
 
-BUSTER_C_INTERNAL CIrWideInteger c_ir_wide_subtract(CIrWideInteger left, CIrWideInteger right)
+BUSTER_C_SHARED CIrWideInteger c_ir_wide_subtract(CIrWideInteger left, CIrWideInteger right)
 {
     CIrWideInteger result = {.low = left.low - right.low, .high = left.high - right.high - (left.low < right.low)};
     return result;
@@ -43067,7 +42959,7 @@ BUSTER_C_INTERNAL CIrWideInteger c_ir_wide_shift_left_one(CIrWideInteger value)
     return result;
 }
 
-BUSTER_C_INTERNAL void c_ir_wide_divide(CIrWideInteger dividend, CIrWideInteger divisor, CIrWideInteger* quotient_out,
+BUSTER_C_SHARED void c_ir_wide_divide(CIrWideInteger dividend, CIrWideInteger divisor, CIrWideInteger* quotient_out,
                                            CIrWideInteger* remainder_out)
 {
     CIrWideInteger quotient = {0};
@@ -43090,7 +42982,7 @@ BUSTER_C_INTERNAL void c_ir_wide_divide(CIrWideInteger dividend, CIrWideInteger 
     *remainder_out = remainder;
 }
 
-BUSTER_C_INTERNAL CIrWideInteger c_ir_wide_multiply(CIrWideInteger left, CIrWideInteger right)
+BUSTER_C_SHARED CIrWideInteger c_ir_wide_multiply(CIrWideInteger left, CIrWideInteger right)
 {
     u64 left_low = (u32)left.low;
     u64 left_high = left.low >> 32;
@@ -43675,7 +43567,7 @@ BUSTER_C_INTERNAL f64 c_ir_float16_to_f64(u64 bits)
 // One value rounded to binary16 and carried on as an f64, which is how every
 // `_Float16` constant is held between operations -- the counterpart of the
 // `(f64)(f32)` step an f32 constant takes.
-BUSTER_C_INTERNAL f64 c_ir_float16_round(f64 value)
+BUSTER_C_SHARED f64 c_ir_float16_round(f64 value)
 {
     return c_ir_float16_to_f64(c_ir_float16_bits_from_f64(value));
 }
@@ -43763,7 +43655,7 @@ BUSTER_C_INTERNAL f64 c_ir_bfloat16_to_f64(u64 bits)
     return result;
 }
 
-BUSTER_C_INTERNAL f64 c_ir_bfloat16_round(f64 value)
+BUSTER_C_SHARED f64 c_ir_bfloat16_round(f64 value)
 {
     return c_ir_bfloat16_to_f64(c_ir_bfloat16_bits_from_f64(value));
 }
@@ -43845,7 +43737,7 @@ BUSTER_C_INTERNAL f64 c_ir_constant_integer_to_float(const CIrConstantValue* sou
 // itself have undefined behavior for negative unsigned inputs, NaNs and values
 // beyond 64 bits. Truncate first, then test the destination range: -128.75 is
 // representable in signed char and -0.75 is representable in unsigned char.
-BUSTER_C_INTERNAL bool c_ir_constant_float_to_integer(f64 floating, IrType* target, CIrWideInteger* result)
+BUSTER_C_SHARED bool c_ir_constant_float_to_integer(f64 floating, IrType* target, CIrWideInteger* result)
 {
     u64 bits;
     memcpy(&bits, &floating, sizeof(bits));
@@ -44138,13 +44030,9 @@ BUSTER_C_INTERNAL bool c_ir_constant_float_round(CIrExt80Big const* numerator, C
     return status != C_IR_ROUND_FAILED;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_float_literal(CIntegerIrBuilder* builder, String8 spelling, CIrConstantValue* result)
+BUSTER_C_SHARED bool c_ir_constant_float_literal_for_type(IrType const* type, String8 spelling, CIrConstantValue* result)
 {
     char8 suffix = 0;
-    c_ir_float_suffix(spelling, &suffix);
-    IrTypeId type_id = suffix == 'h' ? builder->f16_type : suffix == 'f' || suffix == 'F' ? builder->f32_type :
-                       suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
-    IrType const* type = ir_type_from_id(&builder->program->types, type_id);
     bool valid = type && type->kind == IR_TYPE_FLOAT;
     if (valid && type->bit_width > 64)
     {
@@ -44158,12 +44046,22 @@ BUSTER_C_INTERNAL bool c_ir_constant_float_literal(CIntegerIrBuilder* builder, S
     {
         f64 floating;
         valid = c_ir_float_literal_value(spelling, &floating, &suffix);
-        if (valid) *result = (CIrConstantValue){.type = type_id, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
+        if (valid) *result = (CIrConstantValue){.type = type->id, .floating = floating, .kind = C_IR_CONSTANT_FLOAT};
     }
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_wide_float_cast(CIrConstantValue const* source, IrType* source_type,
+BUSTER_C_INTERNAL bool c_ir_constant_float_literal(CIntegerIrBuilder* builder, String8 spelling, CIrConstantValue* result)
+{
+    char8 suffix = 0;
+    c_ir_float_suffix(spelling, &suffix);
+    IrTypeId type_id = suffix == 'h' ? builder->f16_type : suffix == 'f' || suffix == 'F' ? builder->f32_type :
+                       suffix == 'l' || suffix == 'L' ? builder->long_double_type : builder->f64_type;
+    IrType const* type = ir_type_from_id(&builder->program->types, type_id);
+    return c_ir_constant_float_literal_for_type(type, spelling, result);
+}
+
+BUSTER_C_SHARED bool c_ir_constant_wide_float_cast(CIrConstantValue const* source, IrType* source_type,
                                                      IrType const* target, CIrConstantValue* result)
 {
     CIrConstantFloatParts parts = {0};
@@ -44205,7 +44103,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_wide_float_cast(CIrConstantValue const* sou
     return valid;
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_wide_float_to_integer(CIrConstantValue const* source, IrType const* source_type,
+BUSTER_C_SHARED bool c_ir_constant_wide_float_to_integer(CIrConstantValue const* source, IrType const* source_type,
                                                            IrType const* target, CIrWideInteger* result)
 {
     CIrConstantFloatParts parts = c_ir_constant_float_parts(source, source_type);
@@ -44244,13 +44142,13 @@ BUSTER_C_INTERNAL bool c_ir_constant_wide_float_to_integer(CIrConstantValue cons
     return valid;
 }
 
-BUSTER_C_INTERNAL void c_ir_constant_wide_float_sign(CIrConstantValue* value, IrType const* type, bool negative)
+BUSTER_C_SHARED void c_ir_constant_wide_float_sign(CIrConstantValue* value, IrType const* type, bool negative)
 {
     u64 mask = type->bit_width == 80 ? UINT64_C(0x8000) : UINT64_C(0x8000000000000000);
     value->integer_high = (value->integer_high & ~mask) | (negative ? mask : 0);
 }
 
-BUSTER_C_INTERNAL bool c_ir_constant_wide_float_binary(CIntegerIrBuilder* builder, CConditionalOperator operation,
+BUSTER_C_SHARED bool c_ir_constant_wide_float_binary(IrTypeId integer_type, CConditionalOperator operation,
                                                        CIrConstantValue left, CIrConstantValue right, IrType const* type,
                                                        CIrConstantValue* result)
 {
@@ -44277,7 +44175,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_wide_float_binary(CIntegerIrBuilder* builde
         bool answer = operation == C_CONDITIONAL_NOT_EQUAL ? nan || order != 0 : !nan &&
                       (operation == C_CONDITIONAL_EQUAL ? order == 0 : operation == C_CONDITIONAL_LESS ? order < 0 :
                        operation == C_CONDITIONAL_LESS_EQUAL ? order <= 0 : operation == C_CONDITIONAL_GREATER ? order > 0 : order >= 0);
-        *result = c_ir_constant_integer(builder->s32_type, answer);
+        *result = c_ir_constant_integer(integer_type, answer);
     }
     else if (valid && nan)
     {
@@ -44831,7 +44729,7 @@ BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CC
     {
         if (type->bit_width > 64)
         {
-            return c_ir_constant_wide_float_binary(builder, operation, left, right, type, result);
+            return c_ir_constant_wide_float_binary(builder->s32_type, operation, left, right, type, result);
         }
         // Whether an operation created a NaN, rather than propagating one it
         // was handed: IEEE leaves the created NaN's sign unspecified, and the
@@ -47785,7 +47683,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
     Arena* temporary_arena = temporary.arena;
     // Scopes are final here, so every builder copy of this parse result can
     // answer c_parse_scope_for_token by descent instead of a full scope scan.
-    c_parse_index_scope_children(&parse, temporary_arena);
+    if (!parse.scope_children_offsets) c_parse_index_scope_children(&parse, temporary_arena);
     // The token stream is final too: the position index's one classifying
     // pass replaces the per-body label scans below, so force it now rather
     // than letting the first body pay the build.
@@ -49209,38 +49107,10 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
             }
         }
     }
-    // The symbol and global passes below join declarations to their entity by
-    // rescanning every declaration per entity, quadratic in the translation
-    // unit; bucket the declaration indices by entity once instead.  Buckets
-    // keep ascending declaration order, so 'first' and 'definition' resolve
-    // exactly as the full scans did.
-    u32* declarations_by_entity_offsets = arena_allocate(temporary_arena, u32, (u64)parse.entity_count + 1);
-    memset(declarations_by_entity_offsets, 0, sizeof(*declarations_by_entity_offsets) * ((u64)parse.entity_count + 1));
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-    {
-        u32 entity_value = parse.declarations[declaration_index].entity.value;
-        if (entity_value < parse.entity_count)
-        {
-            declarations_by_entity_offsets[entity_value + 1] += 1;
-        }
-    }
-    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
-    {
-        declarations_by_entity_offsets[entity_index + 1] += declarations_by_entity_offsets[entity_index];
-    }
-    u32* declarations_by_entity = arena_allocate(temporary_arena, u32, declarations_by_entity_offsets[parse.entity_count]);
+    c_parse_index_declarations(&parse, temporary_arena);
+    u32* declarations_by_entity_offsets = parse.declarations_by_entity_offsets;
+    u32* declarations_by_entity = parse.declarations_by_entity;
     u64* declaration_specifier_sets = c_declaration_specifier_sets_build(temporary_arena, preprocess, parse);
-    u32* declarations_by_entity_cursors = arena_allocate(temporary_arena, u32, parse.entity_count);
-    memset(declarations_by_entity_cursors, 0, sizeof(*declarations_by_entity_cursors) * parse.entity_count);
-    for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
-    {
-        u32 entity_value = parse.declarations[declaration_index].entity.value;
-        if (entity_value < parse.entity_count)
-        {
-            declarations_by_entity[declarations_by_entity_offsets[entity_value] + declarations_by_entity_cursors[entity_value]] = declaration_index;
-            declarations_by_entity_cursors[entity_value] += 1;
-        }
-    }
     for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
     {
         CEntity* entity = parse.entities + entity_index;
