@@ -146,6 +146,10 @@ int main(void)
     failed |= __real__ complex_value != precise || __imag__ complex_value != -3.25L;
     long double (*call)(long double, long double) = f80_subtract;
     failed |= call(precise, left) != 1.0L;
+    // Both SysV f80 operands are memory-class stack arguments. Keep the
+    // second argument's lowest significand bit live so an eightbyte shift,
+    // swap or double-width truncation cannot pass as a valid indirect call.
+    failed |= call(left, precise) != -1.0L;
     for (int index = 0; index < 40; index += 1)
     {
         right = f80_divide(f80_multiply(right, 3.0L), 3.0L);
