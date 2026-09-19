@@ -66,7 +66,6 @@ jobs:
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Exercise deterministic reconstruction and failure controls
         run: |
@@ -84,7 +83,6 @@ jobs:
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -145,30 +143,19 @@ jobs:
       - name: Prepare pinned SDK and external inputs
         run: |
           python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
-          set +e
-          python3 tools/native_retirement_external.py prepare \
-            --manifest docs/native-retirement-dependencies-v1.json \
-            --source-root "$(pwd)" \
-            2>"$RUNNER_TEMP/native-retirement-external-preflight.err"
-          status=$?
-          set -e
-          if test "$status" -ne 0; then
-            if ! grep -q '^native-retirement external closure failure: external closure source identity mismatch: src/buster/lib/' \
-              "$RUNNER_TEMP/native-retirement-external-preflight.err"; then
-              cat "$RUNNER_TEMP/native-retirement-external-preflight.err" >&2
-              exit "$status"
-            fi
-          fi
-      - name: Refresh exact combined repository bindings
-        run: |
-          mkdir -p "$RUNNER_TEMP/native-retirement-rebind"
-          python3 tools/native_retirement_rebind.py refresh --repo-root "$(pwd)" \
-            | tee "$RUNNER_TEMP/native-retirement-rebind/refresh.json"
           python3 tools/native_retirement_external.py prepare \
             --manifest docs/native-retirement-dependencies-v1.json \
             --source-root "$(pwd)"
+      - name: Check exact combined repository bindings
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-retirement-rebind"
           python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)" \
             | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"
+          git diff --exit-code -- \
+            docs/native-retirement-dependencies-v1.json \
+            docs/native-retirement-census.md \
+            tools/native_retirement_census.c \
+            tools/native_retirement_contract.py
       - name: Run independent contract suite
         run: |
           python3 tools/native_retirement_contract.py self-test
