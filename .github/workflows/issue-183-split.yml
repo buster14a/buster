@@ -1,0 +1,88 @@
+name: Issue 183 split context
+on:
+  push:
+    branches: [scratch/183-typed-ice-analysis]
+    paths-ignore:
+      - .github/issue-183-context/**
+      - .github/issue-183-current-context.txt
+permissions:
+  contents: write
+jobs:
+  split:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          outdir=Path('.github/issue-183-context'); outdir.mkdir(parents=True,exist_ok=True)
+          def ranges(path, pats, before=60, after=100, name=None):
+            p=Path(path); ls=p.read_text(errors='replace').splitlines()
+            rx=re.compile('|'.join('(?:'+x+')' for x in pats),re.I)
+            hits=[i for i,s in enumerate(ls) if rx.search(s)]
+            rs=[]
+            for i in hits:
+              a=max(0,i-before); b=min(len(ls),i+after+1)
+              if rs and a<=rs[-1][1]+5: rs[-1]=(rs[-1][0],max(rs[-1][1],b))
+              else: rs.append((a,b))
+            o=[f'===== {path} =====']
+            for a,b in rs:
+              o.append(f'--- lines {a+1}-{b} ---')
+              o += [f'{j+1:6d}: {ls[j]}' for j in range(a,b)]
+            (outdir/(name or p.name+'.txt')).write_text('\n'.join(o)+'\n')
+          ranges('src/buster/lib/compiler/frontend/c/c.h',[
+            r'typedef.*CTypeId',r'enum CTypeKind',r'struct CType',r'struct CEntity',r'struct CEnumMember',
+            r'C_TYPE_.*128',r'constant_value',r'enum_member_start',r'CInteger'
+          ],50,100,'types.txt')
+          ranges('src/buster/lib/compiler/frontend/c/c_parse.c',[
+            r'enum_group_depth',r'previous_value',r'C_ENTITY_ENUMERATOR',r'c_parse_sizeof_operand_expression_layout',
+            r'c_parse_conditional_expression_type',r'usual.*arithmetic',r'C_TYPE_.*128',r'fixed_underlying'
+          ],70,130,'parse.txt')
+          ranges('src/buster/lib/compiler/frontend/c/c_gen.c',[
+            r'C_ENTITY_ENUMERATOR',r'c_ir_integer_literal_type',r'c_ir_emit_integer_value',
+            r'c_ir_constant_identifier',r'usual.*arithmetic',r'constant_value',r'IR_TYPE_.*128',r'__int128'
+          ],70,130,'gen.txt')
+          ranges('src/buster/lib/compiler/frontend/c/c_source.c',[
+            r'c_integer_expression_evaluate',r'CIntegerExpression',r'intmax',r'uintmax'
+          ],50,100,'pp-eval.txt')
+          tests=[]
+          for p in Path('tests').rglob('*'):
+            if p.is_file() and p.suffix in {'.c','.h','.sh'}:
+              try: ls=p.read_text(errors='replace').splitlines()
+              except: continue
+              if any(re.search(r'enum|gnu17|c23|c2x|fixed underlying|__int128',s,re.I) for s in ls):
+                tests.append((p,ls))
+          o=[]
+          for p,ls in tests:
+            hit=[i for i,s in enumerate(ls) if re.search(r'enum|gnu17|c23|c2x|fixed underlying|__int128',s,re.I)]
+            rs=[]
+            for i in hit:
+              a=max(0,i-20); b=min(len(ls),i+41)
+              if rs and a<=rs[-1][1]+3: rs[-1]=(rs[-1][0],max(rs[-1][1],b))
+              else: rs.append((a,b))
+            o.append(f'===== {p} =====')
+            for a,b in rs:
+              o.append(f'--- lines {a+1}-{b} ---')
+              o += [f'{j+1:6d}: {ls[j]}' for j in range(a,b)]
+          (outdir/'tests.txt').write_text('\n'.join(o)+'\n')
+          PY
+          cat > /tmp/e.c <<'EOF'
+          #include <limits.h>
+          #include <stdio.h>
+          #define T(x) _Generic((x),int:"int",unsigned int:"uint",long:"long",unsigned long:"ulong",long long:"ll",unsigned long long:"ull",__int128:"i128",unsigned __int128:"u128",default:"other")
+          enum S{S0=0,S1=1}; enum H{H0=0,H1=0x80000000}; enum W{W0=0,W1=4294967296LL};
+          enum X{X0=0xffffffffffffffff}; enum D{D0=18446744073709551615};
+          enum C{C0=(1U?-1LL:0LL)}; enum K{K0=(unsigned long long)-1};
+          enum I{I0=INT_MAX,I1}; enum U{U0=UINT_MAX,U1}; enum L{L0=LLONG_MAX,L1};
+          int main(void){printf("S %zu %s %s\n",sizeof(enum S),T(S0),T(S1));printf("H %zu %s %d\n",sizeof(enum H),T(H1),H1>0);printf("W %zu %s %lld\n",sizeof(enum W),T(W1),(long long)W1);printf("X %zu %s %d\n",sizeof(enum X),T(X0),X0>0);printf("D %zu %s %d\n",sizeof(enum D),T(D0),D0>0);printf("C %s %d\n",T(C0),C0<0);printf("K %s %d\n",T(K0),K0>0);printf("I %s %s %llu\n",T(I0),T(I1),(unsigned long long)I1);printf("U %s %s %llu\n",T(U0),T(U1),(unsigned long long)U1);printf("L %s %s %llu\n",T(L0),T(L1),(unsigned long long)L1);}
+          EOF
+          : > .github/issue-183-context/controls.txt
+          for cc in gcc clang; do command -v "$cc" || continue; "$cc" --version | head -1 >> .github/issue-183-context/controls.txt; for std in gnu17 gnu2x; do echo "--- $cc $std" >> .github/issue-183-context/controls.txt; "$cc" -std="$std" /tmp/e.c -o /tmp/e >> .github/issue-183-context/controls.txt 2>&1 && /tmp/e >> .github/issue-183-context/controls.txt; done; done
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-context
+          git commit -m 'chore: split issue 183 source context'
+          git push
