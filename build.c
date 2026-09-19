@@ -20532,10 +20532,11 @@ BUSTER_GLOBAL_LOCAL bool cpython_write_setup_local(Arena* arena, String8 tree_di
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(content));
 }
 
-// Keep the established object-specific non-PIE constraint while making Buster
-// compile the source itself with its supported debug mode. The conditional
-// directives inside its macro argument are the compatibility surface this
-// unit exercises (#76).
+// Buster's ordinary driver default is non-PIC. The object-specific `-fno-pic`
+// spelling became a no-op after this unit moved from a Clang substitute (#76)
+// and the linker gained the full GOTPCRELX conversion table (#78), so compile
+// it with the default and supported debug mode. Conditional directives inside
+// its macro argument remain the compatibility surface.
 BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 ide, String8 source_directory, String8 tree_directory,
                                                           String8 allocator_flag)
 {
@@ -20544,7 +20545,6 @@ BUSTER_GLOBAL_LOCAL bool cpython_build_buster_trampoline(Arena* arena, String8 i
     String8 arguments[] = {
         ide,
         S8("cc"),
-        S8("-fno-pic"),
         S8("-g"),
         S8("-fno-strict-aliasing"),
         S8("-DNDEBUG"),
