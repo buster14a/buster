@@ -2272,6 +2272,25 @@ BUSTER_C_SHARED String8 c_semantic_call_arity_message(Arena* arena, String8 name
 // Each argument-count walk skips indexed nested groups, while the outer walk
 // still visits their calls. Deeply nested calls therefore do not rescan every
 // token of every enclosing argument list and need no recursive stack.
+BUSTER_C_INTERNAL CTypeId c_semantic_call_effective_type(CAnalysisResult* analysis, CEntityId entity, u32 token_index)
+{
+    CTypeId result = entity.value < analysis->entity_count ? analysis->entities[entity.value].type : C_TYPE_ID_INVALID;
+    u32 latest_token = 0;
+    bool found = false;
+    for (u32 declaration_index = 0; declaration_index < analysis->declaration_count; declaration_index += 1)
+    {
+        CDeclaration const* declaration = analysis->declarations + declaration_index;
+        if (declaration->entity.value == entity.value && declaration->type.value < analysis->type_count &&
+            declaration->token_start <= token_index && (!found || declaration->token_start >= latest_token))
+        {
+            result = declaration->type;
+            latest_token = declaration->token_start;
+            found = true;
+        }
+    }
+    return result;
+}
+
 BUSTER_C_SHARED CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* arena, CAnalysisResult* analysis,
                                                                       CPreprocessResult preprocess, u32 start, u32 end)
 {
@@ -2299,7 +2318,7 @@ BUSTER_C_SHARED CCallArityDiagnostic c_semantic_check_named_call_arities(Arena* 
         {
             continue;
         }
-        CTypeId type_id = entity.value < analysis->entity_count ? analysis->entities[entity.value].type : C_TYPE_ID_INVALID;
+        CTypeId type_id = c_semantic_call_effective_type(analysis, entity, index);
         CType* type = type_id.value < analysis->type_count ? &analysis->types[type_id.value] : 0;
         bool indirect = type && type->kind == C_TYPE_POINTER;
         if (indirect)
@@ -16815,29 +16834,15 @@ BUSTER_C_INTERNAL void c_parse_validate_named_call_arities(Arena* arena, CParseR
 BUSTER_C_INTERNAL bool c_parse_local_type_is_variable_length(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                                CScopeId scope, CTypeId type_id)
 {
+    BUSTER_UNUSED(scope);
     bool variable = false;
-    while (!variable && type_id.value < result->type_count && result->types[type_id.value].kind == C_TYPE_ARRAY)
+    if (type_id.value < result->type_count && result->types[type_id.value].kind == C_TYPE_ARRAY)
     {
-        CType array = result->types[type_id.value];
-        if (array.array_bound >= result->array_bound_count)
-        {
-            break;
-        }
-        CArrayBound bound = result->array_bounds[array.array_bound];
-        if (bound.is_star)
-        {
-            variable = true;
-        }
-        else if (bound.token_count)
-        {
-            u64 value = 0;
-            u64 mark = machine->scratch_arena->position;
-            bool constant = c_parse_integer_constant_range(machine, machine->scratch_arena, preprocess, result, scope, bound.token_start,
-                                                           bound.token_start + bound.token_count, &value);
-            arena_set_position(machine->scratch_arena, mark);
-            variable = !constant;
-        }
-        type_id = array.element_type;
+        u64 mark = machine->scratch_arena->position;
+        u64 size = 0;
+        u32 alignment = 0;
+        variable = !c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type_id, &size, &alignment);
+        arena_set_position(machine->scratch_arena, mark);
     }
     return variable;
 }
@@ -17050,6 +17055,30 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
     {
         return;
     }
+    CScopeId scope = c_parse_scope_for_token(result, declaration->scope, switch_index);
+    u64 expression_mark = machine->scratch_arena->position;
+    CTypeId controlling_type = C_TYPE_ID_INVALID;
+    bool controlling_type_resolved =
+        c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, switch_index + 2, header_close, &controlling_type);
+    u64 value_mask = UINT64_MAX;
+    if (controlling_type_resolved && controlling_type.value < result->type_count)
+    {
+        CTypeKind kind = c_parse_expression_promoted_kind(result->types[controlling_type.value].kind);
+        u64 size = 0;
+        u32 alignment = 0;
+        controlling_type_resolved = c_parse_expression_integer_kind(kind) &&
+                                    c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) && size && size <= sizeof(u64);
+        BUSTER_UNUSED(alignment);
+        if (controlling_type_resolved && size < sizeof(u64))
+        {
+            value_mask = UINT64_MAX >> (64 - (u32)(size * 8));
+        }
+    }
+    arena_set_position(machine->scratch_arena, expression_mark);
+    if (!controlling_type_resolved)
+    {
+        return;
+    }
     u64 mark = machine->scratch_arena->position;
     u64* values = arena_allocate(machine->scratch_arena, u64, switch_end - header_close + 1);
     u32 value_count = 0;
@@ -17081,7 +17110,6 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
         {
             continue;
         }
-        CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
         u64 value = 0;
         u64 expression_mark = machine->scratch_arena->position;
         bool constant = c_parse_integer_constant_range(machine, machine->scratch_arena, preprocess, result, scope, index + 1, colon, &value);
@@ -17090,6 +17118,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
         {
             continue;
         }
+        value &= value_mask;
         for (u32 previous = 0; previous < value_count; previous += 1)
         {
             if (values[previous] == value)
