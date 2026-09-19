@@ -29359,6 +29359,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_recover_memory_place_from_value(CIntegerIrBuild
                 }
                 IR_CONSTRUCTION_RECORD(PLACE_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_LOAD);
                 IR_CONSTRUCTION_RECORD(PLACE_ATOMIC_LOAD_RETRACTIONS, definition->opcode == IR_OPCODE_ATOMIC_LOAD);
+                builder->function->operand_total -= definition->operand_count;
                 builder->function->instruction_count -= 1;
                 c_ir_vla_value_forget(builder, (IrValueId){.value = builder->function->value_count - 1});
                 builder->function->value_count -= 1;
@@ -29433,6 +29434,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_assignment_statement_advance(CIntegerIrBuilder
                     current_block->last_instruction = definition_id;
                     builder->last_instruction = definition_id;
                     builder->previous_instruction_known = false;
+                    for (u32 instruction_index = definition_id.value + 1; instruction_index < builder->function->instruction_count; instruction_index += 1)
+                    {
+                        builder->function->operand_total -= builder->function->instructions[instruction_index].operand_count;
+                    }
                     builder->function->instruction_count = definition_id.value + 1;
                     builder->function->value_count = candidate.value + 1;
                     for (u32 shape_index = 0; shape_index < builder->vla_value_capacity; shape_index += 1)
