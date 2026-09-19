@@ -1,0 +1,48 @@
+{
+  "code_revision": "08a078493da221dd8bcd609e2741fb0668db5a02",
+  "diagnostic_baseline_revision": "a7b4924b10b6be0e167f2adc3022a88da5529e5f",
+  "binaries": {
+    "diagnostic_baseline": {
+      "sha256": "f2e31b537a9a9d4e1ab71dd47cd011ecde2aa06f7bb10331ec2380ce0454f5de",
+      "bytes": 44293944
+    },
+    "candidate_release": {
+      "sha256": "9a2b47f3494524e50f53939309ab35cacafe7eec035aeb41c8306199df8ec2a5",
+      "bytes": 29230256
+    },
+    "candidate_instrumented_sanitized": {
+      "sha256": "6bcc29298e0335f6b008aab7ee081ac90da2b14e25e90791765cfa8dc09f75f5",
+      "bytes": 107481600
+    }
+  },
+  "diagnostic_corpus": {
+    "cases": 222,
+    "forms": 2,
+    "actions": 2,
+    "cross_path_mismatches": 0,
+    "extra_target_pairs": 144,
+    "extra_target_mismatches": 0
+  },
+  "extracted": {
+    "cases": 1096,
+    "baseline_valid": 497,
+    "candidate_valid": 496,
+    "acceptance_differences": 1,
+    "exact_responses": 951
+  },
+  "fixtures": {
+    "cases": 362,
+    "baseline_valid": 344,
+    "candidate_valid": 344,
+    "acceptance_differences": 0,
+    "exact_responses": 361
+  },
+  "instrumented_sanitized_suite": {
+    "modules_passed": 53,
+    "modules_total": 53,
+    "assertions_passed": 2802784,
+    "assertions_total": 2802784,
+    "full_log_sha256": "393da825c12584010178b2eff1cdada9cd92d1fc0acabd5a4aea4ed7abf4c1a1",
+    "command": "BUSTER_TEST_JOBS=2 BUSTER_TEST_FIXTURE_TIMING=compiler_driver_tests ./ide-final-proof-08 test --verbose=1 --ci=1"
+  }
+}
