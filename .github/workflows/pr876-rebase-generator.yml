@@ -1,0 +1,276 @@
+name: PR 876 rebase generator
+
+on:
+  push:
+    branches: [codex/pr876-rebase-generator]
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact helper revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: external/musl
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Apply semantic rebase
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import re
+          from pathlib import Path
+
+          ROOT = Path.cwd()
+          FIXTURE = "tests/basic_c_f80_machine.c"
+
+          def sha256(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          def replace_exact(path: str, old: str, new: str) -> None:
+              file_path = ROOT / path
+              text = file_path.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected one exact match, found {count}")
+              file_path.write_text(text.replace(old, new), encoding="utf-8")
+
+          def replace_regex(path: str, pattern: str, replacement: str) -> None:
+              file_path = ROOT / path
+              text = file_path.read_text(encoding="utf-8")
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected one regex match for {pattern!r}, found {count}")
+              file_path.write_text(updated, encoding="utf-8")
+
+          fixture_path = ROOT / FIXTURE
+          call_pair = (
+              "    long double (*call)(long double, long double) = f80_subtract;\n"
+              "    failed |= call(precise, left) != 1.0L;\n"
+          )
+          call_pair_with_regression = call_pair + (
+              "    // Both SysV f80 operands are memory-class stack arguments. Keep the\n"
+              "    // second argument's lowest significand bit live so an eightbyte shift,\n"
+              "    // swap or double-width truncation cannot pass as a valid indirect call.\n"
+              "    failed |= call(left, precise) != -1.0L;\n"
+          )
+          replace_exact(FIXTURE, call_pair, call_pair_with_regression)
+          fixture_bytes = fixture_path.stat().st_size
+          fixture_sha256 = sha256(fixture_path)
+          if fixture_bytes != 7117 or fixture_sha256 != "73bb6b55f2ef4b6c14b43dc05d70cbda1604bc344dae2a1f79f8823f1e5364a3":
+              raise RuntimeError(
+                  f"unexpected fixture identity: bytes={fixture_bytes} sha256={fixture_sha256}"
+              )
+
+          support_path = ROOT / "docs/native-retirement-support-v1.tsv"
+          support_lines = support_path.read_text(encoding="utf-8").splitlines()
+          support_matches = 0
+          for index, line in enumerate(support_lines):
+              fields = line.split("\t")
+              if fields and fields[0] == FIXTURE:
+                  if len(fields) != 5:
+                      raise RuntimeError(f"malformed support row: {line!r}")
+                  fields[3] = str(fixture_bytes)
+                  fields[4] = fixture_sha256
+                  support_lines[index] = "\t".join(fields)
+                  support_matches += 1
+          if support_matches != 1:
+              raise RuntimeError(f"expected one support row, found {support_matches}")
+          support_path.write_text("\n".join(support_lines) + "\n", encoding="utf-8")
+
+          applicability_path = ROOT / "docs/native-retirement-applicability-v1.tsv"
+          applicability_lines = applicability_path.read_text(encoding="utf-8").splitlines()
+          applicability_matches = 0
+          for index, line in enumerate(applicability_lines):
+              fields = line.split("\t")
+              if fields and fields[0] == FIXTURE:
+                  if len(fields) != 5:
+                      raise RuntimeError(f"malformed applicability row: {line!r}")
+                  fields[2] = fixture_sha256
+                  applicability_lines[index] = "\t".join(fields)
+                  applicability_matches += 1
+          if applicability_matches != 4:
+              raise RuntimeError(f"expected four applicability rows, found {applicability_matches}")
+          applicability_path.write_text("\n".join(applicability_lines) + "\n", encoding="utf-8")
+
+          support_sha256 = sha256(support_path)
+          applicability_sha256 = sha256(applicability_path)
+
+          replace_regex(
+              "tools/native_retirement_contract.py",
+              r'^FULL_SUPPORT_CONTRACT_SHA256 = "[0-9a-f]{64}"$',
+              f'FULL_SUPPORT_CONTRACT_SHA256 = "{support_sha256}"',
+          )
+          replace_regex(
+              "tools/native_retirement_contract.py",
+              r'^FULL_APPLICABILITY_LEDGER_SHA256 = "[0-9a-f]{64}"$',
+              f'FULL_APPLICABILITY_LEDGER_SHA256 = "{applicability_sha256}"',
+          )
+          replace_regex(
+              "tools/native_retirement_materializer.py",
+              r'^SUPPORT_CONTRACT_SHA256 = "[0-9a-f]{64}"$',
+              f'SUPPORT_CONTRACT_SHA256 = "{support_sha256}"',
+          )
+          replace_regex(
+              "tools/native_retirement_performance_binding.py",
+              r'^SUPPORT_DECLARATION_SHA256 = "[0-9a-f]{64}"$',
+              f'SUPPORT_DECLARATION_SHA256 = "{support_sha256}"',
+          )
+          replace_regex(
+              "tools/native_retirement_census.c",
+              r'^(BUSTER_GLOBAL_LOCAL String8 const nrc_applicability_ledger_sha256 = S8_INITIALIZER\(")[0-9a-f]{64}("\);)$',
+              rf'\g<1>{applicability_sha256}\g<2>',
+          )
+          replace_regex(
+              "tools/bench_service/profiles/native-retirement-performance-v1.blocked",
+              r'^support-declaration-sha256=[0-9a-f]{64}$',
+              f'support-declaration-sha256={support_sha256}',
+          )
+          replace_regex(
+              "tools/bench_service/queue.c",
+              r'^(    "support-declaration-sha256=)[0-9a-f]{64}(\\n")$',
+              rf'\g<1>{support_sha256}\g<2>',
+          )
+
+          binding_sha256 = sha256(ROOT / "tools/native_retirement_performance_binding.py")
+          replace_regex(
+              "tools/bench_service/profiles/native-retirement-performance-v1.blocked",
+              r'^binding-validator-sha256=[0-9a-f]{64}$',
+              f'binding-validator-sha256={binding_sha256}',
+          )
+          replace_regex(
+              "tools/bench_service/queue.c",
+              r'^(    "binding-validator-sha256=)[0-9a-f]{64}(\\n")$',
+              rf'\g<1>{binding_sha256}\g<2>',
+          )
+
+          print(f"fixture-bytes={fixture_bytes}")
+          print(f"fixture-sha256={fixture_sha256}")
+          print(f"support-sha256={support_sha256}")
+          print(f"applicability-sha256={applicability_sha256}")
+          print(f"binding-validator-sha256={binding_sha256}")
+          PY
+
+      - name: Prepare pinned SDK and external inputs
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)"
+
+      - name: Refresh generated authority
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_rebind.py refresh --repo-root "$(pwd)"
+
+      - name: Package candidate files
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/pr876-output"
+          rm -rf "$out"
+          mkdir -p "$out/files"
+          git status --short > "$out/status.txt"
+          git diff --name-only > "$out/changed-files.txt"
+          git diff --binary > "$out/pr876.patch"
+          while IFS= read -r path; do
+            if [[ -n "$path" && -f "$path" ]]; then
+              mkdir -p "$out/files/$(dirname "$path")"
+              cp "$path" "$out/files/$path"
+            fi
+          done < "$out/changed-files.txt"
+
+      - name: Validate rebased candidate
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            tools/native_retirement_dependency_binding.py \
+            tools/native_retirement_rebind.py \
+            tools/native_retirement_materializer.py \
+            tools/native_retirement_contract.py \
+            tools/native_retirement_performance_binding.py
+          python3 tools/native_retirement_dependency_binding_test.py -v
+          python3 tools/native_retirement_rebind_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)"
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tests/ci_tools_test.py -v
+          cc -std=c11 -Wall -Wextra -Werror tests/basic_c_f80_machine.c -o "$RUNNER_TEMP/basic_c_f80_machine"
+          "$RUNNER_TEMP/basic_c_f80_machine"
+          git diff --check
+
+      - name: Retain generated candidate
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr876-rebase-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr876-output
+          if-no-files-found: error
+          retention-days: 2
