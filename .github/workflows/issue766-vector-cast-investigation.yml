@@ -1,0 +1,88 @@
+name: Issue 766 vector cast investigation
+
+on:
+  push:
+    branches:
+      - codex/issue766-vector-cast-investigation
+
+permissions:
+  contents: read
+
+jobs:
+  investigate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Locate conversion diagnostic and vector handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== exact diagnostic owners ==='
+          grep -RFn --exclude-dir=.git 'cannot convert IR type' src || true
+          echo '=== diagnostic context ==='
+          while IFS=: read -r file line rest; do
+            test -n "$file" || continue
+            start=$((line > 100 ? line - 100 : 1))
+            end=$((line + 180))
+            echo "--- ${file}:${start}-${end} ---"
+            sed -n "${start},${end}p" "$file"
+          done < <(grep -RFn --exclude-dir=.git 'cannot convert IR type' src || true)
+          echo '=== likely vector conversion symbols ==='
+          grep -RFnE --exclude-dir=.git 'vector.*(convert|cast)|(?:convert|cast).*vector|C_TYPE_VECTOR|IR_TYPE_VECTOR' src/buster/lib/compiler/frontend/c src/buster/lib/compiler/ir | head -n 400 || true
+      - name: Bootstrap and build Release compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --config Release --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Run reduced same-width vector conversions
+        shell: bash
+        run: |
+          set -uo pipefail
+          cat > "$RUNNER_TEMP/vector-cast.c" <<'EOF'
+          typedef long long m128i __attribute__((vector_size(16), aligned(16)));
+          typedef unsigned int v4su __attribute__((vector_size(16)));
+          typedef unsigned long long v2du __attribute__((vector_size(16)));
+
+          static m128i add32(m128i a, m128i b) {
+              return (m128i)((v4su)a + (v4su)b);
+          }
+
+          static m128i add64(m128i a, m128i b) {
+              return (m128i)((v2du)a + (v2du)b);
+          }
+
+          int main(void) {
+              m128i a = {1, 2};
+              m128i b = {3, 4};
+              m128i x = add32(a, b);
+              m128i y = add64(a, b);
+              return ((long long *)&x)[0] == 4 && ((long long *)&y)[0] == 4 ? 0 : 1;
+          }
+          EOF
+
+          echo '=== source ==='
+          cat "$RUNNER_TEMP/vector-cast.c"
+          echo '=== clang control ==='
+          clang -Wall -Wextra -Werror "$RUNNER_TEMP/vector-cast.c" -o "$RUNNER_TEMP/clang-vector-cast"
+          "$RUNNER_TEMP/clang-vector-cast"
+
+          echo '=== buster default frontend ==='
+          set +e
+          build/Release/ide cc "$RUNNER_TEMP/vector-cast.c" -o "$RUNNER_TEMP/buster-vector-cast" 2>&1 | tee "$RUNNER_TEMP/buster-default.log"
+          default_status="${PIPESTATUS[0]}"
+          if test "$default_status" -eq 0; then "$RUNNER_TEMP/buster-vector-cast"; default_status="$?"; fi
+
+          echo '=== buster reference frontend ==='
+          build/Release/ide cc -fno-frontend-ssa "$RUNNER_TEMP/vector-cast.c" -o "$RUNNER_TEMP/buster-vector-cast-reference" 2>&1 | tee "$RUNNER_TEMP/buster-reference.log"
+          reference_status="${PIPESTATUS[0]}"
+          if test "$reference_status" -eq 0; then "$RUNNER_TEMP/buster-vector-cast-reference"; reference_status="$?"; fi
+          set -e
+
+          echo "VECTOR_CAST_RESULT default=${default_status} reference=${reference_status}"
+          test "$default_status" -ne 0
+          test "$reference_status" -ne 0
