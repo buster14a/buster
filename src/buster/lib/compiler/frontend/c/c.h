@@ -927,6 +927,9 @@ struct CEntity
     CEntityId next_by_name;
     u32 declaration_index;
     u32 declaration_token_plus_one;
+    // First token of the complete block-scope declaration. Local declarator
+    // ranges below deliberately exclude shared specifiers.
+    u32 declaration_statement_start;
     u32 declaration_token_start;
     u32 declaration_token_count;
     u32 alignment_start;
