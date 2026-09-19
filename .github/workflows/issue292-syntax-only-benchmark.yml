@@ -1,6 +1,7 @@
 name: Issue 292 syntax-only benchmark
 
 on:
+  pull_request:
   push:
     branches:
       - codex/292-ir-free-syntax-only
