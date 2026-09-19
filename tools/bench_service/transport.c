@@ -168,8 +168,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_endpoint_close(BqTransportEndpoint* end
 BUSTER_GLOBAL_LOCAL BqError bq_transport_public_operation(u32 operation)
 {
     bool public_operation = operation == BQ_OP_CAPABILITIES || operation == BQ_OP_SUBMIT ||
-                            operation == BQ_OP_STATUS || operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL ||
-                            operation == BQ_OP_LOGS;
+                            operation == BQ_OP_SUBMIT_EXCLUSIVE || operation == BQ_OP_STATUS ||
+                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS;
     BqError error = public_operation ? BQ_OK : BQ_BAD_REQUEST;
     return error;
 }
@@ -184,7 +184,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
     {
         error = BQ_BAD_REQUEST;
     }
-    if (error == BQ_OK && operation == BQ_OP_SUBMIT)
+    if (error == BQ_OK && (operation == BQ_OP_SUBMIT || operation == BQ_OP_SUBMIT_EXCLUSIVE))
     {
         BqRequest request = {.size = length};
         if (schema != BQ_CONTROL_SCHEMA || length != size - BQ_CONTROL_HEADER || length > BQ_REQUEST_CAP)

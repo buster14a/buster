@@ -38,10 +38,15 @@ full commit and tree and check active service PRs before changing the inventory.
   limits; retain every indexed file and separately bound control record.
   Include the supervisor/journal/host evidence needed for the lifecycle claim.
   No recursive copy of a caller-selected directory or glob is an exporter.
-- There is no admitted smoke dispatch workflow in these deployment references.
-  Add it only with the gateway/exporter it actually invokes. Do not create a
-  workflow that assumes nonexistent installed commands or manufactures receipt
-  fields. Review and test its final head on hosted runners before deployment.
+- `.github/workflows/9700x-service-dispatch.yml` is the reviewed smoke
+  submission path. It is manual, main-only, protected-environment gated and
+  fail-closed unless `BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true`. It
+  performs no checkout and invokes only literal installed `gateway
+  capabilities`, `gateway submit` and `gateway result` commands. Keep it
+  disabled until the repository controls and host verifier in
+  `GITHUB_ADMISSION.md` are complete. It prints authenticated receipts but
+  still is not a result-bundle exporter.
+
 
 These missing components are implementation work, not permissions that an
 operator should compensate for by broadening account or socket access.
@@ -174,13 +179,15 @@ driver, harness, source and policy identities come from the installed inventory.
 Validate typed input values before transport; pass no request expressions into
 shell source. A workflow concurrency group is not whole-host ownership.
 
-Before activation, disable/exclude `.github/workflows/zen5-audit.yml` from this
-host: it independently checks out/builds code and permits `audit/**` pushes.
-Drain any previously admitted execution and verify runner-group/workflow
-restrictions outside YAML; changing only main does not revoke older branch
-workflows. Identify and stop competing Forgejo/manual/agent execution through
-the operator's maintenance procedure. Do not use the audit workflow as a host
-probe or substitute service dispatcher.
+Before activation, verify `.github/workflows/zen5-audit.yml` is absent from
+protected `main` and no queued or running job from an older ref targets either
+benchmark label. Drain any previously admitted execution and verify
+runner-group/workflow restrictions outside YAML; changing only `main` does
+not cancel older branch workflow runs. Identify and stop competing
+Forgejo/manual/agent execution through the operator's maintenance procedure.
+The retired audit workflow must not be restored or used as a host probe or
+substitute service dispatcher.
+
 
 ## First execution and controlled recovery
 

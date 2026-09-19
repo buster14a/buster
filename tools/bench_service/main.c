@@ -10,6 +10,7 @@
 #define _CRT_SECURE_NO_WARNINGS 1
 #endif
 #include "queue.c"
+#include "exclusive_admission.c"
 #include "workspace.c"
 #include "worker_linux.c"
 #include "protocol.c"
@@ -199,6 +200,11 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         typed_remote = true;
         socket_path = BQ_GATEWAY_SOCKET;
         valid = bq_client_arguments(argc - 2, argv + 2, true, &request, &operation);
+        if (valid && operation == BQ_OP_SUBMIT)
+        {
+            operation = BQ_OP_SUBMIT_EXCLUSIVE;
+            bq_put32(request.bytes + 8, operation);
+        }
     }
     else if (argc == 8 && !strcmp(argv[1], "serve"))
     {
