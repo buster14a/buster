@@ -1,4 +1,4 @@
-name: publish issue 845
+name: publish issue 845 shadowing fix
 
 on:
   push:
@@ -23,36 +23,45 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: true
-      - name: Apply and publish exact repair
+      - name: Publish exact warning repair
         shell: bash
         run: |
           set -euo pipefail
-          payload="$RUNNER_TEMP/issue845.patch.gz"
-          cp .github/payloads/issue845.patch.gz "$payload"
-          test "$(wc -c < "$payload")" -eq 12314
-          test "$(sha256sum "$payload" | cut -d' ' -f1)" = "ac12fe59e7cc72d47db040f151e746d5d3153c33e53ad803fa0677c3b59b25cc"
-          gzip -d -c "$payload" > "$RUNNER_TEMP/issue845.patch"
-          test "$(wc -c < "$RUNNER_TEMP/issue845.patch")" -eq 66418
-          test "$(sha256sum "$RUNNER_TEMP/issue845.patch" | cut -d' ' -f1)" = "2d86166fdbe89fd5f9d88e7ef0becaf2841939947f0940bfb12d51e473eb06ec"
-
-          base=bfd14ad8788513eef6df5c216ce7fd6ce29c8248
           target=codex/845-mir-padded-vectors
-          git fetch --no-tags --depth=1 origin "$base"
-          git checkout --detach "$base"
-          test "$(git rev-parse HEAD^{tree})" = "4fcbe32a2eb9363d016270bcd6821258e7c73902"
+          expected=6a2e428d1f8500c35e26152a82efd876fb6045ba
           remote_sha="$(git ls-remote origin "refs/heads/$target" | cut -f1)"
-          test "$remote_sha" = "$base"
-          git checkout -b "$target"
+          test "$remote_sha" = "$expected"
+          git fetch --no-tags --depth=1 origin "$target"
+          git checkout -B "$target" FETCH_HEAD
 
-          git apply --3way --index "$RUNNER_TEMP/issue845.patch"
-          git diff --cached --check
-          test "$(git diff --cached --name-only | wc -l)" -eq 7
-          test "$(git diff --cached --name-only | sort | sha256sum | cut -d' ' -f1)" = "5f296a9cefb70e1c33a8c97acb9dcb370533abd5ab6980b72a2a4c6396bffbe0" || {
-            git diff --cached --name-only >&2
-            exit 1
-          }
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/buster/lib/compiler/codegen/machine_x86_64.c")
+          text = path.read_text()
+          old = '''        bool f64 = instruction->payload == 8 || instruction->payload == 24;
+                  offsets[0] += (s32)(instruction->payload & ~8u);
+                  machine_x64_emit_x87_memory(encoder, load ? S8("FLD") : S8("FSTP"), offsets[0], (u16)(f64 ? 64 : 80));
+                  if (!load && !f64)
+          '''
+          new = '''        bool is_f64_result = instruction->payload == 8 || instruction->payload == 24;
+                  offsets[0] += (s32)(instruction->payload & ~8u);
+                  machine_x64_emit_x87_memory(encoder, load ? S8("FLD") : S8("FSTP"), offsets[0], (u16)(is_f64_result ? 64 : 80));
+                  if (!load && !is_f64_result)
+          '''
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one exact block, found {text.count(old)}")
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+          git diff --check
+          test "$(git diff --name-only | wc -l)" -eq 1
+          test "$(git diff --name-only)" = "src/buster/lib/compiler/codegen/machine_x86_64.c"
+          ! grep -n 'bool f64 =' src/buster/lib/compiler/codegen/machine_x86_64.c
+          grep -n 'bool is_f64_result =' src/buster/lib/compiler/codegen/machine_x86_64.c
 
           git config user.name David
           git config user.email davidgmbb@gmail.com
-          git commit -m 'codegen: support padded vectors throughout MIR (#845)'
+          git add src/buster/lib/compiler/codegen/machine_x86_64.c
+          git commit -m 'codegen: avoid shadowing the f64 typedef'
           git push origin HEAD:"refs/heads/$target"
