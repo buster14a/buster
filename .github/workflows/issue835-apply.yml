@@ -1,0 +1,263 @@
+name: Issue 835 focused patch
+
+on:
+  push:
+    branches:
+      - codex/issue835-explicit-vector-reinterpret
+    paths:
+      - '.github/workflows/issue835-apply.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref_name == 'codex/issue835-explicit-vector-reinterpret' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: codex/issue835-explicit-vector-reinterpret
+          fetch-depth: 2
+      - name: Apply, validate, and publish the focused change
+        env:
+          EXPECTED_PARENT: 1d71d10df9853360ca7961aeddd01675a7de1af7
+          TARGET_BRANCH: codex/issue835-explicit-vector-reinterpret
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          git reset --mixed HEAD^
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source_path = Path("src/buster/lib/compiler/frontend/c/c_gen.c")
+          source = source_path.read_text()
+          old_cast = """        IrType* source_type = ir_type_from_id(&builder->program->types, builder->function->values[values[first].value].canonical_type);
+          IrType* destination_type = ir_type_from_id(&builder->program->types, cast_type);
+          IrValueId result = destination_type && destination_type->kind == IR_TYPE_VOID ? c_ir_emit_integer_value(builder, 0, false, (CToken){0})
+                             : source_type && source_type->kind == IR_TYPE_ARRAY && destination_type && destination_type->kind == IR_TYPE_POINTER
+                                 ? c_ir_decay_array(builder, values[first], cast_type, source)
+                                 : c_ir_emit_cast(builder, values[first], cast_type, source);
+          """
+          new_cast = """        IrTypeId source_type_id = builder->function->values[values[first].value].canonical_type;
+          IrType* source_type = ir_type_from_id(&builder->program->types, source_type_id);
+          IrType* destination_type = ir_type_from_id(&builder->program->types, cast_type);
+          bool vector_reinterpret = source_type && destination_type && source_type_id.value != cast_type.value &&
+                                    source_type->kind == IR_TYPE_VECTOR && destination_type->kind == IR_TYPE_VECTOR &&
+                                    source_type->layout.resolved && destination_type->layout.resolved &&
+                                    source_type->layout.size == destination_type->layout.size;
+          // GNU explicit vector casts reinterpret equal-sized vector representations;
+          // implicit assignment, argument and return conversions still use c_ir_emit_cast.
+          IrValueId result = destination_type && destination_type->kind == IR_TYPE_VOID ? c_ir_emit_integer_value(builder, 0, false, (CToken){0})
+                             : source_type && source_type->kind == IR_TYPE_ARRAY && destination_type && destination_type->kind == IR_TYPE_POINTER
+                                 ? c_ir_decay_array(builder, values[first], cast_type, source)
+                             : vector_reinterpret ? c_ir_emit_representation_alias_conversion(builder, values[first], cast_type, source)
+                                                  : c_ir_emit_cast(builder, values[first], cast_type, source);
+          """
+          if source.count(old_cast) != 1:
+              raise SystemExit("expected exactly one explicit-cast lowering block")
+          source_path.write_text(source.replace(old_cast, new_cast))
+
+          test_path = Path("tests/basic_c_vector.c")
+          test = test_path.read_text()
+
+          old_types = """typedef unsigned int UInt4 __attribute__((vector_size(16)));
+
+          typedef int Int8 __attribute__((vector_size(32)));
+          """
+          new_types = """typedef unsigned int UInt4 __attribute__((vector_size(16)));
+
+          typedef long long Long2 __attribute__((vector_size(16), aligned(16)));
+
+          typedef unsigned long long ULong2 __attribute__((vector_size(16)));
+
+          typedef int Int8 __attribute__((vector_size(32)));
+          """
+          if test.count(old_types) != 1:
+              raise SystemExit("expected vector typedef insertion point")
+          test = test.replace(old_types, new_types)
+
+          old_union = """typedef union UnsignedVectorStorage
+          {
+              UInt4 vector;
+              unsigned int lanes[4];
+          } UnsignedVectorStorage;
+
+          typedef union WideIntegerVectorStorage
+          """
+          new_union = """typedef union UnsignedVectorStorage
+          {
+              UInt4 vector;
+              unsigned int lanes[4];
+          } UnsignedVectorStorage;
+
+          typedef union ReinterpretedVectorStorage
+          {
+              Long2 vector;
+              unsigned int words[4];
+              unsigned long long lanes64[2];
+          } ReinterpretedVectorStorage;
+
+          typedef union WideIntegerVectorStorage
+          """
+          if test.count(old_union) != 1:
+              raise SystemExit("expected vector storage insertion point")
+          test = test.replace(old_union, new_union)
+
+          main_marker = """int main(void)
+          {
+          """
+          helpers = """static Long2 vector_reinterpret_add32(Long2 left, Long2 right)
+          {
+              return (Long2)((UInt4)left + (UInt4)right);
+          }
+
+          static Long2 vector_reinterpret_add64(Long2 left, Long2 right)
+          {
+              return (Long2)((ULong2)left + (ULong2)right);
+          }
+
+          int main(void)
+          {
+          """
+          if test.count(main_marker) != 1:
+              raise SystemExit("expected exactly one vector fixture main")
+          test = test.replace(main_marker, helpers)
+
+          old_declarations = """    UnsignedVectorStorage unsigned_values = {0};
+              IntegerVectorStorage unsigned_comparison = {0};
+              WideIntegerVectorStorage wide_left = {0};
+          """
+          new_declarations = """    UnsignedVectorStorage unsigned_values = {0};
+              IntegerVectorStorage unsigned_comparison = {0};
+              ReinterpretedVectorStorage reinterpret_left = {0};
+              ReinterpretedVectorStorage reinterpret_right = {0};
+              ReinterpretedVectorStorage reinterpret32 = {0};
+              ReinterpretedVectorStorage reinterpret64 = {0};
+              WideIntegerVectorStorage wide_left = {0};
+          """
+          if test.count(old_declarations) != 1:
+              raise SystemExit("expected vector declaration insertion point")
+          test = test.replace(old_declarations, new_declarations)
+
+          old_setup = """    unsigned_comparison.vector = unsigned_values.vector > 1u;
+              wide_left.lanes[0] = 3;
+          """
+          new_setup = """    unsigned_comparison.vector = unsigned_values.vector > 1u;
+              reinterpret_left.words[0] = 0xffffffffu;
+              reinterpret_left.words[1] = 0x80000000u;
+              reinterpret_left.words[2] = 5u;
+              reinterpret_left.words[3] = 0x12345678u;
+              reinterpret_right.words[0] = 1u;
+              reinterpret_right.words[1] = 0x80000000u;
+              reinterpret_right.words[2] = 7u;
+              reinterpret_right.words[3] = 0x11111111u;
+              reinterpret32.vector = vector_reinterpret_add32(reinterpret_left.vector, reinterpret_right.vector);
+              reinterpret_left.lanes64[0] = 0xffffffffull;
+              reinterpret_left.lanes64[1] = 0x8000000000000001ull;
+              reinterpret_right.lanes64[0] = 1ull;
+              reinterpret_right.lanes64[1] = 0x7fffffffffffffffull;
+              reinterpret64.vector = vector_reinterpret_add64(reinterpret_left.vector, reinterpret_right.vector);
+              wide_left.lanes[0] = 3;
+          """
+          if test.count(old_setup) != 1:
+              raise SystemExit("expected vector execution insertion point")
+          test = test.replace(old_setup, new_setup)
+
+          old_checks = """    if (long_difference.lanes[7] != 58)
+                  return 40;
+              return result;
+          }
+          """
+          new_checks = """    if (long_difference.lanes[7] != 58)
+                  return 40;
+              if (reinterpret32.words[0] != 0 || reinterpret32.words[1] != 0 || reinterpret32.words[2] != 12 ||
+                  reinterpret32.words[3] != 0x23456789u)
+                  return 41;
+              if (reinterpret64.lanes64[0] != 0x100000000ull || reinterpret64.lanes64[1] != 0)
+                  return 42;
+              return result;
+          }
+          """
+          if test.count(old_checks) != 1:
+              raise SystemExit("expected vector check insertion point")
+          test_path.write_text(test.replace(old_checks, new_checks))
+          PY
+
+          rm -f .github/workflows/issue835-apply.yml
+          test "$(git diff --name-only | sort)" = $'src/buster/lib/compiler/frontend/c/c_gen.c\ntests/basic_c_vector.c'
+          git diff --check
+
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --config Release --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+
+          for mode in default reference; do
+              extra=()
+              if test "$mode" = reference; then
+                  extra=(-fno-frontend-ssa)
+              fi
+              build/Release/ide cc "${extra[@]}" tests/basic_c_vector.c -o "$RUNNER_TEMP/basic-c-vector-${mode}"
+              "$RUNNER_TEMP/basic-c-vector-${mode}"
+          done
+
+          cat > "$RUNNER_TEMP/vector-reinterpret.c" <<'EOF'
+          typedef long long m128i __attribute__((vector_size(16), aligned(16)));
+          typedef unsigned int v4su __attribute__((vector_size(16)));
+          typedef unsigned long long v2du __attribute__((vector_size(16)));
+
+          static m128i add32(m128i a, m128i b)
+          {
+              return (m128i)((v4su)a + (v4su)b);
+          }
+
+          static m128i add64(m128i a, m128i b)
+          {
+              return (m128i)((v2du)a + (v2du)b);
+          }
+
+          int main(void)
+          {
+              union Storage
+              {
+                  m128i value;
+                  unsigned int words[4];
+                  unsigned long long lanes[2];
+              } a = {0}, b = {0}, result32 = {0}, result64 = {0};
+              a.words[0] = 0xffffffffu;
+              a.words[1] = 0x80000000u;
+              a.words[2] = 5u;
+              a.words[3] = 0x12345678u;
+              b.words[0] = 1u;
+              b.words[1] = 0x80000000u;
+              b.words[2] = 7u;
+              b.words[3] = 0x11111111u;
+              result32.value = add32(a.value, b.value);
+              if (result32.words[0] != 0 || result32.words[1] != 0 || result32.words[2] != 12 || result32.words[3] != 0x23456789u)
+                  return 1;
+              a.lanes[0] = 0xffffffffull;
+              a.lanes[1] = 0x8000000000000001ull;
+              b.lanes[0] = 1ull;
+              b.lanes[1] = 0x7fffffffffffffffull;
+              result64.value = add64(a.value, b.value);
+              return result64.lanes[0] != 0x100000000ull || result64.lanes[1] != 0;
+          }
+          EOF
+
+          for mode in default reference; do
+              extra=()
+              if test "$mode" = reference; then
+                  extra=(-fno-frontend-ssa)
+              fi
+              build/Release/ide cc "${extra[@]}" "$RUNNER_TEMP/vector-reinterpret.c" -o "$RUNNER_TEMP/vector-reinterpret-${mode}"
+              "$RUNNER_TEMP/vector-reinterpret-${mode}"
+          done
+
+          git add src/buster/lib/compiler/frontend/c/c_gen.c tests/basic_c_vector.c
+          git diff --cached --check
+          git config user.name "buster14a automation"
+          git config user.email "noreply@buster14a.com"
+          git commit -m "fix(c): reinterpret same-size explicit vector casts"
+          git push --force-with-lease="refs/heads/${TARGET_BRANCH}:${GITHUB_SHA}" origin "HEAD:refs/heads/${TARGET_BRANCH}"
