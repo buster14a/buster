@@ -14756,10 +14756,10 @@ BUSTER_GLOBAL_LOCAL void machine_x64_emit_f80(MachineX64Encoder* encoder, Machin
     else
     {
         bool load = instruction->opcode == MACHINE_X64_F80_RESULT_LOAD;
-        bool f64 = instruction->payload == 8 || instruction->payload == 24;
+        bool is_f64_result = instruction->payload == 8 || instruction->payload == 24;
         offsets[0] += (s32)(instruction->payload & ~8u);
-        machine_x64_emit_x87_memory(encoder, load ? S8("FLD") : S8("FSTP"), offsets[0], (u16)(f64 ? 64 : 80));
-        if (!load && !f64)
+        machine_x64_emit_x87_memory(encoder, load ? S8("FLD") : S8("FSTP"), offsets[0], (u16)(is_f64_result ? 64 : 80));
+        if (!load && !is_f64_result)
         {
             machine_x64_emit_f80_padding(encoder, offsets[0]);
         }
