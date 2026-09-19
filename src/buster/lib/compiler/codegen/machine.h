@@ -738,8 +738,8 @@ typedef enum MachineOpcode
     MACHINE_X64_F80_NEGATE, // destination, source frames
     MACHINE_X64_F80_COMPARE, // general definition, left/right frames; payload = relation
     MACHINE_X64_F80_CONVERT, // destination/source/scratch frames; payload = conversion
-    MACHINE_X64_F80_RESULT_LOAD, // frame source; publish ST(0) for RET
-    MACHINE_X64_F80_RESULT_STORE, // frame destination; consume ST(0) from CALL
+    MACHINE_X64_F80_RESULT_LOAD, // frame source; publish ST(0), payload 0/16=f80 offset or 8/24=f64 offset
+    MACHINE_X64_F80_RESULT_STORE, // frame destination; consume ST(0), same payload encoding
     // Complete XMM ABI transfers; explicit register operands expose dataflow.
     MACHINE_X64_LOAD_XMM_FRAME128, // vector definition, frame source
     MACHINE_X64_STORE_XMM_FRAME128, // vector use, frame destination

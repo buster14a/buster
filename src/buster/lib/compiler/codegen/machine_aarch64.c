@@ -354,9 +354,9 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_value_shape(IrProgram* program, IrTypeId ty
     {
         // A short vector rides one V register — the whole register for
         // the sixteen-byte form, the low bytes for anything smaller — and
-        // the value itself is slot-backed with only the ABI edges
-        // touching the vector file. Sizes without a sized FP transfer
-        // encoding (the non-power-of-two lane counts) stay canonical.
+        // the value itself is slot-backed with only the ABI edges touching
+        // the vector file. Padded GNU vectors use their rounded object size
+        // here while lane operations retain the source lane count.
         if (abi.parts[0].size != 1 && abi.parts[0].size != 2 && abi.parts[0].size != 4 && abi.parts[0].size != 8 && abi.parts[0].size != 16)
         {
             return false;
@@ -2711,7 +2711,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_vector_lanes(MachineA64Selector* sel
                                  (element->bit_width == 8 || element->bit_width == 16 || element->bit_width == 32 || element->bit_width == 64)) ||
                                 (element->kind == IR_TYPE_FLOAT && (element->bit_width == 32 || element->bit_width == 64))) &&
                     vector->layout.resolved && vector->layout.size <= INT32_MAX && vector->element_count &&
-                    (u64)(element->bit_width / 8) * vector->element_count == vector->layout.size &&
+                    vector->element_count <= UINT64_MAX / (element->bit_width / 8) &&
+                    (u64)(element->bit_width / 8) * vector->element_count <= vector->layout.size &&
                     left_slot != UINT32_MAX && (unary || right_slot != UINT32_MAX) && result_slot != UINT32_MAX;
     u8 operation = IR_BINARY_COUNT;
     if (selected && !unary)

@@ -1352,10 +1352,10 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
     }
     // Power-of-two vectors retain their established ABI support. A GNU
     // non-power-of-two vector has fewer logical lane bytes than its rounded
-    // object image; the x86-64 canonical emitter carries that shape under the
-    // measured SysV and Win64 contracts, while other architectures keep the
-    // old clean signature rejection until their distinct contracts are
-    // implemented.
+    // object image. The native x86-64 and AArch64 backends preserve that lane
+    // count while transporting the rounded object image at ABI boundaries;
+    // other architectures retain the clean signature rejection until their
+    // distinct contracts are implemented.
     bool vector_supported = true;
     if (type->kind == IR_TYPE_VECTOR)
     {
@@ -1371,8 +1371,8 @@ BUSTER_C_INTERNAL bool c_ir_signature_type_supported(IrProgram* program, CIrWide
                                element->layout.size <= 8 &&
                                (element->kind != IR_TYPE_FLOAT || element->layout.size == 2 || element->layout.size == 4 ||
                                 element->layout.size == 8);
-            vector_supported = target.cpu_arch == CPU_ARCH_X86_64 && scalar_lane && type->layout.size <= UINT32_MAX &&
-                               type->layout.size == next_power_of_two(logical_size);
+            vector_supported = (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64) && scalar_lane &&
+                               type->layout.size <= UINT32_MAX && type->layout.size == next_power_of_two(logical_size);
         }
         else
         {
