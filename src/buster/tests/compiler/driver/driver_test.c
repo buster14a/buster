@@ -4,6 +4,7 @@
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
@@ -1491,10 +1492,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { return; }\n"), false},
         {S8("_Static_assert(0, \"syntax diagnostic corpus\");\n"), false},
         {S8("int g(int x) { return _Generic(x, int: 1, int: 2); }\n"), false},
+        {S8("int g(void) { return _Generic(1, default: 1, default: 2); }\n"), false},
+        {S8("int g(void) { return _Generic(1.0, int: 1); }\n"), false},
+        {S8("int g(void) { return _Generic(1, void: 1, default: 2); }\n"), false},
         {S8("int g(int n) { int a[n] = {1}; return a[0]; }\n"), false},
+        {S8("int g(int n) { static int a[n]; return a[0]; }\n"), false},
         {S8("int g(int n) { switch(n) { case 1: return 1; case 1: return 2; } return 0; }\n"), false},
+        {S8("int g(int n) { switch(n) { case 1 ... 2: return 1; } return 0; }\n"), false},
         {S8("int f(int); int g(void) { return sizeof(f(1)); }\n"), true},
         {S8("int g(int x) { return x * 3 + 1; }\n"), true},
+        {S8("int g(void) { int a[sizeof(int)]; return a[0]; }\n"), true},
+        {S8("long long g(long long x) { switch (x) { case -1: return 1; case 4294967295LL: return 2; } return 0; }\n"), true},
         {S8("static int x; int *p = &x;\n"), true},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -1509,13 +1517,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
             BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source)));
             String8 syntax_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-fsyntax-only"), input};
             String8 object_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-c"), S8("-o"), output, input};
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters ir_before = ir_construction_counters();
+#endif
             CompilerDriverResult syntax = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters ir_after = ir_construction_counters();
+            BUSTER_TEST(arguments, !ir_before.overflowed && !ir_after.overflowed);
+            for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
+            {
+                BUSTER_TEST(arguments, ir_before.values[counter] == ir_after.values[counter]);
+            }
+#endif
             CompilerDriverResult object = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
             BUSTER_TEST(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[index].valid);
             BUSTER_TEST(arguments, syntax.error == object.error);
-            BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+            BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostic, object.diagnostic),
+                            string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
+                                          cases[index].source, syntax.diagnostic, object.diagnostic));
             BUSTER_STRING_TEST(arguments, syntax.warning, object.warning);
             BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
             BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
@@ -1526,7 +1547,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
                 BUSTER_TEST(arguments, first.severity == second.severity && first.note_count == second.note_count);
                 BUSTER_STRING_TEST(arguments, first.code, second.code);
                 BUSTER_STRING_TEST(arguments, first.symbol, second.symbol);
-                BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, first), compiler_diagnostic_render(arena, second));
+                String8 first_rendered = compiler_diagnostic_render(arena, first);
+                String8 second_rendered = compiler_diagnostic_render(arena, second);
+                BUSTER_TEST_RAW(arguments, string_equal(first_rendered, second_rendered),
+                                string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
+                                              cases[index].source, first_rendered, second_rendered));
             }
             scratch_end(temporary);
         }

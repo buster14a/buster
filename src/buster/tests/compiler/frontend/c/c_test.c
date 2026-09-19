@@ -433,12 +433,12 @@ BUSTER_GLOBAL_LOCAL void c_test_case_range_lower_diagnostic(UnitTestArguments* a
         lowered = c_lower_to_ir(temporary.arena, S8("case-range-invalid.c"), preprocess, parse, target_native);
     }
     BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
-    BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-    BUSTER_TEST(arguments, lowered.diagnostic_count == 1);
-    if (lowered.diagnostic_count == 1)
+    BUSTER_TEST(arguments, parse.diagnostic_count + lowered.diagnostic_count == 1);
+    CDiagnostic diagnostic = parse.diagnostic_count ? parse.diagnostics[0] : lowered.diagnostics[0];
+    if (parse.diagnostic_count + lowered.diagnostic_count == 1)
     {
-        BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
-        BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, message);
+        BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+        BUSTER_STRING_TEST(arguments, diagnostic.message, message);
     }
     outer_result->test_count += result.test_count;
     outer_result->succeeded_test_count += result.succeeded_test_count;
@@ -9603,14 +9603,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_arity_diagnostics(UnitTestArgumen
                                                     .data_layout = target_data_layout(target_native),
                                                     .dialect = expected[expected_index].dialect,
                                                 });
-        CParseResult parse = c_parse(temporary.arena, tokens);
-        CIRLowerResult ir = c_lower_to_ir(temporary.arena, S8("call-arity.c"), tokens, parse, target_native);
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
         BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, ir.diagnostic_count == 1);
-        if (ir.diagnostic_count == 1)
+        BUSTER_TEST(arguments, syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == 1);
+        if (analysis.diagnostic_count == 1)
         {
-            BUSTER_STRING_TEST(arguments, ir.diagnostics[0].message, expected[expected_index].message);
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, expected[expected_index].message);
         }
         scratch_end(temporary);
     }
@@ -9715,9 +9715,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestAr
         String8 message;
     } cases[] = {
         {S8("int f(int); int g(void) { return sizeof(f()); }"),
-         S8("too few arguments in the call to 'f': it declares 1 parameter")},
+         S8("in function 'g': too few arguments in the call to 'f': it declares 1 parameter")},
         {S8("int (*p)(int); int g(void) { return sizeof(p()); }"),
-         S8("too few arguments in the call to '<function pointer>': it declares 1 parameter")},
+         S8("in function 'g': too few arguments in the call to '<function pointer>': it declares 1 parameter")},
         {S8("int f(int); int g(void) { return sizeof(f(1)); }"), {0}},
         {S8("int f(int); int h(int, int); int g(void) { return sizeof(f(h(1, 2))); }"), {0}},
     };
@@ -9728,15 +9728,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestAr
                                                 (CPreprocessOptions){.target = target_native,
                                                                      .data_layout = target_data_layout(target_native),
                                                                      .dialect = C_PREPROCESS_DIALECT_C23});
-        CAnalysisResult analysis = c_parse(temporary.arena, tokens);
-        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && analysis.diagnostic_count == 0);
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
 #if BUSTER_BENCH_ALLOCATIONS
         IrConstructionCounters before = ir_construction_counters();
 #endif
-        CDiagnostic checked = c_test_check_named_call_arities(temporary.arena, &analysis, tokens, 0, (u32)tokens.token_count);
-        BUSTER_STRING_TEST(arguments, checked.message, cases[index].message);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
 #if BUSTER_BENCH_ALLOCATIONS
         IrConstructionCounters after = ir_construction_counters();
+#endif
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+        BUSTER_TEST(arguments, analysis.diagnostic_count == (cases[index].message.length ? 1u : 0u));
+        if (cases[index].message.length && analysis.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[index].message);
+        }
+#if BUSTER_BENCH_ALLOCATIONS
         BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
         for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
         {
@@ -14031,10 +14037,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
                                                                  .dialect = C_PREPROCESS_DIALECT_C23,
                                                              });
             CParseResult mutation_parse = c_parse(mutation_temporary.arena, mutation_tokens);
-            CIRLowerResult mutation_ir = c_lower_to_ir(mutation_temporary.arena, S8("constexpr-mutation.c"), mutation_tokens, mutation_parse, target_native);
+            CIRLowerResult mutation_ir = {0};
+            if (!mutation_parse.diagnostic_count)
+            {
+                mutation_ir = c_lower_to_ir(mutation_temporary.arena, S8("constexpr-mutation.c"), mutation_tokens, mutation_parse, target_native);
+            }
             BUSTER_TEST(arguments, mutation_tokens.diagnostic_count == 0);
-            BUSTER_TEST(arguments, mutation_parse.diagnostic_count == 0);
-            BUSTER_TEST(arguments, mutation_ir.diagnostic_count == 1);
+            BUSTER_TEST(arguments, mutation_parse.diagnostic_count + mutation_ir.diagnostic_count == 1);
             scratch_end(mutation_temporary);
         }
     }
@@ -14091,14 +14100,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
         CPreprocessResult invalid_generic_tokens =
             c_preprocess(invalid_generic_temporary.arena, invalid_generic_cases[case_index].source, (CPreprocessOptions){0});
         CParseResult invalid_generic_parse = c_parse(invalid_generic_temporary.arena, invalid_generic_tokens);
-        CIRLowerResult invalid_generic_ir =
-            c_lower_to_ir(invalid_generic_temporary.arena, S8("invalid-generic.c"), invalid_generic_tokens, invalid_generic_parse, target_native);
-        BUSTER_TEST(arguments, invalid_generic_tokens.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_generic_parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, invalid_generic_ir.diagnostic_count == 1);
-        if (invalid_generic_ir.diagnostic_count == 1)
+        CIRLowerResult invalid_generic_ir = {0};
+        if (!invalid_generic_parse.diagnostic_count)
         {
-            BUSTER_STRING_TEST(arguments, invalid_generic_ir.diagnostics[0].message, invalid_generic_cases[case_index].message);
+            invalid_generic_ir =
+                c_lower_to_ir(invalid_generic_temporary.arena, S8("invalid-generic.c"), invalid_generic_tokens, invalid_generic_parse, target_native);
+        }
+        BUSTER_TEST(arguments, invalid_generic_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_generic_parse.diagnostic_count + invalid_generic_ir.diagnostic_count == 1);
+        CDiagnostic invalid_generic_diagnostic =
+            invalid_generic_parse.diagnostic_count ? invalid_generic_parse.diagnostics[0] : invalid_generic_ir.diagnostics[0];
+        if (invalid_generic_parse.diagnostic_count + invalid_generic_ir.diagnostic_count == 1)
+        {
+            BUSTER_STRING_TEST(arguments, invalid_generic_diagnostic.message, invalid_generic_cases[case_index].message);
         }
         scratch_end(invalid_generic_temporary);
     }
