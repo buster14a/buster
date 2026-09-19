@@ -22,7 +22,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/issue-183-source"
+          destination="$RUNNER_TEMP/issue-183-source"
+          mkdir -p "$destination"
           cp --parents \
             AGENTS.md \
             docs/agents/frontend.md \
@@ -34,9 +35,11 @@ jobs:
             src/buster/lib/compiler/frontend/c/c_gen.c \
             src/buster/tests/compiler/driver/driver_test.c \
             tests/basic_c_fixed_enum.c \
-            tests/basic_c_bit_field.c \
-            "$RUNNER_TEMP/issue-183-source"
-          git rev-parse HEAD > "$RUNNER_TEMP/issue-183-source/HEAD"
+            "$destination"
+          while IFS= read -r test_source; do
+            cp --parents "$test_source" "$destination"
+          done < <(find tests -maxdepth 1 -type f \( -iname '*enum*' -o -iname '*bit*field*' -o -iname '*bitfield*' \) -print | sort)
+          git rev-parse HEAD > "$destination/HEAD"
       - name: Upload focused source
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
