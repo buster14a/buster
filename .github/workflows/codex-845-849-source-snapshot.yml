@@ -1,4 +1,4 @@
-name: publish issue 848
+name: publish issue 845
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: publish-issue-848
+  group: publish-issue-845
   cancel-in-progress: false
 
 permissions:
@@ -27,27 +27,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          payload="$RUNNER_TEMP/issue848.patch.gz.b64"
-          cp .github/payloads/issue848.patch.gz.b64 "$payload"
-          test "$(wc -c < "$payload")" -eq 6763
-          base64 -d "$payload" > "$RUNNER_TEMP/issue848.patch.gz"
-          test "$(sha256sum "$RUNNER_TEMP/issue848.patch.gz" | cut -d' ' -f1)" = "aa39e336bddc6c2d10d0f9ccba690830fb113839763bf94d2983c510b6aceddb"
-          gzip -d -c "$RUNNER_TEMP/issue848.patch.gz" > "$RUNNER_TEMP/issue848.patch"
-          test "$(sha256sum "$RUNNER_TEMP/issue848.patch" | cut -d' ' -f1)" = "ff6189ec6112e50ef3287475e7472f1db5029dfaed7c9a3737daac0bdf8a787e"
-          git fetch --no-tags --depth=1 origin 4dff1d020c16a7599e74a7e2cc305715eb908553
-          git checkout --detach 4dff1d020c16a7599e74a7e2cc305715eb908553
-          test "$(git rev-parse HEAD^{tree})" = "6698cdffa0f143c476e55d0fb04acaa42bb69a6a"
-          if git ls-remote --exit-code origin refs/heads/codex/848-unreachable-local-20260919 >/dev/null 2>&1; then
-            echo 'feature branch already exists' >&2
-            exit 1
-          fi
-          git checkout -b codex/848-unreachable-local-20260919
-          git apply --check "$RUNNER_TEMP/issue848.patch"
-          git apply --index "$RUNNER_TEMP/issue848.patch"
+          payload="$RUNNER_TEMP/issue845.patch.gz.b64"
+          cp .github/payloads/issue845.patch.gz.b64 "$payload"
+          test "$(wc -c < "$payload")" -eq 16637
+          test "$(sha256sum "$payload" | cut -d' ' -f1)" = "34aa0a750c7de1477dea830b5d788ef8cff8a3878e94c5e70023554973369394"
+          base64 -d "$payload" > "$RUNNER_TEMP/issue845.patch.gz"
+          test "$(sha256sum "$RUNNER_TEMP/issue845.patch.gz" | cut -d' ' -f1)" = "ac12fe59e7cc72d47db040f151e746d5d3153c33e53ad803fa0677c3b59b25cc"
+          gzip -d -c "$RUNNER_TEMP/issue845.patch.gz" > "$RUNNER_TEMP/issue845.patch"
+          test "$(wc -c < "$RUNNER_TEMP/issue845.patch")" -eq 66418
+          test "$(sha256sum "$RUNNER_TEMP/issue845.patch" | cut -d' ' -f1)" = "2d86166fdbe89fd5f9d88e7ef0becaf2841939947f0940bfb12d51e473eb06ec"
+
+          base=bfd14ad8788513eef6df5c216ce7fd6ce29c8248
+          target=codex/845-mir-padded-vectors
+          git fetch --no-tags --depth=1 origin "$base"
+          git checkout --detach "$base"
+          test "$(git rev-parse HEAD^{tree})" = "4fcbe32a2eb9363d016270bcd6821258e7c73902"
+          remote_sha="$(git ls-remote origin "refs/heads/$target" | cut -f1)"
+          test "$remote_sha" = "$base"
+          git checkout -b "$target"
+
+          git apply --3way --index "$RUNNER_TEMP/issue845.patch"
           git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 7
+          test "$(git diff --cached --name-only | sort | sha256sum | cut -d' ' -f1)" = "c43104af9772542dc69fc25024766884765330e0f3c25df949618a9f54b4f8cf" || {
+            git diff --cached --name-only >&2
+            exit 1
+          }
+
           git config user.name David
           git config user.email davidgmbb@gmail.com
-          git commit -m 'c: materialize skipped automatic locals at labeled reentry (#848)'
-          test "$(git rev-parse HEAD^{tree})" = "e8f422324b57b77d2fe2e1bb9952e9b5f9f76ed7"
-          test "$(git diff --name-only HEAD^ HEAD | wc -l)" -eq 7
-          git push origin HEAD:refs/heads/codex/848-unreachable-local-20260919
+          git commit -m 'codegen: support padded vectors throughout MIR (#845)'
+          git push origin HEAD:"refs/heads/$target"
