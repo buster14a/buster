@@ -6861,6 +6861,122 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_unreachable_locals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "static volatile int initializer_calls;\n"
+        "int unreachable_initialized(void)\n"
+        "{\n"
+        "    goto live;\n"
+        "    int hidden = (initializer_calls += 1, 17);\n"
+        "dead:\n"
+        "    return hidden;\n"
+        "live:\n"
+        "    return initializer_calls;\n"
+        "}\n"
+        "int unreachable_uninitialized(void)\n"
+        "{\n"
+        "    goto live;\n"
+        "    int hidden;\n"
+        "dead:\n"
+        "    return hidden;\n"
+        "live:\n"
+        "    return 0;\n"
+        "}\n"
+        "int bypassed_local(int skip)\n"
+        "{\n"
+        "    if (skip) goto use;\n"
+        "    int local = 23;\n"
+        "use:\n"
+        "    return skip ? 0 : local;\n"
+        "}\n"
+        "int reachable_local(void)\n"
+        "{\n"
+        "    int local = 29;\n"
+        "    return local;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    return unreachable_initialized() != 0 || unreachable_uninitialized() != 0 ||\n"
+        "           bypassed_local(1) != 0 || bypassed_local(0) != 23 || reachable_local() != 29 || initializer_calls != 0;\n"
+        "}\n");
+    String8 input = buster_test_temporary_path(arguments->arena, S8("buster-unreachable-local"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            Arena* conflicts[] = {arguments->arena};
+            TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+            String8 object = buster_test_temporary_path(
+                temporary.arena, S8("buster-unreachable-local"),
+#if BUSTER_WINDOWS
+                string_format(temporary.arena, S8("-{u32}-{u32}.obj"), frontend, allocator));
+#else
+                string_format(temporary.arena, S8("-{u32}-{u32}.o"), frontend, allocator));
+#endif
+            String8 allocator_option = string_format(temporary.arena, S8("-fregister-allocator={S8}"), allocators[allocator]);
+            String8 object_command[9] = {S8("-c"), S8("-g0"), allocator_option, frontends[frontend]};
+            u32 object_count = 4;
+            if (allocator != 0)
+            {
+                object_command[object_count++] = S8("-fno-machine-fallback");
+                object_command[object_count++] = S8("-fverify-codegen");
+            }
+            object_command[object_count++] = S8("-o");
+            object_command[object_count++] = object;
+            object_command[object_count++] = input;
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8){.pointer = object_command, .length = object_count}));
+            BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object)
+            {
+                // The historical bug made both automatic `hidden` objects one
+                // undefined external. A local symbol of this spelling is not a
+                // public object contract; its complete absence is.
+                BUSTER_TEST(arguments, compiler_driver_test_object_symbol(&compiled.object, S8("hidden")) == 0);
+            }
+
+            String8 executable = buster_test_temporary_path(
+                temporary.arena, S8("buster-unreachable-local-run"),
+#if BUSTER_WINDOWS
+                string_format(temporary.arena, S8("-{u32}-{u32}.exe"), frontend, allocator));
+#else
+                string_format(temporary.arena, S8("-{u32}-{u32}"), frontend, allocator));
+#endif
+            String8 link_command[8] = {allocator_option, frontends[frontend]};
+            u32 link_count = 2;
+            if (allocator != 0)
+            {
+                link_command[link_count++] = S8("-fno-machine-fallback");
+                link_command[link_count++] = S8("-fverify-codegen");
+            }
+            link_command[link_count++] = S8("-o");
+            link_command[link_count++] = executable;
+            link_command[link_count++] = input;
+            CompilerDriverResult linked = compiler_driver_execute_invocation(
+                temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8){.pointer = link_command, .length = link_count}));
+            BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+            if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run_arguments[] = {executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
+                                                               (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(temporary.arena, spawned).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6881,6 +6997,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_bootstrap_trace);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unreachable_locals);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && !BUSTER_WINDOWS && !BUSTER_APPLE && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_parameter_alignment);
 #endif

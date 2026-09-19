@@ -6269,6 +6269,16 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             block_candidate_counts[block_index] = block_candidate_count;
         }
+        // A local with no store has no defining value for mutable-register
+        // promotion. Keep it in its frame slot so dead-label reads observe
+        // indeterminate automatic storage instead of an undefined vreg.
+        for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+        {
+            if (promotable_locals[value_index] && local_store_counts[value_index] == 0)
+            {
+                promotable_locals[value_index] = 0;
+            }
+        }
         selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);

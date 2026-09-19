@@ -14283,6 +14283,7 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
             .is_thread_local = is_thread_local,
             .is_constexpr = is_constexpr,
             .is_register = is_register,
+            .is_extern = is_extern,
         };
         CEntity* local_entity = &result->entities[entity.value];
         if (cleanup.count)

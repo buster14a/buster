@@ -7637,6 +7637,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             candidate_base += block_candidate_count;
         }
     }
+    // A local with no store has no defining value to seed a mutable virtual
+    // register.  This is observable for automatic declarations materialized
+    // solely so a later unreachable label can still refer to their storage:
+    // the dead read is valid IR, but the object has indeterminate bytes. Keep
+    // such a local in its frame slot rather than manufacturing an undefined
+    // virtual-register definition.
+    for (u32 value_index = 0; value_index < function->value_count; value_index += 1)
+    {
+        if (value_uses[value_index].promotable_width && local_store_counts[value_index] == 0)
+        {
+            value_uses[value_index].promotable_width = 0;
+        }
+    }
     selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
     selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
     // Classification pass: direct locals become stack slots, every other
