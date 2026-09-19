@@ -27,6 +27,8 @@ TARGETS = frozenset(f"{arch}-{system}" for arch in ("x86_64", "aarch64")
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 60
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+INSTALL_PUBLISH_ATTEMPTS = 3
+INSTALL_PUBLISH_RETRY_SECONDS = 0.1
 
 
 def load_pin(manifest, target):
@@ -114,6 +116,32 @@ def download_archive(url, destination, max_bytes):
         _remove_partial(partial)
 
 
+def _running_on_windows():
+    return os.name == "nt"
+
+
+def _publish_installation(staging, root, windows):
+    for attempt in range(INSTALL_PUBLISH_ATTEMPTS):
+        if root.exists():
+            raise ValueError(f"Zig installation directory appeared during publication: {root}")
+        try:
+            if windows:
+                # Unlike os.replace(), Windows rename fails closed if another
+                # process creates the destination between the existence check
+                # and publication.
+                staging.rename(root)
+            else:
+                staging.replace(root)
+            break
+        except OSError as error:
+            transient = windows and getattr(error, "winerror", None) == 5
+            if not transient or attempt == INSTALL_PUBLISH_ATTEMPTS - 1:
+                raise
+            if root.exists():
+                raise ValueError(f"Zig installation directory appeared during publication: {root}") from error
+            time.sleep(INSTALL_PUBLISH_RETRY_SECONDS * (attempt + 1))
+
+
 def install(target, manifest, cache_directory, install_directory, github_path=None):
     version, digest, max_bytes = load_pin(manifest, target)
     archive = Path(cache_directory).resolve() / "archive"
@@ -139,7 +167,7 @@ def install(target, manifest, cache_directory, install_directory, github_path=No
         result = subprocess.run([str(executable), "version"], check=True, capture_output=True, text=True)
         if result.stdout.strip() != version:
             raise ValueError("Verified Zig archive did not report the pinned version")
-        staging.replace(root)
+        _publish_installation(staging, root, _running_on_windows())
     if github_path:
         with Path(github_path).open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(str(root) + "\n")
