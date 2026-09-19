@@ -23,7 +23,7 @@ jobs:
         with:
           persist-credentials: true
           fetch-depth: 0
-      - name: Rewrite, validate, and stage the clean commit
+      - name: Commit, validate, and publish the clean repair
         shell: bash
         run: |
           set -euo pipefail
@@ -76,13 +76,11 @@ jobs:
               actual = hashlib.sha256(path.read_bytes()).hexdigest()
               if fields[key] != actual:
                   raise SystemExit(f"{key} does not bind {path}: {fields[key]} != {actual}")
-          if profile.read_text(encoding="utf-8") not in queue.read_text(encoding="utf-8").replace('"\n    "', '').replace('";\n', ''):
-              # The native service tests perform the authoritative byte-for-byte
-              # comparison; this branch only keeps the pin calculation explicit.
-              pass
+
           Path(".github/workflows/pr807-support-bindings-repair.yml").unlink()
           print(f"BINDING_VALIDATOR_SHA256={binding_sha}")
           PY
+
           if git grep -n '1f94d76fa80c80462fbc39d13c7f05288d6447d7439d366b10df2e793c270204' -- .; then
             echo 'stale support declaration digest remains' >&2
             exit 1
@@ -90,12 +88,8 @@ jobs:
           python3 -m py_compile \
             tools/native_retirement_contract.py \
             tools/native_retirement_performance_binding.py
-          python3 tools/native_retirement_contract_test.py -v
-          python3 tools/native_retirement_materializer_test.py -v
-          python3 tools/native_retirement_performance_identity_test.py -v
-          python3 tools/native_retirement_performance_binding_test.py -v
-          ./build.sh bench_service self-test
           git diff --check
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
@@ -105,5 +99,17 @@ jobs:
             tools/bench_service/queue.c \
             .github/workflows/pr807-support-bindings-repair.yml
           git commit -m "ci: refresh retirement support bindings"
+
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_performance_identity_test.py -v
+          python3 tools/native_retirement_performance_binding_test.py -v
+          ./build.sh bench_service self-test
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            git status --short
+            echo 'validation changed tracked files' >&2
+            exit 1
+          fi
+
           git push origin HEAD:refs/heads/codex/807-ci-fix-staging4-20260918
           printf 'STAGED_COMMIT=%s\n' "$(git rev-parse HEAD)"
