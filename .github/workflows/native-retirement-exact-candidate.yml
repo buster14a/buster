@@ -1,0 +1,63 @@
+name: Native retirement exact candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-retirement-exact-candidate.yml
+      - .github/workflows/native-retirement-evidence.yml
+      - tools/native_retirement_candidate.py
+      - tools/native_retirement_candidate_test.py
+      - docs/native-retirement-exact-candidate.md
+      - docs/native-retirement-gates-v1.json
+      - docs/native-retirement-*.json
+      - docs/native-retirement-*.tsv
+      - src/buster/lib/compiler/**
+  workflow_dispatch:
+    inputs:
+      candidate_commit:
+        description: Full immutable candidate commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # github.sha is a synthetic merge on pull_request.  Every producer and the
+  # eventual acceptance verifier must use the immutable PR head instead.
+  BUSTER_RETIREMENT_CANDIDATE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.candidate_commit }}
+
+jobs:
+  contract:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Exact-candidate contract
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
+          persist-credentials: false
+      - name: Refuse a merge ref, abbreviated identity or dirty checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUSTER_RETIREMENT_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"
+          test -n "$(git rev-parse 'HEAD^{tree}')"
+          git diff --quiet --ignore-submodules --
+          git diff --cached --quiet --ignore-submodules --
+      - name: Require exact-head selection in the evidence workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'github.event.pull_request.head.sha' .github/workflows/native-retirement-evidence.yml
+          ! grep -Fq 'BUSTER_RETIREMENT_CANDIDATE: ${{ github.sha }}' .github/workflows/native-retirement-evidence.yml
+      - name: Test fail-closed candidate, binary and artifact binding
+        working-directory: tools
+        run: |
+          python3 -W error::ResourceWarning -m py_compile \
+            native_retirement_candidate.py native_retirement_candidate_test.py
+          python3 -W error::ResourceWarning native_retirement_candidate_test.py -v
