@@ -1,0 +1,157 @@
+name: Issue 84 final retirement rebind
+
+on:
+  push:
+    branches: [fix/84-transactional-hermetic-spawn]
+    paths:
+      - '.github/workflows/issue84-final-rebind.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: issue84-final-retirement-rebind
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out validated issue branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: fix/84-transactional-hermetic-spawn
+          fetch-depth: 0
+
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: external/doom
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: external/stb
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: external/musl
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Materialize pinned SDK and generated inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
+          set +e
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)" > "$RUNNER_TEMP/pre-refresh.out" 2> "$RUNNER_TEMP/pre-refresh.err"
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/pre-refresh.out"
+          cat "$RUNNER_TEMP/pre-refresh.err" >&2
+          if [[ $status -ne 0 ]]; then
+            grep -F 'external closure source identity mismatch:' "$RUNNER_TEMP/pre-refresh.err"
+          fi
+
+      - name: Refresh exact-tree bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_rebind.py refresh --repo-root "$(pwd)" | tee "$RUNNER_TEMP/refresh.json"
+          python3 tools/native_retirement_external.py prepare \
+            --manifest docs/native-retirement-dependencies-v1.json \
+            --source-root "$(pwd)"
+          python3 tools/native_retirement_rebind.py refresh --repo-root "$(pwd)" | tee "$RUNNER_TEMP/idempotent.json"
+          grep -F '"status": "current"' "$RUNNER_TEMP/idempotent.json"
+
+      - name: Validate regenerated contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_rebind_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)"
+          git diff --check
+
+      - name: Commit authenticated generated outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/issue84-final-rebind.yml
+          git add \
+            .github/workflows/issue84-final-rebind.yml \
+            docs/native-retirement-dependencies-v1.json \
+            docs/native-retirement-census.md \
+            tools/native_retirement_census.c \
+            tools/native_retirement_contract.py
+          cat > "$RUNNER_TEMP/allowed-paths" <<'PATHS'
+          .github/workflows/issue84-final-rebind.yml
+          docs/native-retirement-census.md
+          docs/native-retirement-dependencies-v1.json
+          tools/native_retirement_census.c
+          tools/native_retirement_contract.py
+          PATHS
+          git diff --cached --name-only | sort > "$RUNNER_TEMP/actual-paths"
+          sort "$RUNNER_TEMP/allowed-paths" -o "$RUNNER_TEMP/allowed-paths"
+          comm -23 "$RUNNER_TEMP/actual-paths" "$RUNNER_TEMP/allowed-paths" > "$RUNNER_TEMP/unexpected-paths"
+          test ! -s "$RUNNER_TEMP/unexpected-paths" || { cat "$RUNNER_TEMP/unexpected-paths"; exit 1; }
+          grep -Fx '.github/workflows/issue84-final-rebind.yml' "$RUNNER_TEMP/actual-paths"
+          grep -Fx 'docs/native-retirement-dependencies-v1.json' "$RUNNER_TEMP/actual-paths"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore(retirement): rebind dependency identities for #84'
+          git push origin HEAD:fix/84-transactional-hermetic-spawn
