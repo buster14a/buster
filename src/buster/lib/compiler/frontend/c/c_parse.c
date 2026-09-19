@@ -19375,8 +19375,8 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
             CDeclaration initializer = {.body_start = start, .body_token_count = end - start, .scope = scope};
             c_parse_validate_generic_duplicates(machine, arena, result, preprocess, &initializer, 0, &generic);
             u32 storage = UINT32_MAX;
-            bool thread_local = false;
-            u32 call = c_parse_static_initializer_call(machine, result, preprocess, scope, start, end, &storage, &thread_local);
+            bool thread_local_address = false;
+            u32 call = c_parse_static_initializer_call(machine, result, preprocess, scope, start, end, &storage, &thread_local_address);
             if (call < preprocess.token_count && string_starts_with_sequence(shape.message, S8("cannot fold '")) &&
                 string_ends_with_sequence(shape.message, S8("in a static initializer"))) shape.message = (String8){0};
             if (generic.message.length && string_starts_with_sequence(shape.message, S8("cannot fold '_Generic'"))) shape.message = (String8){0};
@@ -19390,7 +19390,7 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[generic.location_token_index]), generic.kind,
                                    string_format(arena, S8("C IR lowering: {S8}"), generic.message));
             }
-            else if (thread_local && storage < preprocess.token_count)
+            else if (thread_local_address && storage < preprocess.token_count)
             {
                 c_parse_diagnostic(result, declaration.location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
                                    S8("C IR lowering: a static initializer may not take the address of a thread-local object"));
@@ -19618,9 +19618,9 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                         start, scalar.token);
                 }
                 u32 storage = UINT32_MAX;
-                bool thread_local = false;
+                bool thread_local_address = false;
                 u32 call = c_parse_static_initializer_call(machine, result, preprocess, entity->scope, initializer_start, initializer_end,
-                                                          &storage, &thread_local);
+                                                          &storage, &thread_local_address);
                 if (call < preprocess.token_count || storage < preprocess.token_count)
                 {
                     CDeclaration function = result->declarations[declaration_index];
@@ -20704,6 +20704,7 @@ BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine,
                 if (!label)
                 {
                     message = S8("computed goto requires a function-local void pointer label value");
+                    location = value_start;
                 }
                 else
                 {
