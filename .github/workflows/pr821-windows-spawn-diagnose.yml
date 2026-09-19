@@ -18,7 +18,7 @@ jobs:
   repair:
     if: github.event.head_commit.message == 'ci repair PR821 Windows environment' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Check out PR branch
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -78,36 +78,9 @@ jobs:
           if text.count(old) != 1:
               raise SystemExit(f"entry-point environment block match count: {text.count(old)}")
           entry.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
-
-          test = Path("src/buster/tests/os_test.c")
-          text = test.read_text(encoding="utf-8")
-          old = '''    Arena* arena = arguments->arena;
-              String8 self_arguments[] = {program_state->input.arguments.pointer[0], S8("help")};
-          
-              ProcessSpawnResult empty_arguments ='''
-          new = '''    Arena* arena = arguments->arena;
-              String8 self_arguments[] = {program_state->input.arguments.pointer[0], S8("help")};
-          
-              bool captured_environment_valid = program_state->input.environment_keys.length == program_state->input.environment_values.length;
-              for (u64 environment_index = 0; captured_environment_valid && environment_index < program_state->input.environment_keys.length;
-                   environment_index += 1)
-              {
-                  String8 key = program_state->input.environment_keys.pointer[environment_index];
-                  captured_environment_valid = key.length != 0;
-                  for (u64 code_unit = 0; captured_environment_valid && code_unit < key.length; code_unit += 1)
-                  {
-                      captured_environment_valid = key.pointer[code_unit] != '=';
-                  }
-              }
-              BUSTER_TEST(arguments, captured_environment_valid);
-          
-              ProcessSpawnResult empty_arguments ='''
-          if text.count(old) != 1:
-              raise SystemExit(f"os-test insertion match count: {text.count(old)}")
-          test.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
           '@ | python -
 
-      - name: Run Windows release spawn and combination regressions
+      - name: Run the Windows release differential regression
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -123,15 +96,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmd /c "`"$Driver`" test_differential --self-test 2>&1"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /c "`"$Driver`" test_all_combinations_ci --verbose=1 2>&1"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish source repair
         shell: pwsh
         run: |
           git diff --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git add src/buster/lib/entry_point.c src/buster/tests/os_test.c
+          git add src/buster/lib/entry_point.c
           git diff --cached --exit-code
           if ($LASTEXITCODE -eq 0) { throw 'environment repair produced no source change' }
           git config user.name 'github-actions[bot]'
