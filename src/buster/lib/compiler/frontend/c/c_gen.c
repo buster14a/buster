@@ -6188,6 +6188,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_global_place(CIntegerIrBuilder* builder, C
     }
     IrSymbolId symbol = builder->entity_symbols[entity.value];
     CEntity* entity_value = builder->parse.entities + entity.value;
+    if (entity_value->kind == C_ENTITY_LOCAL && !entity_value->is_static_storage && !entity_value->is_extern)
+    {
+        builder->failure_message = string_format(builder->arena, S8("automatic local '{S8}' was referenced without a local mapping"), entity_value->name);
+        builder->failure_token_index = entity_value->declaration_token_plus_one ? entity_value->declaration_token_plus_one - 1 : UINT32_MAX;
+        return IR_VALUE_ID_INVALID;
+    }
     if (symbol.value == IR_ID_UNDERLYING_INVALID && entity_value->kind == C_ENTITY_LOCAL && !entity_value->is_static_storage)
     {
         for (u32 candidate_index = 0; candidate_index < builder->parse.entity_count; candidate_index += 1)
@@ -13076,6 +13082,47 @@ struct CIrLowerVlaLayoutState
 
 typedef struct CIrBodyTask CIrBodyTask;
 typedef struct CIrSwitchCase CIrSwitchCase;
+// A function containing labels may re-enter its token stream after jumping
+// over one or more declarations. Reserve fixed-size automatic objects in the
+// entry block before any terminator is emitted. The declaration itself still
+// owns initialization, cleanup activation, and VLA allocation, so a path that
+// crosses it receives storage but executes none of those side effects.
+BUSTER_C_INTERNAL bool c_ir_predeclare_labeled_automatic_locals(CIntegerIrBuilder* builder, u32 start, u32 end)
+{
+    for (CEntityId entity = {.value = 0}; entity.value < builder->parse.entity_count; entity.value += 1)
+    {
+        CEntity* value = builder->parse.entities + entity.value;
+        u32 declaration_token = value->declaration_token_plus_one ? value->declaration_token_plus_one - 1 : UINT32_MAX;
+        if (value->kind != C_ENTITY_LOCAL || value->is_static_storage || value->is_thread_local || value->is_extern ||
+            declaration_token < start || declaration_token >= end ||
+            value->type.value >= builder->parse.type_count || c_ir_find_local_by_entity(builder, entity))
+        {
+            continue;
+        }
+        IrTypeId local_type = builder->c_type_ir_map[value->type.value];
+        IrType* local_type_value = ir_type_from_id(&builder->program->types, local_type);
+        // Unmapped array types are VLAs. Their allocation and stack checkpoint
+        // must stay at the declaration; C already forbids jumping into their
+        // scope, and predeclaring a pointer would weaken that contract.
+        if (!local_type_value)
+        {
+            continue;
+        }
+        u32 alignment = local_type_value->layout.alignment;
+        String8 rejection = {0};
+        if (!local_type_value->layout.resolved ||
+            c_ir_alignment_evaluate(builder, value->alignment_start, value->alignment_count, alignment, &alignment, 0, &rejection) != C_IR_ALIGNMENT_RESOLVED ||
+            c_ir_emit_local(builder, builder->preprocess.tokens[declaration_token], local_type, entity, alignment).value == IR_ID_UNDERLYING_INVALID)
+        {
+            builder->failure_message = rejection.length ? rejection : string_format(builder->arena, S8("could not predeclare labeled automatic local '{S8}'"), value->name);
+            builder->failure_kind_plus_one = rejection.length ? C_DIAGNOSTIC_INVALID_ALIGNMENT + 1 : 0;
+            builder->failure_token_index = declaration_token;
+            return false;
+        }
+    }
+    return true;
+}
+
 typedef struct CIrSubstatementCase CIrSubstatementCase;
 typedef struct CIrLabel CIrLabel;
 
@@ -32869,7 +32916,7 @@ BUSTER_C_INTERNAL bool c_ir_emit_switch_prefix_locals(CIntegerIrBuilder* builder
     {
         CEntity* value = builder->parse.entities + entity.value;
         u32 declaration_token = value->declaration_token_plus_one ? value->declaration_token_plus_one - 1 : UINT32_MAX;
-        if (value->kind != C_ENTITY_LOCAL || value->is_static_storage || value->is_thread_local || declaration_token < body_start ||
+        if (value->kind != C_ENTITY_LOCAL || value->is_static_storage || value->is_thread_local || value->is_extern || declaration_token < body_start ||
             declaration_token >= prefix_end || value->type.value >= builder->parse.type_count || c_ir_find_local_by_entity(builder, entity))
         {
             continue;
@@ -33980,8 +34027,9 @@ BUSTER_C_INTERNAL bool c_ir_prepare_automatic_declaration(CIntegerIrBuilder* bui
         }
         return true;
     }
-    IrValueId place = c_ir_emit_local(builder, name, local_type, entity, local_alignment);
     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+    IrValueId place = local ? local->place : c_ir_emit_local(builder, name, local_type, entity, local_alignment);
+    local = c_ir_find_local_by_entity(builder, entity);
     if (place.value == IR_ID_UNDERLYING_INVALID || !local)
     {
         builder->failure_message = string_format(builder->arena, S8("could not lower automatic local '{S8}'"), c_token_spelling(builder->preprocess.spelling_base, name));
@@ -36203,6 +36251,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_initialize(CIntegerIrBuilder* builder, CI
         builder->labels = state->labels;
         builder->label_count = state->label_count;
     }
+    if (state->label_count && !c_ir_predeclare_labeled_automatic_locals(builder, declaration.body_start, body_end))
+    {
+        return false;
+    }
     u64 task_capacity = (u64)declaration.body_token_count + 4;
     u32 switch_case_capacity = 0;
     for (u32 index = declaration.body_start; index < body_end; index += 1)
@@ -38144,7 +38196,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 }
                 else
                 {
-                    place = c_ir_emit_local(builder, name, local_type, entity, variable_length_array ? local_type_value->layout.alignment : local_alignment);
+                    CIntegerIrLocal* existing = c_ir_find_local_by_entity(builder, entity);
+                    place = existing ? existing->place
+                                     : c_ir_emit_local(builder, name, local_type, entity,
+                                                       variable_length_array ? local_type_value->layout.alignment : local_alignment);
                 }
                 CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
                 if (place.value == IR_ID_UNDERLYING_INVALID || !local)

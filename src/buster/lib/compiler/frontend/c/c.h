@@ -944,7 +944,9 @@ struct CEntity
     // and only one reader needs it: an assembler label on a `register` local
     // binds a machine register instead of renaming a symbol.
     bool is_register;
-    u8 reserved[1];
+    // Block-scope extern declarations are C_ENTITY_LOCAL for lexical lookup,
+    // but they name external storage rather than an automatic local place.
+    bool is_extern;
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
