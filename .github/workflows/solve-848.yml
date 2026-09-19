@@ -26,12 +26,34 @@ jobs:
           git diff --check
 
       - name: Run Release tests
-        run: ./build.sh build --config Release -t test_all
+        shell: bash
+        run: |
+          set -o pipefail
+          ./build.sh build --config Release -t test_all 2>&1 | tee /tmp/solve-848-validation.log
 
       - name: Verify self-host fixed point
-        run: ./build.sh test_self_host --config Release
+        shell: bash
+        run: |
+          set -o pipefail
+          ./build.sh test_self_host --config Release 2>&1 | tee -a /tmp/solve-848-validation.log
+
+      - name: Publish validation diagnostics
+        if: failure()
+        run: |
+          {
+            echo "head=$(git rev-parse HEAD)"
+            echo "status=failed"
+            echo
+            tail -n 500 /tmp/solve-848-validation.log 2>/dev/null || true
+          } > .github/solve-848-validation.log
+          git config user.name "OpenAI Codex"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/solve-848-validation.log
+          git commit -m "ci: record issue 848 validation failure"
+          git push origin HEAD:codex/848-unreachable-local
 
       - name: Publish tested implementation
+        if: success()
         run: |
           git config user.name "OpenAI Codex"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
