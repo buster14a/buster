@@ -1,0 +1,65 @@
+name: Issue 766 rebased CPython validation
+
+on:
+  push:
+    branches:
+      - codex/issue766-cpython-validation-v2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue766-cpython-validation-v2
+  cancel-in-progress: true
+
+jobs:
+  cpython:
+    name: Exact a4881d28 / CPython v3.13.9
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: a4881d28d79a699dfd839ce836fb3d7427493a90
+          persist-credentials: false
+      - name: Bootstrap and build Release compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = a4881d28d79a699dfd839ce836fb3d7427493a90
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --config Release --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Prove explicit -fno-pic equals the ordinary default
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide cc -fno-pic -g -O3 -c tests/basic_c_pic.c -o "$RUNNER_TEMP/explicit.o"
+          build/Release/ide cc          -g -O3 -c tests/basic_c_pic.c -o "$RUNNER_TEMP/default.o"
+          cmp "$RUNNER_TEMP/explicit.o" "$RUNNER_TEMP/default.o"
+          sha256sum "$RUNNER_TEMP/explicit.o" "$RUNNER_TEMP/default.o"
+      - name: Fetch pinned pristine CPython
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/fetch_cpython.sh "$RUNNER_TEMP/cpython-v3.13.9"
+          test "$(git -C "$RUNNER_TEMP/cpython-v3.13.9" rev-parse HEAD)" = 8183fa5e3f78ca6ab862de7fb8b14f3d929421e0
+          test -z "$(git -C "$RUNNER_TEMP/cpython-v3.13.9" status --porcelain)"
+      - name: Run all allocator trees and preserve full-harness status
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/cpython.log"
+          set +e
+          "$RUNNER_TEMP/buster-build" test_cpython --config Release "$RUNNER_TEMP/cpython-v3.13.9" 2>&1 | tee "$log"
+          harness_status="${PIPESTATUS[0]}"
+          set -e
+
+          for allocator in fast none mir-stack quality; do
+              grep -Fqx "CPYTHON_UNIT tree=${allocator} unit=Python/perf_jit_trampoline.o compiler=buster status=pass" "$log"
+          done
+          test "$(grep -Fc 'unit=Python/perf_jit_trampoline.o compiler=buster status=pass' "$log")" -eq 4
+
+          echo "CPYTHON_ISSUE766 exact_head=a4881d28d79a699dfd839ce836fb3d7427493a90 unit_status=pass full_harness_status=${harness_status}"
+          exit "$harness_status"
