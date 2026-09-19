@@ -30,7 +30,7 @@ FULL_SUPPORTED_GAP_COUNT = 192
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
 FULL_SUPPORTED_GAP_SHA256 = "9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"
-FULL_SUPPORT_CONTRACT_SHA256 = "42149a58107e46d05a3ef6d6b6f63df5923de2260b7b28be6325708e7a3d80ab"
+FULL_SUPPORT_CONTRACT_SHA256 = "8648b81e7c39c514d2036bb242b5ff43dfa9ffc17d67c4bbb19d2a141ed6c8d8"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity

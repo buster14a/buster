@@ -51,21 +51,24 @@ gh variable set GH_ACTIONS_CI_ENABLED --body true --repo OWNER/REPOSITORY
 
 The `test` matrix retains all six desktop runner labels, with two internal
 combination jobs per platform: `<platform> release` and `<platform> checks`.
-Four independent `native` lanes retain the Unix execution-mode and
-configuration-differential suites together, reusing their fresh Release
-compiler. Mobile retains its three independent suite-level shards; lint,
+Six independent `native` lanes run the execution-mode suite. The four Unix
+lanes additionally run the configuration-differential suite, reusing their
+fresh Release compiler; the two Windows lanes report the mode gate
+independently. Mobile retains its three independent suite-level shards; lint,
 UEFI and the independent analyzer remain required. **Require `CI complete`**,
-which checks all groups and the exact 23-job inventory, including all twelve
-desktop partitions. The old six names alone do not prove coverage.
-See [combination sharding](ci-combination-shards.md) for native ownership,
-fail-closed completion, reproduction and mandatory performance qualification;
-[suite partitioning](ci-suite-partition.md) documents the earlier split.
+which checks all groups and the exact 25-job inventory, including all twelve
+desktop partitions and all six native jobs. The old six names alone do not
+prove coverage. See [combination sharding](ci-combination-shards.md) for native
+ownership, fail-closed completion, reproduction and mandatory performance
+qualification; [Windows CI coverage](windows-ci-coverage.md) records the
+Windows mode and compiler-policy contract; [suite partitioning](ci-suite-partition.md)
+documents the earlier split.
 
 | Work | Runners | Command |
 |---|---|---|
 | Combination matrix | `release` and `checks` on each of six desktop labels | `BUSTER_MATRIX_SHARD=<shard>` + `test_all_combinations_ci` |
-| Execution-mode matrix | the four independent Unix native lanes | `test_mode_matrix --config Release` |
-| Native differential matrix | the same four native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
+| Execution-mode matrix | all six independent desktop native lanes | `test_mode_matrix --config Release` |
+| Native differential matrix | the four Unix native lanes | `test_differential --ide build/Release/ide --out <fresh-directory> --sanitize-oracle --jobs 4` |
 | Android shard | `ubuntu-26.04` | `android/start_emulator_ci.sh start`, then `android/test_ci.sh --all` |
 | iOS shards | `macos-26-intel`, `macos-26` | `ios/test_ci.sh --all` |
 
@@ -78,8 +81,9 @@ compile/link/bundle-only; Apple Silicon retains simulator execution.
 The main workflow covers pull requests (including forks), main pushes, tags,
 merge groups and manual runs. Feature pushes use their PR run without a duplicate matrix. `fail-fast` is off
 in all three matrices. Native and mobile lanes have no desktop prerequisite;
-combination failure cannot hide their results or turn green. Within each native
-lane, the differential step still runs after mode failure unless cancelled.
+combination failure cannot hide their results or turn green. Within each Unix
+native lane, the differential step still runs after mode failure unless
+cancelled; Windows requires its independent mode result.
 
 PR revisions and merge groups coalesce per PR/ref. Main/tag pushes and manual
 runs have unique run-ID groups so neither active nor pending results are
@@ -87,10 +91,11 @@ superseded. Lifecycle PR updates separately cancel obsolete fake-tool runs.
 The seven-day log artifacts, summaries, cache boundaries, reproduction commands,
 and timing methodology are documented in [the workflow audit](ci-workflow-audit.md).
 
-Both architectures of both Unix platforms run the execution-mode matrix because
-that is what makes its legs *execute* rather than fall back to the disassembly
-oracle: x86-64 ELF and Mach-O on the Intel runners, AArch64 ELF and Mach-O on
-the Arm ones. Windows is excluded from it as it is on Forgejo.
+Both architectures of all three desktop platforms run the execution-mode
+matrix. Matching native legs therefore execute rather than falling back to the
+disassembly oracle: ELF and Mach-O on the four Unix runners and PE/COFF on the
+two Windows runners. Foreign-format or foreign-architecture legs that cannot
+execute on the current host remain explicitly oracle-checked.
 
 ## Supplementary bootstrap scheduling and tested revision
 
@@ -119,10 +124,10 @@ SHAs must not be substituted for one another in validation reports. Re-running
 a job retains the original event SHA; a newer PR head requires its own run.
 Branch protection should require **both `CI complete` and
 `Linux x86-64 bootstrap evidence`** when the stronger audit is mandatory.
-`CI complete` aggregates only its own lint, desktop, native and mobile jobs; it is not
-a proxy for the separate bootstrap result. No same-name skipped check is
-introduced to stand in for a missing run, and this documentation does not
-change repository rules.
+`CI complete` aggregates its lint, desktop, native, mobile, UEFI and analyzer
+jobs; it is not a proxy for the separate bootstrap result. No same-name skipped
+check is introduced to stand in for a missing run, and this documentation does
+not change repository rules.
 
 Each workflow uses its own name and event in the concurrency key. Only PR and
 merge-group runs permit cancellation. Main, tag and manual runs include their
@@ -224,12 +229,11 @@ AArch64 desktop rows build and test without it.
 
 ## What does not run here
 
-- **Wine and `qemu-user`.** The images carry neither, so an execution-mode
-  matrix leg whose target no runner can execute is oracle-checked instead —
-  the row still reports, with its avenue downgraded. Between the four Unix
-  runners every ELF and Mach-O leg executes natively; the PE legs are the ones
-  that stay on the oracle, because Forgejo covers them under wine and this
-  workflow does not run the execution-mode matrix on Windows.
+- **Wine and `qemu-user`.** The images carry neither. Each native runner executes
+  the matching operating-system format and architecture directly; unsupported
+  foreign formats or architectures remain oracle-checked rather than silently
+  emulated. Across all six native runners, the matching x86-64 and AArch64 ELF,
+  Mach-O and PE/COFF legs have a real host execution avenue.
 - **The performance series.** Hosted virtual machines expose no performance
   counters, and their wall times are too noisy to trend. `STEP_INSTRUCTIONS`
   needs hardware under your control. CI elapsed time and total job seconds
@@ -277,7 +281,7 @@ verified `native-ci-logs.tar.gz` beside `result.json` and `summary.md`, packed
 by `tools/ci_pack_evidence.py`; a packing failure fails the lane and uploads the
 unpacked tree instead. See
 [native evidence packaging](ci-suite-partition.md#native-evidence-packaging).
-The aggregate `CI complete` requires all twelve desktop combination jobs, four
+The aggregate `CI complete` requires all twelve desktop combination jobs, six
 native jobs, three mobile jobs, workflow lint, UEFI and the analyzer. Its
 read-only Actions inventory rejects missing shard identities even when a
 smaller surviving matrix group reports success.
@@ -371,12 +375,13 @@ attached launch-monitor ownership suite continues to use macOS `/bin/bash`.
 Collect timing using `python3 tools/github_ci_time.py collect --branch main --limit 30 --output /tmp/before.json`
 and summarize using `python3 tools/github_ci_time.py summarize /tmp/before.json`.
 For a candidate, replace `--branch main` with `--head-sha COMMIT`. The collector
-accepts historical six-, eleven-, fifteen- and seventeen-job workflows and the
-current twenty-three-job combination-partitioned workflow; all applicable suites must succeed on
-a complete first attempt. The four native jobs must report both mode and
-differential success, and the UEFI and analyzer gates must report their key
-coverage steps. Their execution intervals and runner seconds are included. Workflow hashes
-and runner labels define separate cohorts. Reports include queue delay, elapsed
+accepts historical six-, eleven-, fifteen-, seventeen- and twenty-three-job
+workflows plus the current twenty-five-job layout; all applicable suites must
+succeed on a complete first attempt. All six native jobs must report mode
+success, the four Unix native jobs must additionally report differential
+success, and the UEFI and analyzer gates must report their key coverage steps.
+Their execution intervals and runner seconds are included. Workflow hashes and
+runner labels define separate cohorts. Reports include queue delay, elapsed
 time, execution span and summed runner seconds, including mobile/lint/aggregate
 jobs. Never attribute differences to this PR without matching source/cache state
 and multiple completed observations. No speedup is claimed before that evidence.
