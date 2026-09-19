@@ -7291,7 +7291,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             if (read_ok)
             {
                 function_symbol = (kind == 0 && (reference_kind == 1 || reference_kind == 5)) ||
-                                  (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT);
+                                  (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT) ||
+                                  (kind == 0 && string_equal(name, S8("_tlv_bootstrap")));
                 result.symbols[destination_index] = (ObjectSymbol){
                     .name = string_duplicate_arena(arena, name, false),
                     .value = section_value,
