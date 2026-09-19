@@ -258,7 +258,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_fast(UnitTestArguments* 
 #if !BUSTER_ANDROID && !BUSTER_IOS
                     String8 run[] = {path};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                                                               (ProcessSpawnOptions){.use_process_environment = 1});
+                                                               (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
                     BUSTER_TEST(arguments, spawn.handle != 0);
                     if (spawn.handle)
                     {

@@ -184,7 +184,10 @@ jobs:
       - name: Workflow tool regression tests
         id: workflow_tools
         if: ${{ matrix.shard == 'release' }}
-        timeout-minutes: 2
+        # The native Windows ARM runner is substantially slower for the eight
+        # network-free Python suites. Keep the ordinary two-minute budget and
+        # give only that lane enough time to complete the unchanged coverage.
+        timeout-minutes: ${{ matrix.lane == 'windows-aarch64' && 5 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
