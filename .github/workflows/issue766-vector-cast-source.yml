@@ -19,20 +19,26 @@ jobs:
         with:
           ref: 1d71d10df9853360ca7961aeddd01675a7de1af7
           persist-credentials: false
-      - name: Print explicit vector cast lowering
+      - name: Print exact vector cast paths and tests
         shell: bash
         run: |
           set -euo pipefail
           file=src/buster/lib/compiler/frontend/c/c_gen.c
 
-          echo '=== representation alias helper and surrounding code ==='
-          grep -n 'c_ir_emit_representation_alias_conversion' "$file" || true
-          sed -n '6360,6525p' "$file"
+          echo '=== representation alias helper ==='
+          sed -n '7240,7335p' "$file"
 
-          echo '=== explicit cast lowering call sites ==='
-          sed -n '13820,14030p' "$file"
-          grep -nE 'FRAME.*CAST|CAST.*FRAME|as\.cast|cast_type' "$file" | sed -n '1,240p' || true
+          echo '=== operation application ==='
+          sed -n '21780,21950p' "$file"
 
-          echo '=== cast-validation helpers ==='
-          grep -nE 'explicit.*cast|cast.*valid|vector.*size|size.*vector' "$file" | sed -n '1,260p' || true
-          grep -RFn '__builtin_convertvector' tests src/buster/tests | sed -n '1,120p' || true
+          echo '=== expression cast parser/apply path ==='
+          sed -n '27870,28090p' "$file"
+
+          echo '=== vector fixtures and registrations ==='
+          find tests -maxdepth 1 -type f -name '*vector*' -print | sort
+          grep -n 'basic_c_vector' build.c | sed -n '1,160p' || true
+          for fixture in tests/basic_c_vector*.c; do
+            test -f "$fixture" || continue
+            echo "--- $fixture ---"
+            sed -n '1,260p' "$fixture"
+          done
