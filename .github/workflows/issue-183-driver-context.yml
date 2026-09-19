@@ -1,0 +1,58 @@
+name: Export issue 183 driver contexts
+
+on:
+  push:
+    branches:
+      - scratch/183-current-progress
+    paths:
+      - .github/workflows/issue-183-driver-context.yml
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Export focused contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          ranges = {
+              'src/buster/tests/compiler/driver/driver_test.c': [(8850, 9005), (13920, 14020), (15690, 15820)],
+              'src/buster/lib/compiler/frontend/c/c.h': [(360, 470)],
+              'tests/basic_c_fixed_enum.c': [(1, 260)],
+              'tests/basic_c_bit_field.c': [(1, 320)],
+          }
+          out = []
+          for filename, spans in ranges.items():
+              path = Path(filename)
+              out.append(f'===== {filename} =====\n')
+              if not path.exists():
+                  out.append('MISSING\n')
+                  continue
+              lines = path.read_text(errors='replace').splitlines()
+              out.append(f'line_count={len(lines)}\n')
+              for first, last in spans:
+                  first = max(1, first)
+                  last = min(len(lines), last)
+                  out.append(f'@@ {first}-{last} @@\n')
+                  out.extend(f'{index + 1:06d}: {lines[index]}\n' for index in range(first - 1, last))
+          Path('.github/issue-183-driver-context.txt').write_text(''.join(out))
+          PY
+      - name: Publish contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-driver-context.txt
+          git commit -m 'chore: export issue 183 driver contexts'
+          git push origin HEAD:${GITHUB_REF_NAME}
