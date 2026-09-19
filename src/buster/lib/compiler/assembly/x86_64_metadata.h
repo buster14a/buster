@@ -1068,6 +1068,11 @@ BUSTER_F_DECL bool buster_x86_metadata_form_is_moffs(u32 form_id);
 // exceptions.
 BUSTER_F_DECL bool buster_x86_metadata_form_requires_dfv(u32 form_id);
 BUSTER_F_DECL bool buster_x86_metadata_operand(u32 form_id, u32 operand_index, BusterX86MetadataOperand* result);
+// Return the fixed source-memory tuple width published by a form's operand
+// schema. This is used by source adapters for legacy/VEX/XOP conversions,
+// where the scalar encoding width and the public aggregate qualifier differ.
+BUSTER_F_DECL u16 buster_x86_metadata_form_memory_source_width(BusterX86MetadataForm form,
+                                                                 BusterX86MetadataString atom);
 BUSTER_F_DECL bool buster_x86_metadata_coverage(u32 coverage_id, BusterX86MetadataCoverage* result);
 // Mnemonic lookup is ASCII case-insensitive and uses the first token of each
 // Intel, AT&T, or generic disassembly spelling; dialect aliases share a range.

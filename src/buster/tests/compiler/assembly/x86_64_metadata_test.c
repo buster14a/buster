@@ -2350,9 +2350,20 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
             u16 vector_bits = (u16)(128u << size_index);
             // Both operands promote to int; fixture widths are at most 512 bits.
             u16 memory_bits = (u16)(vector_bits / test_case.memory_divisor);
-            valid &= (u32)memory_bits * test_case.memory_divisor == vector_bits;
+            bool memory_bits_valid = (u32)memory_bits * test_case.memory_divisor == vector_bits;
+            if (!memory_bits_valid)
+            {
+                arguments->show(arguments, S8("EVEX_INPUT case={u32} size={u32} vector_bits={u16} memory_bits={u16} divisor={u8}"),
+                                case_index, size_index, vector_bits, memory_bits, test_case.memory_divisor);
+            }
+            valid &= memory_bits_valid;
             BusterX86MetadataFormKey key = {0};
             bool key_ready = buster_x86_metadata_form_key(test_case.forms[size_index], &key);
+            if (!key_ready)
+            {
+                arguments->show(arguments, S8("EVEX_KEY case={u32} size={u32} form={u32}"),
+                                case_index, size_index, test_case.forms[size_index]);
+            }
             valid &= key_ready;
             for (u32 broadcast = 0; broadcast < 2; broadcast += 1)
             {
@@ -2434,7 +2445,18 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
                             memset(untouched, 0xa5, sizeof(untouched));
                             BusterX86MetadataEmitResult rejected = x86_64_metadata_test_emit_exact_query(key, operands, operand_count,
                                 wrong_count, features, BUSTER_ARRAY_LENGTH(features), untouched, sizeof(untouched), 0, 0);
-                            valid &= rejected.status == BUSTER_X86_METADATA_ENCODE_DECORATOR && rejected.byte_count == 0 && untouched[0] == 0xa5;
+                            // Reject impossible counts without committing output bytes. Schema
+                            // validation may classify a bad count as an operand mismatch before
+                            // the decorator-specific diagnostic path.
+                            bool wrong_count_valid = rejected.status != BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                                     rejected.byte_count == 0 && untouched[0] == 0xa5;
+                            if (!wrong_count_valid)
+                            {
+                                arguments->show(arguments, S8("EVEX_WRONG_COUNT form={u32} size={u32} status={u32} required={u32} bytes={u32} untouched={u32}"),
+                                                key.form_id, size_index, (u32)rejected.status, rejected.required_byte_count,
+                                                rejected.byte_count, untouched[0]);
+                            }
+                            valid &= wrong_count_valid;
                         }
                         AssemblyEncodeResult encoded = assembly_encode(arguments->arena, source,
                             (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_ATT});
@@ -2562,6 +2584,113 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_broadcast_displacements(UnitTestAr
         }
         valid &= case_valid;
     }
+
+
+    // Legacy and VEX conversions publish the source memory tuple directly as
+    // q/dq/qq metadata. Exercise both dialects and repeat each exact source so
+    // form selection cannot depend on mutable candidate state.
+    typedef struct X86ConversionSourceCase X86ConversionSourceCase;
+    struct X86ConversionSourceCase
+    {
+        String8 source;
+        AssemblySyntax syntax;
+        u8 bytes[6];
+        u8 byte_count;
+    };
+    X86ConversionSourceCase const conversion_sources[] = {
+        {S8("cvtps2pd 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0x0f, 0x5a, 0x40, 0x40}, 4},
+        {S8("cvtps2pd xmm0, qword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0x0f, 0x5a, 0x40, 0x40}, 4},
+        {S8("vcvtps2pd 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xc5, 0xf8, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtps2pd xmm0, qword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xf8, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtps2pd 64(%rax), %ymm0\n"), ASSEMBLY_SYNTAX_ATT, {0xc5, 0xfc, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtps2pd ymm0, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xfc, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtpd2ps 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0x66, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtpd2ps xmm0, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0x66, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtpd2ps xmm0, xmmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xf9, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtpd2ps xmm0, ymmword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xfd, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtss2sd 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xf3, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtss2sd xmm0, dword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xf3, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtsd2ss 64(%rax), %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xf2, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("cvtsd2ss xmm0, qword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xf2, 0x0f, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtss2sd 64(%rax), %xmm1, %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xc5, 0xf2, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtss2sd xmm0, xmm1, dword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xf2, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtsd2ss 64(%rax), %xmm1, %xmm0\n"), ASSEMBLY_SYNTAX_ATT, {0xc5, 0xf3, 0x5a, 0x40, 0x40}, 5},
+        {S8("vcvtsd2ss xmm0, xmm1, qword ptr [rax+64]\n"), ASSEMBLY_SYNTAX_INTEL, {0xc5, 0xf3, 0x5a, 0x40, 0x40}, 5},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(conversion_sources); index += 1)
+    {
+        X86ConversionSourceCase test_case = conversion_sources[index];
+        for (u32 repeat = 0; repeat < 2; repeat += 1)
+        {
+            AssemblyEncodeResult encoded = assembly_encode(arguments->arena, test_case.source,
+                (AssemblyEncodeOptions){.target = target, .syntax = test_case.syntax});
+            bool case_valid = encoded.diagnostic_count == 0 && encoded.relocation_count == 0 &&
+                x86_64_metadata_test_bytes_equal(encoded.bytes.pointer, (u32)encoded.bytes.length,
+                                                 test_case.bytes, test_case.byte_count);
+            if (!case_valid)
+            {
+                arguments->show(arguments, S8("CONVERSION_SOURCE index={u32} repeat={u32} syntax={u32} diagnostics={u32} relocations={u32} bytes={u32} expected={u8}: {S8}"),
+                                index, repeat, (u32)test_case.syntax, encoded.diagnostic_count, encoded.relocation_count,
+                                (u32)encoded.bytes.length, test_case.byte_count, test_case.source);
+            }
+            valid &= case_valid;
+        }
+    }
+    String8 const invalid_conversion_widths[] = {
+        S8("vcvtps2pd xmm0, xmmword ptr [rax+64]\n"),
+        S8("vcvtps2pd ymm0, qword ptr [rax+64]\n"),
+        S8("vcvtpd2ps xmm0, qword ptr [rax+64]\n"),
+        S8("cvtss2sd xmm0, qword ptr [rax+64]\n"),
+        S8("cvtsd2ss xmm0, dword ptr [rax+64]\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_conversion_widths); index += 1)
+    {
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, invalid_conversion_widths[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+        bool case_valid = rejected.diagnostic_count != 0 && rejected.bytes.length == 0 && rejected.relocation_count == 0;
+        if (!case_valid)
+        {
+            arguments->show(arguments, S8("CONVERSION_INVALID index={u32} diagnostics={u32} relocations={u32} bytes={u32}: {S8}"),
+                            index, rejected.diagnostic_count, rejected.relocation_count, (u32)rejected.bytes.length,
+                            invalid_conversion_widths[index]);
+        }
+        valid &= case_valid;
+    }
+    String8 const ambiguous_conversion_widths[] = {
+        S8("vcvtpd2ps xmm0, [rax+64]\n"),
+        S8("vcvtpd2ps 64(%rax), %xmm0\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(ambiguous_conversion_widths); index += 1)
+    {
+        AssemblySyntax syntax = index ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL;
+        AssemblyEncodeResult rejected = assembly_encode(arguments->arena, ambiguous_conversion_widths[index],
+            (AssemblyEncodeOptions){.target = target, .syntax = syntax});
+        bool case_valid = rejected.diagnostic_count != 0 && rejected.bytes.length == 0 && rejected.relocation_count == 0;
+        if (!case_valid)
+        {
+            arguments->show(arguments, S8("CONVERSION_AMBIGUOUS index={u32} syntax={u32} diagnostics={u32} relocations={u32} bytes={u32}: {S8}"),
+                            index, (u32)syntax, rejected.diagnostic_count, rejected.relocation_count, (u32)rejected.bytes.length,
+                            ambiguous_conversion_widths[index]);
+        }
+        valid &= case_valid;
+    }
+    Target no_avx_target = {
+        .cpu_arch = CPU_ARCH_X86_64,
+        .os = OPERATING_SYSTEM_LINUX,
+        .cpu_features_explicit = true,
+        .cpu_features = target_cpu_features_from_array((TargetCpuFeature const[]){TARGET_CPU_FEATURE_X86_SSE2}, 1),
+    };
+    AssemblyEncodeResult feature_disabled = assembly_encode(arguments->arena,
+        S8("vcvtps2pd 64(%rax), %ymm0\n"),
+        (AssemblyEncodeOptions){.target = no_avx_target, .syntax = ASSEMBLY_SYNTAX_ATT});
+    bool feature_disabled_valid = feature_disabled.diagnostic_count != 0 && feature_disabled.bytes.length == 0 &&
+                                  feature_disabled.relocation_count == 0;
+    if (!feature_disabled_valid)
+    {
+        arguments->show(arguments, S8("CONVERSION_FEATURE diagnostics={u32} relocations={u32} bytes={u32}"),
+                        feature_disabled.diagnostic_count, feature_disabled.relocation_count, (u32)feature_disabled.bytes.length);
+    }
+    valid &= feature_disabled_valid;
 
     return valid;
 }

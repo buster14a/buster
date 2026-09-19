@@ -91,18 +91,18 @@ The signature-reason negative control uses the currently direct-only 32-byte
 Win64 vector ABI. Narrow vectors and argument count have strict-success regressions and
 must not be constrained to keep a telemetry test failing.
 
-For two-operand EVEX vector loads/conversions, an ordinary memory qualifier
-names the source tuple, not the destination register width. A broadcast
-qualifier names its scalar element. The metadata selector projects the
-candidate's element width and validates the source qualifier independently;
-for example, masked `vcvtps2pd zmm0, m256` reads eight 32-bit elements while
-masked `vcvtpd2ps ymm0, m512` reads eight 64-bit elements. AT&T's unqualified
-memory spelling uses the same candidate contract. Unsized ordinary loads
-whose destination permits multiple source tuple widths are rejected as
-ambiguous; encoding length and candidate order cannot choose input lanes.
-This bounded projection
-requires a mask/broadcast, ZMM destination, or high vector register and covers
-FULL/HALF EVEX tuples; it does not replace all legacy/VEX source inference.
+For source-assembled conversion forms, an ordinary memory qualifier names
+its source width, not the destination mnemonic suffix or register width.
+Legacy, VEX and XOP candidates publish that fixed width directly; EVEX
+FULL/HALF candidates publish a scalar element plus a source tuple. A broadcast
+qualifier names the scalar element. The selector projects each compatible
+candidate independently and keeps an explicit qualifier as a constraint. For
+example, masked `vcvtps2pd zmm0, m256` and VEX `vcvtps2pd ymm0, m128` both
+read 32-bit elements, while masked `vcvtpd2ps ymm0, m512` reads 64-bit
+elements. AT&T's unqualified memory spelling uses the same candidate contract.
+When the same visible operands admit different unsized source widths, selection
+rejects the source as ambiguous; encoding length and candidate order never
+choose the number of input lanes.
 
 The default `-fcanonical-fast` shared pipeline and independent
 `-fcanonical-fast-{fold,address,dce,parameters}` controls are described in
