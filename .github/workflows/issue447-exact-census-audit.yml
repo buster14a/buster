@@ -1,0 +1,165 @@
+name: issue447-exact-census-audit
+
+on:
+  push:
+    branches:
+      - codex/issue447-exact-census-audit-20260918
+    paths:
+      - .github/workflows/issue447-exact-census-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - name: Checkout immutable baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 7d27dc15df558d0881d976615a53255c3e18d0a9
+          path: baseline
+          persist-credentials: false
+
+      - name: Checkout immutable candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 47b9359c112d2da5f37c0ae4a49384571c67dc02
+          path: candidate
+          persist-credentials: false
+
+      - name: Install existing Linux linker dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+
+      - name: Build baseline diagnostic compiler
+        working-directory: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-base-build"
+          "$RUNNER_TEMP/buster-base-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-base-build" build --config Release -t ide -- -j2
+
+      - name: Build candidate diagnostic compiler
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-candidate-build"
+          "$RUNNER_TEMP/buster-candidate-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-candidate-build" build --config Release -t ide -- -j2
+
+      - name: Compile the identical candidate source with both compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          sha256sum baseline/build/Release/ide candidate/build/Release/ide candidate/src/buster/apps/ide/ide.c > evidence/inputs.sha256
+          (
+            cd candidate
+            BUSTER_ALLOCATION_CENSUS=1 ../baseline/build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c \
+              -fsource-metrics=../evidence/baseline.metrics src/buster/apps/ide/ide.c -o ../evidence/baseline.o \
+              > ../evidence/baseline.stdout.log 2> ../evidence/baseline.stderr.log
+            BUSTER_ALLOCATION_CENSUS=1 ./build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c \
+              -fsource-metrics=../evidence/candidate.metrics src/buster/apps/ide/ide.c -o ../evidence/candidate.o \
+              > ../evidence/candidate.stdout.log 2> ../evidence/candidate.stderr.log
+          )
+          test -s evidence/baseline.metrics
+          test -s evidence/candidate.metrics
+          sha256sum evidence/baseline.o evidence/candidate.o > evidence/outputs.sha256
+          cmp evidence/baseline.o evidence/candidate.o
+          python3 candidate/tools/allocation_census.py --input evidence/baseline.stderr.log --output evidence/baseline-allocation --label 'issue447 exact-source baseline'
+          python3 candidate/tools/allocation_census.py --input evidence/candidate.stderr.log --output evidence/candidate-allocation --label 'issue447 exact-source candidate'
+
+      - name: Compare construction counters
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          from pathlib import Path
+
+          def read_metrics(path):
+              result = {}
+              for line in Path(path).read_text().splitlines():
+                  if '=' not in line:
+                      continue
+                  key, value = line.split('=', 1)
+                  try:
+                      value = int(value)
+                  except ValueError:
+                      pass
+                  result[key] = value
+              return result
+
+          baseline = read_metrics('evidence/baseline.metrics')
+          candidate = read_metrics('evidence/candidate.metrics')
+          allowed = {
+              'ir_construction.ssa_slot_grow_visits',
+              'ir_construction.ssa_slot_rehash_probes',
+              'ir_construction.ssa_slot_probes',
+              'ir_construction.ssa_finish_slot_probes',
+          }
+          changed = {
+              key for key in baseline.keys() & candidate.keys()
+              if key.startswith('ir_construction.') and baseline[key] != candidate[key]
+          }
+          unexpected = changed - allowed
+          if unexpected:
+              raise SystemExit(f'unexpected construction-counter changes: {sorted(unexpected)}')
+
+          target = 'ir_construction.ssa_slot_grow_visits'
+          before = baseline[target]
+          after = candidate[target]
+          if not isinstance(before, int) or not isinstance(after, int) or after >= before:
+              raise SystemExit(f'{target} did not improve: {before} -> {after}')
+
+          keys = [
+              'ir_construction.function_starts',
+              'ir_construction.ssa_slot_grows',
+              'ir_construction.ssa_slot_clear_bytes',
+              'ir_construction.ssa_slot_grow_visits',
+              'ir_construction.ssa_finish_slot_grows',
+              'ir_construction.ssa_slot_rehash_probes',
+              'ir_construction.ssa_slot_lookups',
+              'ir_construction.ssa_slot_probes',
+              'ir_construction.ssa_finish_slot_probes',
+              'ir_construction.ssa_slot_inserts',
+              'ir_construction.ssa_forward_steps',
+              'ir_construction.ssa_pending_predecessor_visits',
+              'ir_construction.ssa_simplify_passes',
+              'ir_construction.ssa_simplify_parameter_visits',
+              'ir_construction.ssa_simplify_incoming_visits',
+              'ir_construction.ssa_remap_value_rows',
+              'ir_construction.ssa_remap_instruction_rows',
+              'ir_construction.ssa_remap_operand_slots',
+          ]
+          rows = ['# Issue #447 exact-source counter comparison', '', '| Counter | Baseline | Candidate | Delta | Delta % |', '| --- | ---: | ---: | ---: | ---: |']
+          for key in keys:
+              before = baseline[key]
+              after = candidate[key]
+              delta = after - before
+              percent = (delta / before * 100.0) if before else 0.0
+              rows.append(f'| `{key}` | {before} | {after} | {delta:+d} | {percent:+.3f}% |')
+          rows += ['', f'Changed construction counters: {", ".join(sorted(changed))}.', '', 'The two object files are byte-identical.']
+          report = '\n'.join(rows) + '\n'
+          Path('evidence/report.md').write_text(report)
+          print(report)
+          PYTHON
+          cat evidence/report.md >> "$GITHUB_STEP_SUMMARY"
+          rm evidence/baseline.o evidence/candidate.o
+
+      - name: Retain exact-source evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue447-exact-census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: warn
