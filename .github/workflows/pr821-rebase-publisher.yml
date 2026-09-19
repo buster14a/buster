@@ -141,17 +141,22 @@ jobs:
           diff -u /tmp/expected-paths /tmp/actual-paths
           test "$(git rev-list --count "$BASE_SHA"..HEAD)" = 1
           test "$(git log -1 --format=%s)" = "runtime: make process spawning transactional and hermetic"
+          test "$(git hash-object .github/workflows/ci.yml)" = aa7bb433abbffc431da65641daf34564675f5009
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -q
           python3 tools/native_retirement_rebind_test.py -q
           python3 tools/native_retirement_materializer_test.py -q
           python3 tools/check_action_pins.py
 
-      - name: Publish rebased PR head
+      - name: Publish non-workflow portion under exact lease
         shell: bash
         env:
+          BASE_SHA: 6836e4a8d89b037a6a9d323a3ebf000378397c72
           EXPECTED_HEAD_SHA: 4bb77f2c930de7aba428de89bf81b82a562ac25f
         run: |
           set -euo pipefail
+          git checkout "$BASE_SHA" -- .github/workflows/ci.yml
+          git commit --amend --no-edit
+          test "$(git diff --name-only "$BASE_SHA"..HEAD | wc -l)" = 33
           git push --force-with-lease=refs/heads/fix/84-transactional-hermetic-spawn:$EXPECTED_HEAD_SHA origin HEAD:refs/heads/fix/84-transactional-hermetic-spawn
-          printf 'PUBLISHED_HEAD=%s\n' "$(git rev-parse HEAD)"
+          printf 'PUBLISHED_NON_WORKFLOW_HEAD=%s\n' "$(git rev-parse HEAD)"
