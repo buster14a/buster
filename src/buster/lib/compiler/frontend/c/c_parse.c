@@ -17056,7 +17056,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
         return;
     }
     CScopeId scope = c_parse_scope_for_token(result, declaration->scope, switch_index);
-    u64 expression_mark = machine->scratch_arena->position;
+    u64 controlling_mark = machine->scratch_arena->position;
     CTypeId controlling_type = C_TYPE_ID_INVALID;
     bool controlling_type_resolved =
         c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, switch_index + 2, header_close, &controlling_type);
@@ -17074,7 +17074,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
             value_mask = UINT64_MAX >> (64 - (u32)(size * 8));
         }
     }
-    arena_set_position(machine->scratch_arena, expression_mark);
+    arena_set_position(machine->scratch_arena, controlling_mark);
     if (!controlling_type_resolved)
     {
         return;
