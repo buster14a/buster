@@ -4530,6 +4530,173 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_i128_block_parameters(Un
     return result;
 }
 
+// The two AArch64 fixtures are target-independent integer references for
+// f32/f64.  Reuse them on x86-64 and add the x87 image fixture for long
+// double.  Every allocator/frontend combination must at least produce an
+// object; a matching desktop host executes the same program.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_i128_float(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows")};
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 long_double_source = S8(
+        "typedef unsigned long long U64;\n"
+        "typedef unsigned short U16;\n"
+        "typedef unsigned __int128 U128;\n"
+        "typedef __int128 S128;\n"
+        "\n"
+        "typedef union LongDoubleImage\n"
+        "{\n"
+        "    long double value;\n"
+        "    U64 double_bits;\n"
+        "    struct\n"
+        "    {\n"
+        "        U64 significand;\n"
+        "        U16 sign_exponent;\n"
+        "        U16 padding[3];\n"
+        "    } x87;\n"
+        "} LongDoubleImage;\n"
+        "\n"
+        "static void unsigned_to_long_double(U128 value, long double* output)\n"
+        "{\n"
+        "    *output = (long double)value;\n"
+        "}\n"
+        "static void signed_to_long_double(S128 value, long double* output)\n"
+        "{\n"
+        "    *output = (long double)value;\n"
+        "}\n"
+        "static void long_double_to_unsigned(long double value, U128* output)\n"
+        "{\n"
+        "    *output = (U128)value;\n"
+        "}\n"
+        "static void long_double_to_signed(long double value, S128* output)\n"
+        "{\n"
+        "    *output = (S128)value;\n"
+        "}\n"
+        "static LongDoubleImage x87_value(U64 significand, U16 sign_exponent)\n"
+        "{\n"
+        "    LongDoubleImage result = {0};\n"
+        "    result.x87.significand = significand;\n"
+        "    result.x87.sign_exponent = sign_exponent;\n"
+        "    return result;\n"
+        "}\n"
+        "static int expect_unsigned_float(U128 value, U64 significand, U16 sign_exponent)\n"
+        "{\n"
+        "    LongDoubleImage output = {0};\n"
+        "    unsigned_to_long_double(value, &output.value);\n"
+        "    return output.x87.significand == significand && output.x87.sign_exponent == sign_exponent ? 0 : 1;\n"
+        "}\n"
+        "static int expect_signed_float(S128 value, U64 significand, U16 sign_exponent)\n"
+        "{\n"
+        "    LongDoubleImage output = {0};\n"
+        "    signed_to_long_double(value, &output.value);\n"
+        "    return output.x87.significand == significand && output.x87.sign_exponent == sign_exponent ? 0 : 2;\n"
+        "}\n"
+        "static int expect_unsigned_integer(LongDoubleImage input, U128 expected)\n"
+        "{\n"
+        "    U128 output = ~(U128)0;\n"
+        "    long_double_to_unsigned(input.value, &output);\n"
+        "    return output == expected ? 0 : 3;\n"
+        "}\n"
+        "static int expect_signed_integer(LongDoubleImage input, S128 expected)\n"
+        "{\n"
+        "    S128 output = -1;\n"
+        "    long_double_to_signed(input.value, &output);\n"
+        "    return (U128)output == (U128)expected ? 0 : 4;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    U128 two64 = (U128)1 << 64;\n"
+        "    U128 two127 = (U128)1 << 127;\n"
+        "    int result = 0;\n"
+        "    if (sizeof(long double) == 16)\n"
+        "    {\n"
+        "        result = expect_unsigned_float(0, 0, 0);\n"
+        "        if (!result) result = expect_signed_float(-1, 0x8000000000000000ULL, 0xbfff);\n"
+        "        if (!result) result = expect_unsigned_float(two64 - 1, 0xffffffffffffffffULL, 0x403e);\n"
+        "        if (!result) result = expect_unsigned_float(two64 + 1, 0x8000000000000000ULL, 0x403f);\n"
+        "        if (!result) result = expect_unsigned_float(two64 + 3, 0x8000000000000002ULL, 0x403f);\n"
+        "        if (!result) result = expect_unsigned_float(~(U128)0, 0x8000000000000000ULL, 0x407f);\n"
+        "        if (!result) result = expect_signed_float((S128)two127, 0x8000000000000000ULL, 0xc07e);\n"
+        "\n"
+        "        if (!result) result = expect_unsigned_integer(x87_value(0xc000000000000000ULL, 0x3fff), 1);\n"
+        "        if (!result) result = expect_signed_integer(x87_value(0xc000000000000000ULL, 0xbfff), -1);\n"
+        "        if (!result) result = expect_unsigned_integer(x87_value(0x8000000000000000ULL, 0xbffe), 0);\n"
+        "        if (!result) result = expect_unsigned_integer(x87_value(0x8000000000000001ULL, 0x403f), two64 + 2);\n"
+        "        if (!result) result = expect_signed_integer(x87_value(0xffffffffffffffffULL, 0x407d),\n"
+        "                                                    (S128)(two127 - ((U128)1 << 63)));\n"
+        "        if (!result) result = expect_signed_integer(x87_value(0x8000000000000000ULL, 0xc07e), (S128)two127);\n"
+        "        if (!result) result = expect_unsigned_integer(x87_value(0xffffffffffffffffULL, 0x407e),\n"
+        "                                                      ~(U128)0 - (two64 - 1));\n"
+        "    }\n"
+        "    else\n"
+        "    {\n"
+        "        LongDoubleImage output = {0};\n"
+        "        unsigned_to_long_double(two64 + 1, &output.value);\n"
+        "        if (output.double_bits != 0x43f0000000000000ULL)\n"
+        "        {\n"
+        "            result = 5;\n"
+        "        }\n"
+        "        LongDoubleImage input = {.double_bits = 0x43f0000000000000ULL};\n"
+        "        if (!result)\n"
+        "        {\n"
+        "            result = expect_unsigned_integer(input, two64);\n"
+        "        }\n"
+        "    }\n"
+        "    return result;\n"
+        "}\n"
+    );
+    String8 long_double_fixture =
+        buster_test_temporary_path(arguments->arena, S8("buster-x64-i128-long-double-source"), S8(".c"));
+    BUSTER_TEST(arguments, file_write(long_double_fixture, BUSTER_SLICE_TO_BYTE_SLICE(long_double_source)));
+    String8 fixtures[] = {S8("tests/basic_c_aarch64_i128_to_float.c"), S8("tests/basic_c_aarch64_float_to_i128.c"),
+                          long_double_fixture};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+            {
+                for (u32 fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("buster-x64-i128-float"), S8(".o"));
+                    String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
+                                         S8("-fverify-codegen"), S8("-o"), output, fixtures[fixture]};
+                    CompilerDriverInvocation invocation =
+                        compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    String8 description = string_format(temporary.arena, S8("x64 i128/float {S8} {S8} {S8} {S8}: {S8}"),
+                                                        targets[target], modes[mode], frontends[frontend], fixtures[fixture], compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+#if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+                    bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
+                    if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-x64-i128-float-run"), S8(".exe"));
+                        String8 native_command[] = {modes[mode], frontends[frontend], S8("-fverify-codegen"), S8("-o"), executable,
+                                                    fixtures[fixture]};
+                        CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(
+                            temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                        CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
+                        BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
+                        if (native.error == COMPILER_DRIVER_ERROR_NONE)
+                        {
+                            BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable));
+                        }
+                    }
+#endif
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Execute scalar operations in Node instead of trusting the emitter's own
 // opcode table. Keep module compilation covered when the engine is absent.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestArguments* arguments)
@@ -6922,6 +7089,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_i128_block_parameters);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_f128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_i128_to_float);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
