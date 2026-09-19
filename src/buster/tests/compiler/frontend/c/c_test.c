@@ -14181,6 +14181,14 @@ BUSTER_GLOBAL_LOCAL bool c_test_target_uses_x86_f80_abi(Target target)
            layout.long_double_type.alignment == 16;
 }
 
+BUSTER_GLOBAL_LOCAL bool c_test_target_uses_aapcs64_f128_transport(Target target)
+{
+    TargetDataLayout layout = target_data_layout(target);
+    return target.cpu_arch == CPU_ARCH_AARCH64 && ir_abi_convention_for_target(target) == IR_ABI_CONVENTION_AAPCS64 &&
+           layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 && layout.long_double_type.size == 16 &&
+           layout.long_double_type.alignment == 16;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -14233,6 +14241,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
         bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
+        bool f128_aapcs64 = c_test_target_uses_aapcs64_f128_transport(target) && wide_long_double;
+        u32 rejected_signature_count = f80_sysv || !wide_long_double ? 0 : f128_aapcs64 ? 5 : 6;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
                                                     (CPreprocessOptions){
@@ -14243,7 +14253,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, target_triples[target_index], preprocess, parse, target);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 0 : wide_long_double ? 6 : 0));
+        BUSTER_TEST(arguments, lowered.diagnostic_count == rejected_signature_count);
         for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
         {
             CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
@@ -14273,7 +14283,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                 // because they are larger than two eightbytes -- so they
                 // travel as ordinary memory-class aggregates.  Clang compiles
                 // all five to byval/sret against the same declarations.
-                bool expected_rejected = !f80_sysv && wide_long_double && function_index < 6;
+                bool expected_rejected = !f80_sysv && wide_long_double && function_index < 6 && !(f128_aapcs64 && function_index == 0);
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
             }
             if (wide_long_double)
@@ -14312,7 +14322,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_function_signatures(UnitTes
                                                                        IR_ABI_USE_RESULT));
                 }
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 0 : wide_long_double ? 6 : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == rejected_signature_count);
         }
         scratch_end(temporary);
     }
@@ -14392,13 +14402,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
         bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
+        bool f128_aapcs64 = c_test_target_uses_aapcs64_f128_transport(target) && wide_long_double;
+        u32 rejected_call_count = f80_sysv || !wide_long_double ? 0 : f128_aapcs64 ? 5 : BUSTER_ARRAY_LENGTH(rejected_names);
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
         CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, target_triples[target_index], target, &preprocess, &parse);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == (f80_sysv ? 0 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+        BUSTER_TEST(arguments, lowered.diagnostic_count == rejected_call_count);
         for (u32 diagnostic_index = 0; diagnostic_index < lowered.diagnostic_count; diagnostic_index += 1)
         {
             CDiagnostic diagnostic = lowered.diagnostics[diagnostic_index];
@@ -14422,7 +14434,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 // single-member wrapper classifies identically, so both
                 // variadic calls lower.  The union's classification carries no
                 // x87 class at all, so it lowers as a memory-class aggregate.
-                bool expected_rejected = !f80_sysv && wide_long_double;
+                bool scalar_transport = f128_aapcs64 && (function_index == 0 || function_index == 4);
+                bool expected_rejected = !f80_sysv && wide_long_double && !scalar_transport;
                 BUSTER_TEST(arguments, function->state == (expected_rejected ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
                 if (expected_rejected)
                 {
@@ -14441,7 +14454,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_signature_calls(UnitTestArg
                 BUSTER_TEST(arguments, function != 0);
                 BUSTER_TEST(arguments, function && function->state == IR_FUNCTION_DECLARATION);
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == (f80_sysv ? 0 : wide_long_double ? BUSTER_ARRAY_LENGTH(rejected_names) : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == rejected_call_count);
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(temporary);
@@ -14479,6 +14492,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
         Target target = parsed_target.target;
         bool wide_long_double = target_data_layout(target).long_double_type.bit_width > 64;
         bool f80_sysv = c_test_target_uses_x86_f80_abi(target) && wide_long_double;
+        bool f128_aapcs64 = c_test_target_uses_aapcs64_f128_transport(target) && wide_long_double;
+        bool unsupported_signature = wide_long_double && !f80_sysv && !f128_aapcs64;
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult preprocess = {0};
         CParseResult parse = {0};
@@ -14492,8 +14507,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
         CIRLowerResult lowered = c_lower_to_ir(temporary.arena, target_triples[target_index], preprocess, parse, target);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
-        BUSTER_TEST(arguments, lowered.diagnostic_count == ((!f80_sysv && wide_long_double) ? 1 : 0));
-        if (!f80_sysv && wide_long_double && lowered.diagnostic_count == 1)
+        BUSTER_TEST(arguments, lowered.diagnostic_count == (unsupported_signature ? 1 : 0));
+        if (unsupported_signature && lowered.diagnostic_count == 1)
         {
             BUSTER_TEST(arguments, lowered.diagnostics[0].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
             BUSTER_TEST(arguments, lowered.diagnostics[0].message.length != 0);
@@ -14516,11 +14531,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_cleanup_signature_calls(Uni
                     call_count += opcode == IR_OPCODE_CALL;
                     branch_count += opcode == IR_OPCODE_BRANCH || opcode == IR_OPCODE_BRANCH_IF;
                 }
-                BUSTER_TEST(arguments, owner->state == ((!f80_sysv && wide_long_double) ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
-                BUSTER_TEST(arguments, call_count == ((!f80_sysv && wide_long_double) ? 0 : 1));
-                BUSTER_TEST(arguments, (!f80_sysv && wide_long_double) ? branch_count == 0 : branch_count != 0);
+                BUSTER_TEST(arguments, owner->state == (unsupported_signature ? IR_FUNCTION_REJECTED : IR_FUNCTION_LOWERED));
+                BUSTER_TEST(arguments, call_count == (unsupported_signature ? 0 : 1));
+                BUSTER_TEST(arguments, unsupported_signature ? branch_count == 0 : branch_count != 0);
             }
-            BUSTER_TEST(arguments, module->rejected_function_count == ((!f80_sysv && wide_long_double) ? 1 : 0));
+            BUSTER_TEST(arguments, module->rejected_function_count == (unsupported_signature ? 1 : 0));
             BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
         }
         scratch_end(temporary);

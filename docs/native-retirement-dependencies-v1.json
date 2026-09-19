@@ -492,15 +492,15 @@
       "source": "src/buster/lib/compiler/ir/ir.c",
       "provenance": "repo:src/buster/lib/compiler/ir/ir.c",
       "destination": "dependencies/project-include/buster/lib/compiler/ir/ir.c",
-      "bytes": 269075,
-      "sha256": "1b9df7a0af76ff524477dc84ee3cab09903e556b58303b6c77e8cd5a83d67518"
+      "bytes": 270100,
+      "sha256": "1507193c55bbb96e075ecdf6d3c26dd053ef0fedb89b97156b7058acb40b1b21"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir.h",
       "provenance": "repo:src/buster/lib/compiler/ir/ir.h",
       "destination": "dependencies/project-include/buster/lib/compiler/ir/ir.h",
-      "bytes": 46930,
-      "sha256": "f03742d330f5a12c468535384d9ff922a6a122cefd7be482c3c1edeb9ef17faf"
+      "bytes": 46749,
+      "sha256": "3b64d4badfc1ba4971ddec4db2add02bbf51fae747ed593898c5f6319b897b5a"
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_cfg.c",
@@ -534,8 +534,8 @@
       "source": "src/buster/lib/compiler/ir/ir_promote.c",
       "provenance": "repo:src/buster/lib/compiler/ir/ir_promote.c",
       "destination": "dependencies/project-include/buster/lib/compiler/ir/ir_promote.c",
-      "bytes": 42674,
-      "sha256": "36289333585546c96ee52a9055534e9abb500e5635391df64c39384a39d0e69a"
+      "bytes": 38373,
+      "sha256": "9afc493e6282767fa403376eb50824ab0de9e18cba0f6fa0cd93f8278fe95a30"
     },
     {
       "source": "src/buster/lib/compiler/ir/model.h",

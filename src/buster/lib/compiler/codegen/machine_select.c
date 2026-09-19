@@ -714,7 +714,15 @@ MachineTypeClass* machine_type_classes_build(Arena* arena, IrTypeTable const* ty
                          ((type->bit_width == 16 && type->float_format == IR_FLOAT_FORMAT_IEEE) || type->bit_width == 32 || type->bit_width == 64)
                      ? MACHINE_TYPE_CLASS_FLOAT_SCALAR
                      : 0;
-        flags |= resolved && type->kind == IR_TYPE_VECTOR && type->layout.size == 64 ? MACHINE_TYPE_CLASS_VECTOR_REGISTER : 0;
+        bool vector_register = false;
+        if (resolved && type->kind == IR_TYPE_VECTOR && type->layout.size == 64 && type->element_type.value < types->count)
+        {
+            IrType const* element = types->types + type->element_type.value;
+            vector_register = element->layout.resolved && element->layout.size &&
+                              type->element_count <= UINT64_MAX / element->layout.size &&
+                              type->element_count * element->layout.size == type->layout.size;
+        }
+        flags |= vector_register ? MACHINE_TYPE_CLASS_VECTOR_REGISTER : 0;
         flags |= type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_FUNCTION || (type->kind == IR_TYPE_INTEGER && type->bit_width > 32)
                      ? MACHINE_TYPE_CLASS_WIDE
                      : 0;

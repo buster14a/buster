@@ -3647,11 +3647,14 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_instruction_payload(MachineFunction* fun
             bool convert = instruction->opcode == MACHINE_X64_F80_CONVERT;
             u32 count = binary || compare || convert ? 3u : instruction->opcode == MACHINE_X64_F80_NEGATE ? 2u : 1u;
             bool bridge = instruction->opcode == MACHINE_X64_F80_RESULT_LOAD || instruction->opcode == MACHINE_X64_F80_RESULT_STORE;
+            bool bridge_f64 = bridge && (instruction->payload == 8 || instruction->payload == 24);
+            u32 bridge_offset = bridge ? instruction->payload & ~8u : 0;
             valid = binary ? instruction->payload < 4u : compare || convert ? instruction->payload < 6u :
-                    bridge ? instruction->payload == 0 || instruction->payload == 16 : instruction->payload == 0;
+                    bridge ? instruction->payload == 0 || instruction->payload == 8 || instruction->payload == 16 || instruction->payload == 24
+                           : instruction->payload == 0;
             for (u32 operand = compare ? 1u : 0u; operand < count && valid; operand += 1)
             {
-                u32 bytes = 16 + (bridge ? instruction->payload : 0);
+                u32 bytes = bridge ? bridge_offset + (bridge_f64 ? 8u : 16u) : 16u;
                 if (convert)
                 {
                     bool to_f80 = instruction->payload == 0 || instruction->payload == 1 || instruction->payload == 4;
@@ -5329,25 +5332,6 @@ bool machine_replay_deserialize(Arena* arena, ByteSlice bytes, MachineFunction* 
 #include <buster/lib/compiler/codegen/register_allocator_quality.c>
 #include <buster/lib/compiler/codegen/register_allocator_predicate.c>
 
-BUSTER_GLOBAL_LOCAL bool machine_function_has_padded_vector(IrProgram* program, IrFunction* function)
-{
-    bool result = false;
-    if (program && function && function->values)
-    {
-        for (u32 value_index = 0; value_index < function->value_count && !result; value_index += 1)
-        {
-            IrType* type = ir_type_from_id(&program->types, function->values[value_index].canonical_type);
-            IrType* element = type && type->kind == IR_TYPE_VECTOR ? ir_type_from_id(&program->types, type->element_type) : 0;
-            if (element && element->layout.resolved && element->layout.size && type->layout.resolved &&
-                type->element_count <= UINT64_MAX / element->layout.size)
-            {
-                result = type->element_count * element->layout.size != type->layout.size;
-            }
-        }
-    }
-    return result;
-}
-
 BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_internal(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                                     bool assume_validated, bool position_independent, bool predicate_residency,
                                                                                     bool preserve_debug_values, MachineSelectionModule* module)
@@ -5356,10 +5340,7 @@ BUSTER_GLOBAL_LOCAL MachineSelectResult machine_select_canonical_function_intern
     if (arena && program && function)
     {
         IrValidationResult publication = ir_function_publish_cfg(program->arena, function);
-        // Padded GNU vectors retain a logical lane count smaller than their
-        // frame image. The canonical emitter owns their lane-wise semantics
-        // and target ABI legalization until MIR carries that distinction.
-        if (publication.error == IR_VALIDATION_NONE && !machine_function_has_padded_vector(program, function))
+        if (publication.error == IR_VALIDATION_NONE)
         {
             switch (target.cpu_arch)
             {
