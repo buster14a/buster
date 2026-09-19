@@ -25,17 +25,13 @@ jobs:
           set -euo pipefail
           file=src/buster/lib/compiler/frontend/c/c_gen.c
 
-          echo '=== c_ir_emit_cast definition ==='
-          grep -n 'c_ir_emit_cast(' "$file" | head -n 30
+          echo '=== cast body 7320-7750 ==='
+          sed -n '7320,7750p' "$file"
           echo '=== vector alias symbol ==='
           grep -n 'c_ir_emit_vector_alias_conversion' "$file" || true
           echo '=== vector conversion terms ==='
-          grep -nE 'vector.*(alias|convert|cast)|(?:alias|convert|cast).*vector' "$file" | head -n 200 || true
-          echo '=== cast body 7480-7740 ==='
-          sed -n '7480,7740p' "$file"
-          echo '=== vector helper neighborhood 6900-7480 ==='
-          sed -n '6900,7480p' "$file"
-          echo '=== vector tests and fixtures ==='
-          grep -RFn 'vector alias' src/buster/tests tests docs/agents/frontend | head -n 100 || true
-          grep -RFn 'same-width' src/buster/tests tests docs/agents/frontend | head -n 100 || true
-          grep -RFn '__m128i' tests src/buster/tests | head -n 100 || true
+          grep -niE 'vector.*(alias|convert|cast)|(alias|convert|cast).*vector' "$file" | sed -n '1,240p' || true
+          echo '=== matching tests and fixtures ==='
+          grep -RFn 'vector alias' src/buster/tests tests docs/agents/frontend | sed -n '1,120p' || true
+          grep -RFn 'same-width' src/buster/tests tests docs/agents/frontend | sed -n '1,120p' || true
+          grep -RFn '__m128i' tests src/buster/tests | sed -n '1,160p' || true
