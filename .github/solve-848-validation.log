@@ -1,4 +1,44 @@
-head=6d50cf9b43edf58cb0bdcc5e0294a1643c701543
+head=5167063484402038b559f17cc05426126d4608c2
 status=failed
 
-Error: /home/runner/work/buster/buster/build is not a directory
+BUSTER_BUILD_DIRECTORY: build
+BUSTER_BUILD_CONFIG: Debug
+BUSTER_CC: clang
+BUSTER_LINKER: MOLD
++ /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build -DBUSTER_CI=OFF -DCMAKE_C_COMPILER=clang -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DCMAKE_LINKER_TYPE=MOLD -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=ON -DBUSTER_DEVELOPER_TARGETS=ON -DBUSTER_BUILD_DRIVER=/home/runner/work/buster/buster/.cache/bootstrap-driver/posix/4162fe5f8225dd4bbca8427604bf8348d62185085babe64d5cd08d201a1d4c3c/build-2571-22880 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug;Release -DBUSTER_SINGLE_THREADED=OFF
+Warn about uninitialized values.
+-- The C compiler identification is Clang 18.1.3
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - failed
+-- Check for working C compiler: /usr/bin/clang
+-- Check for working C compiler: /usr/bin/clang - broken
+CMake Error at /usr/local/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:67 (message):
+  The C compiler
+
+    "/usr/bin/clang"
+
+  is not able to compile a simple test program.
+
+  It fails with the following output:
+
+    Change Dir: '/home/runner/work/buster/buster/build/CMakeFiles/CMakeScratch/TryCompile-bzXIqn'
+    
+    Run Build Command(s): /usr/local/bin/ninja -v cmTC_f191e
+    [1/2] /usr/bin/clang -DCMAKE_INTDIR=\"Debug\"  -g -MD -MT CMakeFiles/cmTC_f191e.dir/Debug/testCCompiler.c.o -MF CMakeFiles/cmTC_f191e.dir/Debug/testCCompiler.c.o.d -o CMakeFiles/cmTC_f191e.dir/Debug/testCCompiler.c.o -c /home/runner/work/buster/buster/build/CMakeFiles/CMakeScratch/TryCompile-bzXIqn/testCCompiler.c
+    [2/2] : && /usr/bin/clang -g -fuse-ld=mold CMakeFiles/cmTC_f191e.dir/Debug/testCCompiler.c.o -o Debug/cmTC_f191e   && :
+    FAILED: [code=1] Debug/cmTC_f191e 
+    : && /usr/bin/clang -g -fuse-ld=mold CMakeFiles/cmTC_f191e.dir/Debug/testCCompiler.c.o -o Debug/cmTC_f191e   && :
+    clang: error: invalid linker name in argument '-fuse-ld=mold'
+    ninja: build stopped: subcommand failed.
+    
+    
+
+  
+
+  CMake will not be able to correctly generate this project.
+Call Stack (most recent call first):
+  CMakeLists.txt:7 (project)
+
+
+-- Configuring incomplete, errors occurred!
+CMake generation (cc=clang, fuzz_available=OFF, sanitize=OFF) took 3.817741 seconds (3817741000 nanoseconds)
