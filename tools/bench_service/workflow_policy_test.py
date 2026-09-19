@@ -146,6 +146,14 @@ def main() -> int:
         return report(errors)
 
     dispatch = DISPATCH.read_text(encoding="utf-8")
+    permission_declarations = [
+        line.strip()
+        for line in dispatch.splitlines()
+        if line.lstrip().startswith("permissions:")
+    ]
+    if permission_declarations != ["permissions: {}"]:
+        errors.append("dispatch workflow must grant no GITHUB_TOKEN permissions")
+
     workflows = sorted((*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")))
     benchmark_users = [
         path.name
