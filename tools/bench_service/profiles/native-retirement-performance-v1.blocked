@@ -11,3 +11,4 @@ binding-validator-sha256=9d0d64d3577f30dd77806fd7fb84189e192b5ae767789129ca24384
 statistics=tools/throughput/retirement_stats.h
 statistics-sha256=72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8
 requires=qualified-9700x-service,predeclared-execution-plan,bound-subjects,durable-replay
+
