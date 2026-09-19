@@ -1,4 +1,4 @@
-name: 845-849 source snapshot
+name: publish issue 848
 
 on:
   push:
@@ -7,40 +7,44 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: codex-845-849-source-${{ github.ref }}
-  cancel-in-progress: true
+  group: publish-issue-848
+  cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  source:
+  publish:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          persist-credentials: false
-          ref: 460c48e9c9bcbd292e10b2b4627ee281718479aa
-      - name: Pack tracked source
+          ref: 4dff1d020c16a7599e74a7e2cc305715eb908553
+          fetch-depth: 1
+          persist-credentials: true
+      - name: Apply and publish exact repair
         shell: bash
+        env:
+          PATCH_GZ_B64: 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
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "460c48e9c9bcbd292e10b2b4627ee281718479aa"
-          test "$(git rev-parse HEAD^{tree})" = "f0fbc2fd0c0967070a83a13a578ed712d0f7fd73"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/buster-source.tar.gz" HEAD
-          git rev-parse HEAD > "$RUNNER_TEMP/revision.txt"
-          git rev-parse HEAD^{tree} > "$RUNNER_TEMP/tree.txt"
-          sha256sum "$RUNNER_TEMP/buster-source.tar.gz" > "$RUNNER_TEMP/buster-source.tar.gz.sha256"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: codex-pr522-source-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/buster-source.tar.gz
-            ${{ runner.temp }}/buster-source.tar.gz.sha256
-            ${{ runner.temp }}/revision.txt
-            ${{ runner.temp }}/tree.txt
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+          test "$(git rev-parse HEAD)" = "4dff1d020c16a7599e74a7e2cc305715eb908553"
+          test "$(git rev-parse HEAD^{tree})" = "6698cdffa0f143c476e55d0fb04acaa42bb69a6a"
+          if git ls-remote --exit-code origin refs/heads/codex/848-unreachable-local-20260919 >/dev/null 2>&1; then
+            echo 'feature branch already exists' >&2
+            exit 1
+          fi
+          git checkout -b codex/848-unreachable-local-20260919
+          printf '%s' "$PATCH_GZ_B64" | base64 -d | gzip -d > "$RUNNER_TEMP/issue848.patch"
+          test "$(sha256sum "$RUNNER_TEMP/issue848.patch" | cut -d' ' -f1)" = "ff6189ec6112e50ef3287475e7472f1db5029dfaed7c9a3737daac0bdf8a787e"
+          git apply --check "$RUNNER_TEMP/issue848.patch"
+          git apply --index "$RUNNER_TEMP/issue848.patch"
+          git diff --cached --check
+          git config user.name David
+          git config user.email davidgmbb@gmail.com
+          git commit -m 'c: materialize skipped automatic locals at labeled reentry (#848)'
+          test "$(git rev-parse HEAD^{tree})" = "e8f422324b57b77d2fe2e1bb9952e9b5f9f76ed7"
+          test "$(git diff --name-only HEAD^ HEAD | wc -l)" -eq 7
+          git push origin HEAD:refs/heads/codex/848-unreachable-local-20260919
