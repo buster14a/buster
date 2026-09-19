@@ -1,0 +1,85 @@
+name: Issue 183 symbol context
+on:
+  push:
+    branches: [scratch/183-typed-ice-analysis]
+    paths-ignore:
+      - .github/issue-183-symbols/**
+      - .github/issue-183-context/**
+      - .github/issue-183-current-context.txt
+permissions:
+  contents: write
+jobs:
+  symbols:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          out=Path('.github/issue-183-symbols'); out.mkdir(parents=True,exist_ok=True)
+          sources={p.name:p for p in [Path('src/buster/lib/compiler/frontend/c/c.h'),Path('src/buster/lib/compiler/frontend/c/c_parse.c'),Path('src/buster/lib/compiler/frontend/c/c_gen.c'),Path('src/buster/lib/compiler/frontend/c/c_source.c')]}
+          def numbered(p,a,b):
+            ls=p.read_text(errors='replace').splitlines(); a=max(a,0); b=min(b,len(ls))
+            return '\n'.join(f'{i+1:6d}: {ls[i]}' for i in range(a,b))+'\n'
+          def extract_symbol(path,name,filename):
+            text=path.read_text(errors='replace'); ls=text.splitlines(True); starts=[]; off=0
+            for i,line in enumerate(ls):
+              if re.search(r'\b'+re.escape(name)+r'\s*\(',line): starts.append((i,off))
+              off+=len(line)
+            chunks=[]
+            for li,pos in starts:
+              brace=text.find('{',pos)
+              semi=text.find(';',pos,brace if brace>=0 else len(text))
+              if brace<0 or semi>=0: continue
+              depth=0; state='code'; esc=False; j=brace
+              while j<len(text):
+                c=text[j]; n=text[j+1] if j+1<len(text) else ''
+                if state=='code':
+                  if c=='/' and n=='*': state='block'; j+=1
+                  elif c=='/' and n=='/': state='line'; j+=1
+                  elif c=='"': state='str'; esc=False
+                  elif c=="'": state='char'; esc=False
+                  elif c=='{': depth+=1
+                  elif c=='}':
+                    depth-=1
+                    if depth==0: j+=1; break
+                elif state=='block' and c=='*' and n=='/': state='code'; j+=1
+                elif state=='line' and c=='\n': state='code'
+                elif state in ('str','char'):
+                  if esc: esc=False
+                  elif c=='\\': esc=True
+                  elif (state=='str' and c=='"') or (state=='char' and c=="'"): state='code'
+                j+=1
+              start_line=max(0,li-8); end_line=text.count('\n',0,j)+4
+              chunks.append(f'===== {path}:{name} =====\n'+numbered(path,start_line,end_line))
+            Path(out/filename).write_text('\n'.join(chunks) or f'NOT FOUND {name}\n')
+          funcs={
+            'c_parse.c':['c_parse_enum_type','c_parse_sizeof_operand_expression_layout','c_parse_conditional_expression_type','c_parse_direct_expression_base','c_parse_builtin_type_layout','c_parse_type_layout'],
+            'c_gen.c':['c_ir_integer_literal_type','c_ir_emit_integer_value','c_ir_constant_identifier','c_ir_lower_conditional_value_step','c_ir_predict_expression_type','c_ir_scalar_type','c_ir_type','c_ir_static_initializer_expression'],
+            'c_source.c':['c_integer_expression_evaluate_with_features','c_integer_expression_evaluate'],
+          }
+          for src,names in funcs.items():
+            for name in names: extract_symbol(sources[src],name,name+'.txt')
+          h=sources['c.h']; hls=h.read_text(errors='replace').splitlines()
+          for marker,fn in [('struct CEntity','CEntity.txt'),('struct CEnumMember','CEnumMember.txt'),('struct CType\n','CType.txt'),('typedef enum CTypeKind','CTypeKind.txt')]:
+            hits=[i for i,s in enumerate(hls) if re.search(marker,s)]
+            Path(out/fn).write_text(numbered(h,max(0,hits[-1]-5),hits[-1]+150) if hits else 'NOT FOUND\n')
+          for src in ['c_parse.c','c_gen.c']:
+            p=sources[src]; ls=p.read_text(errors='replace').splitlines(); hits=[i for i,s in enumerate(ls) if 'C_ENTITY_ENUMERATOR' in s]
+            Path(out/(src+'.enumerator.txt')).write_text('\n'.join(f'===== {p} hit {i+1} =====\n'+numbered(p,i-30,i+51) for i in hits))
+          for src in ['c_parse.c','c_gen.c','c.h']:
+            p=sources[src]; ls=p.read_text(errors='replace').splitlines(); hits=[i for i,s in enumerate(ls) if re.search(r'C_TYPE_(UNSIGNED_)?INT128|IR_TYPE_.*128|__int128|usual.*arithmetic|integer.*rank|is_unsigned',s,re.I)]
+            Path(out/(src+'.integer-model.txt')).write_text('\n'.join(f'===== {p} hit {i+1} =====\n'+numbered(p,i-20,i+41) for i in hits))
+          for p in [Path('tests/c/c.c'),Path('tests/c/c-gnu.c')]:
+            if p.exists():
+              ls=p.read_text(errors='replace').splitlines(); hits=[i for i,s in enumerate(ls) if re.search(r'enum|__int128|_Generic|typeof',s,re.I)]
+              Path(out/(p.name+'.enum.txt')).write_text('\n'.join(f'===== {p} hit {i+1} =====\n'+numbered(p,i-20,i+41) for i in hits))
+          PY
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-symbols
+          git commit -m 'chore: capture issue 183 symbol context'
+          git push
