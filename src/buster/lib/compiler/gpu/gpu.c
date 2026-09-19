@@ -20,6 +20,8 @@
 #include <buster/lib/string.h>
 #include <buster/lib/system_headers.h>
 
+#define GPU_TOOL_TIMEOUT_DEFAULT_MICROSECONDS UINT64_C(120000000)
+
 typedef struct GpuStringComponents GpuStringComponents;
 struct GpuStringComponents
 {
@@ -2383,6 +2385,7 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                                                                 (ProcessSpawnOptions){
                                                                     .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
                                                                     .use_process_environment = true,
+                                                                    .new_process_group = true,
                                                                 });
                     if (!spawn.handle)
                     {
@@ -2393,11 +2396,20 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                     }
                     else
                     {
-                        ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+                        u64 tool_timeout = options.tool_timeout_microseconds ? options.tool_timeout_microseconds : GPU_TOOL_TIMEOUT_DEFAULT_MICROSECONDS;
+                        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, tool_timeout);
                         gpu_result_append_log(arena, &result, wait.streams[STANDARD_STREAM_OUTPUT]);
                         gpu_result_append_log(arena, &result, wait.streams[STANDARD_STREAM_ERROR]);
                         result.process_result = wait.result;
-                        if (wait.result != PROCESS_RESULT_SUCCESS)
+                        result.timed_out = wait.timed_out != 0;
+                        if (wait.timed_out)
+                        {
+                            result.error = GPU_PIPELINE_ERROR_TOOL_TIMEOUT;
+                            result.failed_step = step_index;
+                            result.diagnostic = result.log.length ? string_format(arena, S8("GPU tool timed out: {S8}\n{S8}"), result.command, result.log)
+                                                                  : string_format(arena, S8("GPU tool timed out: {S8}"), result.command);
+                        }
+                        else if (wait.result != PROCESS_RESULT_SUCCESS)
                         {
                             result.error = GPU_PIPELINE_ERROR_TOOL_FAILED;
                             result.failed_step = step_index;

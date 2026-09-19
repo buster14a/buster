@@ -643,6 +643,39 @@ UnitTestResult gpu_pipeline_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, os_file_delete(legacy_temporary));
     }
 
+#if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // A private executable shell script is a deterministic fake external
+    // tool. Its sleep child must be terminated with the complete process group.
+    {
+        String8 tool = buster_test_temporary_path(arena, S8("gpu-timeout-tool"), S8(".sh"));
+        String8 first = buster_test_temporary_path(arena, S8("gpu-timeout-input-a"), S8(".spv"));
+        String8 second = buster_test_temporary_path(arena, S8("gpu-timeout-input-b"), S8(".spv"));
+        String8 output = buster_test_temporary_path(arena, S8("gpu-timeout-output"), S8(".spv"));
+        String8 script_text = S8("#!/bin/sh\nwhile :; do sleep 1; done\n");
+        u8 spirv_bytes[] = {0x03, 0x02, 0x23, 0x07, 0, 0, 0, 0};
+        String8 inputs[] = {first, second};
+        BUSTER_TEST(arguments, file_write(tool, (ByteSlice){(u8*)script_text.pointer, script_text.length}));
+        BUSTER_TEST(arguments, chmod((const char*)tool.pointer, 0700) == 0);
+        BUSTER_TEST(arguments, file_write(first, (ByteSlice)BUSTER_ARRAY_TO_SLICE(spirv_bytes)));
+        BUSTER_TEST(arguments, file_write(second, (ByteSlice)BUSTER_ARRAY_TO_SLICE(spirv_bytes)));
+        GpuPipelineOptions options = gpu_test_options(inputs, BUSTER_ARRAY_LENGTH(inputs), gpu_test_target(S8("spirv64")), GPU_PIPELINE_ACTION_LINK);
+        options.output_path = output;
+        options.tools.spirv_link_path = tool;
+        options.tool_timeout_microseconds = 100000;
+        u64 start = os_now_microseconds();
+        GpuPipelineResult timed = gpu_pipeline_execute(arena, options);
+        u64 elapsed = os_now_microseconds() - start;
+        BUSTER_TEST(arguments, timed.error == GPU_PIPELINE_ERROR_TOOL_TIMEOUT);
+        BUSTER_TEST(arguments, timed.timed_out && timed.process_result == PROCESS_RESULT_FAILED);
+        BUSTER_TEST(arguments, elapsed < 5000000);
+        BUSTER_TEST(arguments, timed.temporary_directory.length && gpu_test_path_has_kind(timed.temporary_directory, OS_FILE_KIND_MISSING));
+        BUSTER_TEST(arguments, os_file_delete(tool));
+        BUSTER_TEST(arguments, os_file_delete(first));
+        BUSTER_TEST(arguments, os_file_delete(second));
+        BUSTER_TEST(arguments, os_file_delete(output));
+    }
+#endif
+
     return result;
 }
 

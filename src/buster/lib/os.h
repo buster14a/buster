@@ -142,19 +142,48 @@ typedef enum StandardStream
     STANDARD_STREAM_COUNT,
 } StandardStream;
 
+// Captured output is finite by default. A zero configured limit selects the
+// corresponding default; UINT64_MAX explicitly disables that one bound.
+#define PROCESS_CAPTURE_DEFAULT_PER_STREAM_BYTES BUSTER_MB(16)
+#define PROCESS_CAPTURE_DEFAULT_TOTAL_BYTES BUSTER_MB(32)
+
+typedef enum ProcessCaptureOverflowPolicy
+{
+    // Retain the deterministic prefix and keep draining the rest.
+    PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
+    // Retain the prefix, keep draining, and make the wait result fail.
+    PROCESS_CAPTURE_OVERFLOW_FAIL,
+    // Retain the prefix and write later bytes to the caller-owned descriptor
+    // for that stream. The descriptor is neither flushed nor closed here.
+    PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE,
+    PROCESS_CAPTURE_OVERFLOW_COUNT,
+} ProcessCaptureOverflowPolicy;
+
+typedef struct ProcessCaptureLimits ProcessCaptureLimits;
+struct ProcessCaptureLimits
+{
+    u64 per_stream[(size_t)STANDARD_STREAM_COUNT];
+    u64 total;
+};
+
 typedef struct ProcessGroupControlState ProcessGroupControlState;
 
 typedef struct ProcessSpawnResult ProcessSpawnResult;
 struct ProcessSpawnResult
 {
     OsProcessHandle* handle;
+    // Windows Job Object used for kill-on-close tree containment. Null on
+    // POSIX, where process_group reserves the exact group-leader identity.
+    OsProcessHandle* process_tree;
     OsFileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
+    ProcessCaptureLimits capture_limits;
+    OsFileDescriptor* capture_overflow_files[(size_t)STANDARD_STREAM_COUNT];
     // Optional shared flag state. The wait lane remains the sole owner of the
     // process-group identity and performs every signal, query, and reap.
     ProcessGroupControlState* process_group_control;
-    // On POSIX, the child is the leader of a fresh process group. Waiting
-    // terminates residual helpers before reaping the leader; deadline cleanup
-    // likewise terminates the complete spawned process tree.
+    ProcessCaptureOverflowPolicy capture_overflow_policy;
+    // On POSIX, the child is the leader of a fresh process group. On Windows,
+    // it was assigned to a kill-on-close Job Object before its first instruction.
     u64 process_group : 1;
     u64 reserved : 63;
 };
@@ -164,30 +193,51 @@ struct ProcessSpawnOptions
 {
     u64 capture : (size_t)STANDARD_STREAM_COUNT;
     u64 use_process_environment : 1;
+    // POSIX creates a fresh process group. Windows creates a kill-on-close Job
+    // Object and assigns the suspended child before allowing it to execute.
     u64 new_process_group : 1;
     u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 2;
+    ProcessCaptureLimits capture_limits;
+    OsFileDescriptor* capture_overflow_files[(size_t)STANDARD_STREAM_COUNT];
+    ProcessCaptureOverflowPolicy capture_overflow_policy;
 };
 
 typedef struct ProcessWaitResult ProcessWaitResult;
 struct ProcessWaitResult
 {
     ByteSlice streams[(size_t)STANDARD_STREAM_COUNT];
+    // observed = every byte drained; captured = the returned prefix; streamed
+    // = overflow written to the configured descriptor; dropped = the rest.
+    u64 observed_bytes[(size_t)STANDARD_STREAM_COUNT];
+    u64 captured_bytes[(size_t)STANDARD_STREAM_COUNT];
+    u64 streamed_bytes[(size_t)STANDARD_STREAM_COUNT];
+    u64 dropped_bytes[(size_t)STANDARD_STREAM_COUNT];
+    u64 observed_total;
+    u64 captured_total;
+    u64 streamed_total;
+    u64 dropped_total;
     ProcessResult result;
     // Native child status retained for diagnostics. On Windows this is the
     // DWORD returned by GetExitCodeProcess; on POSIX it is the status word
     // returned by waitpid. `result` remains the portable contract.
     u32 platform_status;
-    // Set when the deadline passed and the child was killed rather than having
-    // exited on its own. `result` is a plain failure in that case: a killed
-    // child's exit status describes the kill, not what it was doing.
+    // Set when the deadline passed and the process tree was terminated.
     u8 timed_out;
+    u8 termination_requested;
+    u8 forcibly_terminated;
+    // The returned in-memory streams are prefixes because at least one bound
+    // was reached. capture_failed additionally makes result a plain failure.
+    u8 capture_limit_exceeded;
+    u8 output_truncated;
+    u8 capture_failed;
+    u8 process_tree_cleanup_failed;
     // The exact group leader was not reaped. Callers must stop admission and
     // must not hand its retained numeric identity to another lane.
     u8 process_group_reservation_retained;
     // The WNOWAIT observation stopped proving ownership (for example ECHILD).
     // No later signal, group query, or reap was attempted with the numeric ID.
     u8 process_group_ownership_lost;
-    u8 reserved[1];
+    u8 reserved[2];
 };
 
 typedef enum OsFileReadStatus

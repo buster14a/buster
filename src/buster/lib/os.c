@@ -2479,6 +2479,24 @@ bool os_windows_pipe_disable_inheritance(OsFileDescriptor* pipe)
 {
     return SetHandleInformation((HANDLE)pipe, HANDLE_FLAG_INHERIT, 0) != 0;
 }
+
+BUSTER_GLOBAL_LOCAL bool os_windows_job_wait_empty(HANDLE job, u64 timeout_microseconds)
+{
+    bool result = false;
+    u64 deadline = os_now_microseconds() + timeout_microseconds;
+    bool query_valid = true;
+    while (query_valid && !result && os_now_microseconds() < deadline)
+    {
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information = {0};
+        query_valid = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &information, sizeof(information), 0) != 0;
+        result = query_valid && information.ActiveProcesses == 0;
+        if (query_valid && !result)
+        {
+            Sleep(1);
+        }
+    }
+    return result;
+}
 #endif
 
 ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options)
@@ -2487,6 +2505,14 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     ProcessSpawnResult result = {0};
     bool pipe_creation_results[(u64)STANDARD_STREAM_COUNT] = {0};
     bool pipe_result = true;
+    result.capture_limits = options.capture_limits;
+    result.capture_overflow_policy = options.capture_overflow_policy;
+    memcpy(result.capture_overflow_files, options.capture_overflow_files, sizeof(result.capture_overflow_files));
+    if (options.capture_overflow_policy >= PROCESS_CAPTURE_OVERFLOW_COUNT)
+    {
+        string_print(S8("Invalid process capture overflow policy: {u32}\n"), (u32)options.capture_overflow_policy);
+        pipe_result = false;
+    }
 #if defined(_WIN32)
     bool any_capture = false;
     for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
@@ -2518,6 +2544,26 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         }
     }
 
+    if (pipe_result && options.new_process_group)
+    {
+        HANDLE job = CreateJobObjectW(0, 0);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (job && SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+        {
+            result.process_tree = (OsProcessHandle*)job;
+        }
+        else
+        {
+            string_print(S8("Error creating a process Job Object: \"{EOs}\"\n"), os_get_last_error());
+            if (job)
+            {
+                CloseHandle(job);
+            }
+            pipe_result = false;
+        }
+    }
+
     if (pipe_result)
     {
         PROCESS_INFORMATION process_information = {0};
@@ -2541,11 +2587,38 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         WindowsStringList argv = windows_string_list_from_slice_string(temp.arena, arguments);
         WindowsStringList envp = options.use_process_environment ? program_state->input.raw_environment
                                                                  : windows_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
-        DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT;
+        DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | (options.new_process_group ? CREATE_SUSPENDED : 0);
 
         if (CreateProcessW(first_argument.pointer, argv, 0, 0, 1, creation_flags, envp, 0, &startup_info, &process_information))
         {
-            result.handle = (OsProcessHandle*)process_information.hProcess;
+            bool child_ready = true;
+            if (result.process_tree)
+            {
+                if (!AssignProcessToJobObject((HANDLE)result.process_tree, process_information.hProcess))
+                {
+                    string_print(S8("Error assigning process to Job Object: \"{EOs}\"\n"), os_get_last_error());
+                    child_ready = false;
+                }
+                else if (ResumeThread(process_information.hThread) == (DWORD)-1)
+                {
+                    string_print(S8("Error resuming contained process: \"{EOs}\"\n"), os_get_last_error());
+                    child_ready = false;
+                }
+            }
+            if (child_ready)
+            {
+                result.handle = (OsProcessHandle*)process_information.hProcess;
+            }
+            else
+            {
+                if (result.process_tree)
+                {
+                    TerminateJobObject((HANDLE)result.process_tree, 1);
+                }
+                TerminateProcess(process_information.hProcess, 1);
+                WaitForSingleObject(process_information.hProcess, INFINITE);
+                CloseHandle(process_information.hProcess);
+            }
             CloseHandle(process_information.hThread);
         }
         else
@@ -2573,6 +2646,12 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             }
         }
     }
+    if (!result.handle && result.process_tree)
+    {
+        CloseHandle((HANDLE)result.process_tree);
+        result.process_tree = 0;
+    }
+    result.process_group = result.handle != 0 && result.process_tree != 0;
 #elif BUSTER_ANDROID
     BUSTER_UNUSED(environment_keys);
     BUSTER_UNUSED(environment_values);
@@ -2728,24 +2807,93 @@ struct PipeCapture
     u64 total_length;
 };
 
-BUSTER_GLOBAL_LOCAL void pipe_capture_append(Arena* arena, PipeCapture* capture, u8* data, u64 length)
+BUSTER_GLOBAL_LOCAL u64 pipe_capture_counter_add(u64 value, u64 addend)
 {
-    PipeChunk* chunk = arena_allocate(arena, PipeChunk, 1);
-    chunk->next = 0;
-    chunk->length = length;
-    chunk->data = arena_allocate(arena, u8, length);
-    memcpy(chunk->data, data, length);
+    return value > UINT64_MAX - addend ? UINT64_MAX : value + addend;
+}
 
-    if (capture->last)
+BUSTER_GLOBAL_LOCAL void pipe_capture_add_count(u64* stream_count, u64* total_count, u64 addend)
+{
+    *stream_count = pipe_capture_counter_add(*stream_count, addend);
+    *total_count = pipe_capture_counter_add(*total_count, addend);
+}
+
+BUSTER_GLOBAL_LOCAL u64 pipe_capture_limit(u64 configured, u64 fallback)
+{
+    return configured ? configured : fallback;
+}
+
+BUSTER_GLOBAL_LOCAL void pipe_capture_append(Arena* arena, PipeCapture* capture, ProcessSpawnResult spawn, ProcessWaitResult* result, StandardStream stream,
+                                             u8* data, u64 length)
+{
+    u64 per_stream_limit = pipe_capture_limit(spawn.capture_limits.per_stream[stream], PROCESS_CAPTURE_DEFAULT_PER_STREAM_BYTES);
+    u64 total_limit = pipe_capture_limit(spawn.capture_limits.total, PROCESS_CAPTURE_DEFAULT_TOTAL_BYTES);
+    u64 per_stream_remaining = result->captured_bytes[stream] < per_stream_limit ? per_stream_limit - result->captured_bytes[stream] : 0;
+    u64 total_remaining = result->captured_total < total_limit ? total_limit - result->captured_total : 0;
+    u64 retained = length < per_stream_remaining ? length : per_stream_remaining;
+    if (retained > total_remaining)
     {
-        capture->last->next = chunk;
+        retained = total_remaining;
     }
-    else
+
+    pipe_capture_add_count(result->observed_bytes + stream, &result->observed_total, length);
+    if (retained)
     {
-        capture->first = chunk;
+        PipeChunk* chunk = arena_allocate(arena, PipeChunk, 1);
+        chunk->next = 0;
+        chunk->length = retained;
+        chunk->data = arena_allocate(arena, u8, retained);
+        memcpy(chunk->data, data, retained);
+
+        if (capture->last)
+        {
+            capture->last->next = chunk;
+        }
+        else
+        {
+            capture->first = chunk;
+        }
+        capture->last = chunk;
+        capture->total_length += retained;
+        pipe_capture_add_count(result->captured_bytes + stream, &result->captured_total, retained);
     }
-    capture->last = chunk;
-    capture->total_length += length;
+
+    u64 overflow = length - retained;
+    if (overflow)
+    {
+        result->capture_limit_exceeded = 1;
+        result->output_truncated = 1;
+        if (spawn.capture_overflow_policy == PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE)
+        {
+            OsFileDescriptor* file = spawn.capture_overflow_files[stream];
+            if (file)
+            {
+                OsFileTransferResult transfer = os_file_write_checked(file, (ByteSlice){data + retained, overflow});
+                pipe_capture_add_count(result->streamed_bytes + stream, &result->streamed_total, transfer.transferred);
+                overflow -= transfer.transferred;
+                if (transfer.error.v)
+                {
+                    result->capture_failed = 1;
+                }
+            }
+            else
+            {
+                result->capture_failed = 1;
+            }
+        }
+        else if (spawn.capture_overflow_policy == PROCESS_CAPTURE_OVERFLOW_FAIL)
+        {
+            result->capture_failed = 1;
+        }
+        if (overflow)
+        {
+            pipe_capture_add_count(result->dropped_bytes + stream, &result->dropped_total, overflow);
+            if (spawn.capture_overflow_policy != PROCESS_CAPTURE_OVERFLOW_TRUNCATE)
+            {
+                result->capture_failed = 1;
+            }
+        }
+    }
 }
 
 BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* capture)
@@ -3939,7 +4087,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     DWORD requested_byte_count = available_byte_count < sizeof(buffer) ? available_byte_count : (DWORD)sizeof(buffer);
                     if (ReadFile(read_pipe, buffer, requested_byte_count, &read_byte_count, 0) && read_byte_count)
                     {
-                        pipe_capture_append(scratch.arena, &captures[stream], buffer, read_byte_count);
+                        pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, read_byte_count);
                         made_progress = true;
                     }
                 }
@@ -4011,7 +4159,13 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             // The exit code below then describes this kill rather than the
             // child's own progress, which is why `timed_out` is reported
             // separately.
-            TerminateProcess((HANDLE)spawn.handle, 1);
+            result.termination_requested = 1;
+            result.forcibly_terminated = 1;
+            BOOL terminated = spawn.process_tree ? TerminateJobObject((HANDLE)spawn.process_tree, 1) : TerminateProcess((HANDLE)spawn.handle, 1);
+            if (!terminated)
+            {
+                result.process_tree_cleanup_failed = 1;
+            }
         }
 
         DWORD wait_result = WaitForSingleObject(spawn.handle, INFINITE);
@@ -4035,7 +4189,23 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 }
             }
         }
+        if (spawn.process_tree)
+        {
+            if (!TerminateJobObject((HANDLE)spawn.process_tree, 1))
+            {
+                result.process_tree_cleanup_failed = 1;
+            }
+            if (!os_windows_job_wait_empty((HANDLE)spawn.process_tree, 5000000))
+            {
+                result.process_tree_cleanup_failed = 1;
+            }
+            CloseHandle((HANDLE)spawn.process_tree);
+        }
         CloseHandle(spawn.handle);
+        if (result.process_tree_cleanup_failed)
+        {
+            result.result = PROCESS_RESULT_FAILED;
+        }
 #else
         pid_t pid = (pid_t)(u64)spawn.handle;
         int status = 0;
@@ -4110,7 +4280,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                             ssize_t read_result = read(read_pipes[stream], buffer, (size_t)requested);
                             if (read_result > 0)
                             {
-                                pipe_capture_append(scratch.arena, &captures[stream], buffer, (u64)read_result);
+                                pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, (u64)read_result);
                                 quiescent_capture_remaining[stream] -= (u64)read_result;
                             }
                             else if (read_result == 0 || errno != EINTR)
@@ -4198,7 +4368,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
 
                 if (read_result > 0)
                 {
-                    pipe_capture_append(scratch.arena, &captures[stream], buffer, (u64)read_result);
+                    pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, (u64)read_result);
                 }
                 else
                 {
@@ -4363,12 +4533,18 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         if (capture_failed) { wait_failed = true; }
         if (wait_failed) { result.result = PROCESS_RESULT_FAILED; }
         result.process_group_reservation_retained = spawn.process_group && wait_result != pid;
-        result.process_group_ownership_lost = result.process_group_reservation_retained &&
-            group_state.outcome == OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
+        result.process_group_ownership_lost = result.process_group_reservation_retained && group_state.outcome == OS_PROCESS_GROUP_WAIT_OWNERSHIP_LOST;
+        result.process_tree_cleanup_failed = result.process_group_reservation_retained || result.process_group_ownership_lost;
 #endif
+        if (result.capture_failed)
+        {
+            result.result = PROCESS_RESULT_FAILED;
+        }
         if (timed_out)
         {
             result.timed_out = 1;
+            result.termination_requested = 1;
+            result.forcibly_terminated = 1;
             result.result = PROCESS_RESULT_FAILED;
         }
         scratch_end(scratch);

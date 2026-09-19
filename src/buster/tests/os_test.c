@@ -44,6 +44,76 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_resource_noop(void* argument)
 #endif
 #endif
 
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+typedef struct OsTestEnvironment OsTestEnvironment;
+struct OsTestEnvironment
+{
+    SliceString8 keys;
+    SliceString8 values;
+};
+
+BUSTER_GLOBAL_LOCAL bool os_test_environment_key_matches(String8 key, String8* overrides, u64 override_count)
+{
+    bool result = false;
+    for (u64 index = 0; index < override_count && !result; index += 1)
+    {
+        result = string_equal(key, overrides[index]);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL OsTestEnvironment os_test_environment(Arena* arena, String8* override_keys, String8* override_values, u64 override_count)
+{
+    SliceString8 inherited_keys = program_state->input.environment_keys;
+    SliceString8 inherited_values = program_state->input.environment_values;
+    String8* keys = arena_allocate(arena, String8, inherited_keys.length + override_count);
+    String8* values = arena_allocate(arena, String8, inherited_keys.length + override_count);
+    u64 count = 0;
+    for (u64 index = 0; index < override_count; index += 1)
+    {
+        keys[count] = override_keys[index];
+        values[count] = override_values[index];
+        count += 1;
+    }
+    for (u64 index = 0; index < inherited_keys.length; index += 1)
+    {
+        if (!os_test_environment_key_matches(inherited_keys.pointer[index], override_keys, override_count))
+        {
+            keys[count] = inherited_keys.pointer[index];
+            values[count] = inherited_values.pointer[index];
+            count += 1;
+        }
+    }
+    return (OsTestEnvironment){{keys, count}, {values, count}};
+}
+
+BUSTER_GLOBAL_LOCAL void os_test_sleep_milliseconds(u32 milliseconds)
+{
+#if BUSTER_WINDOWS
+    Sleep(milliseconds);
+#else
+    poll(0, 0, (int)milliseconds);
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_create_empty_file(String8 path)
+{
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    bool result = file != 0;
+    if (file)
+    {
+        result = os_file_close(file) && result;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_test_regular_file_exists(String8 path)
+{
+    FileStats stats = os_file_replacement_target_stats(path);
+    return stats.valid && stats.kind == OS_FILE_KIND_REGULAR;
+}
+#endif
+
 typedef struct OsTestLaneState OsTestLaneState;
 struct OsTestLaneState
 {
@@ -264,6 +334,61 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     BUSTER_UNUSED(arguments);
 
     UnitTestResult result = {0};
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 process_test_mode = os_get_environment_variable(S8("BUSTER_OS_PROCESS_TEST_MODE"));
+    if (string_starts_with_sequence(process_test_mode, S8("flood")))
+    {
+        u8 output[4096];
+        u8 error[4096];
+        for (u64 index = 0; index < sizeof(output); index += 1)
+        {
+            output[index] = (u8)(index * 17 + 3);
+            error[index] = (u8)(index * 29 + 7);
+        }
+        bool both = string_equal(process_test_mode, S8("flood-both"));
+        bool written = true;
+        for (u32 block = 0; block < 128 && written; block += 1)
+        {
+            written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_OUTPUT), (ByteSlice){output, sizeof(output)});
+            if (both)
+            {
+                written = os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR), (ByteSlice){error, sizeof(error)}) && written;
+            }
+        }
+        os_exit(written ? 0 : 90);
+    }
+    if (string_equal(process_test_mode, S8("tree-grandchild")))
+    {
+        String8 ready = os_get_environment_variable(S8("BUSTER_OS_PROCESS_READY"));
+        String8 release = os_get_environment_variable(S8("BUSTER_OS_PROCESS_RELEASE"));
+        String8 escaped = os_get_environment_variable(S8("BUSTER_OS_PROCESS_ESCAPED"));
+        bool ready_created = os_test_create_empty_file(ready);
+        while (ready_created && !os_test_regular_file_exists(release))
+        {
+            os_test_sleep_milliseconds(1);
+        }
+        bool escaped_created = ready_created && os_test_create_empty_file(escaped);
+        os_exit(escaped_created ? 0 : 91);
+    }
+    if (string_equal(process_test_mode, S8("tree-parent")))
+    {
+        String8 override_keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE")};
+        String8 override_values[] = {S8("tree-grandchild")};
+        OsTestEnvironment child_environment = os_test_environment(arguments->arena, override_keys, override_values, BUSTER_ARRAY_LENGTH(override_keys));
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        ProcessSpawnResult child =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), child_environment.keys, child_environment.values, (ProcessSpawnOptions){0});
+        if (!child.handle)
+        {
+            os_exit(92);
+        }
+        for (;;)
+        {
+            os_test_sleep_milliseconds(100);
+        }
+    }
+#endif
 
 #if !BUSTER_SINGLE_THREADED && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 resource_failure_mode = os_get_environment_variable(S8("BUSTER_OS_RESOURCE_FAILURE_MODE"));
@@ -839,6 +964,164 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             CloseHandle(write_pipe);
         }
         BUSTER_TEST(arguments, !os_windows_pipe_disable_inheritance((OsFileDescriptor*)INVALID_HANDLE_VALUE));
+    }
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Limits retain deterministic prefixes while every stream continues to be
+    // drained. Counters account for every byte and the fail policy changes only
+    // the portable result, not the native child status.
+    {
+        u64 arena_position = arguments->arena->position;
+        String8 override_keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_TEST_JOBS")};
+        String8 both_values[] = {S8("flood-both"), S8("1")};
+        OsTestEnvironment both_environment = os_test_environment(arguments->arena, override_keys, both_values, BUSTER_ARRAY_LENGTH(override_keys));
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        ProcessSpawnOptions truncate_options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .new_process_group = 1,
+        };
+        truncate_options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64);
+        truncate_options.capture_limits.per_stream[STANDARD_STREAM_ERROR] = BUSTER_KB(64);
+        truncate_options.capture_limits.total = BUSTER_KB(128);
+        ProcessSpawnResult truncate_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), both_environment.keys, both_environment.values, truncate_options);
+        BUSTER_TEST(arguments, truncate_spawn.handle != 0 && truncate_spawn.process_group);
+        if (truncate_spawn.handle)
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, truncate_spawn, 30000000);
+            BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out);
+            BUSTER_TEST(arguments, waited.capture_limit_exceeded && waited.output_truncated && !waited.capture_failed);
+            BUSTER_TEST(arguments, waited.observed_bytes[STANDARD_STREAM_OUTPUT] == BUSTER_KB(512));
+            BUSTER_TEST(arguments, waited.observed_bytes[STANDARD_STREAM_ERROR] == BUSTER_KB(512));
+            BUSTER_TEST(arguments, waited.captured_bytes[STANDARD_STREAM_OUTPUT] == BUSTER_KB(64));
+            BUSTER_TEST(arguments, waited.captured_bytes[STANDARD_STREAM_ERROR] == BUSTER_KB(64));
+            BUSTER_TEST(arguments, waited.dropped_total == BUSTER_KB(896));
+            BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == BUSTER_KB(64));
+            BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_ERROR].length == BUSTER_KB(64));
+            if (waited.streams[STANDARD_STREAM_OUTPUT].length)
+            {
+                BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_OUTPUT].pointer[0] == 3);
+            }
+            if (waited.streams[STANDARD_STREAM_ERROR].length)
+            {
+                BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_ERROR].pointer[0] == 7);
+            }
+        }
+        arena_set_position(arguments->arena, arena_position);
+    }
+    {
+        u64 arena_position = arguments->arena->position;
+        String8 override_keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_TEST_JOBS")};
+        String8 output_values[] = {S8("flood-output"), S8("1")};
+        OsTestEnvironment environment = os_test_environment(arguments->arena, override_keys, output_values, BUSTER_ARRAY_LENGTH(override_keys));
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        ProcessSpawnOptions fail_options = {
+            .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+            .new_process_group = 1,
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL,
+        };
+        fail_options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64);
+        fail_options.capture_limits.total = BUSTER_KB(32);
+        ProcessSpawnResult fail_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), environment.keys, environment.values, fail_options);
+        BUSTER_TEST(arguments, fail_spawn.handle != 0);
+        if (fail_spawn.handle)
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, fail_spawn, 30000000);
+            BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_FAILED && !waited.timed_out);
+            BUSTER_TEST(arguments, waited.platform_status == 0 && waited.capture_failed);
+            BUSTER_TEST(arguments, waited.captured_total == BUSTER_KB(32));
+            BUSTER_TEST(arguments, waited.dropped_total == BUSTER_KB(480));
+        }
+        arena_set_position(arguments->arena, arena_position);
+    }
+    {
+        u64 arena_position = arguments->arena->position;
+        String8 overflow_path = buster_test_temporary_path(arguments->arena, S8("process-capture-overflow"), S8(".bin"));
+        BUSTER_TEST(arguments, os_file_delete(overflow_path));
+        OsFileDescriptor* overflow_file =
+            os_file_open(overflow_path, (OpenFlags){.create = 1, .write = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, overflow_file != 0);
+        String8 override_keys[] = {S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_TEST_JOBS")};
+        String8 output_values[] = {S8("flood-output"), S8("1")};
+        OsTestEnvironment environment = os_test_environment(arguments->arena, override_keys, output_values, BUSTER_ARRAY_LENGTH(override_keys));
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        ProcessSpawnOptions stream_options = {
+            .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+            .new_process_group = 1,
+            .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_STREAM_TO_FILE,
+        };
+        stream_options.capture_limits.per_stream[STANDARD_STREAM_OUTPUT] = BUSTER_KB(32);
+        stream_options.capture_limits.total = BUSTER_KB(32);
+        stream_options.capture_overflow_files[STANDARD_STREAM_OUTPUT] = overflow_file;
+        if (overflow_file)
+        {
+            ProcessSpawnResult stream_spawn =
+                os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), environment.keys, environment.values, stream_options);
+            BUSTER_TEST(arguments, stream_spawn.handle != 0);
+            if (stream_spawn.handle)
+            {
+                ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, stream_spawn, 30000000);
+                BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_SUCCESS && !waited.capture_failed);
+                BUSTER_TEST(arguments, waited.captured_total == BUSTER_KB(32));
+                BUSTER_TEST(arguments, waited.streamed_total == BUSTER_KB(480));
+                BUSTER_TEST(arguments, waited.dropped_total == 0);
+            }
+            FileStats stats = os_file_get_stats(overflow_file, (FileStatsOptions){.size = 1, .identity = 1});
+            BUSTER_TEST(arguments, stats.valid && stats.kind == OS_FILE_KIND_REGULAR && stats.size == BUSTER_KB(480));
+            BUSTER_TEST(arguments, os_file_close(overflow_file));
+            BUSTER_TEST(arguments, os_file_delete(overflow_path));
+        }
+        arena_set_position(arguments->arena, arena_position);
+    }
+
+    // The child creates a grandchild that inherits the captured stdio. A
+    // deadline must return only after the whole owned tree is gone; otherwise
+    // releasing the sentinel lets the grandchild prove its escape.
+    {
+        u64 arena_position = arguments->arena->position;
+        String8 ready = buster_test_temporary_path(arguments->arena, S8("process-tree-ready"), S8(".txt"));
+        String8 release = buster_test_temporary_path(arguments->arena, S8("process-tree-release"), S8(".txt"));
+        String8 escaped = buster_test_temporary_path(arguments->arena, S8("process-tree-escaped"), S8(".txt"));
+        BUSTER_TEST(arguments, os_file_delete(ready));
+        BUSTER_TEST(arguments, os_file_delete(release));
+        BUSTER_TEST(arguments, os_file_delete(escaped));
+        String8 override_keys[] = {
+            S8("BUSTER_OS_PROCESS_TEST_MODE"), S8("BUSTER_OS_PROCESS_READY"), S8("BUSTER_OS_PROCESS_RELEASE"),
+            S8("BUSTER_OS_PROCESS_ESCAPED"),   S8("BUSTER_TEST_JOBS"),
+        };
+        String8 override_values[] = {S8("tree-parent"), ready, release, escaped, S8("1")};
+        OsTestEnvironment environment = os_test_environment(arguments->arena, override_keys, override_values, BUSTER_ARRAY_LENGTH(override_keys));
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
+        ProcessSpawnOptions options = {
+            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            .new_process_group = 1,
+        };
+        ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), environment.keys, environment.values, options);
+        BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
+        if (spawn.handle)
+        {
+            // Start the termination deadline only after the grandchild has
+            // entered its parked state. Sanitizer startup can exceed two
+            // seconds on hosted machines; it is not the behavior under test.
+            for (u32 poll = 0; poll < 3000 && !os_test_regular_file_exists(ready); poll += 1)
+            {
+                os_test_sleep_milliseconds(10);
+            }
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, 2000000);
+            BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_FAILED && waited.timed_out);
+            BUSTER_TEST(arguments, waited.termination_requested && waited.forcibly_terminated);
+            BUSTER_TEST(arguments, !waited.process_tree_cleanup_failed);
+        }
+        BUSTER_TEST(arguments, os_test_regular_file_exists(ready));
+        BUSTER_TEST(arguments, os_test_create_empty_file(release));
+        os_test_sleep_milliseconds(300);
+        BUSTER_TEST(arguments, !os_test_regular_file_exists(escaped));
+        BUSTER_TEST(arguments, os_file_delete(ready));
+        BUSTER_TEST(arguments, os_file_delete(release));
+        BUSTER_TEST(arguments, os_file_delete(escaped));
+        arena_set_position(arguments->arena, arena_position);
     }
 #endif
 
