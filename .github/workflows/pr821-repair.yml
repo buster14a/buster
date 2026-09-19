@@ -26,7 +26,6 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           def replace_once(path: str, old: str, new: str) -> None:
               file = Path(path)
@@ -41,30 +40,11 @@ jobs:
               "BUSTER_GLOBAL_LOCAL bool os_process_spawn_test_should_fail(OsProcessSpawnTestOperation operation)",
               "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool os_process_spawn_test_should_fail(OsProcessSpawnTestOperation operation)",
           )
-
-          differential = Path("tools/differential.c")
-          text = differential.read_text()
-          pattern = re.compile(
-              r"(?P<indent>^[ \t]*)"
-              r"(?P<value>\.capture_limit\s*=\s*TO_MB\(64\))"
-              r"(?P<gap>\s*)}",
-              re.MULTILINE,
+          replace_once(
+              "tools/differential.c",
+              "                                  .use_process_environment = false,\n                                  .new_process_group = !BUSTER_WINDOWS});",
+              "                                  .use_process_environment = false,\n                                  .search_path = true,\n                                  .new_process_group = !BUSTER_WINDOWS});",
           )
-          matches = list(pattern.finditer(text))
-          if len(matches) != 1:
-              for index, line in enumerate(text.splitlines(), 1):
-                  if "capture_limit" in line or "os_process_spawn" in line:
-                      print(f"DIFFERENTIAL_CONTEXT {index}: {line}")
-              raise SystemExit(f"tools/differential.c: expected one self-test capture-limit initializer, found {len(matches)}")
-          match = matches[0]
-          context = text[max(0, match.start() - 600):match.end() + 200]
-          if "os_process_spawn" not in context or ".search_path" in context:
-              raise SystemExit("tools/differential.c: capture-limit match is not the expected unqualified self-test spawn")
-          replacement = (
-              f"{match.group('indent')}{match.group('value')},\n"
-              f"{match.group('indent')}.search_path = true{match.group('gap')}}}"
-          )
-          differential.write_text(text[:match.start()] + replacement + text[match.end():])
 
           needles = ("weird_kind", "no-shell metachar")
           found = False
