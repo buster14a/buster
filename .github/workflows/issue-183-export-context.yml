@@ -1,0 +1,83 @@
+name: Export current issue 183 contexts
+
+on:
+  push:
+    branches:
+      - scratch/183-current-progress
+    paths:
+      - .github/workflows/issue-183-export-context.yml
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Extract source contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          queries = {
+              'src/buster/lib/compiler/frontend/c/c.h': [
+                  'struct CEnumMember', 'CEnumMember', 'constant_is_negative', 'C_ENTITY_ENUMERATOR'
+              ],
+              'src/buster/lib/compiler/frontend/c/c_internal.h': [
+                  'c_integer_expression_evaluate', 'c_parse_builtin_type_layout'
+              ],
+              'src/buster/lib/compiler/frontend/c/c_source.c': [
+                  'c_integer_expression_evaluate_with_features', 'c_integer_expression_evaluate('
+              ],
+              'src/buster/lib/compiler/frontend/c/c_parse.c': [
+                  'enum_start = open + 1', 'previous_value', 'enum_underlying_type',
+                  'CEnumMember', '.type = enum_integer_type', 'C_ENTITY_ENUMERATOR',
+                  'c_integer_expression_evaluate('
+              ],
+              'src/buster/lib/compiler/frontend/c/c_gen.c': [
+                  'C_ENTITY_ENUMERATOR', 'c_ir_emit_integer_value', 'c_ir_constant_identifier',
+                  'c_ir_integer_literal_type', 'C_PUNCTUATOR_GENERIC', '_Generic',
+                  'c_lower_to_ir', 'C_TYPE_ENUM'
+              ],
+              'tests/basic_c.c': ['enum ', '_Generic'],
+          }
+
+          out = []
+          for filename, needles in queries.items():
+              path = Path(filename)
+              if not path.exists():
+                  out.append(f'===== MISSING {filename} =====\n')
+                  continue
+              lines = path.read_text(errors='replace').splitlines()
+              out.append(f'===== FILE {filename} ({len(lines)} lines) =====\n')
+              emitted = set()
+              for needle in needles:
+                  matches = [i for i, line in enumerate(lines) if needle in line]
+                  out.append(f'--- QUERY {needle!r}: {len(matches)} matches ---\n')
+                  for i in matches:
+                      start = max(0, i - 45)
+                      end = min(len(lines), i + 70)
+                      key = (start, end)
+                      if key in emitted:
+                          continue
+                      emitted.add(key)
+                      out.append(f'@@ {filename}:{start + 1}-{end} (match {i + 1}) @@\n')
+                      out.extend(f'{n + 1:06d}: {lines[n]}\n' for n in range(start, end))
+              out.append('\n')
+          Path('.github/issue-183-current-context.txt').write_text(''.join(out))
+          PY
+      - name: Publish contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-current-context.txt
+          git commit -m 'chore: export current issue 183 source contexts'
+          git push origin HEAD:${GITHUB_REF_NAME}
