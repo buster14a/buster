@@ -6,8 +6,7 @@ on:
     paths:
       - .github/workflows/native-retirement-exact-candidate.yml
       - .github/workflows/native-retirement-evidence.yml
-      - tools/native_retirement_candidate.py
-      - tools/native_retirement_candidate_test.py
+      - tools/native_retirement_candidate*.py
       - docs/native-retirement-exact-candidate.md
       - docs/native-retirement-gates-v1.json
       - docs/native-retirement-*.json
@@ -24,7 +23,7 @@ permissions:
   contents: read
 
 env:
-  # github.sha is a synthetic merge on pull_request.  Every producer and the
+  # github.sha is a synthetic merge on pull_request. Every producer and the
   # eventual acceptance verifier must use the immutable PR head instead.
   BUSTER_RETIREMENT_CANDIDATE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.candidate_commit }}
 
@@ -58,6 +57,5 @@ jobs:
       - name: Test fail-closed candidate, binary and artifact binding
         working-directory: tools
         run: |
-          python3 -W error::ResourceWarning -m py_compile \
-            native_retirement_candidate.py native_retirement_candidate_test.py
+          python3 -W error::ResourceWarning -m py_compile native_retirement_candidate*.py
           python3 -W error::ResourceWarning native_retirement_candidate_test.py -v
