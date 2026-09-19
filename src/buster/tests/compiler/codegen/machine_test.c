@@ -6060,6 +6060,124 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_values_differential(UnitTe
     return result;
 }
 
+// Exercise the accepted production scheduler path with one source mark per row.
+// The independent leaves create excess pressure; the balanced consumers make
+// a heavily permuted order strictly cheaper, so line-mark repair cannot be
+// skipped by either scheduler gate.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_schedule_line_mark_repair(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u64 fixture_position = arguments->arena->position;
+    enum { LEAF_COUNT = 256 };
+    MachineFunctionBuilder builder = machine_function_builder_begin(arguments->arena);
+    u32* values = arena_allocate(arguments->arena, u32, LEAF_COUNT);
+    machine_builder_block_begin(&builder);
+    for (u32 leaf = 0; leaf < LEAF_COUNT; leaf += 1)
+    {
+        u32 row = builder.instructions.total_count;
+        u32 value = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+            .definition_point = machine_point_make(row, MACHINE_POINT_AFTER),
+            .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+            .typed_origin = IR_ID_UNDERLYING_INVALID,
+        });
+        machine_builder_instruction(&builder, (MachineInstruction){
+            .opcode = MACHINE_X64_MOV_RI,
+            .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value), machine_ref_make(MACHINE_REF_IMMEDIATE, 0)},
+        });
+        values[leaf] = value;
+    }
+    for (u32 width = LEAF_COUNT; width > 1; width /= 2)
+    {
+        for (u32 pair = 0; pair < width / 2; pair += 1)
+        {
+            u32 row = builder.instructions.total_count;
+            u32 value = machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+                .definition_point = machine_point_make(row, MACHINE_POINT_AFTER),
+                .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                .typed_origin = IR_ID_UNDERLYING_INVALID,
+            });
+            machine_builder_instruction(&builder, (MachineInstruction){
+                .opcode = MACHINE_X64_ADD64,
+                .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[2 * pair]),
+                             machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[2 * pair + 1])},
+            });
+            values[pair] = value;
+        }
+    }
+    machine_builder_instruction(&builder, (MachineInstruction){
+        .opcode = MACHINE_X64_MOV_RR,
+        .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX),
+                     machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, values[0])},
+    });
+    machine_builder_instruction(&builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&builder, (MachineBlock){0});
+
+    MachineFunction function = machine_function_builder_finish(arguments->arena, &builder);
+    function.target = machine_target_x86_64();
+    function.immediates = arena_allocate(arguments->arena, u64, 1);
+    function.immediates[0] = 1;
+    function.immediate_count = 1;
+    function.line_mark_count = function.instruction_count;
+    function.line_marks = arena_allocate(arguments->arena, MachineLineMark, function.line_mark_count);
+    for (u32 row = 0; row < function.instruction_count; row += 1)
+    {
+        function.line_marks[row] = (MachineLineMark){.row = row, .instruction = row};
+    }
+    BUSTER_TEST(arguments, machine_verify_function(&function).error == MACHINE_VERIFY_NONE);
+
+    u64 output_position = arguments->arena->position;
+    arena_allocate(arguments->arena, MachineInstruction, function.instruction_count);
+    arena_allocate(arguments->arena, MachineVirtualRegister, function.virtual_register_count ? function.virtual_register_count : 1);
+    arena_allocate(arguments->arena, MachineLineMark, function.line_mark_count ? function.line_mark_count : 1);
+    u64 retained_position = arguments->arena->position;
+    arena_set_position(arguments->arena, output_position);
+
+    MachineScheduleResult scheduled = machine_schedule_function(arguments->arena, &function);
+    BUSTER_TEST(arguments, arguments->arena->position == retained_position);
+    u64 repeated_position = arguments->arena->position;
+    arena_allocate(arguments->arena, MachineInstruction, function.instruction_count);
+    arena_allocate(arguments->arena, MachineVirtualRegister, function.virtual_register_count ? function.virtual_register_count : 1);
+    arena_allocate(arguments->arena, MachineLineMark, function.line_mark_count ? function.line_mark_count : 1);
+    u64 repeated_retained_position = arguments->arena->position;
+    arena_set_position(arguments->arena, repeated_position);
+    MachineScheduleResult repeated = machine_schedule_function(arguments->arena, &function);
+    BUSTER_TEST(arguments, arguments->arena->position == repeated_retained_position);
+    BUSTER_TEST(arguments, scheduled.moved && repeated.moved);
+    BUSTER_TEST(arguments, machine_verify_function(&scheduled.function).error == MACHINE_VERIFY_NONE);
+    BUSTER_TEST(arguments, scheduled.function.line_mark_count == function.instruction_count);
+    bool exact = scheduled.function.line_mark_count == function.instruction_count;
+    bool input_untouched = true;
+    u32 permuted = 0;
+    for (u32 row = 0; row < function.instruction_count; row += 1)
+    {
+        input_untouched &= function.line_marks[row].row == row && function.line_marks[row].instruction == row;
+        if (exact)
+        {
+            MachineLineMark mark = scheduled.function.line_marks[row];
+            exact &= mark.row == row && mark.instruction < function.instruction_count;
+            if (mark.instruction < function.instruction_count)
+            {
+                exact &= memcmp(scheduled.function.instructions + row, function.instructions + mark.instruction,
+                                sizeof(MachineInstruction)) == 0;
+                permuted += mark.instruction != row;
+            }
+        }
+    }
+    BUSTER_TEST(arguments, input_untouched);
+    BUSTER_TEST(arguments, exact && permuted > function.instruction_count / 2);
+    BUSTER_TEST(arguments, repeated.function.line_mark_count == scheduled.function.line_mark_count);
+    if (repeated.function.line_mark_count == scheduled.function.line_mark_count)
+    {
+        BUSTER_TEST(arguments, memcmp(repeated.function.line_marks, scheduled.function.line_marks,
+                                     scheduled.function.line_mark_count * sizeof(MachineLineMark)) == 0);
+        BUSTER_TEST(arguments, memcmp(repeated.function.instructions, scheduled.function.instructions,
+                                     scheduled.function.instruction_count * sizeof(MachineInstruction)) == 0);
+    }
+    arena_set_position(arguments->arena, fixture_position);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6102,6 +6220,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
