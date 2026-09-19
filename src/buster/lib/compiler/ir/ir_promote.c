@@ -701,18 +701,41 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     statistics->values_before += function->value_count;
     u32 local_count = 0;
     bool barrier = function->label_metadata_count != 0;
-    // Direct frontend SSA emits no LOCAL rows for promoted owners. Use the
-    // producer's conservative opcode summary to avoid a redundant FAST-path
-    // discovery scan. Hand-built/uncertified functions still scan normally.
-    bool may_have_locals = ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL));
-    for (u32 index = 0; may_have_locals && index < function->instruction_count && !barrier; index += 1)
+    bool summary_known = (function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) != 0;
+    bool sparse_locals = summary_known && function->local_places;
+    if (sparse_locals && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL)))
     {
-        IrInstruction* row = function->instructions + index;
-        local_count += row->opcode == IR_OPCODE_LOCAL;
-        barrier = row->opcode == IR_OPCODE_INLINE_ASSEMBLY || row->opcode == IR_OPCODE_INDIRECT_BRANCH ||
-                  row->opcode == IR_OPCODE_LABEL_ADDRESS || row->opcode == IR_OPCODE_STACK_ALLOCATE ||
-                  row->opcode == IR_OPCODE_STACK_SAVE || row->opcode == IR_OPCODE_STACK_RESTORE ||
-                  (row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(program, row));
+        for (u32 local = 0; local < function->local_count; local += 1)
+        {
+            IrValueId place = function->local_places[local];
+            if (place.value < function->value_count)
+            {
+                IrInstructionId definition = function->values[place.value].definition;
+                if (definition.value < function->instruction_count)
+                {
+                    IrInstruction* row = function->instructions + definition.value;
+                    local_count += row->opcode == IR_OPCODE_LOCAL && row->result.value == place.value &&
+                                   row->canonical_local.value == local;
+                }
+            }
+        }
+        u64 unconditional_barriers = IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH) |
+                                     IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) |
+                                     IR_OPCODE_BIT(IR_OPCODE_STACK_SAVE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE);
+        barrier |= ir_function_may_contain_opcodes(function, unconditional_barriers);
+    }
+    else
+    {
+        bool may_have_locals = ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL));
+        for (u32 index = 0; may_have_locals && index < function->instruction_count && !barrier; index += 1)
+        {
+            IrInstruction* row = function->instructions + index;
+            local_count += row->opcode == IR_OPCODE_LOCAL;
+            barrier = row->opcode == IR_OPCODE_INLINE_ASSEMBLY || row->opcode == IR_OPCODE_INDIRECT_BRANCH ||
+                      row->opcode == IR_OPCODE_LABEL_ADDRESS || row->opcode == IR_OPCODE_STACK_ALLOCATE ||
+                      row->opcode == IR_OPCODE_STACK_SAVE || row->opcode == IR_OPCODE_STACK_RESTORE ||
+                      (row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(program, row));
+        }
     }
     if (barrier)
     {
@@ -735,28 +758,82 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
             replacements[value] = value;
         }
         u32 local_index = 0;
-        for (u32 index = 0; index < function->instruction_count; index += 1)
+        if (sparse_locals)
         {
-            IrInstruction* row = function->instructions + index;
-            if (row->opcode == IR_OPCODE_LOCAL)
+            // Collect from the producer-owned local projection, then restore
+            // definition-row order so promotion and parameter insertion remain
+            // byte-for-byte deterministic with the old row scan.
+            for (u32 local = 0; local < function->local_count; local += 1)
             {
-                IrValue* value = function->values + row->result.value;
-                locals[local_index] = (IrPromoteLocal){
-                    .value = row->result.value, .first = IR_PROMOTE_NONE, .last = IR_PROMOTE_NONE,
-                    .eligible = value->category == IR_VALUE_PLACE && !value->is_volatile && !row->volatile_access &&
-                                row->operand_count == 0 && ir_local_type_promotable(program, row->canonical_type),
-                };
-                local_by_value[row->result.value] = local_index++;
+                IrValueId place = function->local_places[local];
+                if (place.value >= old_value_count)
+                {
+                    continue;
+                }
+                IrInstructionId definition = function->values[place.value].definition;
+                if (definition.value >= function->instruction_count)
+                {
+                    continue;
+                }
+                IrInstruction* row = function->instructions + definition.value;
+                if (row->opcode == IR_OPCODE_LOCAL && row->result.value == place.value && row->canonical_local.value == local)
+                {
+                    locals[local_index++].value = place.value;
+                }
+            }
+            for (u32 index = 1; index < local_index; index += 1)
+            {
+                IrPromoteLocal key = locals[index];
+                u32 cursor = index;
+                while (cursor && function->values[locals[cursor - 1].value].definition.value > function->values[key.value].definition.value)
+                {
+                    locals[cursor] = locals[cursor - 1];
+                    cursor -= 1;
+                }
+                locals[cursor] = key;
+            }
+            BUSTER_CHECK(local_index == local_count);
+            for (u32 index = 0; index < local_index; index += 1)
+            {
+                u32 value_index = locals[index].value;
+                IrInstruction* row = function->instructions + function->values[value_index].definition.value;
+                IrValue* value = function->values + value_index;
+                locals[index].first = IR_PROMOTE_NONE;
+                locals[index].last = IR_PROMOTE_NONE;
+                locals[index].eligible = value->category == IR_VALUE_PLACE && !value->is_volatile && !row->volatile_access &&
+                                         row->operand_count == 0 && ir_local_type_promotable(program, row->canonical_type);
+                local_by_value[value_index] = index;
             }
         }
-        statistics->candidate_locals += local_count;
-        u32 event_count = 0;
-        for (u32 block = 0; block < function->block_count; block += 1)
+        else
         {
-            IrBlock* source = function->blocks + block;
-            for (u32 index = source->first_instruction.value; index != IR_PROMOTE_NONE; index = function->instructions[index].next.value)
+            for (u32 index = 0; index < function->instruction_count; index += 1)
             {
                 IrInstruction* row = function->instructions + index;
+                if (row->opcode == IR_OPCODE_LOCAL)
+                {
+                    IrValue* value = function->values + row->result.value;
+                    locals[local_index] = (IrPromoteLocal){
+                        .value = row->result.value, .first = IR_PROMOTE_NONE, .last = IR_PROMOTE_NONE,
+                        .eligible = value->category == IR_VALUE_PLACE && !value->is_volatile && !row->volatile_access &&
+                                    row->operand_count == 0 && ir_local_type_promotable(program, row->canonical_type),
+                    };
+                    local_by_value[row->result.value] = local_index++;
+                }
+            }
+        }
+        // Calls need semantic qualification, unlike unconditional barriers.
+        // Reuse the required operand/event walk and finish that proof before
+        // any local can be promoted instead of adding a discovery row scan.
+        bool inspect_calls = sparse_locals && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_CALL));
+        u32 event_count = 0;
+        for (u32 block = 0; block < function->block_count && !barrier; block += 1)
+        {
+            IrBlock* source = function->blocks + block;
+            for (u32 index = source->first_instruction.value; index != IR_PROMOTE_NONE && !barrier; index = function->instructions[index].next.value)
+            {
+                IrInstruction* row = function->instructions + index;
+                barrier = inspect_calls && row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(program, row);
                 u32 owner = row->opcode == IR_OPCODE_LOCAL ? local_by_value[row->result.value] : IR_PROMOTE_NONE;
                 for (u32 operand = 0; operand < row->operand_count; operand += 1)
                 {
@@ -792,7 +869,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                     local->last = event_count++;
                 }
             }
-            for (IrBlockParameter* parameter = source->first_parameter; parameter; parameter = parameter->next)
+            for (IrBlockParameter* parameter = source->first_parameter; parameter && !barrier; parameter = parameter->next)
             {
                 for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
                 {
@@ -804,6 +881,14 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                 }
             }
         }
+        if (barrier)
+        {
+            statistics->barrier_functions += 1;
+        }
+        else
+        {
+            statistics->candidate_locals += local_count;
+        }
         IrPromoteCfg cfg = {0};
         bool cfg_built = false;
         bool cfg_valid = false;
@@ -814,7 +899,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
         u32* entries = 0;
         u32* exits = 0;
         u64 promoted_before = statistics->promoted_locals;
-        for (u32 index = 0; index < local_count; index += 1)
+        for (u32 index = 0; index < local_count && !barrier; index += 1)
         {
             IrPromoteLocal* local = locals + index;
             if (local->eligible)
