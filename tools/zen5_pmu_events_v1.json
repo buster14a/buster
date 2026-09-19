@@ -1,0 +1,244 @@
+{
+  "schema": "buster-zen5-pmu-events-v1",
+  "version": 1,
+  "purpose": "Diagnostic Zen 5 counter qualification only; never ordinary timing acceptance.",
+  "cpu": {
+    "vendor_id": "AuthenticAMD",
+    "family": 26,
+    "model": 68,
+    "model_hex": "0x44",
+    "model_name": "AMD Ryzen 7 9700X 8-Core Processor",
+    "linux_perf_mapping": "amdzen5"
+  },
+  "linux_pmu_events": {
+    "revision": "518e5b794c06c0f0eb40df3e202274a66202c137",
+    "mapfile_path": "tools/perf/pmu-events/arch/x86/mapfile.csv",
+    "mapfile_pattern": "AuthenticAMD-26-([12467][[:xdigit:]]|[[:xdigit:]]),v1,amdzen5,core"
+  },
+  "repeats": 3,
+  "minimum_running_fraction": 0.9,
+  "groups": [
+    {
+      "id": "core-execution",
+      "description": "Architectural user-space execution counters.",
+      "events": [
+        {
+          "key": "instructions",
+          "selector": "instructions:u",
+          "output_names": ["instructions", "instructions:u"],
+          "perf_type": 0,
+          "config_hex": "0x1",
+          "scope": "user",
+          "required": true,
+          "source_path": "include/uapi/linux/perf_event.h",
+          "source_event_name": "PERF_COUNT_HW_INSTRUCTIONS",
+          "semantics": "Retired instructions. Diagnostic unless a separately powered paired counter experiment is predeclared."
+        },
+        {
+          "key": "cycles",
+          "selector": "cycles:u",
+          "output_names": ["cycles", "cycles:u"],
+          "perf_type": 0,
+          "config_hex": "0x0",
+          "scope": "user",
+          "required": true,
+          "source_path": "include/uapi/linux/perf_event.h",
+          "source_event_name": "PERF_COUNT_HW_CPU_CYCLES",
+          "semantics": "Core cycles while executing user space."
+        },
+        {
+          "key": "branches",
+          "selector": "branches:u",
+          "output_names": ["branches", "branches:u"],
+          "perf_type": 0,
+          "config_hex": "0x4",
+          "scope": "user",
+          "required": true,
+          "source_path": "include/uapi/linux/perf_event.h",
+          "source_event_name": "PERF_COUNT_HW_BRANCH_INSTRUCTIONS",
+          "semantics": "Retired branch instructions."
+        },
+        {
+          "key": "branch_misses",
+          "selector": "branch-misses:u",
+          "output_names": ["branch-misses", "branch-misses:u", "branch_misses"],
+          "perf_type": 0,
+          "config_hex": "0x5",
+          "scope": "user",
+          "required": true,
+          "source_path": "include/uapi/linux/perf_event.h",
+          "source_event_name": "PERF_COUNT_HW_BRANCH_MISSES",
+          "semantics": "Retired branch mispredictions."
+        }
+      ]
+    },
+    {
+      "id": "l2-hierarchy",
+      "description": "Zen 5 data-cache requests observed at L2; excludes L2-prefetch traffic as defined by Linux perf.",
+      "events": [
+        {
+          "key": "instructions",
+          "selector": "instructions:u",
+          "output_names": ["instructions", "instructions:u"],
+          "perf_type": 0,
+          "config_hex": "0x1",
+          "scope": "user",
+          "required": true,
+          "source_path": "include/uapi/linux/perf_event.h",
+          "source_event_name": "PERF_COUNT_HW_INSTRUCTIONS",
+          "semantics": "Retired-instruction denominator for this diagnostic replay."
+        },
+        {
+          "key": "l2_data_access",
+          "selector": "cpu/event=0x64,umask=0xf8,name=l2_data_access/u",
+          "output_names": ["l2_data_access", "l2_data_access:u"],
+          "perf_type": 4,
+          "event_code_hex": "0x64",
+          "umask_hex": "0xf8",
+          "config_hex": "0xf864",
+          "scope": "user",
+          "required": true,
+          "source_path": "tools/perf/pmu-events/arch/x86/amdzen5/l2-cache.json",
+          "source_event_name": "l2_cache_req_stat.dc_access_in_l2",
+          "semantics": "Core-to-L2 data-cache accesses, not including L2 prefetch."
+        },
+        {
+          "key": "l2_data_miss",
+          "selector": "cpu/event=0x64,umask=0x08,name=l2_data_miss/u",
+          "output_names": ["l2_data_miss", "l2_data_miss:u"],
+          "perf_type": 4,
+          "event_code_hex": "0x64",
+          "umask_hex": "0x08",
+          "config_hex": "0x864",
+          "scope": "user",
+          "required": true,
+          "source_path": "tools/perf/pmu-events/arch/x86/amdzen5/l2-cache.json",
+          "source_event_name": "l2_cache_req_stat.ls_rd_blk_c",
+          "semantics": "Core-to-L2 data-cache request misses in L2."
+        }
+      ]
+    },
+    {
+      "id": "fill-sources",
+      "description": "Zen 5 data-cache fill-source hierarchy. DRAM counts include MMIO by the hardware definition and are never called generic cache misses.",
+      "events": [
+        {
+          "key": "instructions",
+          "selector": "instructions:u",
+          "output_names": ["instructions", "instructions:u"],
+          "perf_type": 0,
+          "config_hex": "0x1",
+          "scope": "user",
+          "required": true,
+          "source_path": "include/uapi/linux/perf_event.h",
+          "source_event_name": "PERF_COUNT_HW_INSTRUCTIONS",
+          "semantics": "Retired-instruction denominator for this diagnostic replay."
+        },
+        {
+          "key": "fills_all",
+          "selector": "cpu/event=0x44,umask=0xff,name=fills_all/u",
+          "output_names": ["fills_all", "fills_all:u"],
+          "perf_type": 4,
+          "event_code_hex": "0x44",
+          "umask_hex": "0xff",
+          "config_hex": "0xff44",
+          "scope": "user",
+          "required": true,
+          "source_path": "tools/perf/pmu-events/arch/x86/amdzen5/load-store.json",
+          "source_event_name": "ls_any_fills_from_sys.all",
+          "semantics": "Any data-cache fill from every defined source."
+        },
+        {
+          "key": "fills_local_l2",
+          "selector": "cpu/event=0x44,umask=0x01,name=fills_local_l2/u",
+          "output_names": ["fills_local_l2", "fills_local_l2:u"],
+          "perf_type": 4,
+          "event_code_hex": "0x44",
+          "umask_hex": "0x01",
+          "config_hex": "0x144",
+          "scope": "user",
+          "required": true,
+          "source_path": "tools/perf/pmu-events/arch/x86/amdzen5/load-store.json",
+          "source_event_name": "ls_any_fills_from_sys.local_l2",
+          "semantics": "Any data-cache fill from the local L2."
+        },
+        {
+          "key": "fills_dram_io_all",
+          "selector": "cpu/event=0x44,umask=0x48,name=fills_dram_io_all/u",
+          "output_names": ["fills_dram_io_all", "fills_dram_io_all:u"],
+          "perf_type": 4,
+          "event_code_hex": "0x44",
+          "umask_hex": "0x48",
+          "config_hex": "0x4844",
+          "scope": "user",
+          "required": true,
+          "source_path": "tools/perf/pmu-events/arch/x86/amdzen5/load-store.json",
+          "source_event_name": "ls_any_fills_from_sys.dram_io_all",
+          "semantics": "Any data-cache fill from DRAM or MMIO in any NUMA node."
+        }
+      ]
+    },
+    {
+      "id": "data-tlb",
+      "description": "Zen 5 L1 data-TLB misses and the subset that requests page-table walks.",
+      "events": [
+        {
+          "key": "instructions",
+          "selector": "instructions:u",
+          "output_names": ["instructions", "instructions:u"],
+          "perf_type": 0,
+          "config_hex": "0x1",
+          "scope": "user",
+          "required": true,
+          "source_path": "include/uapi/linux/perf_event.h",
+          "source_event_name": "PERF_COUNT_HW_INSTRUCTIONS",
+          "semantics": "Retired-instruction denominator for this diagnostic replay."
+        },
+        {
+          "key": "l1_dtlb_miss_all",
+          "selector": "cpu/event=0x45,umask=0xff,name=l1_dtlb_miss_all/u",
+          "output_names": ["l1_dtlb_miss_all", "l1_dtlb_miss_all:u"],
+          "perf_type": 4,
+          "event_code_hex": "0x45",
+          "umask_hex": "0xff",
+          "config_hex": "0xff45",
+          "scope": "user",
+          "required": true,
+          "source_path": "tools/perf/pmu-events/arch/x86/amdzen5/load-store.json",
+          "source_event_name": "ls_l1_d_tlb_miss.all",
+          "semantics": "L1 data-TLB misses for all page sizes."
+        },
+        {
+          "key": "l1_dtlb_miss_l2_miss",
+          "selector": "cpu/event=0x45,umask=0xf0,name=l1_dtlb_miss_l2_miss/u",
+          "output_names": ["l1_dtlb_miss_l2_miss", "l1_dtlb_miss_l2_miss:u"],
+          "perf_type": 4,
+          "event_code_hex": "0x45",
+          "umask_hex": "0xf0",
+          "config_hex": "0xf045",
+          "scope": "user",
+          "required": true,
+          "source_path": "tools/perf/pmu-events/arch/x86/amdzen5/load-store.json",
+          "source_event_name": "ls_l1_d_tlb_miss.all_l2_miss",
+          "semantics": "L1 data-TLB misses that also miss L2 TLB and request a page-table walk."
+        }
+      ]
+    }
+  ],
+  "optional_attribution": [
+    {
+      "id": "ibs_op",
+      "sysfs_pmu": "ibs_op",
+      "required": false,
+      "scope": "kernel-policy-dependent sampling",
+      "semantics": "Optional IBS operation attribution; never collected inside ordinary timing trials."
+    },
+    {
+      "id": "ibs_fetch",
+      "sysfs_pmu": "ibs_fetch",
+      "required": false,
+      "scope": "kernel-policy-dependent sampling",
+      "semantics": "Optional IBS fetch attribution; never collected inside ordinary timing trials."
+    }
+  ]
+}

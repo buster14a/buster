@@ -848,6 +848,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_contents(UnitTestArguments*
         String8 artifact_only[] = {names[0]};
         BUSTER_TEST(arguments, file_test_entries_are(arena, directory, artifact_only, 1, 0));
 
+        // A reader opened before replacement keeps the old object; a new
+        // reader sees the complete new object. This makes Windows open-handle
+        // replacement deterministic instead of depending on race timing.
+        OsFileOpenResult held = os_file_open_checked(artifact, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1, .write = 1});
+        if (BUSTER_REQUIRE(arguments, held.file != 0))
+        {
+            BUSTER_TEST(arguments, file_publish(artifact, old_content));
+            BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, old_content));
+            u8 held_bytes[sizeof(new_bytes)];
+            OsFileReadResult held_read = os_file_read_exact(held.file, (ByteSlice){held_bytes, sizeof(held_bytes)});
+            BUSTER_TEST(arguments, held_read.status == OS_FILE_READ_OK && held_read.transferred == sizeof(held_bytes) &&
+                                     memory_compare(held_bytes, new_bytes, sizeof(new_bytes)));
+            BUSTER_TEST(arguments, os_file_close(held.file));
+        }
+
         // Empty and repeated publications leave one complete destination.
         BUSTER_TEST(arguments, file_publish(artifact, (ByteSlice){0}));
         BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, (ByteSlice){0}));

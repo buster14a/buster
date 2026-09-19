@@ -10,6 +10,7 @@ substitute for inspecting the current implementation and fixtures.
 | Area | Guide |
 |---|---|
 | Pipeline, ownership, diagnostics, canonical IR, expression places and qualifiers | [Foundations](frontend/foundations.md) |
+| Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
 | Relocations, weak/alias symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
 | Atomic layout, argument classification, loads/stores, conversions | [Atomics](frontend/atomics.md) |

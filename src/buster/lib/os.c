@@ -2419,12 +2419,39 @@ OsError os_file_replace(String8 path, String8 destination)
 #elif defined(_WIN32)
         TemporalArena scratch = scratch_begin(0, 0);
         String16 path_w = string16_from_string8(scratch.arena, path, true);
-        String16 destination_w = string16_from_string8(scratch.arena, destination, true);
-        // No MOVEFILE_COPY_ALLOWED: a cross-volume copy and delete is neither
-        // atomic nor a rename.
-        if (!MoveFileExW(path_w.pointer, destination_w.pointer, MOVEFILE_REPLACE_EXISTING))
+        String8 absolute_destination = os_path_absolute_lexical(scratch.arena, destination, true);
+        String16 destination_w = string16_from_string8(scratch.arena, absolute_destination, true);
+        u64 rename_bytes = sizeof(FILE_RENAME_INFO) + destination_w.length * sizeof(WindowsChar);
+        if (!absolute_destination.length || rename_bytes > UINT32_MAX)
         {
-            result = os_get_last_error();
+            result = os_file_invalid_error();
+        }
+        else
+        {
+            HANDLE handle = CreateFileW(path_w.pointer, DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        0, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, 0);
+            if (handle == INVALID_HANDLE_VALUE)
+            {
+                result = os_get_last_error();
+            }
+            else
+            {
+                FILE_RENAME_INFO* rename_info = (FILE_RENAME_INFO*)arena_allocate(scratch.arena, u8, rename_bytes);
+                memset(rename_info, 0, (size_t)rename_bytes);
+                rename_info->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+                rename_info->FileNameLength = (DWORD)(destination_w.length * sizeof(WindowsChar));
+                memcpy(rename_info->FileName, destination_w.pointer, rename_info->FileNameLength);
+                // Existing readers retain the old object while new opens see
+                // the replacement. MoveFileExW alone cannot provide this when
+                // a destination handle is still open, even with delete sharing.
+                if (!SetFileInformationByHandle(handle, FileRenameInfoEx, rename_info, (DWORD)rename_bytes))
+                {
+                    result = os_get_last_error();
+                }
+                // A completed rename cannot be reported as unpublished because
+                // of closing this private, attribute-free handle.
+                CloseHandle(handle);
+            }
         }
         scratch_end(scratch);
 #else
