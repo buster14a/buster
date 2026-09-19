@@ -1,0 +1,58 @@
+name: issue-847-run
+
+on:
+  push:
+    branches:
+      - codex/847-retirement-harness
+    paths:
+      - .github/workflows/issue-847-run.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --detach FETCH_HEAD
+
+      - name: Apply the retirement harness migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/issue-847-apply.py
+          git fetch --no-tags origin refs/pull/522/head
+          git checkout FETCH_HEAD -- \
+            src/buster/tests/compiler/codegen/aarch64_stride_test.c \
+            src/buster/tests/compiler/codegen/canonical_entry_test_internal.h
+          git diff --check
+
+      - name: Validate the focused suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-fast
+
+      - name: Publish the tested source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'OpenAI Codex'
+          git config user.email 'noreply@openai.com'
+          git add \
+            src/buster/tests/compiler/codegen/codegen_test.c \
+            src/buster/tests/compiler/codegen/aarch64_stride_test.c \
+            src/buster/tests/compiler/codegen/canonical_entry_test_internal.h \
+            src/buster/tests/compiler/driver/driver_test.c
+          git commit -m 'test(codegen): migrate retirement harness contracts'
+          git push origin HEAD:codex/847-retirement-harness
