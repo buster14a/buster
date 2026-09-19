@@ -4896,6 +4896,7 @@ struct CIrSsaEvent
 struct CIrDirectSsa
 {
     CIrSsaSlot* slots;
+    u32* slot_indices;
     CIrSsaRead* reads;
     CIrSsaEvent* events;
     CIrSsaLocal* locals;
@@ -5017,26 +5018,29 @@ BUSTER_C_INTERNAL void c_ir_ssa_grow_slots(CIntegerIrBuilder* builder)
     u32 capacity = ssa->slot_capacity ? ssa->slot_capacity * 2 : 64;
     IR_CONSTRUCTION_RECORD(SSA_SLOT_GROWS, 1);
     CIrSsaSlot* slots = arena_allocate(builder->scratch_arena, CIrSsaSlot, capacity);
+    u32* slot_indices = arena_allocate(builder->scratch_arena, u32, capacity / 2);
     memset(slots, 0, sizeof(*slots) * capacity);
     IR_CONSTRUCTION_RECORD(SSA_FINISH_SLOT_GROWS, ssa->predecessor_offsets != 0);
-    IR_CONSTRUCTION_RECORD(SSA_SLOT_GROW_VISITS, ssa->slot_capacity);
+    IR_CONSTRUCTION_RECORD(SSA_SLOT_GROW_VISITS, ssa->slot_count);
     IR_CONSTRUCTION_RECORD(SSA_SLOT_CLEAR_BYTES, sizeof(*slots) * (u64)capacity);
-    for (u32 index = 0; index < ssa->slot_capacity; index += 1)
+    // Rehash only occupied rows. The compact physical-slot index follows key
+    // insertion order, so growth remains deterministic without scanning the
+    // half-empty hash table.
+    for (u32 index = 0; index < ssa->slot_count; index += 1)
     {
-        CIrSsaSlot entry = ssa->slots[index];
-        if (entry.block_plus_one)
+        CIrSsaSlot entry = ssa->slots[ssa->slot_indices[index]];
+        u32 slot = c_ir_ssa_hash(entry.block_plus_one, entry.local, capacity - 1);
+        IR_CONSTRUCTION_RECORD(SSA_SLOT_REHASH_PROBES, 1);
+        while (slots[slot].block_plus_one)
         {
-            u32 slot = c_ir_ssa_hash(entry.block_plus_one, entry.local, capacity - 1);
             IR_CONSTRUCTION_RECORD(SSA_SLOT_REHASH_PROBES, 1);
-            while (slots[slot].block_plus_one)
-            {
-                IR_CONSTRUCTION_RECORD(SSA_SLOT_REHASH_PROBES, 1);
-                slot = (slot + 1) & (capacity - 1);
-            }
-            slots[slot] = entry;
+            slot = (slot + 1) & (capacity - 1);
         }
+        slots[slot] = entry;
+        slot_indices[index] = slot;
     }
     ssa->slots = slots;
+    ssa->slot_indices = slot_indices;
     ssa->slot_capacity = capacity;
 }
 
@@ -5076,7 +5080,7 @@ BUSTER_C_INTERNAL CIrSsaSlot* c_ir_ssa_slot(CIntegerIrBuilder* builder, u32 bloc
             }
         }
         ssa->slots[slot] = (CIrSsaSlot){.block_plus_one = block + 1, .local = local, .value = IR_VALUE_ID_INVALID};
-        ssa->slot_count += 1;
+        ssa->slot_indices[ssa->slot_count++] = slot;
         IR_CONSTRUCTION_RECORD(SSA_SLOT_INSERTS, 1);
     }
     return ssa->slots + slot;
