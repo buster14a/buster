@@ -14,6 +14,10 @@ DISPATCH = WORKFLOWS / "9700x-service-dispatch.yml"
 POLICY = WORKFLOWS / "bench-service-policy.yml"
 EXCLUSIVE_TEST = SERVICE / "exclusive_admission_test.c"
 OLD_AUDIT = WORKFLOWS / "zen5-audit.yml"
+TRANSIENT_REPAIR = WORKFLOWS / "pr843-doc-fix.yml"
+ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
+BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
+DEPLOYMENT = SERVICE / "deploy" / "VALIDATE_BUSTER_V1.md"
 
 SOURCE_REQUIREMENTS = {
     "exclusive_admission.c": (
@@ -35,11 +39,48 @@ SOURCE_REQUIREMENTS = {
     ),
 }
 
+DOCUMENTATION_REQUIREMENTS = {
+    ACTIONLINT: (
+        ".github/workflows/9700x-service-dispatch.yml",
+        "only by the fixed service dispatch workflow",
+    ),
+    BENCHMARKING: (
+        "The dedicated Ryzen 7 9700X is no longer a general GitHub Actions",
+        ".github/workflows/9700x-service-dispatch.yml",
+        "native-retirement-performance-v1` remains blocked",
+    ),
+    DEPLOYMENT: (
+        ".github/workflows/9700x-service-dispatch.yml` is the reviewed smoke",
+        "The retired audit workflow must not be restored",
+        "BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true",
+    ),
+}
+
 
 def main() -> int:
     errors: list[str] = []
     if OLD_AUDIT.exists():
         errors.append("zen5-audit.yml still permits checked-out code on the benchmark host")
+    if TRANSIENT_REPAIR.exists():
+        errors.append("transient PR repair workflow remains in the repository tree")
+
+    for path, markers in DOCUMENTATION_REQUIREMENTS.items():
+        if not path.is_file():
+            errors.append(f"missing benchmark policy document: {path.relative_to(ROOT)}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        for marker in markers:
+            if marker not in text:
+                errors.append(f"{path.relative_to(ROOT)} is missing policy marker: {marker}")
+
+    if BENCHMARKING.is_file():
+        text = BENCHMARKING.read_text(encoding="utf-8")
+        if "gh workflow run zen5-audit.yml" in text:
+            errors.append("benchmarking guide still instructs operators to run retired zen5-audit.yml")
+    if DEPLOYMENT.is_file():
+        text = DEPLOYMENT.read_text(encoding="utf-8")
+        if "There is no admitted smoke dispatch workflow" in text:
+            errors.append("deployment guide still claims the fixed smoke workflow is missing")
 
     if not POLICY.is_file():
         errors.append("missing bench-service-policy.yml")
