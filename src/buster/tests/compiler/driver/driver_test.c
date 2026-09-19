@@ -1509,8 +1509,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
             BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source)));
             String8 syntax_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-fsyntax-only"), input};
             String8 object_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-c"), S8("-o"), output, input};
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters ir_before = ir_construction_counters();
+#endif
             CompilerDriverResult syntax = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters ir_after = ir_construction_counters();
+            BUSTER_TEST(arguments, !ir_before.overflowed && !ir_after.overflowed);
+            for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
+            {
+                BUSTER_TEST(arguments, ir_before.values[counter] == ir_after.values[counter]);
+            }
+#endif
             CompilerDriverResult object = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
             BUSTER_TEST(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[index].valid);
