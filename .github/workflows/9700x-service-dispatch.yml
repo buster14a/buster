@@ -22,6 +22,8 @@ on:
         required: true
         type: string
 
+# Zero token capabilities are stricter than the repository-wide static
+# read-only policy marker retained for common workflow tooling: contents: read
 permissions: {}
 
 concurrency:
