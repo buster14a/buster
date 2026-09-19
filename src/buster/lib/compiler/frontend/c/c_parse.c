@@ -16900,8 +16900,9 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
     }
 }
 
-BUSTER_C_INTERNAL void c_parse_validate_generic_duplicates(Arena* arena, CParseResult* result, CPreprocessResult preprocess,
-                                                             CDeclaration const* declaration, CParseLoweringConstraintDiagnostic* diagnostic)
+BUSTER_C_INTERNAL void c_parse_validate_generic_duplicates(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+                                                             CPreprocessResult preprocess, CDeclaration const* declaration,
+                                                             CParseLoweringConstraintDiagnostic* diagnostic)
 {
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
@@ -16937,11 +16938,22 @@ BUSTER_C_INTERNAL void c_parse_validate_generic_duplicates(Arena* arena, CParseR
         {
             continue;
         }
+
+        CScopeId generic_scope = c_parse_scope_for_token(result, declaration->scope, generic);
+        u64 scratch_mark = machine->scratch_arena->position;
+        CTypeId controller_type = C_TYPE_ID_INVALID;
+        bool controller_resolved = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, generic_scope, generic + 2,
+                                                                 controller_end, &controller_type);
+        arena_set_position(machine->scratch_arena, scratch_mark);
+
         u64 mark = arena->position;
         CTypeId* association_types = arena_allocate(arena, CTypeId, close - controller_end + 1);
         u32 association_type_count = 0;
+        u32 match_count = 0;
+        u32 default_count = 0;
+        bool generic_valid = true;
         u32 association_start = controller_end + 1;
-        while (association_start < close)
+        while (association_start < close && generic_valid)
         {
             u32 colon = UINT32_MAX;
             u32 association_end = close;
@@ -16964,9 +16976,26 @@ BUSTER_C_INTERNAL void c_parse_validate_generic_duplicates(Arena* arena, CParseR
                     break;
                 }
             }
+            if (colon == UINT32_MAX || colon == association_start || colon + 1 >= association_end)
+            {
+                c_parse_lowering_constraint_consider(diagnostic, S8("expected 'type-name: expression' or 'default: expression' in _Generic association"),
+                                                     association_start, association_start);
+                generic_valid = false;
+                continue;
+            }
             bool is_default = colon == association_start + 1 && preprocess.tokens[association_start].kind == C_TOKEN_IDENTIFIER &&
                               string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[association_start]), S8("default"));
-            if (colon > association_start && colon < association_end && !is_default)
+            if (is_default)
+            {
+                default_count += 1;
+                if (default_count > 1)
+                {
+                    c_parse_lowering_constraint_consider(diagnostic, S8("_Generic selection has more than one default association"),
+                                                         association_start, association_start);
+                    generic_valid = false;
+                }
+            }
+            else
             {
                 CScopeId scope = c_parse_scope_for_token(result, declaration->scope, association_start);
                 u32 type_index = association_start;
@@ -16978,16 +17007,36 @@ BUSTER_C_INTERNAL void c_parse_validate_generic_duplicates(Arena* arena, CParseR
                 }
                 if (type.value < result->type_count && type_index == colon)
                 {
-                    for (u32 previous = 0; previous < association_type_count; previous += 1)
+                    CTypeKind kind = result->types[type.value].kind;
+                    u64 layout_mark = machine->scratch_arena->position;
+                    u64 size = 0;
+                    u32 alignment = 0;
+                    bool complete_object = kind != C_TYPE_VOID && kind != C_TYPE_FUNCTION &&
+                                           c_parse_type_layout(machine, machine->scratch_arena, preprocess, result, type, &size, &alignment);
+                    arena_set_position(machine->scratch_arena, layout_mark);
+                    BUSTER_UNUSED(size);
+                    BUSTER_UNUSED(alignment);
+                    if (!complete_object)
+                    {
+                        c_parse_lowering_constraint_consider(diagnostic, S8("_Generic association requires a complete object type"),
+                                                             association_start, association_start);
+                        generic_valid = false;
+                    }
+                    for (u32 previous = 0; generic_valid && previous < association_type_count; previous += 1)
                     {
                         if (c_parse_types_compatible(arena, result, preprocess, association_types[previous], type))
                         {
                             c_parse_lowering_constraint_consider(diagnostic, S8("_Generic selection has multiple compatible type associations"),
                                                                  association_start, association_start);
-                            break;
+                            generic_valid = false;
                         }
                     }
-                    association_types[association_type_count++] = type;
+                    if (generic_valid)
+                    {
+                        association_types[association_type_count++] = type;
+                        match_count += controller_resolved && controller_type.value < result->type_count &&
+                                       c_parse_types_compatible(arena, result, preprocess, controller_type, type);
+                    }
                 }
             }
             if (association_end == close)
@@ -16995,6 +17044,11 @@ BUSTER_C_INTERNAL void c_parse_validate_generic_duplicates(Arena* arena, CParseR
                 break;
             }
             association_start = association_end + 1;
+        }
+        if (generic_valid && controller_resolved && !match_count && !default_count)
+        {
+            c_parse_lowering_constraint_consider(
+                diagnostic, S8("_Generic controlling type is not compatible with any association and no default was provided"), generic, generic);
         }
         arena_set_position(arena, mark);
     }
@@ -17168,7 +17222,7 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
         c_parse_validate_const_assignments(result, preprocess, declaration, &diagnostic);
         c_parse_validate_return_statements(result, preprocess, declaration, &diagnostic);
         c_parse_validate_vla_declarations(machine, result, preprocess, declaration_index, &diagnostic);
-        c_parse_validate_generic_duplicates(arena, result, preprocess, declaration, &diagnostic);
+        c_parse_validate_generic_duplicates(machine, arena, result, preprocess, declaration, &diagnostic);
         c_parse_validate_switch_duplicates(machine, result, preprocess, declaration, &diagnostic);
         if (diagnostic.message.length)
         {
