@@ -2574,14 +2574,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
     // serve as this complete mixed-ABI observer.
     bool configured_clang = string_first_sequence(S8(BUSTER_HOST_C_COMPILER_ID), S8("Clang")) < S8(BUSTER_HOST_C_COMPILER_ID).length;
     String8 host_compiler = configured_clang ? S8(BUSTER_HOST_C_COMPILER) : executable_resolve_in_path(arguments->arena, S8("clang"));
-    BUSTER_TEST(arguments, host_compiler.length != 0);
-    String8 host_objects[4];
-    bool host_compiled[4];
+    bool host_observer_available = host_compiler.length != 0;
+    if (!host_observer_available)
+    {
+        arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_OBSERVER status=skipped reason=missing-clang\n"));
+    }
+    String8 host_objects[4] = {0};
+    bool host_compiled[4] = {0};
     String8 host_sources[] = {S8("tests/host_frame_vectors.c"), S8("tests/host_vector_joins.c"), S8("tests/host_signbit_images.c"), S8("tests/host_vector_arithmetic.c")};
     for (u32 observer = 0; observer < BUSTER_ARRAY_LENGTH(host_sources); observer += 1)
     {
         host_objects[observer] = buster_test_temporary_path(arguments->arena,
             observer == 3 ? S8("buster-vector-arithmetic-host") : observer == 2 ? S8("buster-signbit-host") : observer ? S8("buster-vector-join-host") : S8("buster-frame-vector-host"), S8(".o"));
+        if (!host_observer_available)
+        {
+            continue;
+        }
         String8 host_command[12];
         u32 host_count = 0;
         host_command[host_count++] = host_compiler;
@@ -2594,7 +2602,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         host_command[host_count++] = host_objects[observer];
         ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
             (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
-        host_compiled[observer] = host_spawn.handle && os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+        if (!host_spawn.handle)
+        {
+            host_observer_available = false;
+            arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_OBSERVER status=skipped reason=missing-clang\n"));
+            continue;
+        }
+        host_compiled[observer] = os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, host_compiled[observer]);
     }
 #endif
@@ -2627,21 +2641,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             bool x86_quad_control = fixture == 6 &&
                                 invocation.target.cpu_arch == CPU_ARCH_X86_64 &&
                                 layout.long_double_type.bit_width == 128;
-                            // The archived direct implementation cannot load a
-                            // binary128 value through a pointer. Retain that
-                            // failed control; it is not the semantic oracle.
-                            bool direct_quad_control = fixture == 6 && mode == 0 &&
+                            // During the MIR-only transition, the archived
+                            // `none` path may still report its structured load
+                            // gap while the MIR alias succeeds. Validate either
+                            // semantic outcome without accepting an unattributed
+                            // failure or restoring fallback.
+                            bool aarch64_quad_transition = fixture == 6 && mode == 0 &&
                                 invocation.target.cpu_arch == CPU_ARCH_AARCH64 &&
                                 layout.long_double_type.bit_width == 128;
-                            bool explicit_x86_unsupported = compiled.error == COMPILER_DRIVER_ERROR_CODEGEN &&
-                                compiled.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !compiled.has_object &&
-                                string_first_sequence(compiled.diagnostic, S8("kind=codegen.unsupported-instruction")) < compiled.diagnostic.length &&
-                                string_first_sequence(compiled.diagnostic, S8("opcode=load")) < compiled.diagnostic.length &&
-                                string_first_sequence(compiled.diagnostic, targets[target]) < compiled.diagnostic.length;
+                            CompilerDiagnostic* quad_diagnostic = compiled.diagnostic_count == 1 ? compiled.diagnostics : 0;
+                            bool explicit_quad_unsupported = compiled.error == COMPILER_DRIVER_ERROR_CODEGEN &&
+                                compiled.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !compiled.has_object && quad_diagnostic &&
+                                string_equal(quad_diagnostic->code, S8("codegen.unsupported-instruction")) &&
+                                quad_diagnostic->primary.has_range && quad_diagnostic->backend &&
+                                string_equal(quad_diagnostic->backend->target, targets[target]) &&
+                                string_equal(quad_diagnostic->backend->function, S8("signbit_image_long_double")) &&
+                                string_equal(quad_diagnostic->backend->opcode, S8("load"));
+                            bool supported_quad = compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
+                                compiled.codegen_statistics.function_count == function_counts[fixture] &&
+                                compiled.codegen_statistics.fallback_function_count == 0;
                             BUSTER_TEST_RAW(arguments, x86_quad_control
-                                ? explicit_x86_unsupported
-                                : direct_quad_control
-                                ? compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object
+                                ? explicit_quad_unsupported
+                                : aarch64_quad_transition
+                                ? explicit_quad_unsupported || supported_quad
                                 : compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
                             if (x86_quad_control)
                             {
@@ -2654,7 +2676,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                     supported.codegen_statistics.function_count == 2 &&
                                     supported.codegen_statistics.fallback_function_count == 0, description);
                             }
-                            else
+                            else if (!aarch64_quad_transition || supported_quad)
                             {
                                 BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count == function_counts[fixture] &&
                                     compiled.codegen_statistics.fallback_function_count == 0, description);
@@ -2667,8 +2689,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                             bool executable_cpu = cpu == 0 || (fixture >= 7 &&
                                 (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
                                           : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE)));
-                            if (native_target && executable_cpu && fixture != 3 && compiled.error == COMPILER_DRIVER_ERROR_NONE &&
-                                (observer == UINT32_MAX || host_compiled[observer]))
+                            if (host_observer_available && native_target && executable_cpu && fixture != 3 &&
+                                compiled.error == COMPILER_DRIVER_ERROR_NONE && (observer == UINT32_MAX || host_compiled[observer]))
                             {
                                 native_frame_run_count += 1;
                                 ByteSlice object_bytes = file_read(temporary.arena, object, (FileReadOptions){0});
@@ -4381,10 +4403,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
         BUSTER_TEST(arguments, file_write(output, sentinel));
         String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-unknown-windows"), modes[mode],
                              S8("-fno-machine-fallback"), S8("-o"), output, S8("tests/basic_c_asm_literal_register.c")};
-        CompilerDriverResult invalid = compiler_driver_execute_invocation(temporary.arena,
-            compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-        BUSTER_TEST(arguments, invalid.error != COMPILER_DRIVER_ERROR_NONE && !invalid.has_object);
-        BUSTER_TEST(arguments, string_first_sequence(invalid.diagnostic, S8("literal register")) < invalid.diagnostic.length);
+        CompilerDriverInvocation invalid_invocation = compiler_driver_parse_arguments(
+            temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult invalid = compiler_driver_execute_invocation(temporary.arena, invalid_invocation);
+        CompilerDiagnostic* invalid_diagnostic = invalid.diagnostic_count == 1 ? invalid.diagnostics : 0;
+        BUSTER_TEST(arguments, invalid.error == COMPILER_DRIVER_ERROR_CODEGEN &&
+            invalid.codegen_error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION && !invalid.has_object);
+        BUSTER_TEST(arguments, invalid_diagnostic && string_equal(invalid_diagnostic->code, S8("codegen.unsupported-instruction")) &&
+            invalid_diagnostic->primary.has_range && invalid_diagnostic->backend &&
+            string_equal(invalid_diagnostic->backend->target, S8("x86_64-windows")) &&
+            string_equal(invalid_diagnostic->backend->allocator,
+                codegen_register_allocator_mode_string((CodegenRegisterAllocatorMode)invalid_invocation.register_allocator)) &&
+            string_equal(invalid_diagnostic->backend->function, S8("main")) &&
+            string_equal(invalid_diagnostic->backend->opcode, S8("inline-assembly")) &&
+            string_equal(invalid_diagnostic->backend->operation, S8("not-applicable")));
         ByteSlice after = file_read(temporary.arena, output, (FileReadOptions){0});
         BUSTER_TEST(arguments, after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
         scratch_end(temporary);

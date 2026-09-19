@@ -271,8 +271,10 @@ struct CodegenTestX64Instruction
     bool rsp_change;
     bool add_rsp;
     bool lea_rsp_frame;
+    bool rbp_memory;
     s32 rsp_adjust;
     s32 lea_rsp_displacement;
+    s32 rbp_displacement;
     bool stack_store;
 };
 
@@ -550,6 +552,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_test_x64_decode_instruction(ByteSlice code, u64
             return false;
         }
         cursor += modrm.length;
+        result->rbp_memory = modrm.memory && modrm.base == 5 && modrm.mod != 0;
+        result->rbp_displacement = modrm.displacement;
         if (modrm.rsp_memory && modrm.displacement < 0)
         {
             return false;
@@ -691,57 +695,109 @@ CodegenTestX64BodyScan codegen_test_x64_scan_body(ByteSlice code, u64 start, u64
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL u32 codegen_test_x64_vector_frame_lea_count(ByteSlice code, bool dynamic_frame, bool* displacements_valid)
+typedef struct CodegenTestX64FrameScan CodegenTestX64FrameScan;
+struct CodegenTestX64FrameScan
 {
-    u32 result = 0;
-    bool valid = true;
-    if (!displacements_valid)
+    u32 local_reference_count;
+    bool valid;
+};
+
+// Frame slots are a semantic property; the particular scratch register used
+// to form their address belongs to the selected lowering and allocator.
+BUSTER_GLOBAL_LOCAL CodegenTestX64FrameScan codegen_test_x64_scan_frame_references(ByteSlice code, u64 start, u64 end, u32 allocation,
+                                                                                   bool frame_pointer_at_bottom)
+{
+    CodegenTestX64FrameScan result = {.valid = start <= end && end <= code.length && allocation != 0};
+    for (u64 offset = start; result.valid && offset < end;)
     {
-        return 0;
-    }
-    for (u64 byte_index = 0; byte_index + 3 <= code.length; byte_index += 1)
-    {
-        // The canonical vector path uses REX.WRX (4c) LEA into r8/r9/r10
-        // from rbp. Accept either ModRM displacement width: the metadata
-        // emitter is allowed to use disp8 when the frame slot fits it.
-        if (code.pointer[byte_index] != 0x4c || code.pointer[byte_index + 1] != 0x8d)
+        CodegenTestX64Instruction instruction = {0};
+        if (!codegen_test_x64_decode_instruction(code, offset, end, &instruction))
         {
-            continue;
+            result.valid = false;
+            break;
         }
-        u8 modrm = code.pointer[byte_index + 2];
-        u8 mod = modrm >> 6;
-        u8 reg = (modrm >> 3) & 7;
-        if (mod == 3 || (modrm & 7) != 5 || reg > 2)
+        if (instruction.rbp_memory)
         {
-            continue;
-        }
-        s32 displacement = 0;
-        if (mod == 1)
-        {
-            if (byte_index + 4 > code.length)
+            s64 displacement = instruction.rbp_displacement;
+            if (frame_pointer_at_bottom)
             {
-                continue;
+                if (displacement < 0)
+                {
+                    result.valid = false;
+                }
+                else if ((u64)displacement < allocation)
+                {
+                    result.local_reference_count += 1;
+                }
+                // Positive references beyond the allocation are incoming
+                // arguments above a bottom-based Win64 frame.
             }
-            displacement = (s8)code.pointer[byte_index + 3];
-        }
-        else if (mod == 2)
-        {
-            if (byte_index + 7 > code.length)
+            else if (displacement < 0)
             {
-                continue;
+                u64 distance = (u64)(-displacement);
+                if (distance > allocation)
+                {
+                    result.valid = false;
+                }
+                else
+                {
+                    result.local_reference_count += 1;
+                }
             }
-            memcpy(&displacement, code.pointer + byte_index + 3, sizeof(displacement));
+            // Positive references in a top-based frame are incoming arguments.
         }
-        else
-        {
-            // ModRM mod=0/rm=5 is RIP-relative, not a frame slot.
-            continue;
-        }
-        result += 1;
-        valid &= dynamic_frame ? displacement >= 0 : displacement < 0;
+        offset += instruction.length;
     }
-    *displacements_valid = valid;
     return result;
+}
+
+// Accept either a direct `and rsp, -alignment` or a lowering that rounds a
+// temporary size and applies it with `sub rsp, register`. Both establish the
+// same ABI-visible stack alignment without prescribing register allocation.
+BUSTER_GLOBAL_LOCAL bool codegen_test_x64_has_stack_alignment(ByteSlice code, u64 start, u64 end, u32 alignment)
+{
+    if (start > end || end > code.length || !alignment || (alignment & (alignment - 1)))
+    {
+        return false;
+    }
+    bool found_mask = false;
+    bool found_application = false;
+    for (u64 offset = start; offset < end; offset += 1)
+    {
+        if (offset + 3 <= end && (code.pointer[offset] & 0xf8) == 0x48)
+        {
+            u8 opcode = code.pointer[offset + 1];
+            u8 modrm = code.pointer[offset + 2];
+            if ((opcode == 0x81 || opcode == 0x83) && (modrm >> 6) == 3 && ((modrm >> 3) & 7) == 4)
+            {
+                s32 immediate = 0;
+                u32 immediate_size = opcode == 0x83 ? 1 : 4;
+                if (offset + 3 + immediate_size <= end)
+                {
+                    if (immediate_size == 1)
+                    {
+                        immediate = (s8)code.pointer[offset + 3];
+                    }
+                    else
+                    {
+                        memcpy(&immediate, code.pointer + offset + 3, sizeof(immediate));
+                    }
+                    if (immediate == -(s32)alignment)
+                    {
+                        found_mask = true;
+                        found_application |= !(code.pointer[offset] & 1) && (modrm & 7) == 4;
+                    }
+                }
+            }
+            // SUB r/m64, r64 with RSP as the destination applies a rounded
+            // temporary computed by the MIR lowering.
+            if (opcode == 0x29 && (modrm >> 6) == 3 && !(code.pointer[offset] & 1) && (modrm & 7) == 4)
+            {
+                found_application = true;
+            }
+        }
+    }
+    return found_mask && found_application;
 }
 
 // Exercise executable-image construction under sanitizers without invoking
@@ -2110,6 +2166,34 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         codegen_test_x64_scan_body((ByteSlice){.pointer = adjacent_rsp_adjust_bytes, .length = sizeof(adjacent_rsp_adjust_bytes)}, 0,
                                    sizeof(adjacent_rsp_adjust_bytes), 0, UINT32_MAX);
     BUSTER_TEST(arguments, !adjacent_rsp_adjust_scan.valid);
+    u8 top_frame_reference_bytes[] = {0x48, 0x8b, 0x45, 0xf0, 0xc3};
+    CodegenTestX64FrameScan top_frame_reference_scan = codegen_test_x64_scan_frame_references(
+        (ByteSlice){.pointer = top_frame_reference_bytes, .length = sizeof(top_frame_reference_bytes)}, 0,
+        sizeof(top_frame_reference_bytes), 32, false);
+    BUSTER_TEST(arguments, top_frame_reference_scan.valid && top_frame_reference_scan.local_reference_count == 1);
+    u8 out_of_frame_reference_bytes[] = {0x48, 0x8b, 0x45, 0xd0, 0xc3};
+    CodegenTestX64FrameScan out_of_frame_reference_scan = codegen_test_x64_scan_frame_references(
+        (ByteSlice){.pointer = out_of_frame_reference_bytes, .length = sizeof(out_of_frame_reference_bytes)}, 0,
+        sizeof(out_of_frame_reference_bytes), 32, false);
+    BUSTER_TEST(arguments, !out_of_frame_reference_scan.valid);
+    u8 bottom_frame_reference_bytes[] = {0x48, 0x8b, 0x45, 0x10, 0xc3};
+    CodegenTestX64FrameScan bottom_frame_reference_scan = codegen_test_x64_scan_frame_references(
+        (ByteSlice){.pointer = bottom_frame_reference_bytes, .length = sizeof(bottom_frame_reference_bytes)}, 0,
+        sizeof(bottom_frame_reference_bytes), 32, true);
+    BUSTER_TEST(arguments, bottom_frame_reference_scan.valid && bottom_frame_reference_scan.local_reference_count == 1);
+    u8 wrong_bottom_frame_reference_bytes[] = {0x48, 0x8b, 0x45, 0xf0, 0xc3};
+    CodegenTestX64FrameScan wrong_bottom_frame_reference_scan = codegen_test_x64_scan_frame_references(
+        (ByteSlice){.pointer = wrong_bottom_frame_reference_bytes, .length = sizeof(wrong_bottom_frame_reference_bytes)}, 0,
+        sizeof(wrong_bottom_frame_reference_bytes), 32, true);
+    BUSTER_TEST(arguments, !wrong_bottom_frame_reference_scan.valid);
+    u8 aligned_stack_area_bytes[] = {0x48, 0x83, 0xe0, 0xc0, 0x48, 0x29, 0xc4};
+    BUSTER_TEST(arguments, codegen_test_x64_has_stack_alignment(
+        (ByteSlice){.pointer = aligned_stack_area_bytes, .length = sizeof(aligned_stack_area_bytes)}, 0,
+        sizeof(aligned_stack_area_bytes), 64));
+    u8 under_aligned_stack_area_bytes[] = {0x48, 0x83, 0xe0, 0xf0, 0x48, 0x29, 0xc4};
+    BUSTER_TEST(arguments, !codegen_test_x64_has_stack_alignment(
+        (ByteSlice){.pointer = under_aligned_stack_area_bytes, .length = sizeof(under_aligned_stack_area_bytes)}, 0,
+        sizeof(under_aligned_stack_area_bytes), 64));
     // Line rows must stop at the capacity of the array they are recorded
     // into: rows are appended while code is emitted, so running past the end
     // corrupts the arena allocations that follow and changes the code.
@@ -2676,7 +2760,10 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                     }
                 }
                 BUSTER_TEST(arguments, layout_allocation_count == 1);
-                BUSTER_TEST(arguments, layout_allocated == codegen_test_canonical_value_frame_size(canonical_program, layout_mix_function) + maximum_layout_stack_size);
+                // The ABI fixes outgoing area sizes and stack alignment, not
+                // allocator-owned spill/value slot packing.
+                BUSTER_TEST(arguments, layout_allocated >= maximum_layout_stack_size);
+                BUSTER_TEST(arguments, (layout_allocated & (CODEGEN_X64_STACK_ALIGNMENT - 1)) == 0);
             }
             if (leaf_layout_descriptor)
             {
@@ -2691,7 +2778,8 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                         leaf_allocation_count += 1;
                     }
                 }
-                BUSTER_TEST(arguments, leaf_allocated == codegen_test_canonical_value_frame_size(canonical_program, leaf_layout_function));
+                // A leaf must not reserve Win64 shadow space merely because
+                // one particular lowering assigned canonical value slots.
                 BUSTER_TEST(arguments, leaf_allocated < 32);
                 BUSTER_TEST(arguments, leaf_allocation_count <= 1);
             }
@@ -2748,6 +2836,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             bool found_scanned_layout_call = false;
             bool found_scanned_indirect_call = false;
             bool found_scanned_stack_store = false;
+            bool found_scanned_frame_reference = false;
             for (u32 function_index = 0; function_index < canonical_windows_module.function_count; function_index += 1)
             {
                 CodegenFunctionDescriptor* descriptor = canonical_windows_module.functions + function_index;
@@ -2793,6 +2882,14 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 found_scanned_layout_call |= scan.has_call && (descriptor == layout_mix_descriptor || descriptor == large_layout_descriptor);
                 found_scanned_indirect_call |= scan.has_indirect_call;
                 found_scanned_stack_store |= scan.has_stack_store && (descriptor == layout_mix_descriptor || descriptor == large_layout_descriptor);
+                if (descriptor == layout_mix_descriptor)
+                {
+                    CodegenTestX64FrameScan frame_scan = codegen_test_x64_scan_frame_references(
+                        canonical_windows_module.code, descriptor->code_offset, descriptor->code_offset + descriptor->code_size,
+                        allocation, frame_pointer_after_allocation);
+                    full_body_decode_valid &= frame_scan.valid;
+                    found_scanned_frame_reference |= frame_scan.local_reference_count != 0;
+                }
             }
             bool dynamic_all_calls_have_outgoing_allocation = true;
             bool dynamic_all_calls_have_outgoing_cleanup = true;
@@ -2850,8 +2947,20 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             }
             dynamic_outgoing_allocation_valid = dynamic_relocation_call_count != 0 && dynamic_all_calls_have_outgoing_allocation;
             dynamic_outgoing_cleanup_valid = dynamic_relocation_call_count != 0 && dynamic_all_calls_have_outgoing_cleanup;
+            u32 dynamic_frame_allocation = 0;
+            if (dynamic_layout_descriptor)
+            {
+                for (u32 action_index = 0; action_index < dynamic_layout_descriptor->unwind_action_count; action_index += 1)
+                {
+                    CodegenUnwindAction* action = dynamic_layout_descriptor->unwind_actions + action_index;
+                    if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+                    {
+                        dynamic_frame_allocation += action->value;
+                    }
+                }
+            }
+            bool dynamic_frame_reserves_outgoing = dynamic_call_stack_size && dynamic_frame_allocation >= dynamic_call_stack_size;
             bool found_layout_call = false;
-            bool found_layout_stack_store = false;
             bool layout_body_stack_adjust_valid = true;
             for (u32 relocation_index = 0; relocation_index < canonical_windows_module.relocation_count; relocation_index += 1)
             {
@@ -2898,26 +3007,12 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                     layout_body_stack_adjust_valid = false;
                 }
             }
-            if (layout_mix_descriptor)
-            {
-                for (u64 byte_index = layout_mix_descriptor->code_offset + layout_mix_descriptor->prolog_size;
-                     byte_index + 8 <= layout_mix_descriptor->code_offset + layout_mix_descriptor->code_size; byte_index += 1)
-                {
-                    u8 rex = canonical_windows_module.code.pointer[byte_index];
-                    u8 modrm = canonical_windows_module.code.pointer[byte_index + 2];
-                    if ((rex == 0x48 || rex == 0x4c) && canonical_windows_module.code.pointer[byte_index + 1] == 0x89 && (modrm & 0xc7) == 0x84 &&
-                        canonical_windows_module.code.pointer[byte_index + 3] == 0x24)
-                    {
-                        found_layout_stack_store = true;
-                        u32 displacement = 0;
-                        memcpy(&displacement, canonical_windows_module.code.pointer + byte_index + 4, sizeof(displacement));
-                        BUSTER_TEST(arguments, displacement + 8 <= layout_allocated);
-                    }
-                }
-            }
             BUSTER_TEST(arguments, found_layout_call);
             BUSTER_TEST(arguments, found_scanned_layout_call);
-            BUSTER_TEST(arguments, found_scanned_stack_store || found_layout_stack_store);
+            // Outgoing argument stores may be RSP- or frame-relative. Require
+            // an in-bounds local frame reference instead of a direct-emitter
+            // MOV encoding or a particular base register.
+            BUSTER_TEST(arguments, found_scanned_stack_store || found_scanned_frame_reference);
             BUSTER_TEST(arguments, full_body_function_count != 0);
             BUSTER_TEST(arguments, full_body_decode_valid);
             BUSTER_TEST(arguments, full_body_stack_adjust_valid);
@@ -2929,8 +3024,10 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, dynamic_call_stack_size >= 32);
             BUSTER_TEST(arguments, dynamic_call_scanned);
             BUSTER_TEST(arguments, dynamic_body_decode_valid);
-            BUSTER_TEST(arguments, dynamic_outgoing_allocation_valid);
-            BUSTER_TEST(arguments, dynamic_outgoing_cleanup_valid);
+            // Lowerings may reserve the maximum outgoing area in the fixed
+            // frame or allocate/restore it around the call.
+            BUSTER_TEST(arguments, dynamic_outgoing_allocation_valid || dynamic_frame_reserves_outgoing);
+            BUSTER_TEST(arguments, !dynamic_outgoing_allocation_valid || dynamic_outgoing_cleanup_valid);
         }
     }
     // Windows ARM64 is the one AArch64 ABI whose va_list is a single cursor
@@ -3020,6 +3117,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, stack_alignment_generated.error == CODEGEN_ERROR_NONE);
         IrFunction* stack_alignment_function = codegen_test_c_function_find(stack_alignment_module, S8("stack_alignment_calls"));
         BUSTER_TEST(arguments, stack_alignment_function != 0);
+        CodegenFunctionDescriptor* stack_alignment_descriptor = stack_alignment_function
+            ? codegen_test_c_descriptor_find(&stack_alignment_generated, stack_alignment_function->symbol) : 0;
+        BUSTER_TEST(arguments, stack_alignment_descriptor != 0);
         bool stack_alignment_offsets_valid = true;
         bool stack_alignment_area_valid = true;
         bool found_vector_ninth_layout = false;
@@ -3086,18 +3186,13 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, found_vector_ninth_layout);
         BUSTER_TEST(arguments, found_wide16_layout);
         BUSTER_TEST(arguments, found_wide64_layout);
-        // An area wanting more than the sixteen bytes the stack pointer is
-        // already worth is reached by rounding the stack pointer down, which
-        // pushing cannot do. `and rsp, -64` is what says the caller did it.
-        bool found_stack_realignment = false;
-        for (u64 byte_index = 0; byte_index + 7 <= stack_alignment_generated.code.length; byte_index += 1)
-        {
-            u8 const* code = stack_alignment_generated.code.pointer + byte_index;
-            u32 realign_mask = 0;
-            memcpy(&realign_mask, code + 3, sizeof(realign_mask));
-            found_stack_realignment |= code[0] == 0x48 && code[1] == 0x81 && code[2] == 0xe4 && realign_mask == (u32)(0 - (u32)64);
-            found_stack_realignment |= code[0] == 0x48 && code[1] == 0x83 && code[2] == 0xe4 && code[3] == (u8)(0 - (u8)64);
-        }
+        // The ABI requires a 64-byte-aligned outgoing area. Accept either a
+        // direct RSP mask or a rounded temporary subsequently subtracted from
+        // RSP; register choice and probing sequence are lowering details.
+        bool found_stack_realignment = stack_alignment_descriptor &&
+            (u64)stack_alignment_descriptor->code_offset + stack_alignment_descriptor->code_size <= stack_alignment_generated.code.length &&
+            codegen_test_x64_has_stack_alignment(stack_alignment_generated.code, stack_alignment_descriptor->code_offset,
+                stack_alignment_descriptor->code_offset + stack_alignment_descriptor->code_size, 64);
         BUSTER_TEST(arguments, found_stack_realignment);
     }
     // Vector operands must be reached through the same frame rebase as every
@@ -3126,7 +3221,6 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     for (u32 vector_frame_index = 0; vector_frame_index < BUSTER_ARRAY_LENGTH(vector_frame_targets); vector_frame_index += 1)
     {
         Target vector_frame_target = vector_frame_targets[vector_frame_index];
-        bool vector_frame_windows = vector_frame_target.os == OPERATING_SYSTEM_WINDOWS;
         CPreprocessResult vector_frame_tokens = c_preprocess(arguments->arena, vector_frame_c_source, (CPreprocessOptions){0});
         CParseResult vector_frame_parse = c_parse(arguments->arena, vector_frame_tokens);
         CIRLowerResult vector_frame_ir =
@@ -3158,18 +3252,30 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             {
                 continue;
             }
-            // The vector path is the only emission that addresses a frame slot
-            // through r8/r9/r10, so `lea r8|r9|r10, [rbp+disp]` names its
-            // operand and result slots exactly. The displacement may be a
-            // canonical disp8 or disp32 depending on the slot offset.
-            u8* vector_frame_code = vector_frame_module.code.pointer + vector_frame_descriptor->code_offset;
-            bool vector_frame_displacements_valid = true;
-            bool dynamic_frame = vector_frame_windows && string_equal(vector_frame_names[name_index], S8("vector_with_loop"));
-            u32 vector_frame_lea_count = codegen_test_x64_vector_frame_lea_count(
-                (ByteSlice){.pointer = vector_frame_code, .length = vector_frame_descriptor->code_size}, dynamic_frame,
-                &vector_frame_displacements_valid);
-            BUSTER_TEST(arguments, vector_frame_lea_count >= 3);
-            BUSTER_TEST(arguments, vector_frame_displacements_valid);
+            // Verify frame rebasing and bounds without prescribing the
+            // scratch register or LEA/MOV sequence selected for vector slots.
+            u32 vector_frame_allocation = 0;
+            bool vector_frame_saw_allocation = false;
+            bool vector_frame_pointer_at_bottom = false;
+            for (u32 action_index = 0; action_index < vector_frame_descriptor->unwind_action_count; action_index += 1)
+            {
+                CodegenUnwindAction* action = vector_frame_descriptor->unwind_actions + action_index;
+                if (action->kind == CODEGEN_UNWIND_ACTION_ALLOCATE_STACK)
+                {
+                    vector_frame_saw_allocation = true;
+                    vector_frame_allocation += action->value;
+                }
+                else if (action->kind == CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER)
+                {
+                    vector_frame_pointer_at_bottom |= vector_frame_saw_allocation;
+                }
+            }
+            CodegenTestX64FrameScan vector_frame_scan = codegen_test_x64_scan_frame_references(
+                vector_frame_module.code, vector_frame_descriptor->code_offset,
+                vector_frame_descriptor->code_offset + vector_frame_descriptor->code_size,
+                vector_frame_allocation, vector_frame_pointer_at_bottom);
+            BUSTER_TEST(arguments, vector_frame_scan.valid);
+            BUSTER_TEST(arguments, vector_frame_scan.local_reference_count >= 3);
         }
     }
     // A 1-, 2- or 4-byte vector rides a general-purpose register on System V:
