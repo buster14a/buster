@@ -21,7 +21,7 @@ jobs:
           path: snapshots/base
           persist-credentials: false
       - name: Check out PR head
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af25f
         with:
           ref: 4bb77f2c930de7aba428de89bf81b82a562ac25f
           path: snapshots/head
@@ -29,7 +29,7 @@ jobs:
       - name: Check out current main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: e013ef03b560677b1a6b47590e9eb05171b9b34d
+          ref: 6836e4a8d89b037a6a9d323a3ebf000378397c72
           path: snapshots/main
           persist-credentials: false
       - name: Create deterministic source archives
