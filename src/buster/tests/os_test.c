@@ -1102,6 +1102,13 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
         if (spawn.handle)
         {
+            // Start the termination deadline only after the grandchild has
+            // entered its parked state. Sanitizer startup can exceed two
+            // seconds on hosted machines; it is not the behavior under test.
+            for (u32 poll = 0; poll < 3000 && !os_test_regular_file_exists(ready); poll += 1)
+            {
+                os_test_sleep_milliseconds(10);
+            }
             ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawn, 2000000);
             BUSTER_TEST(arguments, waited.result == PROCESS_RESULT_FAILED && waited.timed_out);
             BUSTER_TEST(arguments, waited.termination_requested && waited.forcibly_terminated);
