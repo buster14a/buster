@@ -1,4 +1,4 @@
-name: Issue 793 source workbench
+name: Issue 793 validation workbench
 
 on:
   push:
@@ -9,24 +9,66 @@ permissions:
   contents: read
 
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 120
+    env:
+      LC_ALL: C
+      BUSTER_TEST_JOBS: 2
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
 
-      - name: Collect repository source
+      - name: Apply candidate patch
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD 'HEAD^{tree}' > revision.txt
-          tar --exclude=.git -czf "$RUNNER_TEMP/issue-793-repository.tar.gz" .
+          printf '%s' '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' | base64 -d | gzip -d > "$RUNNER_TEMP/issue-793.patch"
+          git apply --check "$RUNNER_TEMP/issue-793.patch"
+          git apply "$RUNNER_TEMP/issue-793.patch"
+          git diff --check
+          git diff --stat
+
+      - name: Bootstrap build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --linker DEFAULT
+
+      - name: Release test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/release-test-all.log"
+
+      - name: Release self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/test-self-host.log"
+
+      - name: Release allocator mode matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/test-mode-matrix.log"
+
+      - name: Debug test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --config Debug --cc clang --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Debug -t test_all 2>&1 | tee "$RUNNER_TEMP/debug-test-all.log"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: issue-793-repository-${{ github.run_id }}
-          path: ${{ runner.temp }}/issue-793-repository.tar.gz
-          retention-days: 3
-          if-no-files-found: error
+          name: issue-793-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/issue-793.patch
+          retention-days: 7
+          if-no-files-found: warn
