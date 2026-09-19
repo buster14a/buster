@@ -1,15 +1,12 @@
-name: Zen 5 throughput audit
+name: Issue 447 Zen 5 paired qualification
 
-# Measurement-only workflow for the dedicated Ryzen 9700X runner. It builds the
-# trusted Clang Release compiler, reproduces the self-host fixed point with its
-# STEP_INSTRUCTIONS and throughput rows, then profiles the stage-1 unity
-# compile with perf and the two survey tools. Every result lands in one
-# artifact; nothing here is a gate.
 on:
   workflow_dispatch:
   push:
-    branches: ['audit/**']
-    paths: ['.github/workflows/zen5-audit.yml']
+    branches:
+      - audit/issue447-ssa-live-slot-index-20260918
+    paths:
+      - .github/workflows/zen5-audit.yml
 
 permissions:
   contents: read
@@ -19,243 +16,341 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  audit:
+  qualify:
     runs-on: [buster-zen5, ryzen-9700x]
     timeout-minutes: 120
     env:
       LC_ALL: C
+      BASE_SHA: 7d27dc15df558d0881d976615a53255c3e18d0a9
+      CANDIDATE_SHA: 47b9359c112d2da5f37c0ae4a49384571c67dc02
+      CPU: '2'
+      MACHINE_ID: benchpress-9700x-20260918-issue447-v1
+
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Checkout immutable baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ env.BASE_SHA }}
+          path: baseline
           persist-credentials: false
 
-      - name: Host probe
+      - name: Checkout immutable candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Checkout frozen candidate source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: frozen
+          persist-credentials: false
+
+      - name: Capture and verify the dedicated host
         shell: bash
         run: |
-          # Evidence lives outside the workspace: generate replaces build/.
-          AUDIT="$RUNNER_TEMP/zen5-audit"
-          printf 'AUDIT=%s\n' "$AUDIT" >> "$GITHUB_ENV"
-          rm -rf "$AUDIT"
-          mkdir -p "$AUDIT"
-          exec > >(tee "$AUDIT/host.log") 2>&1
+          set -euo pipefail
+          EVIDENCE="$RUNNER_TEMP/issue447-zen5"
+          LOCK_DIR="$RUNNER_TEMP/issue447-lock"
+          LOCK="$LOCK_DIR/host.lock"
+          rm -rf "$EVIDENCE" "$LOCK_DIR"
+          mkdir -p "$EVIDENCE"
+          install -d -m 700 "$LOCK_DIR"
+          printf 'EVIDENCE=%s\nLOCK=%s\n' "$EVIDENCE" "$LOCK" >> "$GITHUB_ENV"
+          exec > >(tee "$EVIDENCE/host.log") 2>&1
           set -x
-          git rev-parse HEAD 'HEAD^{tree}'
+          hostname
           uname -a
           id
           nproc
           lscpu
-          lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE,MAXMHZ,MINMHZ || true
+          lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE,MAXMHZ,MINMHZ
           free -b
-          df -h . "$RUNNER_TEMP"
-          cat /proc/sys/kernel/perf_event_paranoid || true
-          cat /proc/sys/kernel/kptr_restrict || true
-          cat /sys/devices/system/cpu/smt/active || true
-          cat /sys/devices/system/cpu/cpufreq/boost || true
-          cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor || true
-          cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_driver || true
+          cat /proc/sys/kernel/perf_event_paranoid
+          cat /sys/devices/system/cpu/smt/active
+          cat /sys/devices/system/cpu/cpufreq/boost
+          cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor
+          cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_driver
           cat /sys/devices/system/cpu/cpu2/cpufreq/energy_performance_preference || true
-          cat /sys/kernel/mm/transparent_hugepage/enabled || true
           grep -m1 microcode /proc/cpuinfo || true
-          for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd; do
-            if command -v "$tool" >/dev/null 2>&1; then
-              printf 'TOOL %s %s\n' "$tool" "$(command -v "$tool")"
-              "$tool" --version 2>&1 | head -2 || true
-            else
-              printf 'TOOL %s missing\n' "$tool"
-            fi
-          done
-          perf stat -e instructions:u,cycles:u -- true 2>&1 || true
+          lscpu | grep -F 'AMD Ryzen 7 9700X'
+          clang --version
+          cmake --version
+          ninja --version
+          mold --version
+          perf --version
+          taskset --version | head -1
+          perf stat -e instructions:u,cycles:u -- true
 
-      - name: Bootstrap build driver
-        id: driver
+      - name: Build immutable uninstrumented compilers and the native harness
         shell: bash
         run: |
           set -euo pipefail
-          exec > >(tee "$AUDIT/driver.log") 2>&1
-          if command -v tcc >/dev/null 2>&1; then
-            # Canonical path: build.sh publishes and reuses the TCC-built driver.
-            printf 'BOOTSTRAP tcc\n'
-            tcc -v
-            driver=./build.sh
-          else
-            # Documented hosted exception (build.md): no TCC on the image.
-            printf 'BOOTSTRAP clang-exception\n'
-            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
-            driver="$RUNNER_TEMP/buster-build"
-          fi
-          printf 'DRIVER %s\n' "$driver"
-          printf 'driver=%s\n' "$driver" >> "$GITHUB_OUTPUT"
-          if command -v mold >/dev/null 2>&1; then linker=MOLD; else linker=DEFAULT; fi
-          printf 'LINKER %s\n' "$linker"
-          printf 'linker=%s\n' "$linker" >> "$GITHUB_OUTPUT"
-
-      - name: Configure and build the trusted Release compiler
-        id: build
-        shell: bash
-        env:
-          DRIVER: ${{ steps.driver.outputs.driver }}
-          LINKER: ${{ steps.driver.outputs.linker }}
-        run: |
-          set -euo pipefail
-          exec > >(tee "$AUDIT/build.log") 2>&1
+          exec > >(tee "$EVIDENCE/build.log") 2>&1
           set -x
-          # Not --ci: keep debug info and frame pointers so perf symbolizes
-          # and unwinds the -O3 binary (benchmarking.md, "profilable as built").
-          "$DRIVER" generate --config Release --cc clang --linker "$LINKER"
-          "$DRIVER" build --config Release -t ide
-          sha256sum build/Release/ide
-          ls -l build/Release/ide
-          grep -E 'CMAKE_C_FLAGS|CMAKE_C_COMPILER|BUSTER_' build/CMakeCache.txt | sort > "$AUDIT/cmake-cache-flags.txt"
-          cp build/compile_commands.json "$AUDIT/" || true
+          LINKER=DEFAULT
+          if command -v mold >/dev/null 2>&1; then LINKER=MOLD; fi
+          printf 'LINKER=%s\n' "$LINKER" >> "$GITHUB_ENV"
 
-      - name: Self-host fixed point with instruction counts
-        id: self_host
-        continue-on-error: true
-        shell: bash
-        env:
-          DRIVER: ${{ steps.driver.outputs.driver }}
-        run: |
-          set -o pipefail
-          "$DRIVER" test_self_host --config Release 2>&1 | tee "$AUDIT/test_self_host.log"
-          mkdir -p "$AUDIT/self-host"
-          cp build/*.metrics "$AUDIT/self-host/" 2>/dev/null || true
-          find build -maxdepth 1 \( -name 'ide-self*' -o -name '*.metrics' \) -exec ls -l {} + >> "$AUDIT/test_self_host.log" || true
-
-      - name: Stage-1 counters, wall time and RSS
-        id: counters
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -uo pipefail
-          exec > >(tee "$AUDIT/counters.log") 2>&1
-          mkdir -p "$AUDIT/stage1"
-          IDE=build/Release/ide
-          COMMON=(-Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0)
-          SRC=src/buster/apps/ide/ide.c
-          # Warm the page cache and record the verbose SOURCE table once.
-          "$IDE" cc "${COMMON[@]}" -g -v -fsource-metrics="$AUDIT/stage1/warm.metrics" "$SRC" -lm -o "$AUDIT/stage1/warm" \
-              > "$AUDIT/stage1/source-table.txt" 2>&1
-          sha256sum "$AUDIT/stage1/warm"
-          echo '== wall/CPU/RSS, 5 runs each, pinned to CPU 2: default (-g) then -g0 =='
-          for variant in default g0; do
-            for i in 1 2 3 4 5; do
-              python3 - "$variant" "$i" <<'PY'
-          import os, resource, subprocess, sys, time
-          variant, i = sys.argv[1], sys.argv[2]
-          audit = os.environ["AUDIT"]
-          debug = "-g0" if variant == "g0" else "-g"
-          cmd = ["taskset", "-c", "2", "build/Release/ide", "cc", "-Isrc", "-Ibuild/generated",
-                 "-DBUSTER_UNITY_BUILD=1", "-DBUSTER_INCLUDE_TESTS=0", debug,
-                 f"-fsource-metrics={audit}/stage1/{variant}-{i}.metrics",
-                 "src/buster/apps/ide/ide.c", "-lm", "-o", f"{audit}/stage1/{variant}-{i}"]
-          t0 = time.perf_counter()
-          rc = subprocess.run(cmd).returncode
-          wall = time.perf_counter() - t0
-          ru = resource.getrusage(resource.RUSAGE_CHILDREN)
-          print(f"STAGE1_TIMING variant={variant} run={i} rc={rc} wall_s={wall:.3f} user_s={ru.ru_utime:.3f} sys_s={ru.ru_stime:.3f} maxrss_kib={ru.ru_maxrss}")
-          PY
-            done
+          for tree in baseline candidate frozen; do
+            (
+              cd "$tree"
+              clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/$tree-build"
+            )
           done
-          sha256sum "$AUDIT/stage1"/default-? "$AUDIT/stage1"/g0-?
-          echo '== perf stat group A (core), 3 repeats, pinned =='
-          perf stat -r 3 -e '{cycles,instructions,branches,branch-misses}:u' -e task-clock -e page-faults -e context-switches -- \
-            taskset -c 2 "$IDE" cc "${COMMON[@]}" -g "$SRC" -lm -o "$AUDIT/stage1/statA" 2>&1
-          echo '== perf stat group B (memory), 3 repeats, pinned =='
-          perf stat -r 3 -e '{instructions,L1-dcache-loads,L1-dcache-load-misses,L1-icache-load-misses,cache-misses}:u' -- \
-            taskset -c 2 "$IDE" cc "${COMMON[@]}" -g "$SRC" -lm -o "$AUDIT/stage1/statB" 2>&1
-          echo '== perf stat group A with -g0, 3 repeats, pinned =='
-          perf stat -r 3 -e '{cycles,instructions,branches,branch-misses}:u' -e task-clock -- \
-            taskset -c 2 "$IDE" cc "${COMMON[@]}" -g0 "$SRC" -lm -o "$AUDIT/stage1/statA-g0" 2>&1
-          echo '== perf stat group A, object only (-g -c), 3 repeats, pinned =='
-          perf stat -r 3 -e '{cycles,instructions,branches,branch-misses}:u' -e task-clock -- \
-            taskset -c 2 "$IDE" cc "${COMMON[@]}" -g -c "$SRC" -o "$AUDIT/stage1/statA.o" 2>&1
-          echo '== perf stat group A, preprocess only (-E), 3 repeats, pinned =='
-          perf stat -r 3 -e '{cycles,instructions,branches,branch-misses}:u' -e task-clock -- \
-            taskset -c 2 "$IDE" cc "${COMMON[@]}" -E "$SRC" -o "$AUDIT/stage1/statA.i" 2>&1
-          ls -l "$AUDIT/stage1/statA" "$AUDIT/stage1/statA.o" "$AUDIT/stage1/statA.i"
-          echo '== ide bench =='
-          "$IDE" bench 2>&1
-          rm -f "$AUDIT/stage1"/default-? "$AUDIT/stage1"/g0-? "$AUDIT/stage1"/statA* "$AUDIT/stage1"/statB* "$AUDIT/stage1/warm"
 
-      - name: Stage-1 cycle profile (perf record, frame pointers)
-        id: profile
-        continue-on-error: true
-        timeout-minutes: 30
-        shell: bash
-        run: |
-          set -uo pipefail
-          exec > >(tee "$AUDIT/profile.log") 2>&1
-          mkdir -p "$AUDIT/profile"
-          IDE=build/Release/ide
-          DATA="$AUDIT/profile/stage1.data"
-          perf record -F 4999 -e cycles:u --call-graph fp -o "$DATA" -- \
-            taskset -c 2 "$IDE" cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o "$AUDIT/profile/ide-stage1"
-          rm -f "$AUDIT/profile/ide-stage1"
-          perf report -i "$DATA" --stdio --no-children --sort sym -g none --percent-limit 0.15 > "$AUDIT/profile/flat-by-symbol.txt" 2>&1
-          perf report -i "$DATA" --stdio --no-children --sort dso -g none > "$AUDIT/profile/flat-by-dso.txt" 2>&1
-          perf report -i "$DATA" --stdio --children --sort sym -g none --percent-limit 0.8 > "$AUDIT/profile/inclusive-by-symbol.txt" 2>&1
-          perf report -i "$DATA" --stdio --no-children --sort sym -g caller,0.5,callee,function,percent --percent-limit 1.0 > "$AUDIT/profile/callers-top.txt" 2>&1
-          perf report -i "$DATA" --stdio --no-children --sort sym -g folded,0.2 --percent-limit 0.5 > "$AUDIT/profile/folded-top.txt" 2>&1
-          head -70 "$AUDIT/profile/flat-by-symbol.txt"
-          # Top symbols annotated at instruction granularity, bounded output.
-          grep -E '^\s+[0-9]+\.[0-9]+%' "$AUDIT/profile/flat-by-symbol.txt" | head -10 | awk '{print $NF}' > "$AUDIT/profile/top-symbols.txt"
-          while read -r sym; do
-            timeout 300 perf annotate -i "$DATA" --stdio -l --percent-type local-period -s "$sym" 2>/dev/null | head -500 > "$AUDIT/profile/annotate-$sym.txt" || true
-          done < "$AUDIT/profile/top-symbols.txt"
-          # Leaf-IP line attribution: the sample IP is the instruction itself, so
-          # srcline is exact here (the return-address shift only affects callers).
-          timeout 900 perf report -i "$DATA" --stdio --no-children --sort sym,srcline -g none --percent-limit 0.1 > "$AUDIT/profile/flat-by-line.txt" 2>&1 || true
-          # Keep the binary beside the capture so the profile can be queried offline.
-          if command -v zstd >/dev/null 2>&1; then zstd -q -T0 -19 build/Release/ide -o "$AUDIT/profile/ide.zst"; else gzip -c build/Release/ide > "$AUDIT/profile/ide.gz"; fi
-          ls -l "$AUDIT/profile"
+          (
+            cd baseline
+            "$RUNNER_TEMP/baseline-build" generate --config Release --cc clang --linker "$LINKER"
+            "$RUNNER_TEMP/baseline-build" build --config Release -t ide
+          )
+          (
+            cd candidate
+            "$RUNNER_TEMP/candidate-build" generate --config Release --cc clang --linker "$LINKER"
+            "$RUNNER_TEMP/candidate-build" build --config Release -t ide
+            "$RUNNER_TEMP/candidate-build" bench_throughput self-test
+            "$RUNNER_TEMP/candidate-build" bench_throughput help
+          )
+          (
+            cd frozen
+            "$RUNNER_TEMP/frozen-build" generate --config Release --cc clang --linker "$LINKER"
+          )
 
-      - name: Cache-miss survey (Zen fill and TLB events)
-        id: cache_survey
-        continue-on-error: true
-        timeout-minutes: 25
-        shell: bash
-        run: |
-          set -uo pipefail
-          python3 tools/cache_miss_survey.py --self-test 2>&1 | tail -3
-          python3 tools/cache_miss_survey.py --dwarf --repeat 3 --cpu 2 --limit 40 --lines 12 --out "$AUDIT/cache-miss-survey" 2>&1 | tee "$AUDIT/cache-miss-survey.log"
-          rm -f "$AUDIT"/cache-miss-survey/*.data || true
+          BASE_IDE="$GITHUB_WORKSPACE/baseline/build/Release/ide"
+          CANDIDATE_IDE="$GITHUB_WORKSPACE/candidate/build/Release/ide"
+          FROZEN_ROOT="$GITHUB_WORKSPACE/frozen"
+          FROZEN_GENERATED="$GITHUB_WORKSPACE/frozen/build/generated"
+          BENCH="$GITHUB_WORKSPACE/candidate/build/throughput-tools/throughput"
+          test -x "$BASE_IDE"
+          test -x "$CANDIDATE_IDE"
+          test -x "$BENCH"
+          test -d "$FROZEN_GENERATED"
+          printf 'BASE_IDE=%s\nCANDIDATE_IDE=%s\nFROZEN_ROOT=%s\nFROZEN_GENERATED=%s\nBENCH=%s\n' \
+            "$BASE_IDE" "$CANDIDATE_IDE" "$FROZEN_ROOT" "$FROZEN_GENERATED" "$BENCH" >> "$GITHUB_ENV"
 
-      - name: Branch-miss survey (LBR mispredict flags)
-        id: branch_survey
-        continue-on-error: true
-        timeout-minutes: 25
-        shell: bash
-        run: |
-          set -uo pipefail
-          python3 tools/branch_miss_survey.py --self-test 2>&1 | tail -3
-          python3 tools/branch_miss_survey.py --repeat 3 --cross-check --top 40 2>&1 | tee "$AUDIT/branch-miss-survey.log"
-
-      - name: Summary
-        if: always()
-        shell: bash
-        env:
-          BUILD_RESULT: ${{ steps.build.outcome }}
-          SELF_HOST_RESULT: ${{ steps.self_host.outcome }}
-          COUNTERS_RESULT: ${{ steps.counters.outcome }}
-          PROFILE_RESULT: ${{ steps.profile.outcome }}
-          CACHE_RESULT: ${{ steps.cache_survey.outcome }}
-          BRANCH_RESULT: ${{ steps.branch_survey.outcome }}
-        run: |
           {
-            printf '## Zen 5 throughput audit\n\n'
-            printf 'build: **%s**, self-host: **%s**, counters: **%s**, profile: **%s**, cache survey: **%s**, branch survey: **%s**\n\n' \
-              "$BUILD_RESULT" "$SELF_HOST_RESULT" "$COUNTERS_RESULT" "$PROFILE_RESULT" "$CACHE_RESULT" "$BRANCH_RESULT"
-            printf '```\n'
-            grep -E 'STEP_INSTRUCTIONS|SELF_HOST|took' "$AUDIT/test_self_host.log" 2>/dev/null | head -40
-            grep -E 'STAGE1_TIMING|BENCH_C_FRONTEND' "$AUDIT/counters.log" 2>/dev/null
-            printf '```\n'
-          } >> "$GITHUB_STEP_SUMMARY"
-          du -sh "$AUDIT" || true
+            git -C baseline rev-parse HEAD 'HEAD^{tree}'
+            git -C candidate rev-parse HEAD 'HEAD^{tree}'
+            git -C frozen rev-parse HEAD 'HEAD^{tree}'
+            sha256sum "$BASE_IDE" "$CANDIDATE_IDE" "$BENCH"
+            find "$FROZEN_GENERATED" -type f -print0 | sort -z | xargs -0 sha256sum
+          } > "$EVIDENCE/input-identities.txt"
+          cp baseline/build/CMakeCache.txt "$EVIDENCE/baseline-CMakeCache.txt"
+          cp candidate/build/CMakeCache.txt "$EVIDENCE/candidate-CMakeCache.txt"
+          cp frozen/build/CMakeCache.txt "$EVIDENCE/frozen-CMakeCache.txt"
+          cp candidate/build/compile_commands.json "$EVIDENCE/candidate-compile_commands.json"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Qualify the harness admission path
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BENCH" qualify \
+            --cpu "$CPU" \
+            --machine-id "$MACHINE_ID" \
+            --lock-file "$LOCK" | tee "$EVIDENCE/qualification.json"
+
+      - name: Frozen-source A/A qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BENCH" run \
+            --baseline "$BASE_IDE" \
+            --candidate "$BASE_IDE" \
+            --baseline-id "$BASE_SHA" \
+            --candidate-id "$BASE_SHA" \
+            --output "$EVIDENCE/aa" \
+            --profile ci \
+            --mode fast \
+            --pairs 30 \
+            --warmups 2 \
+            --cpu "$CPU" \
+            --machine-id "$MACHINE_ID" \
+            --lock-file "$LOCK" \
+            --self-host-root "$FROZEN_ROOT" \
+            --self-host-generated "$FROZEN_GENERATED" \
+            --require-identical-output \
+            --pmu \
+            --require-pmu
+          "$BENCH" compare --output "$EVIDENCE/aa"
+          cat "$EVIDENCE/aa/summary.md" | tee "$EVIDENCE/aa-summary.md"
+
+      - name: Frozen-source A/B qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$BENCH" run \
+            --baseline "$BASE_IDE" \
+            --candidate "$CANDIDATE_IDE" \
+            --baseline-id "$BASE_SHA" \
+            --candidate-id "$CANDIDATE_SHA" \
+            --output "$EVIDENCE/ab" \
+            --profile ci \
+            --mode fast \
+            --pairs 30 \
+            --warmups 2 \
+            --cpu "$CPU" \
+            --machine-id "$MACHINE_ID" \
+            --lock-file "$LOCK" \
+            --self-host-root "$FROZEN_ROOT" \
+            --self-host-generated "$FROZEN_GENERATED" \
+            --require-identical-output \
+            --pmu \
+            --require-pmu
+          "$BENCH" compare --output "$EVIDENCE/ab"
+          cat "$EVIDENCE/ab/summary.md" | tee "$EVIDENCE/ab-summary.md"
+
+      - name: Enforce and report issue 447 acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import csv
+          import json
+          import os
+          import statistics
+          from pathlib import Path
+
+          evidence = Path(os.environ['EVIDENCE'])
+          target = 'self_host_stage1/fast'
+
+          def load_bundle(name):
+              root = evidence / name
+              summary = json.loads((root / 'summary.json').read_text())
+              if not summary.get('valid'):
+                  raise SystemExit(f'{name}: invalid comparison bundle')
+              if int(summary.get('confirmed_regressions', 0)) != 0:
+                  raise SystemExit(f'{name}: confirmed substantial regression')
+              comparisons = {row['name']: row for row in summary['comparisons']}
+              if target not in comparisons:
+                  raise SystemExit(f'{name}: missing {target}')
+              jobs = {}
+              for line in (root / 'jobs.tsv').read_text().splitlines():
+                  index, job = line.split('\t', 1)
+                  jobs[int(index)] = job
+              with (root / 'samples.csv').open(newline='') as handle:
+                  samples = [row for row in csv.DictReader(handle) if jobs[int(row['job'])] == target]
+              with (root / 'telemetry.csv').open(newline='') as handle:
+                  telemetry = [row for row in csv.DictReader(handle) if jobs[int(row['job'])] == target]
+              if not samples or not telemetry:
+                  raise SystemExit(f'{name}: missing raw stage-1 samples or PMU replays')
+              return root, summary, comparisons[target], samples, telemetry
+
+          def values(rows, variant, field, integer=False):
+              result = []
+              for row in rows:
+                  if int(row['variant']) != variant or not row[field]:
+                      continue
+                  result.append(int(row[field]) if integer else float(row[field]))
+              if not result:
+                  raise SystemExit(f'missing {field} for variant {variant}')
+              return result
+
+          def summarize(name):
+              root, summary, comparison, samples, telemetry = load_bundle(name)
+              data = {'root': root, 'summary': summary, 'comparison': comparison}
+              for field in ('wall_seconds', 'peak_rss_bytes', 'output_bytes'):
+                  integer = field != 'wall_seconds'
+                  data[field] = [
+                      values(samples, 0, field, integer),
+                      values(samples, 1, field, integer),
+                  ]
+              for field in ('instructions', 'cycles'):
+                  data[field] = [
+                      values(telemetry, 0, field, True),
+                      values(telemetry, 1, field, True),
+                  ]
+              hashes = []
+              for variant in (0, 1):
+                  variant_hashes = {row['output_sha256'] for row in samples if int(row['variant']) == variant and row['output_sha256']}
+                  if len(variant_hashes) != 1:
+                      raise SystemExit(f'{name}: nondeterministic stage-1 output for variant {variant}: {sorted(variant_hashes)}')
+                  hashes.append(next(iter(variant_hashes)))
+              if hashes[0] != hashes[1]:
+                  raise SystemExit(f'{name}: A/B stage-1 output mismatch')
+              data['hash'] = hashes[0]
+              return data
+
+          aa = summarize('aa')
+          ab = summarize('ab')
+
+          base_instructions = statistics.median(ab['instructions'][0])
+          candidate_instructions = statistics.median(ab['instructions'][1])
+          if candidate_instructions >= base_instructions:
+              raise SystemExit(f'candidate stage-1 instructions did not improve: {base_instructions} -> {candidate_instructions}')
+
+          base_output = statistics.median(ab['output_bytes'][0])
+          candidate_output = statistics.median(ab['output_bytes'][1])
+          if base_output != candidate_output:
+              raise SystemExit(f'stage-1 output size changed: {base_output} -> {candidate_output}')
+
+          def ratio(after, before):
+              return after / before if before else 1.0
+
+          wall_base = statistics.median(ab['wall_seconds'][0])
+          wall_candidate = statistics.median(ab['wall_seconds'][1])
+          rss_base = statistics.median(ab['peak_rss_bytes'][0])
+          rss_candidate = statistics.median(ab['peak_rss_bytes'][1])
+          cycles_base = statistics.median(ab['cycles'][0])
+          cycles_candidate = statistics.median(ab['cycles'][1])
+          aa_inst_base = statistics.median(aa['instructions'][0])
+          aa_inst_candidate = statistics.median(aa['instructions'][1])
+
+          tests = ab['comparison'].get('tests', [])
+          wall_tests = [row for row in tests if row.get('metric') == 'wall_seconds']
+          rss_tests = [row for row in tests if row.get('metric') == 'peak_rss_bytes']
+
+          lines = [
+              '# Issue #447 dedicated Ryzen 7 9700X qualification',
+              '',
+              f'- immutable baseline: `{os.environ["BASE_SHA"]}`',
+              f'- immutable candidate: `{os.environ["CANDIDATE_SHA"]}`',
+              f'- frozen source: candidate `{os.environ["CANDIDATE_SHA"]}`',
+              f'- machine label: `{os.environ["MACHINE_ID"]}`, logical CPU `{os.environ["CPU"]}`',
+              '- design: A/A then A/B, 30 randomized pairs per round, two warmups, uninstrumented Release compilers, separate required PMU replays',
+              '',
+              '## Acceptance result',
+              '',
+              '| Metric | Baseline median | Candidate median | Delta |',
+              '| --- | ---: | ---: | ---: |',
+              f'| stage-1 instructions | {base_instructions:.0f} | {candidate_instructions:.0f} | {(ratio(candidate_instructions, base_instructions)-1)*100:+.4f}% |',
+              f'| stage-1 cycles | {cycles_base:.0f} | {cycles_candidate:.0f} | {(ratio(cycles_candidate, cycles_base)-1)*100:+.4f}% |',
+              f'| stage-1 wall time | {wall_base:.6f} s | {wall_candidate:.6f} s | {(ratio(wall_candidate, wall_base)-1)*100:+.4f}% |',
+              f'| stage-1 peak RSS | {rss_base/1048576:.3f} MiB | {rss_candidate/1048576:.3f} MiB | {(ratio(rss_candidate, rss_base)-1)*100:+.4f}% |',
+              f'| stage-1 output bytes | {base_output:.0f} | {candidate_output:.0f} | {candidate_output-base_output:+.0f} |',
+              '',
+              f'- A/A instruction medians: {aa_inst_base:.0f} / {aa_inst_candidate:.0f} ({(ratio(aa_inst_candidate, aa_inst_base)-1)*100:+.4f}%).',
+              f'- A/B output SHA-256: `{ab["hash"]}` for every baseline and candidate sample.',
+              f'- A/A confirmed regressions: {aa["summary"]["confirmed_regressions"]}; A/B confirmed regressions: {ab["summary"]["confirmed_regressions"]}.',
+              f'- A/B inconclusive cases retained: {ab["summary"]["inconclusive_cases"]}.',
+              '',
+              '## Harness uncertainty rows for `self_host_stage1/fast`',
+              '',
+              '| Metric | Round | Median ratio | Confidence interval | Regression |',
+              '| --- | ---: | ---: | ---: | --- |',
+          ]
+          for row in wall_tests + rss_tests:
+              lines.append(
+                  f'| {row["metric"]} | {row["round"]} | {row["median_ratio"]:.6f} | '
+                  f'[{row["ci_low"]:.6f}, {row["ci_high"]:.6f}] | {row["regression"]} |'
+              )
+          lines += [
+              '',
+              'Raw timing/RSS samples, PMU replays, commands, hashes, host qualification, fixed-point evidence and sealed metadata are retained in the workflow artifact.',
+              '',
+          ]
+          report = '\n'.join(lines)
+          (evidence / 'acceptance.md').write_text(report)
+          print(report)
+          PYTHON
+          cat "$EVIDENCE/acceptance.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain all qualification evidence
         if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: zen5-audit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/zen5-audit
+          name: issue447-zen5-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue447-zen5
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
