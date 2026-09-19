@@ -927,6 +927,9 @@ struct CEntity
     CEntityId next_by_name;
     u32 declaration_index;
     u32 declaration_token_plus_one;
+    // First token of the complete block-scope declaration. Local declarator
+    // ranges below deliberately exclude shared specifiers.
+    u32 declaration_statement_start;
     u32 declaration_token_start;
     u32 declaration_token_count;
     u32 alignment_start;
@@ -1201,6 +1204,9 @@ struct CParseResult
     CSymbolTable* symbols;
     CDeclaration* declarations;
     CType* types;
+    // Borrowed only while semantic constraints are checked. Scalar query
+    // results share immutable types; declarator types remain independent.
+    CTypeId* expression_scalar_types;
     CParameter* parameters;
     CMember* members;
     CEnumMember* enum_members;
@@ -1234,6 +1240,9 @@ struct CParseResult
     // scope when it is present.
     u32* scope_children_offsets;
     u32* scope_children;
+    // Shared declaration buckets preserve source order for redeclared callees.
+    u32* declarations_by_entity_offsets;
+    u32* declarations_by_entity;
     CDiagnostic* diagnostics;
     CDeferredStaticAssert* deferred_static_asserts;
     // The function types a declarator spelled `noreturn` on: the attribute
@@ -1295,6 +1304,9 @@ struct CParseResult
     u32 type_alignment_capacity;
     u32 bfloat16_builtin_call_count;
     u32 bfloat16_builtin_call_capacity;
+    // True only after the selected analysis entry point completed its passes.
+    // Resource-limit exits can otherwise look like a successful empty model.
+    bool analysis_complete;
 };
 
 // CParseResult is the compatibility name for the semantic model.  New phase
@@ -1415,6 +1427,8 @@ BUSTER_F_DECL CAggregateAttributes c_parse_aggregate_attributes(CParseResult con
 BUSTER_F_DECL CTypeAlignment const* c_parse_type_alignment(CParseResult const* result, CTypeId type);
 BUSTER_F_DECL CParserResult c_parse_ast(Arena* arena, CPreprocessResult preprocess);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
+// Complete syntax and semantic analysis without constructing canonical IR.
+BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);
 BUSTER_F_DECL CIRLowerResult c_analyze(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target);
 BUSTER_F_DECL CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPreprocessResult preprocess, CParserResult syntax, Target target,
                                                   CIRLowerOptions options);

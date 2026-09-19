@@ -63,6 +63,9 @@ GENERATED_METADATA_NAMES = frozenset({
     "manifest.json",
     "dependency-manifest.json",
     "dependency-descriptor.json",
+    "dependency-policy.json",
+    "dependency-source-snapshot.json",
+    "dependency-resolved-descriptor.json",
     "dependency-receipt.json",
     "dependency-materializer.tsv",
     "dependency-files.tsv",
@@ -117,7 +120,7 @@ ARCHIVED_TARGETS = (
 ARCHIVED_FRONTENDS = ("local-backed-canonical", "direct-ssa")
 ARCHIVED_PICS = ("0", "1")
 ARCHIVED_ALLOCATORS = ("mir-stack", "fast", "quality")
-SUPPORT_CONTRACT_SHA256 = "ae46df88d79ed3f0e9ca54df4620874b7c0553df66da374f19f9c3cbdf19880d"
+SUPPORT_CONTRACT_SHA256 = "60c396dffcfae84b335927f733fa4ab8fca5f322836468fa59ff2fa28352c2b9"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
@@ -903,7 +906,7 @@ def _verify_archived_fixture_inputs(replay, source_root):
             _fail(f"archived replay fixture identity mismatch: {fixture['fixture']}")
 
 
-def materialize(manifest, source_root, output, descriptor_sha256=None, descriptor_path=None):
+def materialize(manifest, source_root, output, descriptor_sha256=None, descriptor_path=None, authority_files=None):
     """Verify and atomically publish a dependency tree.
 
     ``output`` must not exist.  The return value is a deterministic receipt;
@@ -959,6 +962,19 @@ def materialize(manifest, source_root, output, descriptor_sha256=None, descripto
             receipt["descriptor_path"] = _canonical_relative(descriptor_path, "descriptor_path")
         if archived_replay is not None:
             receipt["archived_replay"] = archived_replay
+        if authority_files is not None:
+            allowed = {
+                "dependency-policy.json",
+                "dependency-source-snapshot.json",
+                "dependency-resolved-descriptor.json",
+            }
+            if not isinstance(authority_files, dict) or set(authority_files) != allowed:
+                _fail("materializer authority files are missing or unexpected")
+            for name in sorted(allowed):
+                data = authority_files[name]
+                if not isinstance(data, bytes) or not data:
+                    _fail(f"materializer authority file is not non-empty bytes: {name}")
+                (temporary / name).write_bytes(data)
         receipt_bytes = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
         (temporary / "dependency-manifest.json").write_bytes(receipt_bytes)
         # The generated names are reserved even for the materializer's own
@@ -998,6 +1014,26 @@ def materialize_file(manifest_path, source_root, output):
     root = _descriptor_source_root(manifest_path, manifest, source_root)
     label = os.path.relpath(os.path.abspath(os.fspath(manifest_path)), os.path.abspath(os.fspath(root)))
     descriptor_label = _canonical_relative(label, "descriptor_path")
+    if manifest.get("schema") == "buster-native-retirement-dependency-policy-v1":
+        import native_retirement_dependency_binding as authority
+        policy = authority.parse_policy(raw)
+        snapshot_raw = _read_no_follow(root / PurePosixPath(authority.SNAPSHOT_PATH), "repository-source snapshot")
+        snapshot = authority.parse_snapshot(snapshot_raw, raw, policy)
+        legacy_raw = _read_no_follow(root / PurePosixPath(authority.LEGACY_DESCRIPTOR_PATH), "legacy dependency descriptor")
+        resolved_raw = authority.render_resolved_descriptor(policy, snapshot, legacy_raw)
+        resolved = authority.strict_json(resolved_raw, "resolved dependency descriptor")
+        return materialize(
+            resolved,
+            root,
+            output,
+            hashlib.sha256(resolved_raw).hexdigest(),
+            descriptor_label,
+            authority_files={
+                "dependency-policy.json": raw,
+                "dependency-source-snapshot.json": snapshot_raw,
+                "dependency-resolved-descriptor.json": resolved_raw,
+            },
+        )
     descriptor_sha256 = hashlib.sha256(raw).hexdigest()
     return materialize(manifest, root, output, descriptor_sha256, descriptor_label)
 

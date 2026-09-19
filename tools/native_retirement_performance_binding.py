@@ -125,7 +125,7 @@ ROW_ELIGIBILITY_FIELDS = [
     "generated_runtime", "runtime_oracle", "code_section",
 ]
 SUPPORT_DECLARATION_PATH = "docs/native-retirement-support-v1.tsv"
-SUPPORT_DECLARATION_SHA256 = "ae46df88d79ed3f0e9ca54df4620874b7c0553df66da374f19f9c3cbdf19880d"
+SUPPORT_DECLARATION_SHA256 = "60c396dffcfae84b335927f733fa4ab8fca5f322836468fa59ff2fa28352c2b9"
 SUPPORT_DECLARATION_FIELDS = ["path", "role", "compile_obligation", "bytes", "sha256"]
 INPUT_FIELDS = ["path", "role", "compile_obligation", "bytes", "buster_hash_64",
                 "sha256", "fixture_recipe", "fixture_flags"]
