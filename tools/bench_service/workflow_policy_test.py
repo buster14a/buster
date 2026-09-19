@@ -18,6 +18,7 @@ TRANSIENT_REPAIR = WORKFLOWS / "pr843-doc-fix.yml"
 ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 DEPLOYMENT = SERVICE / "deploy" / "VALIDATE_BUSTER_V1.md"
+ADMISSION_INSTALLER = SERVICE / "deploy" / "configure_github_admission.sh"
 
 SOURCE_REQUIREMENTS = {
     "exclusive_admission.c": (
@@ -81,6 +82,24 @@ def main() -> int:
         text = DEPLOYMENT.read_text(encoding="utf-8")
         if "There is no admitted smoke dispatch workflow" in text:
             errors.append("deployment guide still claims the fixed smoke workflow is missing")
+
+    if not ADMISSION_INSTALLER.is_file():
+        errors.append("missing configure_github_admission.sh")
+    else:
+        installer = ADMISSION_INSTALLER.read_text(encoding="utf-8")
+        disable_command = 'gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body false --repo "$repo"'
+        disable_count = installer.count(disable_command)
+        mutation_positions = [
+            position
+            for marker in ("gh api --method PUT", "gh api --method POST")
+            if (position := installer.find(marker)) >= 0
+        ]
+        if disable_count != 1:
+            errors.append("admission installer must disable dispatch exactly once")
+        elif not mutation_positions:
+            errors.append("admission installer is missing repository policy mutations")
+        elif installer.find(disable_command) > min(mutation_positions):
+            errors.append("admission installer must disable dispatch before its first policy mutation")
 
     if not POLICY.is_file():
         errors.append("missing bench-service-policy.yml")
