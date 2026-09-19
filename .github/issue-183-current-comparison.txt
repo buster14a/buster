@@ -1,0 +1,94 @@
+base=b6ab86343e36c443969cfc310853a703e639be0e
+apply_exit=0
+candidate_build_exit=0
+targeted_compile_run=0 0
+
+=== baseline exit=1 lines=5941 ===
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+TEST_MODULE_TIMING index=50 module=compiler_driver_tests duration_ns=58108505376 passed=39623 failed=12 assertions=39635 status=fail
+[2753725/2753737] Unit tests
+[52/53] Module tests
+[0/0] External tests
+
+=== candidate exit=1 lines=5965 ===
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+fixed_enum.error == COMPILER_DRIVER_ERROR_NONE failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8940
+fixed_enum_bytes.length != 0 failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:8943
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:13980
+os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:15761
+os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:15761
+os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:15761
+os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS failed at /home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c:compiler_driver_tests:15761
+TEST_MODULE_TIMING index=50 module=compiler_driver_tests duration_ns=55046207083 passed=39599 failed=36 assertions=39635 status=fail
+[2753701/2753737] Unit tests
+[52/53] Module tests
+[0/0] External tests
+
+=== apply log ===
+
+=== candidate build tail ===
+[1/24] Building C object CMakeFiles/ide.dir/src/buster/apps/ide/ide.c.o
+[2/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/metamorphic/metamorphic_test.c.o
+[3/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/frontend/c/once_test.c.o
+[4/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/frontend/c/macro_conditional_test.c.o
+[5/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/diagnostic_test.c.o
+[6/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/ir/ir_test.c.o
+[7/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/ir/vector_contract_test.c.o
+[8/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/llvm/bitcode_test.c.o
+[9/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/codegen/machine_select_test.c.o
+[10/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/codegen/machine_test.c.o
+[11/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/codegen/codegen_test.c.o
+[12/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/codegen/aarch64_stride_test.c.o
+[13/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/frontend/c/c_test.c.o
+[14/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/gpu/gpu_test.c.o
+[15/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/link/link_test.c.o
+[16/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/driver/object_path_test.c.o
+[17/24] Building C object CMakeFiles/ide.dir/src/buster/tests/test.c.o
+[18/24] Building C object CMakeFiles/ide.dir/src/buster/lib/compiler/frontend/c/c_source.c.o
+[19/24] Building C object CMakeFiles/ide.dir/src/buster/lib/compiler/frontend/c/c_parse.c.o
+[20/24] Building C object CMakeFiles/ide.dir/src/buster/lib/compiler/frontend/c/c_gen.c.o
+[21/24] Building C object CMakeFiles/ide.dir/src/buster/lib/compiler/gpu/gpu.c.o
+[22/24] Building C object CMakeFiles/ide.dir/src/buster/lib/compiler/driver/driver.c.o
+[23/24] Building C object CMakeFiles/ide.dir/src/buster/tests/compiler/driver/driver_test.c.o
+[24/24] Linking C executable ide
+
+=== targeted output ===
