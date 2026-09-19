@@ -785,7 +785,8 @@ struct BusterX86MetadataSelectResult
     u32 selected_byte_count;
     u16 selected_memory_width;
     u8 selected_memory_operand;
-    u8 reserved0;
+    // Reapply the selected conversion projection only after final selection.
+    bool selected_memory_source_width_cleared;
     u32 diagnostic_operand;
     s64 diagnostic_value;
     BusterX86MetadataString required_feature;

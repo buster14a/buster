@@ -9394,6 +9394,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                     selected_implicit_one = candidate_implicit_one;
                     selected_x87_no_rexw = candidate_x87_no_rexw;
                     result.selected_memory_width = 0;
+                    result.selected_memory_source_width_cleared = false;
                     result.selected_memory_operand = UINT8_MAX;
                     if (inferred_memory_width)
                     {
@@ -9403,6 +9404,10 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                             {
                                 result.selected_memory_width = candidate_operands[operand_index].width;
                                 result.selected_memory_operand = (u8)operand_index;
+                                result.selected_memory_source_width_cleared =
+                                    candidate_source_tuple_width != 0 &&
+                                    query.operands[operand_index].memory.source_width != 0 &&
+                                    candidate_operands[operand_index].memory.source_width == 0;
                                 break;
                             }
                         }
@@ -9416,6 +9421,7 @@ BusterX86MetadataSelectResult buster_x86_metadata_select_form(BusterX86MetadataP
                 result.stable_hash = 0;
                 result.selected_byte_count = 0;
                 result.selected_memory_width = 0;
+                result.selected_memory_source_width_cleared = false;
                 result.selected_memory_operand = UINT8_MAX;
             }
             else if (result.candidate_count) result.status = BUSTER_X86_METADATA_ENCODE_SUCCESS;
@@ -9475,10 +9481,11 @@ BusterX86MetadataEmitResult buster_x86_metadata_encode(BusterX86MetadataEncodeQu
         operands[selection.selected_memory_operand].width = selection.selected_memory_width;
         BusterX86MetadataForm selected_form = {0};
         u16 selected_scalar_width = 0;
-        if (buster_x86_metadata_form(selection.form_id, &selected_form) &&
+        bool aggregate_source_width_cleared = buster_x86_metadata_form(selection.form_id, &selected_form) &&
             (buster_x86_metadata_block_memory_source_topology_internal(selected_form, physical, &selected_scalar_width) ||
              buster_x86_metadata_aggregate_memory_source_topology_internal(selected_form, physical, &selected_scalar_width)) &&
-            operands[selection.selected_memory_operand].memory.source_width == 512)
+            operands[selection.selected_memory_operand].memory.source_width == 512;
+        if (selection.selected_memory_source_width_cleared || aggregate_source_width_cleared)
             operands[selection.selected_memory_operand].memory.source_width = 0;
         physical.operands = operands;
     }

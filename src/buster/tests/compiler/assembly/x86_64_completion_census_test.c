@@ -2811,8 +2811,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     // maps to the sse2 feature. The AT&T share is the larger one because the
     // implicit byte-width of an unsuffixed memory operand is an AT&T-only
     // question. Nothing moved down.
-    BUSTER_TEST(arguments, source.intel_exact_count == 5628 && source.intel_normalized_relocation_count == 28 &&
-                             source.intel_alias_equivalent_count == 222 && source.intel_unresolved_count == 3962 &&
+    BUSTER_TEST(arguments, source.intel_exact_count == 5631 && source.intel_normalized_relocation_count == 28 &&
+                             source.intel_alias_equivalent_count == 222 && source.intel_unresolved_count == 3959 &&
                              source.intel_byte_mismatch_count == 767 && source.intel_relocation_mismatch_count == 0 &&
                              source.intel_policy_rejected_count == 542 && source.intel_different_encoding_count == 17);
     // #280 changes exactly this census row: VMOVNTDQA zmm0, dword ptr
@@ -2854,8 +2854,8 @@ UnitTestResult x86_64_completion_census_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, att_reason_non_none == source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_UNREPRESENTABLE] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_SYNTAX_REJECTED] +
                                            source.att_class_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_POLICY_REJECTED]);
-    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6662 &&
-                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3267 &&
+    BUSTER_TEST(arguments, source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_NONE] == 6665 &&
+                             source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_OPERANDS] == 3264 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_UNKNOWN_INSTRUCTION] == 136 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_SYNTAX_INVALID_EXPRESSION] == 0 &&
                              source.intel_source_reason_counts[BUSTER_X86_COMPLETION_CENSUS_SOURCE_REASON_POLICY_FEATURE] == 542);
