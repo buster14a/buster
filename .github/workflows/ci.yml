@@ -190,6 +190,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
+          "$BUSTER_CI_PYTHON" tools/ci_zig_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-installer-test.log"
           "$BUSTER_CI_PYTHON" tools/ci_android_sdk_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/android-sdk-installer-test.log"
           "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
           "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
