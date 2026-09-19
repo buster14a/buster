@@ -2204,11 +2204,15 @@ OsError os_file_delete_checked(String8 path)
 FileStats os_file_replacement_target_stats(String8 path)
 {
     FileStats result = {0};
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = os_file_test_selects(path) ? os_file_test_take(OS_FILE_TEST_STATS) : 0;
+    if (step && step->action == OS_FILE_TEST_ERROR) result.error.v = (u32)step->value;
+#endif
     if (!path.pointer || !path.length)
     {
         result.error = os_file_invalid_error();
     }
-    else
+    else if (!result.error.v)
     {
 #if defined(__linux__) || defined(__APPLE__)
         BUSTER_VALIDATE(!path.pointer[path.length]);

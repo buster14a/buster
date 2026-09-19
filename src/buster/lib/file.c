@@ -1,8 +1,10 @@
 // File content ownership and transfer policy: file_write_checked preserves
-// transfer/close failures; file_read owns padded arena and normalized APK asset
+// transfer/close failures; file_publish_checked atomically replaces complete
+// in-memory artifacts; file_read owns padded arena and normalized APK asset
 // reads; file_map_read and file_map_unmap own optional mappings; file_copy_checked
 // streams into a staging file beside its destination and publishes it with
-// os_file_replace.
+// os_file_replace. The staging path and publication boundary are kept together
+// so callers can validate the complete artifact before replacement.
 #include <buster/lib/file.h>
 #include <buster/lib/os_internal.h>
 #include <buster/lib/system_headers.h>
@@ -87,6 +89,114 @@ OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OpenPer
 bool file_write(String8 path, ByteSlice content)
 {
     return !file_write_checked(path, content, (OpenPermissions){.read = 1, .write = 1}).error.v;
+}
+
+// Once publication has failed or been refused, later close/delete failures are
+// cleanup and never replace the operation's primary outcome.
+BUSTER_GLOBAL_LOCAL void file_publish_record(FilePublishResult* result, OsError error)
+{
+    if (error.v)
+    {
+        if (result->status == FILE_PUBLISH_FAILED && !result->error.v)
+        {
+            result->error = error;
+        }
+        else if (!result->cleanup_error.v)
+        {
+            result->cleanup_error = error;
+        }
+    }
+}
+
+FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions)
+{
+    FilePublishResult result = {0};
+    FileStats target = os_file_replacement_target_stats(path);
+    result.error = target.error;
+    bool replaces = target.valid && target.kind == OS_FILE_KIND_REGULAR;
+    bool stages = false;
+    if (target.valid && !replaces && target.kind != OS_FILE_KIND_MISSING)
+    {
+        result.status = FILE_PUBLISH_UNSUPPORTED_DESTINATION;
+    }
+#if BUSTER_WINDOWS
+    else if (replaces && !(target.permissions & 0222))
+    {
+        // Match the old in-place writer's refusal of a read-only destination
+        // instead of relying on MoveFileExW attribute behavior.
+        result.error.v = (u32)ERROR_ACCESS_DENIED;
+    }
+#endif
+    else
+    {
+        stages = target.valid;
+    }
+
+    TemporalArena scratch = scratch_begin(0, 0);
+    OsFileStagingResult staging = {0};
+    if (stages && !result.error.v)
+    {
+        staging = os_file_staging_create(scratch.arena, path, permissions);
+        result.error = staging.error;
+    }
+    if (staging.file)
+    {
+#if !BUSTER_WINDOWS
+        if (replaces && !result.error.v)
+        {
+            u32 final_permissions = target.permissions;
+            if (permissions.execute)
+            {
+                final_permissions |= 0111;
+            }
+            else
+            {
+                final_permissions &= ~0111u;
+            }
+            result.error = os_file_set_permissions(staging.file, final_permissions);
+        }
+#endif
+        if (!result.error.v)
+        {
+            OsFileTransferResult written = os_file_write_checked(staging.file, content);
+            result.error = written.error;
+            if (!result.error.v && written.transferred != content.length)
+            {
+                result.status = FILE_PUBLISH_INVALID_STAGING;
+            }
+        }
+        if (!result.error.v && result.status != FILE_PUBLISH_INVALID_STAGING)
+        {
+            result.error = os_file_flush(staging.file);
+        }
+        file_publish_record(&result, os_file_close_checked(staging.file));
+        if (!result.error.v && result.status != FILE_PUBLISH_INVALID_STAGING)
+        {
+            result.error = os_file_replace(staging.path, path);
+            if (!result.error.v)
+            {
+                result.status = FILE_PUBLISH_PUBLISHED;
+            }
+        }
+        if (result.status != FILE_PUBLISH_PUBLISHED)
+        {
+            file_publish_record(&result, os_file_delete_checked(staging.path));
+        }
+    }
+    scratch_end(scratch);
+    return result;
+}
+
+bool file_publish(String8 path, ByteSlice content)
+{
+    FilePublishResult result = file_publish_checked(path, content, (OpenPermissions){.read = 1, .write = 1});
+    return result.status == FILE_PUBLISH_PUBLISHED;
+}
+
+bool file_publish_executable(String8 path, ByteSlice content)
+{
+    FilePublishResult result = file_publish_checked(path, content, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+    return result.status == FILE_PUBLISH_PUBLISHED;
 }
 
 BUSTER_GLOBAL_LOCAL FileIdentity file_identity_from_stats(FileStats stats)

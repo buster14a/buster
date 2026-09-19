@@ -2969,7 +2969,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_llvm_bitcode(Arena* arena, Compil
     }
     result->has_llvm_bitcode = true;
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_llvm_bitcode_path(arena, invocation.input_paths[0]);
-    if (!file_write(output, artifact.bytes))
+    if (!file_publish(output, artifact.bytes))
     {
         result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
         result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
@@ -3021,7 +3021,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_wasm64(Arena* arena, CompilerDriv
                      : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
                          ? compiler_driver_default_wasm64_path(arena, invocation.input_paths[0])
                          : S8("a.wasm");
-    if (!file_write(output, artifact.bytes))
+    if (!file_publish(output, artifact.bytes))
     {
         result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
         result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
@@ -3051,7 +3051,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_ebpf(Arena* arena, CompilerDriver
                      : invocation.action == COMPILER_DRIVER_ACTION_OBJECT
                          ? compiler_driver_default_object_path(arena, invocation.input_paths[0])
                          : S8("a.o");
-    if (!file_write(output, artifact.bytes))
+    if (!file_publish(output, artifact.bytes))
     {
         result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
         result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
@@ -3076,7 +3076,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
             result->diagnostic = S8("could not format native object as textual assembly");
             return;
         }
-        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result->output)))
+        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result->output)))
         {
             result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result->diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
@@ -3098,7 +3098,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
             return;
         }
         String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_object_path(arena, invocation.input_paths[0]);
-        if (!file_write(output, artifact.bytes))
+        if (!file_publish(output, artifact.bytes))
         {
             result->error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result->diagnostic = string_format(arena, S8("could not write {S8}"), output);
@@ -3336,7 +3336,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_single
         // An assembly unit is already what the preprocessor would have
         // produced, so -E hands the text back unchanged.
         result.output = string_duplicate_arena(arena, source, false);
-        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
         {
             result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
@@ -3441,7 +3441,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_preprocessed_as
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = source;
-        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
         {
             result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
@@ -3532,7 +3532,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     if (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS)
     {
         result.output = compiler_driver_preprocess_text(arena, preprocess, UINT64_MAX, 0);
-        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
         {
             result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
@@ -4672,7 +4672,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                                               .length = invocation.input_count,
                                           },
                                           false);
-        if (invocation.output_path.length && !file_write(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
+        if (invocation.output_path.length && !file_publish(invocation.output_path, BUSTER_SLICE_TO_BYTE_SLICE(result.output)))
         {
             result.error = COMPILER_DRIVER_ERROR_FILE_WRITE;
             result.diagnostic = string_format(arena, S8("could not write {S8}"), invocation.output_path);
