@@ -176,6 +176,26 @@ semantic reference, with failed wide CAS requiring a validated pair read.
 This corpus is a coverage floor for #36, not a claim of complete MIR lowering
 or permission to retire the canonical oracle.
 
+## C input phase selection
+
+A `.c` input and any path under `-x c` begin as raw C source and run the full
+preprocessor. In automatic language mode, `.i` begins as preprocessed C;
+`-x cpp-output` selects that same phase for any suffix, including an
+extensionless path. `-x c` deliberately overrides a `.i` suffix, while
+`-x none` restores suffix inference.
+
+Preprocessed C still runs the normal lexer, identifier interning, source-map
+publication, numeric/`#line` marker handling, pragma state and C23 keyword
+normalization. It does not replay command-line `-D`/`-U` operations, includes,
+conditional or definition directives, diagnostics directives, or macro
+expansion in ordinary text. `-E` on preprocessed C serializes that retained
+token stream with the normal output spacing; it is not a second preprocessing
+pass and need not preserve the input bytes verbatim. This is a starting-phase
+distinction, not a new C dialect or backend.
+`COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT` exposes the same contract to invocation
+API callers; a future per-input `-x` snapshot can carry that language value
+without changing the frontend contract.
+
 A `.s` input, or any input under `-x assembler`, is an assembly translation
 unit rather than a C one. `assembly_unit_encode` (`assembly_unit.c`) is the
 layer above `assembly_encode`: it interprets the directive vocabulary, tracks

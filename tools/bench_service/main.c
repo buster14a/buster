@@ -49,6 +49,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     u32 body_size = 0;
     bool raw = false;
     bool remote = false;
+    bool typed_remote = false;
     bool serve = false;
     bool valid = false;
     bool handled = false;
@@ -75,6 +76,48 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     {
         remote = true;
         valid = true;
+    }
+    else if (argc >= 4 && !strcmp(argv[1], "client"))
+    {
+        typed_remote = true;
+        if (argc == 4 && !strcmp(argv[3], "capabilities"))
+        {
+            operation = BQ_OP_CAPABILITIES;
+            valid = true;
+        }
+        else if (argc == 9 && !strcmp(argv[3], "submit"))
+        {
+            BqRequest submission;
+            String8 fields[BQ_FIELD_COUNT];
+            for (u32 i = 0; i < BQ_FIELD_COUNT; i += 1)
+            {
+                fields[i] = string_from_pointer(argv[4 + i]);
+            }
+            valid = bq_request_make(fields, &submission) == BQ_OK;
+            operation = BQ_OP_SUBMIT;
+            if (valid)
+            {
+                body_size = submission.size;
+                memcpy(body, submission.bytes, body_size);
+            }
+        }
+        else if (argc == 5 && (!strcmp(argv[3], "status") || !strcmp(argv[3], "result") ||
+                               !strcmp(argv[3], "cancel")))
+        {
+            operation = !strcmp(argv[3], "status") ? BQ_OP_STATUS :
+                        !strcmp(argv[3], "result") ? BQ_OP_RESULT : BQ_OP_CANCEL;
+            valid = bq_decimal(argv[4], true, &id);
+            bq_put64(body, id);
+            body_size = 8;
+        }
+        else if ((argc == 5 || argc == 6) && !strcmp(argv[3], "logs"))
+        {
+            operation = BQ_OP_LOGS;
+            valid = bq_decimal(argv[4], true, &id) && (argc == 5 || bq_decimal(argv[5], false, &argument));
+            bq_put64(body, id);
+            bq_put64(body + 8, argument);
+            body_size = 16;
+        }
     }
     else if (argc == 8 && !strcmp(argv[1], "serve"))
     {
@@ -198,6 +241,13 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
         handled = true;
         simple_diagnostic = true;
     }
+    if (!handled && typed_remote && valid)
+    {
+        bq_packet(&request, operation, 1, body, body_size);
+        error = bq_transport_request(argv[2], &request, &response);
+        handled = true;
+        simple_diagnostic = true;
+    }
     if (!handled && serve && valid)
     {
         u64 cpu = 0;
@@ -296,6 +346,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "fake-reconcile DIR JOB TOKEN | materialize DIR INSTALLED_ROOT WORKSPACE_ROOT | "
                     "workspace-reconcile DIR WORKSPACE_ROOT JOB TOKEN | "
                     "worker-run DIR INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU | protocol DIR | rpc SOCKET | "
+                    "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
                     "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU\n");
         }
     }

@@ -7,6 +7,19 @@ cd "$repo_root"
 # shellcheck source=android/payload_deadline_policy.sh
 source "$repo_root/android/payload_deadline_policy.sh"
 
+android_execution=${BUSTER_ANDROID_EXECUTION:-runtime}
+if [[ $# -gt 0 && $1 == --package-only ]]; then
+    android_execution=package
+    shift
+fi
+case "$android_execution" in
+    runtime|package) ;;
+    *)
+        echo "error: BUSTER_ANDROID_EXECUTION must be runtime or package (got '$android_execution')" >&2
+        exit 1
+        ;;
+esac
+
 android_sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 if [[ -z ${android_sdk} ]]; then
     echo "error: ANDROID_HOME or ANDROID_SDK_ROOT must point at an Android SDK" >&2
@@ -28,13 +41,26 @@ if [[ -z ${android_ndk} || ! -f ${android_ndk}/build/cmake/android.toolchain.cma
 fi
 
 android_platform=${BUSTER_ANDROID_PLATFORM:-android-35}
-# The CI image is deliberately fixed to x86_64. Do not query adb before the
-# build: the emulator can be starting while CMake/Ninja compile and package.
 android_abi=${BUSTER_ANDROID_ABI:-x86_64}
-if [[ $android_abi != x86_64 ]]; then
-    echo "error: Android CI requires the fixed x86_64 emulator ABI (got '$android_abi')" >&2
-    exit 1
-fi
+case "$android_execution" in
+    runtime)
+        # The runtime CI image is deliberately fixed to x86_64. Do not query adb
+        # before the build: the emulator can start while CMake/Ninja package.
+        if [[ $android_abi != x86_64 ]]; then
+            echo "error: Android runtime CI requires the fixed x86_64 emulator ABI (got '$android_abi')" >&2
+            exit 1
+        fi
+        ;;
+    package)
+        case "$android_abi" in
+            x86_64|arm64-v8a) ;;
+            *)
+                echo "error: Android package CI supports x86_64 or arm64-v8a (got '$android_abi')" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+esac
 
 build_configs_string=${BUSTER_ANDROID_BUILD_CONFIGS:-}
 if [[ -z $build_configs_string ]]; then
@@ -49,7 +75,7 @@ if [[ $# -gt 0 ]]; then
     case "$1" in
         --all)
             if [[ $# -ne 1 ]]; then
-                echo "usage: $0 [--all|Debug|Release ...]" >&2
+                echo "usage: $0 [--package-only] [--all|--configs Debug Release|Debug|Release ...]" >&2
                 exit 2
             fi
             build_configs_string="Debug Release"
@@ -90,6 +116,32 @@ android_run_tests_script=${BUSTER_ANDROID_RUN_TESTS_SCRIPT:-android/run_tests.sh
 android_emulator_started_marker=${BUSTER_ANDROID_EMULATOR_STARTED_MARKER:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/buster-android-emulator.started}
 android_cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
 
+# See docs/android-ci-abi-policy.md for the supported-ABI and runtime boundary.
+android_aarch64_package=${BUSTER_ANDROID_AARCH64_PACKAGE:-auto}
+if [[ $android_execution == package ]]; then
+    android_aarch64_package=0
+elif [[ ${GITHUB_ACTIONS:-false} == true && ${GITHUB_JOB:-} == mobile ]]; then
+    if [[ $android_aarch64_package == 0 ]]; then
+        echo "error: the required GitHub Android job cannot disable AArch64 package coverage" >&2
+        exit 1
+    fi
+    android_aarch64_package=1
+elif [[ $android_aarch64_package == auto ]]; then
+    android_aarch64_package=0
+fi
+case "$android_aarch64_package" in
+    0|1) ;;
+    *)
+        echo "error: BUSTER_ANDROID_AARCH64_PACKAGE must be auto, 0, or 1 (got '$android_aarch64_package')" >&2
+        exit 1
+        ;;
+esac
+android_aarch64_build_directory=${BUSTER_ANDROID_AARCH64_BUILD_DIRECTORY:-build/android-ci-arm64-v8a}
+if [[ $android_aarch64_package == 1 && $android_aarch64_build_directory == "$build_directory" ]]; then
+    echo "error: x86-64 runtime and arm64-v8a package coverage require separate build directories" >&2
+    exit 1
+fi
+
 android_phase=configure
 android_config=none
 config_statuses=()
@@ -99,7 +151,7 @@ cleanup_on_failure() {
     local cleanup_status=not-run
     local result_index
     trap - EXIT INT TERM
-    if [[ $status -ne 0 && -f $android_emulator_started_marker ]]; then
+    if [[ $android_execution == runtime && $status -ne 0 && -f $android_emulator_started_marker ]]; then
         if BUSTER_ANDROID_EMULATOR_STARTED_MARKER="$android_emulator_started_marker" \
             BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS="$android_cleanup_timeout_seconds" \
             bash "$android_start_script" stop; then
@@ -109,12 +161,28 @@ cleanup_on_failure() {
             echo "warning: Android emulator cleanup failed after test status $status (cleanup status $cleanup_status)" >&2
         fi
     fi
-    for result_index in "${!build_configs[@]}"; do
-        printf 'ANDROID_CONFIG_RESULT config=%s status=%s\n' "${build_configs[$result_index]}" "${config_statuses[$result_index]:-not-run}"
-    done
-    printf 'ANDROID_BATCH_RESULT phase=%s config=%s status=%s cleanup_status=%s\n' "$android_phase" "$android_config" "$status" "$cleanup_status"
-    if [[ $status -ne 0 ]]; then
-        printf 'error: Android batch failed in phase %s (config=%s status=%s); a later configuration success does not clear an earlier failure\n' "$android_phase" "$android_config" "$status" >&2
+    if [[ $android_execution == package ]]; then
+        for result_index in "${!build_configs[@]}"; do
+            printf 'ANDROID_PACKAGE_CONFIG_RESULT abi=%s config=%s status=%s\n' \
+                "$android_abi" "${build_configs[$result_index]}" "${config_statuses[$result_index]:-not-run}"
+        done
+        printf 'ANDROID_PACKAGE_BATCH_RESULT abi=%s phase=%s config=%s status=%s\n' \
+            "$android_abi" "$android_phase" "$android_config" "$status"
+        if [[ $status -ne 0 ]]; then
+            printf 'error: Android package batch failed in phase %s (abi=%s config=%s status=%s)\n' \
+                "$android_phase" "$android_abi" "$android_config" "$status" >&2
+        fi
+    else
+        for result_index in "${!build_configs[@]}"; do
+            printf 'ANDROID_CONFIG_RESULT config=%s status=%s\n' \
+                "${build_configs[$result_index]}" "${config_statuses[$result_index]:-not-run}"
+        done
+        printf 'ANDROID_BATCH_RESULT phase=%s config=%s status=%s cleanup_status=%s\n' \
+            "$android_phase" "$android_config" "$status" "$cleanup_status"
+        if [[ $status -ne 0 ]]; then
+            printf 'error: Android batch failed in phase %s (config=%s status=%s); a later configuration success does not clear an earlier failure\n' \
+                "$android_phase" "$android_config" "$status" >&2
+        fi
     fi
     exit "$status"
 }
@@ -122,38 +190,82 @@ trap cleanup_on_failure EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+verify_android_apk() {
+    local apk_path=$1
+    local abi=$2
+    python3 - "$apk_path" "$abi" <<'PY_VERIFY_APK'
+import sys
+import zipfile
+
+apk_path, abi = sys.argv[1:]
+entry = f"lib/{abi}/libide.so"
+expected_machine = {"x86_64": 62, "arm64-v8a": 183}[abi]
+with zipfile.ZipFile(apk_path) as archive:
+    names = archive.namelist()
+    if names.count(entry) != 1:
+        raise SystemExit(f"error: {apk_path} must contain exactly one {entry}")
+    image = archive.read(entry)
+if len(image) < 20 or image[:4] != b"\x7fELF" or image[4] != 2 or image[5] != 1:
+    raise SystemExit(f"error: {entry} is not a little-endian ELF64 image")
+machine = int.from_bytes(image[18:20], "little")
+if machine != expected_machine:
+    raise SystemExit(
+        f"error: {entry} has ELF machine {machine}, expected {expected_machine} for {abi}"
+    )
+print(
+    f"ANDROID_PACKAGE_VERIFY abi={abi} entry={entry} "
+    f"elf_machine={machine} status=0"
+)
+PY_VERIFY_APK
+}
+
+configure_android_tree() {
+    local directory=$1
+    local abi=$2
+    # CMake 4.4 promotes the NDK r27 toolchain's own pre-3.10 compatibility
+    # declarations to developer errors under -Werror=dev. Keep every other
+    # developer diagnostic fatal while leaving third-party deprecation policy to
+    # the pinned NDK instead of patching its installed files.
+    cmake --warn-uninitialized -Werror=dev -Wno-error=deprecated \
+        -B "$directory" \
+        -G "Ninja Multi-Config" \
+        -DCMAKE_TOOLCHAIN_FILE="${android_ndk}/build/cmake/android.toolchain.cmake" \
+        -DANDROID_ABI="$abi" \
+        -DANDROID_PLATFORM="$android_platform" \
+        -DCMAKE_DEFAULT_BUILD_TYPE="${build_configs[0]}" \
+        -DCMAKE_CONFIGURATION_TYPES="Debug;Release" \
+        -DCMAKE_LINKER_TYPE=DEFAULT \
+        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+        -DBUSTER_CI=ON \
+        -DBUSTER_OPTIMIZE=OFF \
+        -DBUSTER_SANITIZE=OFF \
+        -DBUSTER_FUZZ_AVAILABLE=OFF \
+        -DBUSTER_INCLUDE_TESTS=ON \
+        -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
+        -DBUSTER_DEVELOPER_TARGETS=OFF
+}
+
 cmake --version
 ninja --version
 
 configure_started=$SECONDS
-# CMake 4.4 promotes the NDK r27 toolchain's own pre-3.10 compatibility
-# declarations to developer errors under -Werror=dev. Keep every other
-# developer diagnostic fatal while leaving third-party deprecation policy to
-# the pinned NDK instead of patching its installed files.
-cmake --warn-uninitialized -Werror=dev -Wno-error=deprecated \
-    -B "$build_directory" \
-    -G "Ninja Multi-Config" \
-    -DCMAKE_TOOLCHAIN_FILE="${android_ndk}/build/cmake/android.toolchain.cmake" \
-    -DANDROID_ABI="$android_abi" \
-    -DANDROID_PLATFORM="$android_platform" \
-    -DCMAKE_DEFAULT_BUILD_TYPE="${build_configs[0]}" \
-    -DCMAKE_CONFIGURATION_TYPES="Debug;Release" \
-    -DCMAKE_LINKER_TYPE=DEFAULT \
-    -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-    -DBUSTER_CI=ON \
-    -DBUSTER_OPTIMIZE=OFF \
-    -DBUSTER_SANITIZE=OFF \
-    -DBUSTER_FUZZ_AVAILABLE=OFF \
-    -DBUSTER_INCLUDE_TESTS=ON \
-    -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF \
-    -DBUSTER_DEVELOPER_TARGETS=OFF
-echo "TIMING_ANDROID configure_seconds=$((SECONDS - configure_started))"
+configure_android_tree "$build_directory" "$android_abi"
+if [[ $android_execution == package ]]; then
+    echo "TIMING_ANDROID_PACKAGE abi=$android_abi configure_seconds=$((SECONDS - configure_started))"
+else
+    echo "TIMING_ANDROID configure_seconds=$((SECONDS - configure_started))"
+fi
 
 apk_paths=()
 android_phase=build
-for build_config in "${build_configs[@]}"; do
+for index in "${!build_configs[@]}"; do
+    build_config=${build_configs[$index]}
     android_config=$build_config
-    echo "Building and packaging Android ${build_config} while the emulator boots"
+    if [[ $android_execution == runtime ]]; then
+        echo "Building and packaging Android ${build_config} while the emulator boots"
+    else
+        echo "Building and packaging Android ${android_abi} ${build_config}"
+    fi
     build_started=$SECONDS
     cmake --build "$build_directory" --config "$build_config" --target apk --verbose
     apk_source="$build_directory/buster.apk"
@@ -165,8 +277,37 @@ for build_config in "${build_configs[@]}"; do
     mkdir -p "$(dirname "$apk_path")"
     cp -f "$apk_source" "$apk_path"
     apk_paths+=("$apk_path")
-    echo "TIMING_ANDROID build_seconds config=$build_config value=$((SECONDS - build_started))"
+    if [[ $android_execution == package ]]; then
+        verify_android_apk "$apk_path" "$android_abi"
+        config_statuses[$index]=0
+        printf 'ANDROID_PACKAGE_ARTIFACT abi=%s config=%s path=%s\n' \
+            "$android_abi" "$build_config" "$apk_path"
+        echo "TIMING_ANDROID_PACKAGE abi=$android_abi build_seconds config=$build_config value=$((SECONDS - build_started))"
+    else
+        echo "TIMING_ANDROID build_seconds config=$build_config value=$((SECONDS - build_started))"
+    fi
 done
+
+if [[ $android_execution == package ]]; then
+    android_phase=package
+    android_config=none
+    exit 0
+fi
+
+if [[ $android_aarch64_package == 1 ]]; then
+    android_phase=aarch64-package
+    android_config=none
+    aarch64_started=$SECONDS
+    echo "Building required Android AArch64 compile/link/package coverage"
+    BUSTER_ANDROID_EXECUTION=package \
+        BUSTER_ANDROID_ABI=arm64-v8a \
+        BUSTER_ANDROID_BUILD_DIRECTORY="$android_aarch64_build_directory" \
+        BUSTER_ANDROID_AARCH64_PACKAGE=0 \
+        BUSTER_ANDROID_EMULATOR_STARTED_MARKER="${android_emulator_started_marker}.aarch64-package" \
+        bash "$repo_root/android/test_ci.sh" --package-only --configs "${build_configs[@]}"
+    printf 'ANDROID_AARCH64_COVERAGE abi=arm64-v8a execution=compile-link-package runtime=not-run reason=github-hosted-x86_64-kvm status=0\n'
+    echo "TIMING_ANDROID aarch64_package_seconds=$((SECONDS - aarch64_started))"
+fi
 
 android_phase=boot-wait
 android_config=none

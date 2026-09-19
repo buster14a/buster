@@ -518,8 +518,23 @@ cannot produce a performance qualification or #512 acceptance result.
 
 ```sh
 ./build.sh bench_service serve STATE SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU
+./build.sh bench_service client SOCKET capabilities
+./build.sh bench_service client SOCKET submit PRINCIPAL KEY validate-buster-v1 BASE_SHA CANDIDATE_SHA
+./build.sh bench_service client SOCKET status JOB
+./build.sh bench_service client SOCKET result JOB
+./build.sh bench_service client SOCKET logs JOB [AFTER_SEQUENCE]
+./build.sh bench_service client SOCKET cancel JOB
+# Raw bounded-frame diagnostics only:
 ./build.sh bench_service rpc SOCKET <request-frame >response-frame
 ```
+
+`client` constructs only the public schema-2 operations, rejects fake and
+blocked recipe submissions before transport, and verifies that the response
+schema, operation and correlation exactly match the request. Transport or
+malformed-response failures remain fail-closed. It does not grant access: the
+socket still requires the daemon's exact effective UID and GID. An external
+fixed-request gateway must therefore run under the reviewed service identity;
+this command is not permission to expose an arbitrary RPC or shell boundary.
 
 `SOCKET`'s parent must already be a private, operator-provisioned directory;
 the service refuses an existing socket, final symlink, non-private parent or
@@ -527,7 +542,7 @@ replacement inode. The bind uses a restrictive umask and validates the
 pathname inode before listening and again after setup. On shutdown it removes
 only the socket inode it created and reports cleanup or replacement failures.
 Windows and macOS compile the bounded codec but report `unsupported` for
-`serve` and `rpc`; no network listener is added there.
+`serve`, `client` and `rpc`; no network listener is added there.
 
 ## CLI
 
@@ -563,8 +578,10 @@ because stdout or the response channel failed.
 stdin, and writes one response frame through the queue opened by that process.
 It remains a local pipe codec without caller authentication and retains the
 fake recipes for deterministic regression work. `bench_service rpc SOCKET`
-forwards schema-2 frames to the authenticated Linux service; that endpoint
-advertises `service-recipes=validate-buster-v1` and
+forwards one already-encoded schema-2 frame for diagnostics. `bench_service
+client SOCKET ...` is the typed public-operation encoder and exact-response
+validator used by a fixed-request gateway. Both reach the authenticated Linux
+service; that endpoint advertises `service-recipes=validate-buster-v1` and
 `blocked-recipes=native-retirement-performance-v1`, rejects fake, blocked and
 supervisor-internal submissions, and performs the only service queue mutation.
 

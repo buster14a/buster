@@ -1757,6 +1757,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembler_language(UnitT
         COMPILER_DRIVER_LANGUAGE_AUTOMATIC,
         COMPILER_DRIVER_LANGUAGE_C,
         COMPILER_DRIVER_LANGUAGE_ASSEMBLY,
+        COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT,
     };
     CompilerDriverLanguage gpu_languages[] = {
         COMPILER_DRIVER_LANGUAGE_OPENCL,
@@ -5524,6 +5525,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
 }
 
 #include <buster/tests/compiler/driver/driver_fast_test.c>
+#include <buster/tests/compiler/driver/preprocessed_input_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
 
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -6738,6 +6740,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocessed_c_input);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
