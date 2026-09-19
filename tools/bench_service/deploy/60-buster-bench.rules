@@ -1,0 +1,31 @@
+/* Fixed systemd authorization for the dedicated benchmark host.
+ *
+ * The service account may start/stop only deterministic per-job units. The
+ * dispatch identity may submit through the gateway but can never manage a
+ * unit. Root and the separately reviewed admin group own the long-lived
+ * service lifecycle. Everything else under the buster-bench namespace fails
+ * closed instead of falling through to a desktop authentication policy.
+ */
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units")
+        return polkit.Result.NOT_HANDLED;
+
+    var unit = action.lookup("unit") || "";
+    var verb = action.lookup("verb") || "";
+    if (unit.indexOf("buster-bench") !== 0)
+        return polkit.Result.NOT_HANDLED;
+
+    if (subject.user === "root")
+        return polkit.Result.YES;
+
+    var job = /^buster-bench-[1-9][0-9]*-[1-9][0-9]*(?:-(?:base-generate|base-build|candidate-generate|candidate-build|throughput))?\.service$/;
+    var serviceVerb = verb === "start" || verb === "stop" || verb === "restart";
+    if (subject.user === "buster-bench" && job.test(unit) && serviceVerb)
+        return polkit.Result.YES;
+
+    if (subject.isInGroup("buster-bench-admin") &&
+        unit === "buster-bench.service" && serviceVerb)
+        return polkit.Result.YES;
+
+    return polkit.Result.NO;
+});
