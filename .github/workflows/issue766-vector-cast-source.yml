@@ -1,0 +1,41 @@
+name: Issue 766 vector cast source inspection
+
+on:
+  push:
+    branches:
+      - codex/issue766-vector-cast-investigation
+    paths:
+      - '.github/workflows/issue766-vector-cast-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 1d71d10df9853360ca7961aeddd01675a7de1af7
+          persist-credentials: false
+      - name: Print vector conversion implementation and call sites
+        shell: bash
+        run: |
+          set -euo pipefail
+          file=src/buster/lib/compiler/frontend/c/c_gen.c
+
+          echo '=== c_ir_emit_cast definition ==='
+          grep -n 'c_ir_emit_cast(' "$file" | head -n 30
+          echo '=== vector alias symbol ==='
+          grep -n 'c_ir_emit_vector_alias_conversion' "$file" || true
+          echo '=== vector conversion terms ==='
+          grep -nE 'vector.*(alias|convert|cast)|(?:alias|convert|cast).*vector' "$file" | head -n 200 || true
+          echo '=== cast body 7480-7740 ==='
+          sed -n '7480,7740p' "$file"
+          echo '=== vector helper neighborhood 6900-7480 ==='
+          sed -n '6900,7480p' "$file"
+          echo '=== vector tests and fixtures ==='
+          grep -RFn 'vector alias' src/buster/tests tests docs/agents/frontend | head -n 100 || true
+          grep -RFn 'same-width' src/buster/tests tests docs/agents/frontend | head -n 100 || true
+          grep -RFn '__m128i' tests src/buster/tests | head -n 100 || true
