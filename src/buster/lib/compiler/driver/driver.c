@@ -284,9 +284,49 @@ bool compiler_driver_language_is_native(CompilerDriverLanguage language)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_effective_language(CompilerDriverInvocation invocation, String8 path)
+BUSTER_GLOBAL_LOCAL CompilerDriverLanguage compiler_driver_input_language(CompilerDriverInvocation invocation, u32 input_index)
 {
-    GpuSourceLanguage language = compiler_driver_gpu_language(invocation.language);
+    CompilerDriverLanguage result = invocation.language;
+    if (invocation.input_languages && input_index < invocation.input_language_count)
+    {
+        result = invocation.input_languages[input_index];
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_invocation_has_language(CompilerDriverInvocation invocation, CompilerDriverLanguage language)
+{
+    bool result = invocation.language == language;
+    if (invocation.input_languages)
+    {
+        result = false;
+        for (u32 input_index = 0; input_index < invocation.input_count && !result; input_index += 1)
+        {
+            result = compiler_driver_input_language(invocation, input_index) == language;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_invocation_languages_are_native(CompilerDriverInvocation invocation)
+{
+    bool result = compiler_driver_language_is_native(invocation.language);
+    if (invocation.input_languages)
+    {
+        result = true;
+        for (u32 input_index = 0; input_index < invocation.input_count && result; input_index += 1)
+        {
+            result = compiler_driver_language_is_native(compiler_driver_input_language(invocation, input_index));
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL GpuSourceLanguage compiler_driver_gpu_effective_language(CompilerDriverInvocation invocation, u32 input_index)
+{
+    CompilerDriverLanguage selected = compiler_driver_input_language(invocation, input_index);
+    GpuSourceLanguage language = compiler_driver_gpu_language(selected);
+    String8 path = invocation.input_paths[input_index];
     return language == GPU_SOURCE_LANGUAGE_AUTOMATIC ? gpu_source_language_from_path(path) : language;
 }
 
@@ -442,10 +482,14 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_reject_gpu_native_options(Arena* arena,
     {
         compiler_driver_argument_error(arena, invocation, S8("source metrics are not supported for GPU target: {S8}"), invocation->source_metrics_path);
     }
-    else if (invocation->language == COMPILER_DRIVER_LANGUAGE_C || invocation->language == COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT)
+    else if (compiler_driver_invocation_has_language(*invocation, COMPILER_DRIVER_LANGUAGE_C) ||
+             compiler_driver_invocation_has_language(*invocation, COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT))
     {
+        CompilerDriverLanguage language = compiler_driver_invocation_has_language(*invocation, COMPILER_DRIVER_LANGUAGE_C)
+                                              ? COMPILER_DRIVER_LANGUAGE_C
+                                              : COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT;
         compiler_driver_argument_error(arena, invocation, S8("native source language is incompatible with GPU target: {S8}"),
-                                       invocation->language == COMPILER_DRIVER_LANGUAGE_C ? S8("c") : S8("cpp-output"));
+                                       language == COMPILER_DRIVER_LANGUAGE_C ? S8("c") : S8("cpp-output"));
     }
     else if (invocation->library_path_count || invocation->library_count || invocation->framework_path_count || invocation->framework_count ||
         invocation->linker_argument_count)
@@ -589,7 +633,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_check_gpu_inputs(Arena* arena, Compiler
     bool has_cuda_input = false;
     for (u32 input_index = 0; input_index < invocation->input_count; input_index += 1)
     {
-        GpuSourceLanguage input_language = compiler_driver_gpu_effective_language(*invocation, invocation->input_paths[input_index]);
+        GpuSourceLanguage input_language = compiler_driver_gpu_effective_language(*invocation, input_index);
         has_hlsl_input = has_hlsl_input || input_language == GPU_SOURCE_LANGUAGE_HLSL;
         has_cuda_input = has_cuda_input || input_language == GPU_SOURCE_LANGUAGE_CUDA;
     }
@@ -625,7 +669,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
                       invocation->gpu_shader_model.length || invocation->metal_sdk.length || invocation->cuda_path.length || invocation->rocm_path.length ||
                       invocation->gpu_tools.clang_path.length || invocation->gpu_tools.llc_path.length || invocation->gpu_tools.spirv_link_path.length ||
                       invocation->gpu_tools.spirv_dis_path.length || invocation->gpu_tools.xcrun_path.length || invocation->gpu_tools.dxc_path.length ||
-                      invocation->gpu_argument_count || invocation->save_gpu_temporaries || !compiler_driver_language_is_native(invocation->language);
+                      invocation->gpu_argument_count || invocation->save_gpu_temporaries || !compiler_driver_invocation_languages_are_native(*invocation);
     if (gpu_option)
     {
         compiler_driver_argument_error(arena, invocation, S8("GPU option requires a GPU target: {S8}"),
@@ -801,6 +845,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         return invocation;
     }
     invocation.input_paths = arena_allocate(arena, String8, arguments.length);
+    invocation.input_languages = arena_allocate(arena, CompilerDriverLanguage, arguments.length);
     invocation.include_paths = arena_allocate(arena, String8, arguments.length);
     invocation.system_include_paths = arena_allocate(arena, String8, arguments.length + default_include_capacity);
     invocation.macro_operations = arena_allocate(arena, CPreprocessorOperation, arguments.length);
@@ -825,7 +870,10 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         String8 argument = arguments.pointer[argument_index];
         if (options_ended || !argument.length || argument.pointer[0] != '-')
         {
-            invocation.input_paths[invocation.input_count++] = argument;
+            u32 input_index = invocation.input_count++;
+            invocation.input_paths[input_index] = argument;
+            invocation.input_languages[input_index] = invocation.language;
+            invocation.input_language_count = invocation.input_count;
             continue;
         }
         if (string_equal(argument, S8("--")))
@@ -1641,20 +1689,19 @@ typedef enum CompilerDriverCInputPhase
 // One authority classifies both the C language and its starting phase.
 // `-x cpp-output` applies to every suffix; explicit `-x c` is the raw-source
 // escape hatch even for `.i`, while automatic mode derives the phase from the
-// suffix. A future positional -x input record can carry the same language
-// value into this classifier without creating a parallel phase table.
-BUSTER_GLOBAL_LOCAL CompilerDriverCInputPhase compiler_driver_c_input_phase(CompilerDriverInvocation invocation, String8 path)
+// suffix. The parser snapshots this value beside each input.
+BUSTER_GLOBAL_LOCAL CompilerDriverCInputPhase compiler_driver_c_input_phase(CompilerDriverLanguage language, String8 path)
 {
     CompilerDriverCInputPhase result = COMPILER_DRIVER_C_INPUT_INVALID;
-    if (invocation.language == COMPILER_DRIVER_LANGUAGE_C)
+    if (language == COMPILER_DRIVER_LANGUAGE_C)
     {
         result = COMPILER_DRIVER_C_INPUT_RAW;
     }
-    else if (invocation.language == COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT)
+    else if (language == COMPILER_DRIVER_LANGUAGE_CPP_OUTPUT)
     {
         result = COMPILER_DRIVER_C_INPUT_PREPROCESSED;
     }
-    else if (invocation.language == COMPILER_DRIVER_LANGUAGE_AUTOMATIC && path.length >= 2 && path.pointer[path.length - 2] == '.')
+    else if (language == COMPILER_DRIVER_LANGUAGE_AUTOMATIC && path.length >= 2 && path.pointer[path.length - 2] == '.')
     {
         if (path.pointer[path.length - 1] == 'c')
         {
@@ -1669,19 +1716,19 @@ BUSTER_GLOBAL_LOCAL CompilerDriverCInputPhase compiler_driver_c_input_phase(Comp
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverInvocation invocation, String8 path)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_c_input(CompilerDriverLanguage language, String8 path)
 {
-    return compiler_driver_c_input_phase(invocation, path) != COMPILER_DRIVER_C_INPUT_INVALID;
+    return compiler_driver_c_input_phase(language, path) != COMPILER_DRIVER_C_INPUT_INVALID;
 }
 
 // A `.s` input, or any input under `-x assembler`.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_input(CompilerDriverInvocation invocation, String8 path)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_input(CompilerDriverLanguage language, String8 path)
 {
-    if (invocation.language == COMPILER_DRIVER_LANGUAGE_ASSEMBLY)
+    if (language == COMPILER_DRIVER_LANGUAGE_ASSEMBLY)
     {
         return true;
     }
-    if (invocation.language != COMPILER_DRIVER_LANGUAGE_AUTOMATIC || path.length < 2)
+    if (language != COMPILER_DRIVER_LANGUAGE_AUTOMATIC || path.length < 2)
     {
         return false;
     }
@@ -3418,11 +3465,13 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
     {
         return compiler_driver_execute_preprocessed_assembly_single(arena, invocation, suppress_object_write, warnings);
     }
-    if (invocation.input_count == 1 && compiler_driver_assembly_input(invocation, invocation.input_paths[0]))
+    if (invocation.input_count == 1 &&
+        compiler_driver_assembly_input(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]))
     {
         return compiler_driver_execute_assembly_single(arena, invocation, suppress_object_write, warnings);
     }
-    if (invocation.input_count != 1 || !compiler_driver_c_input(invocation, invocation.input_paths[0]))
+    if (invocation.input_count != 1 ||
+        !compiler_driver_c_input(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]))
     {
         result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
         result.diagnostic = S8("the C frontend currently requires exactly one C input");
@@ -3457,7 +3506,7 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
                                                     .undefinition_count = invocation.undefinition_count,
                                                     .include_path_count = invocation.include_path_count,
                                                     .system_include_path_count = invocation.system_include_path_count,
-                                                    .already_preprocessed = compiler_driver_c_input_phase(invocation, invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
+                                                    .already_preprocessed = compiler_driver_c_input_phase(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) == COMPILER_DRIVER_C_INPUT_PREPROCESSED,
                                                 });
     // Reported even when a later stage fails: the units the frontend read are
     // measured by then, and a failing compile is exactly when the size of
@@ -3815,8 +3864,23 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
 {
     CompilerDriverResult result = {0};
     GpuSourceLanguage language = compiler_driver_gpu_language(invocation.language);
+    GpuSourceLanguage* input_languages = 0;
+    if (invocation.input_languages)
+    {
+        input_languages = arena_allocate(arena, GpuSourceLanguage, invocation.input_count);
+        for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
+        {
+            input_languages[input_index] = compiler_driver_gpu_language(compiler_driver_input_language(invocation, input_index));
+            if (input_languages[input_index] == GPU_SOURCE_LANGUAGE_COUNT)
+            {
+                result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+                result.diagnostic = S8("invalid per-input language for GPU compilation");
+                return result;
+            }
+        }
+    }
     GpuPipelineAction action = compiler_driver_gpu_action(invocation.action);
-    if (language == GPU_SOURCE_LANGUAGE_COUNT || action == GPU_PIPELINE_ACTION_COUNT)
+    if ((!input_languages && language == GPU_SOURCE_LANGUAGE_COUNT) || action == GPU_PIPELINE_ACTION_COUNT)
     {
         result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
         result.diagnostic = S8("invalid language or action for GPU compilation");
@@ -3827,6 +3891,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_gpu(Arena* aren
     GpuPipelineResult pipeline = gpu_pipeline_execute(arena,
                                                       (GpuPipelineOptions){
                                                           .input_paths = invocation.input_paths,
+                                                          .input_languages = input_languages,
                                                           .include_paths = invocation.include_paths,
                                                           .system_include_paths = invocation.system_include_paths,
                                                           .macro_operations = invocation.macro_operations,
@@ -3905,13 +3970,15 @@ struct CompilerDriverUnitBatch
     u32 workers;
 };
 
-BUSTER_GLOBAL_LOCAL bool compiler_driver_parallel_c_input(CompilerDriverInvocation invocation, String8 path)
+BUSTER_GLOBAL_LOCAL bool compiler_driver_parallel_c_input(CompilerDriverInvocation invocation, u32 input_index)
 {
+    String8 path = invocation.input_paths[input_index];
+    CompilerDriverLanguage language = compiler_driver_input_language(invocation, input_index);
     bool native = invocation.target.cpu_arch == CPU_ARCH_X86_64 || invocation.target.cpu_arch == CPU_ARCH_AARCH64;
     return native && invocation.action == COMPILER_DRIVER_ACTION_LINK && !invocation.emit_llvm_bitcode &&
            !invocation.has_gpu_target && !compiler_driver_object_input(path) && !compiler_driver_archive_input(path) &&
-           compiler_driver_c_input(invocation, path) &&
-           !compiler_driver_assembly_input(invocation, path) && !compiler_driver_preprocessed_assembly_input(path);
+           compiler_driver_c_input(language, path) &&
+           !compiler_driver_assembly_input(language, path) && !compiler_driver_preprocessed_assembly_input(path);
 }
 
 BUSTER_GLOBAL_LOCAL u32 compiler_driver_unit_worker_limit(CompilerDriverInvocation invocation)
@@ -3966,7 +4033,12 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
             };
             CompilerDriverInvocation single = batch->invocation;
             single.input_paths += batch->first_input + index;
+            if (single.input_languages)
+            {
+                single.input_languages += batch->first_input + index;
+            }
             single.input_count = 1;
+            single.input_language_count = single.input_languages ? 1 : 0;
             single.output_path = (String8){0};
             single.action = COMPILER_DRIVER_ACTION_OBJECT;
             unit->result = compiler_driver_execute_c_single(unit->arena, single, true, &unit->warnings);
@@ -3999,9 +4071,18 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.diagnostic = invocation.diagnostic.length ? invocation.diagnostic : S8("invalid compiler invocation");
         goto finish;
     }
+    if ((invocation.input_languages && invocation.input_language_count != invocation.input_count) ||
+        (!invocation.input_languages && invocation.input_language_count))
+    {
+        result.error = COMPILER_DRIVER_ERROR_ARGUMENT;
+        result.diagnostic = S8("per-input language selection count does not match input count");
+        goto finish;
+    }
     if (invocation.bootstrap_trace_prefix.length &&
-        (invocation.input_count != 1 || !compiler_driver_c_input(invocation, invocation.input_paths[0]) ||
-         compiler_driver_assembly_input(invocation, invocation.input_paths[0]) || invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
+        (invocation.input_count != 1 ||
+         !compiler_driver_c_input(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) ||
+         compiler_driver_assembly_input(compiler_driver_input_language(invocation, 0), invocation.input_paths[0]) ||
+         invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
          (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64) ||
          (invocation.action != COMPILER_DRIVER_ACTION_LINK && invocation.action != COMPILER_DRIVER_ACTION_OBJECT)))
     {
@@ -4103,6 +4184,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
     for (u32 input_index = 0; input_index < invocation.input_count; input_index += 1)
     {
         String8 path = invocation.input_paths[input_index];
+        CompilerDriverLanguage language = compiler_driver_input_language(invocation, input_index);
         bool object_input = compiler_driver_object_input(path);
         bool archive_input = compiler_driver_archive_input(path);
         if ((object_input || archive_input) && invocation.action != COMPILER_DRIVER_ACTION_LINK)
@@ -4111,7 +4193,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
             result.diagnostic = string_format(arena, S8("prebuilt input {S8} is only valid while linking"), path);
             goto finish;
         }
-        if (!object_input && !archive_input && !compiler_driver_c_input(invocation, path) && !compiler_driver_assembly_input(invocation, path) &&
+        if (!object_input && !archive_input && !compiler_driver_c_input(language, path) && !compiler_driver_assembly_input(language, path) &&
             !compiler_driver_preprocessed_assembly_input(path))
         {
             result.error = COMPILER_DRIVER_ERROR_INVALID_INPUT;
@@ -4247,7 +4329,9 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         }
         CompilerDriverInvocation single = invocation;
         single.input_paths = invocation.input_paths + input_index;
+        single.input_languages = invocation.input_languages ? invocation.input_languages + input_index : 0;
         single.input_count = 1;
+        single.input_language_count = single.input_languages ? 1 : 0;
         single.output_path = (String8){0};
         bool suppress_object_write = !invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_LINK;
         if (!invocation.emit_llvm_bitcode && invocation.action == COMPILER_DRIVER_ACTION_OBJECT)
@@ -4261,7 +4345,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         Arena* unit_arena;
         CompilerDriverResult unit;
         CompilerDriverUnit* task = 0;
-        if (compiler_driver_parallel_c_input(invocation, input_path))
+        if (compiler_driver_parallel_c_input(invocation, input_index))
         {
             if (input_index >= batch_end)
             {
@@ -4272,7 +4356,7 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 batch_first = input_index;
                 unit_task_count = 1;
                 while (unit_task_count < unit_task_capacity && unit_task_count < invocation.input_count - input_index &&
-                       compiler_driver_parallel_c_input(invocation, invocation.input_paths[input_index + unit_task_count]))
+                       compiler_driver_parallel_c_input(invocation, input_index + unit_task_count))
                 {
                     unit_task_count += 1;
                 }

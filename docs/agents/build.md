@@ -72,6 +72,13 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
+The separate `TCC bootstrap / Canonical TCC bootstrap` check guards the
+canonical path on the dedicated Linux runner. For same-repository pull requests,
+merge groups, pushes to `main`, and manual runs it records `tcc -v`, removes
+the local bootstrap cache, and runs `./build.sh time_trace_summary_self_test`
+twice to prove both cold publication and warm reuse. Fork pull requests skip
+this self-hosted job; untrusted fork code remains on hosted runners.
+
 On Linux, distribution TCC 0.9.27 can reject inferred-size arrays containing
 compound literals in shared `string.c`/`os.c` before the driver runs. TinyCC
 `0fb54300b56512754221d80adda85ddb9815bceb` (0.9.28rc) bootstraps this tree
