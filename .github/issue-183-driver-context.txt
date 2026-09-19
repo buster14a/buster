@@ -1,0 +1,530 @@
+===== src/buster/tests/compiler/driver/driver_test.c =====
+line_count=18548
+@@ 8850-9005 @@
+008850:             S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wide_path,
+008851:             S8("tests/basic_c_int128_aggregate_constants.c"),
+008852:         };
+008853:         CompilerDriverResult wide = compiler_driver_execute_invocation(
+008854:             wide_temporary.arena, compiler_driver_parse_arguments(wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wide_command_line)));
+008855:         BUSTER_TEST(arguments, wide.error == COMPILER_DRIVER_ERROR_NONE && wide.has_object);
+008856:         if (wide.error == COMPILER_DRIVER_ERROR_NONE && wide.has_object)
+008857:         {
+008858:             FileMapRead wide_map = file_map_read(wide_temporary.arena, wide_path, (FileReadOptions){0});
+008859:             ObjectFile serialized = object_read(wide_temporary.arena, wide_map.bytes, wide.object.target);
+008860:             BUSTER_TEST(arguments, compiler_driver_test_wide_initializer_bytes(&serialized));
+008861:             file_map_unmap(wide_map);
+008862:         }
+008863:         scratch_end(wide_temporary);
+008864:     }
+008865:     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(c_object_targets); target_index += 1)
+008866:     {
+008867:         TemporalArena cross_temp = arena_begin_temporal(c_object_arena);
+008868:         String8 cross_object_path =
+008869:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-object"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+008870:         String8 cross_command_line[] = {
+008871:             S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), cross_object_path, S8("tests/basic_c_compile.c"),
+008872:         };
+008873:         CompilerDriverResult cross = compiler_driver_execute_invocation(
+008874:             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(cross_command_line)));
+008875:         BUSTER_TEST(arguments, cross.error == COMPILER_DRIVER_ERROR_NONE);
+008876:         FileMapRead cross_map = file_map_read(cross_temp.arena, cross_object_path, (FileReadOptions){0});
+008877:         ByteSlice cross_bytes = cross_map.bytes;
+008878:         BUSTER_TEST(arguments, cross_bytes.length != 0);
+008879:         // Debug sections and their relocations must survive a round trip
+008880:         // through every object format, or linking a previously compiled
+008881:         // object back in fails.
+008882:         BUSTER_TEST(arguments, cross.has_object);
+008883:         if (cross.has_object)
+008884:         {
+008885:             ObjectFile cross_round_trip = object_read(cross_temp.arena, cross_bytes, cross.object.target);
+008886:             BUSTER_TEST(arguments, cross_round_trip.error == OBJECT_ERROR_NONE);
+008887:             if (cross_round_trip.error == OBJECT_ERROR_NONE)
+008888:             {
+008889:                 bool debug_found = false;
+008890:                 for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+008891:                 {
+008892:                     if (!object_section_kind_is_debug((ObjectSectionKind)kind))
+008893:                     {
+008894:                         continue;
+008895:                     }
+008896:                     BUSTER_TEST(arguments, cross_round_trip.sections[kind].data.length == cross.object.sections[kind].data.length);
+008897:                     debug_found = debug_found || cross_round_trip.sections[kind].data.length != 0;
+008898:                 }
+008899:                 BUSTER_TEST(arguments, debug_found);
+008900:             }
+008901:         }
+008902:         file_map_unmap(cross_map);
+008903:         String8 artifact_object_path =
+008904:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-artifacts"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+008905:         String8 artifact_command_line[] = {
+008906:             S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), artifact_object_path, S8("tests/basic_c_frontend_artifacts.c"),
+008907:         };
+008908:         CompilerDriverResult artifacts = compiler_driver_execute_invocation(
+008909:             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(artifact_command_line)));
+008910:         BUSTER_TEST(arguments, artifacts.error == COMPILER_DRIVER_ERROR_NONE);
+008911:         BUSTER_TEST(arguments, artifacts.has_object);
+008912:         if (artifacts.has_object)
+008913:         {
+008914:             bool function_relocation = false;
+008915:             bool data_relocation = false;
+008916:             for (u32 relocation_index = 0; relocation_index < artifacts.object.relocation_count; relocation_index += 1)
+008917:             {
+008918:                 ObjectRelocation relocation = artifacts.object.relocations[relocation_index];
+008919:                 if (relocation.symbol >= artifacts.object.symbol_count)
+008920:                 {
+008921:                     continue;
+008922:                 }
+008923:                 ObjectSymbol symbol = artifacts.object.symbols[relocation.symbol];
+008924:                 function_relocation |= symbol.kind == OBJECT_SYMBOL_FUNCTION;
+008925:                 data_relocation |= symbol.kind == OBJECT_SYMBOL_DATA;
+008926:             }
+008927:             BUSTER_TEST(arguments, function_relocation);
+008928:             BUSTER_TEST(arguments, data_relocation);
+008929:             FileMapRead artifact_map = file_map_read(cross_temp.arena, artifact_object_path, (FileReadOptions){0});
+008930:             BUSTER_TEST(arguments, artifact_map.bytes.length != 0);
+008931:             file_map_unmap(artifact_map);
+008932:         }
+008933:         String8 fixed_enum_object_path =
+008934:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-fixed-enum"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+008935:         String8 fixed_enum_command_line[] = {
+008936:             S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), fixed_enum_object_path, S8("tests/basic_c_fixed_enum.c"),
+008937:         };
+008938:         CompilerDriverResult fixed_enum = compiler_driver_execute_invocation(
+008939:             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixed_enum_command_line)));
+008940:         BUSTER_TEST(arguments, fixed_enum.error == COMPILER_DRIVER_ERROR_NONE);
+008941:         FileMapRead fixed_enum_map = file_map_read(cross_temp.arena, fixed_enum_object_path, (FileReadOptions){0});
+008942:         ByteSlice fixed_enum_bytes = fixed_enum_map.bytes;
+008943:         BUSTER_TEST(arguments, fixed_enum_bytes.length != 0);
+008944:         file_map_unmap(fixed_enum_map);
+008945:         String8 string_object_path =
+008946:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-string"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+008947:         String8 string_command_line[] = {
+008948:             S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), string_object_path, S8("tests/basic_c_string_concat.c"),
+008949:         };
+008950:         CompilerDriverResult string_literals = compiler_driver_execute_invocation(
+008951:             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(string_command_line)));
+008952:         BUSTER_TEST(arguments, string_literals.error == COMPILER_DRIVER_ERROR_NONE);
+008953:         FileMapRead string_map = file_map_read(cross_temp.arena, string_object_path, (FileReadOptions){0});
+008954:         ByteSlice string_bytes = string_map.bytes;
+008955:         BUSTER_TEST(arguments, string_bytes.length != 0);
+008956:         file_map_unmap(string_map);
+008957:         String8 wchar_object_path =
+008958:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-wchar"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+008959:         String8 wchar_command_line[] = {
+008960:             S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), wchar_object_path, S8("tests/issue36_target_wchar.c"),
+008961:         };
+008962:         CompilerDriverResult wchar_result = compiler_driver_execute_invocation(
+008963:             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wchar_command_line)));
+008964:         BUSTER_TEST(arguments, wchar_result.error == COMPILER_DRIVER_ERROR_NONE);
+008965:         FileMapRead wchar_map = file_map_read(cross_temp.arena, wchar_object_path, (FileReadOptions){0});
+008966:         BUSTER_TEST(arguments, wchar_map.bytes.length != 0);
+008967:         file_map_unmap(wchar_map);
+008968:         String8 nullptr_object_path =
+008969:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-nullptr"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+008970:         String8 nullptr_command_line[] = {
+008971:             S8("-c"), S8("-std=c23"), S8("-target"), c_object_targets[target_index], S8("-o"), nullptr_object_path, S8("tests/basic_c_nullptr.c"),
+008972:         };
+008973:         CompilerDriverResult nullptr_result = compiler_driver_execute_invocation(
+008974:             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(nullptr_command_line)));
+008975:         BUSTER_TEST(arguments, nullptr_result.error == COMPILER_DRIVER_ERROR_NONE);
+008976:         FileMapRead nullptr_map = file_map_read(cross_temp.arena, nullptr_object_path, (FileReadOptions){0});
+008977:         ByteSlice nullptr_bytes = nullptr_map.bytes;
+008978:         BUSTER_TEST(arguments, nullptr_bytes.length != 0);
+008979:         file_map_unmap(nullptr_map);
+008980:         String8 constexpr_object_path =
+008981:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-constexpr"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+008982:         String8 constexpr_command_line[] = {
+008983:             S8("-c"), S8("-std=c23"), S8("-target"), c_object_targets[target_index], S8("-o"), constexpr_object_path, S8("tests/basic_c_constexpr.c"),
+008984:         };
+008985:         CompilerDriverResult constexpr_result = compiler_driver_execute_invocation(
+008986:             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(constexpr_command_line)));
+008987:         BUSTER_TEST(arguments, constexpr_result.error == COMPILER_DRIVER_ERROR_NONE);
+008988:         FileMapRead constexpr_map = file_map_read(cross_temp.arena, constexpr_object_path, (FileReadOptions){0});
+008989:         ByteSlice constexpr_bytes = constexpr_map.bytes;
+008990:         BUSTER_TEST(arguments, constexpr_bytes.length != 0);
+008991:         file_map_unmap(constexpr_map);
+008992:         String8 atomic_object_path =
+008993:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-atomic"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+008994:         String8 atomic_command_line[] = {
+008995:             S8("-c"), S8("-target"), c_object_targets[target_index], S8("-o"), atomic_object_path, S8("tests/basic_c_atomic.c"),
+008996:         };
+008997:         CompilerDriverResult atomic = compiler_driver_execute_invocation(
+008998:             cross_temp.arena, compiler_driver_parse_arguments(cross_temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_command_line)));
+008999:         BUSTER_TEST(arguments, atomic.error == COMPILER_DRIVER_ERROR_NONE);
+009000:         FileMapRead atomic_map = file_map_read(cross_temp.arena, atomic_object_path, (FileReadOptions){0});
+009001:         ByteSlice atomic_bytes = atomic_map.bytes;
+009002:         BUSTER_TEST(arguments, atomic_bytes.length != 0);
+009003:         file_map_unmap(atomic_map);
+009004:         String8 stdatomic_object_path =
+009005:             buster_test_temporary_path(cross_temp.arena, S8("buster-c-cross-stdatomic"), string_format(cross_temp.arena, S8("-{u32}.o"), target_index));
+@@ 13920-14020 @@
+013920:             };
+013921:             for (u64 option = 0; option < BUSTER_ARRAY_LENGTH(host_stack_options); option += 1)
+013922:             {
+013923:                 host_stack_command[host_stack_command_count++] = host_stack_options[option];
+013924:             }
+013925:             ProcessSpawnResult host_stack_spawn = os_process_spawn(
+013926:                 (SliceString8){.pointer = host_stack_command, .length = host_stack_command_count}, (SliceString8){0}, (SliceString8){0},
+013927:                 (ProcessSpawnOptions){
+013928:                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+013929:                     .use_process_environment = true,
+013930:                 });
+013931:             bool compiled = host_stack_spawn.handle && os_process_wait_sync(stack_pair_arena, host_stack_spawn).result == PROCESS_RESULT_SUCCESS;
+013932:             BUSTER_TEST(arguments, compiled);
+013933:             host_stack_compiled &= compiled;
+013934:         }
+013935:         for (u64 allocator_index = 0; host_stack_compiled && allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+013936:         {
+013937:             String8 buster_stack_objects[2];
+013938:             bool buster_stack_compiled = true;
+013939:             for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(buster_stack_objects); source_index += 1)
+013940:             {
+013941:                 buster_stack_objects[source_index] = buster_test_temporary_path(
+013942:                     stack_pair_arena, S8("buster-c-overaligned-object"), string_format(stack_pair_arena, S8("-{u32}-{u32}.o"), (u32)allocator_index, source_index));
+013943:                 String8 buster_stack_command[] = {
+013944:                     c_lz4_regression_allocators[allocator_index], S8("-c"), S8("-o"), buster_stack_objects[source_index], stack_sources[source_index],
+013945:                     stack_variant ? S8("-DOVERALIGNED_STACK_SCALAR_ONLY=1") : S8("-UOVERALIGNED_STACK_SCALAR_ONLY"),
+013946:                     stack_variant && allocator_index != 1 ? S8("-fno-machine-fallback") : S8("-fmachine-fallback"),
+013947:                     stack_variant == 1 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-fverify-codegen"),
+013948:                 };
+013949:                 CompilerDriverResult buster_stack = compiler_driver_execute_invocation(
+013950:                     stack_pair_arena, compiler_driver_parse_arguments(stack_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_stack_command)));
+013951:                 BUSTER_TEST_RAW(arguments, buster_stack.error == COMPILER_DRIVER_ERROR_NONE, buster_stack.diagnostic);
+013952:                 if (stack_variant)
+013953:                 {
+013954:                     BUSTER_TEST(arguments, buster_stack.codegen_statistics.function_count > 0 &&
+013955:                                            buster_stack.codegen_statistics.fallback_function_count == 0);
+013956:                 }
+013957:                 buster_stack_compiled &= buster_stack.error == COMPILER_DRIVER_ERROR_NONE;
+013958:             }
+013959:             for (u32 direction = 0; buster_stack_compiled && direction < 2; direction += 1)
+013960:             {
+013961:                 String8 stack_mixed_path = buster_test_temporary_path(
+013962:                     stack_pair_arena, S8("buster-c-overaligned-pair"), string_format(stack_pair_arena, S8("-{u32}-{u32}"), (u32)allocator_index, direction));
+013963:                 String8 stack_link_command[] = {
+013964:                     S8("-o"), stack_mixed_path,
+013965:                     direction == 0 ? buster_stack_objects[0] : host_stack_objects[0],
+013966:                     direction == 0 ? host_stack_objects[1] : buster_stack_objects[1],
+013967:                     host_stack_objects[2],
+013968:                 };
+013969:                 CompilerDriverResult stack_link = compiler_driver_execute_invocation(
+013970:                     stack_pair_arena, compiler_driver_parse_arguments(stack_pair_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(stack_link_command)));
+013971:                 BUSTER_TEST(arguments, stack_link.error == COMPILER_DRIVER_ERROR_NONE);
+013972:                 if (stack_link.error == COMPILER_DRIVER_ERROR_NONE)
+013973:                 {
+013974:                     String8 stack_arguments[] = {stack_mixed_path};
+013975:                     ProcessSpawnResult stack_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(stack_arguments), (SliceString8){0}, (SliceString8){0},
+013976:                                                                      (ProcessSpawnOptions){.use_process_environment = true});
+013977:                     BUSTER_TEST(arguments, stack_spawn.handle != 0);
+013978:                     if (stack_spawn.handle)
+013979:                     {
+013980:                         BUSTER_TEST(arguments, os_process_wait_sync(stack_pair_arena, stack_spawn).result == PROCESS_RESULT_SUCCESS);
+013981:                     }
+013982:                 }
+013983:             }
+013984:         }
+013985:         scratch_end(stack_pair_temporary);
+013986:     }
+013987: #endif
+013988:     // A call through a noreturn function pointer type ends control flow, and
+013989:     // nothing after it in the block is emitted.  The defect that motivated the
+013990:     // fixture only ever produced dead code, so running the program cannot see
+013991:     // it: every shape in the fixture calls `must_not_be_reached` from a spot
+013992:     // its noreturn call dominates, and the whole assertion is that the name
+013993:     // reaches the assembly nowhere.  Clang's own -S output for the same file
+013994:     // does not mention it either.
+013995:     String8 noreturn_type_assembly_command_line[] = {
+013996:         S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_noreturn_type.c"),
+013997:     };
+013998:     CompilerDriverResult noreturn_type_assembly = compiler_driver_execute_invocation(
+013999:         arguments->arena,
+014000:         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(noreturn_type_assembly_command_line)));
+014001:     BUSTER_TEST(arguments, noreturn_type_assembly.error == COMPILER_DRIVER_ERROR_NONE);
+014002:     BUSTER_TEST(arguments, string_first_sequence(noreturn_type_assembly.output, S8("must_not_be_reached")) == BUSTER_STRING_NO_MATCH);
+014003:     // The noreturn fixture also guards which declarations the marker is read
+014004:     // from, and only the emitted code shows that: a call to a noreturn callee
+014005:     // is followed by the terminator alone, while a call that returns reaches
+014006:     // the store of the fall-off-the-end return value first.  The x86 backend
+014007:     // emits both terminators as raw bytes -- 0x0f 0x0b is ud2 -- so what
+014008:     // stands between the call and those bytes is what tells the two apart.
+014009:     String8 noreturn_assembly_command_line[] = {
+014010:         S8("-S"), S8("-target"), S8("x86_64-unknown-linux-gnu"), S8("tests/basic_c_noreturn_call.c"),
+014011:     };
+014012:     CompilerDriverResult noreturn_assembly = compiler_driver_execute_invocation(
+014013:         arguments->arena, compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(noreturn_assembly_command_line)));
+014014:     BUSTER_TEST(arguments, noreturn_assembly.error == COMPILER_DRIVER_ERROR_NONE);
+014015:     // The marker has to reach a call through the declarator that owns it,
+014016:     // through the specifiers every declarator of a list shares, through a
+014017:     // later declaration of the same function, and through its definition.
+014018:     String8 noreturn_terminated_calls[] = {
+014019:         S8("call \"list_noreturn\"\n"),
+014020:         S8("call \"list_specifier_first\"\n"),
+@@ 15690-15820 @@
+015690:     // float builtins hosted <math.h> hides behind NAN and INFINITY, the
+015691:     // frame-address/alloca/signbit builtins, System V bit-field placement
+015692:     // with an enum-typed field among narrower ones, a shift whose count is
+015693:     // unsigned, and a narrow integer parameter whose register arrives with
+015694:     // the caller's leftover high half.  Each source stays separate so a future regression names
+015695:     // the exact contract it broke, and each runs under every register
+015696:     // allocator because several are lowering rather than parsing defects.
+015697:     // The audit regressions also pin promotion, constant conditional typing,
+015698:     // and empty macro arguments across the same allocator matrix.
+015699:     String8 c_quickjs_regression_paths[] = {
+015700:         S8("tests/basic_c_aggregate_attribute.c"),
+015701:         S8("tests/basic_c_integer_literals.c"),
+015702:         S8("tests/basic_c_utf8_identifiers.c"),
+015703:         S8("tests/basic_c_local_enum_declarator.c"),
+015704:         S8("tests/basic_c_attribute_short_spelling.c"),
+015705:         S8("tests/basic_c_atomic_specifier.c"),
+015706:         S8("tests/basic_c_self_referential_initializer.c"),
+015707:         S8("tests/basic_c_constant_float_builtins.c"),
+015708:         S8("tests/basic_c_frame_alloca_signbit.c"),
+015709:         S8("tests/basic_c_macro_task_batches.c"),
+015710:         S8("tests/basic_c_bit_field_layout.c"),
+015711:         S8("tests/basic_c_shift_operand_types.c"),
+015712:         S8("tests/basic_c_narrow_argument_abi.c"),
+015713:         S8("tests/basic_c_bit_field_promotion.c"),
+015714:         S8("tests/basic_c_unnamed_initializer_members.c"),
+015715:         S8("tests/basic_c_constant_conditional_type.c"),
+015716:         S8("tests/basic_c_macro_empty_paste.c"),
+015717:         S8("tests/basic_c_preprocessor_short_circuit.c"),
+015718:     };
+015719:     String8 c_quickjs_regression_names[] = {
+015720:         S8("buster-c-aggregate-attribute"),
+015721:         S8("buster-c-integer-literals"),
+015722:         S8("buster-c-utf8-identifiers"),
+015723:         S8("buster-c-local-enum-declarator"),
+015724:         S8("buster-c-attribute-short-spelling"),
+015725:         S8("buster-c-atomic-specifier"),
+015726:         S8("buster-c-self-referential-initializer"),
+015727:         S8("buster-c-constant-float-builtins"),
+015728:         S8("buster-c-frame-alloca-signbit"),
+015729:         S8("buster-c-macro-task-batches"),
+015730:         S8("buster-c-bit-field-layout"),
+015731:         S8("buster-c-shift-operand-types"),
+015732:         S8("buster-c-narrow-argument-abi"),
+015733:         S8("buster-c-bit-field-promotion"),
+015734:         S8("buster-c-unnamed-initializer-members"),
+015735:         S8("buster-c-constant-conditional-type"),
+015736:         S8("buster-c-macro-empty-paste"),
+015737:         S8("buster-c-preprocessor-short-circuit"),
+015738:     };
+015739:     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths) == BUSTER_ARRAY_LENGTH(c_quickjs_regression_names));
+015740:     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
+015741:     {
+015742:         for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+015743:         {
+015744:             TemporalArena quickjs_temporary = scratch_begin(&arguments->arena, 1);
+015745:             String8 fixture_path = buster_test_temporary_path(quickjs_temporary.arena, c_quickjs_regression_names[fixture_index], S8(""));
+015746:             String8 fixture_command_line[] = {
+015747:                 c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_quickjs_regression_paths[fixture_index],
+015748:             };
+015749:             CompilerDriverResult fixture = compiler_driver_execute_invocation(
+015750:                 quickjs_temporary.arena,
+015751:                 compiler_driver_parse_arguments(quickjs_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+015752:             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+015753:             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+015754:             {
+015755:                 String8 fixture_arguments[] = {fixture_path};
+015756:                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+015757:                                                                     (ProcessSpawnOptions){.use_process_environment = true});
+015758:                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+015759:                 if (fixture_spawn.handle)
+015760:                 {
+015761:                     BUSTER_TEST(arguments, os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+015762:                 }
+015763:             }
+015764:             scratch_end(quickjs_temporary);
+015765:         }
+015766:     }
+015767:     // The C23 attribute syntax, which the frontend did not parse at all: an
+015768:     // attributed declaration failed to register and the error surfaced later
+015769:     // as an unrelated "undeclared identifier".  Two fixtures, because the two
+015770:     // halves fail differently.  The first covers every position the grammar
+015771:     // allows a sequence in and asserts the decorated declarations, layouts
+015772:     // and control flow are unchanged, which is the silent failure mode.  The
+015773:     // second covers [[noreturn]], the one attribute buster acts on, and is
+015774:     // checked in the assembly below as well as run.  Both run under every
+015775:     // register allocator: the statement and label positions are lowering
+015776:     // rather than parsing defects.
+015777:     String8 c_c23_attribute_paths[] = {
+015778:         S8("tests/basic_c_c23_attributes.c"),
+015779:         S8("tests/basic_c_c23_noreturn.c"),
+015780:     };
+015781:     String8 c_c23_attribute_names[] = {
+015782:         S8("buster-c-c23-attributes"),
+015783:         S8("buster-c-c23-noreturn"),
+015784:     };
+015785:     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_c23_attribute_paths); fixture_index += 1)
+015786:     {
+015787:         for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+015788:         {
+015789:             TemporalArena c23_temporary = scratch_begin(&arguments->arena, 1);
+015790:             String8 fixture_path = buster_test_temporary_path(c23_temporary.arena, c_c23_attribute_names[fixture_index], S8(""));
+015791:             String8 fixture_command_line[] = {
+015792:                 c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_c23_attribute_paths[fixture_index],
+015793:             };
+015794:             CompilerDriverResult fixture = compiler_driver_execute_invocation(
+015795:                 c23_temporary.arena, compiler_driver_parse_arguments(c23_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+015796:             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+015797:             if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+015798:             {
+015799:                 String8 fixture_arguments[] = {fixture_path};
+015800:                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+015801:                                                                     (ProcessSpawnOptions){.use_process_environment = true});
+015802:                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+015803:                 if (fixture_spawn.handle)
+015804:                 {
+015805:                     BUSTER_TEST(arguments, os_process_wait_sync(c23_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+015806:                 }
+015807:             }
+015808:             scratch_end(c23_temporary);
+015809:         }
+015810:     }
+015811:     // Keep the constexpr storage/semantic fixture in the existing native mode
+015812:     // matrix. Unlike the attribute fixtures, constexpr requires the C23 dialect.
+015813:     for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+015814:     {
+015815:         TemporalArena constexpr_temporary = scratch_begin(&arguments->arena, 1);
+015816:         String8 fixture_path = buster_test_temporary_path(constexpr_temporary.arena, S8("buster-c-constexpr-leaf"), S8(""));
+015817:         String8 fixture_command_line[] = {
+015818:             S8("-std=c23"), c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, S8("tests/basic_c_constexpr_leaf.c"),
+015819:         };
+015820:         CompilerDriverResult fixture = compiler_driver_execute_invocation(
+===== src/buster/lib/compiler/frontend/c/c.h =====
+line_count=1424
+@@ 360-470 @@
+000360: // The facts a translation unit consults a handful of times, held out of the
+000361: // row every frontend call carries. CPreprocessResult is passed by value
+000362: // through the parser and the IR lowering — roughly a hundred and fifty
+000363: // by-value parameters, one copy per type-parse frame push, one per constant
+000364: // initializer — and these six members were 548 of its 712 bytes while the hot
+000365: // paths read only `tokens`, `spelling_base`, `target` and `dialect`. The data
+000366: // layout is read three times per compile and the measurement tables only by
+000367: // `-v` reporting and `-fsource-metrics=`, so they ride one pointer instead of
+000368: // every copy.
+000369: //
+000370: // Null for hand-built results (the token-space literals the integer-constant
+000371: // evaluator takes); `c_preprocess_detail` reads those as the all-zero block
+000372: // their inline members used to be.
+000373: typedef struct CPreprocessDetail CPreprocessDetail;
+000374: struct CPreprocessDetail
+000375: {
+000376:     TargetDataLayout data_layout;
+000377:     // Every file the preprocessor lexed, summed twice: once per inclusion,
+000378:     // and once per distinct path. A header with neither #pragma once nor a
+000379:     // recognized whole-file include guard is re-read and re-lexed at every
+000380:     // #include, so their ratio is the translation unit's include
+000381:     // amplification, and `lexed_files` attributes it per path.
+000382:     CSourceMetrics source_lexed;
+000383:     CSourceMetrics source_unique;
+000384:     CSourceFileMetrics* lexed_files;
+000385:     CPreprocessedMetrics preprocessed;
+000386: #if BUSTER_INCLUDE_TESTS
+000387:     // Actual include-identity table slot examinations for end-to-end scaling
+000388:     // fixtures. Tests-disabled builds neither store nor increment this value.
+000389:     u64 include_file_probe_count;
+000390: #endif
+000391:     u32 lexed_file_count;
+000392: };
+000393: 
+000394: typedef struct CLexResult CLexResult;
+000395: struct CLexResult
+000396: {
+000397:     String8 translated_source;
+000398:     // Base pointer token offsets are relative to: translated_source.pointer
+000399:     // for a standalone c_lex, the preprocessor's shared spelling space when
+000400:     // the lex ran inside c_preprocess.
+000401:     char8 const* spelling_base;
+000402:     CToken* tokens;
+000403:     // One byte per token, in the same order as `tokens`: raw CTokenKind for
+000404:     // non-punctuators and a tagged CPunctuator for punctuators.  The
+000405:     // preprocessor copies this projection into its final private stream.
+000406:     CTokenShape* token_shapes;
+000407:     CDiagnostic* diagnostics;
+000408:     // Location checkpoints of the translated source, retained so a token's
+000409:     // line/column recover on demand from its offset: the original-source
+000410:     // location at each linearity break beside the translated offset of that
+000411:     // break (see c_translate_source in c.c).
+000412:     IrSourceCheckpoint* checkpoints;
+000413:     u32* checkpoint_offsets;
+000414:     // Page bracket over the checkpoints (see IrSourceRegion).
+000415:     u32* checkpoint_pages;
+000416:     u32 checkpoint_page_count;
+000417:     u32 checkpoint_count;
+000418:     // Spelling-space offset of translated_source.pointer (0 standalone).
+000419:     u32 translated_offset;
+000420:     CSourceMetrics metrics;
+000421:     u64 token_count;
+000422:     u64 diagnostic_count;
+000423:     // Cursor into the checkpoints; location queries at non-decreasing
+000424:     // offsets amortize to one advance instead of a search.
+000425:     u32 location_cursor;
+000426: };
+000427: 
+000428: typedef struct CPreprocessorDefinition CPreprocessorDefinition;
+000429: struct CPreprocessorDefinition
+000430: {
+000431:     // An identifier, optionally followed immediately by a function-like
+000432:     // parameter list parsed under the same rules as a source `#define`.
+000433:     String8 name;
+000434:     // The replacement list, taken verbatim: an empty value defines an
+000435:     // object-like macro that expands to nothing, the way `-DNAME=` does. A
+000436:     // caller that wants the `1` a valueless `-DNAME` means must spell it.
+000437:     String8 value;
+000438: };
+000439: 
+000440: typedef enum CPreprocessorOperationKind
+000441: {
+000442:     C_PREPROCESSOR_OPERATION_DEFINE,
+000443:     C_PREPROCESSOR_OPERATION_UNDEFINE,
+000444:     C_PREPROCESSOR_OPERATION_COUNT,
+000445: } CPreprocessorOperationKind;
+000446: 
+000447: typedef struct CPreprocessorOperation CPreprocessorOperation;
+000448: struct CPreprocessorOperation
+000449: {
+000450:     // The operand without its -D/-U prefix. Definitions retain their first
+000451:     // '=' so forwarding consumers preserve `-DNAME`, `-DNAME=`, and values
+000452:     // containing later '=' characters exactly.
+000453:     String8 operand;
+000454:     CPreprocessorOperationKind kind;
+000455: };
+000456: 
+000457: typedef enum CPreprocessDialect
+000458: {
+000459:     C_PREPROCESS_DIALECT_GNU17,
+000460:     C_PREPROCESS_DIALECT_GNU99,
+000461:     C_PREPROCESS_DIALECT_GNU11,
+000462:     C_PREPROCESS_DIALECT_GNU23,
+000463:     C_PREPROCESS_DIALECT_C99,
+000464:     C_PREPROCESS_DIALECT_C11,
+000465:     C_PREPROCESS_DIALECT_C17,
+000466:     C_PREPROCESS_DIALECT_C23,
+000467:     C_PREPROCESS_DIALECT_COUNT,
+000468: } CPreprocessDialect;
+000469: 
+000470: typedef struct CPreprocessOptions CPreprocessOptions;
+===== tests/basic_c_fixed_enum.c =====
+line_count=18
+@@ 1-18 @@
+000001: typedef unsigned long Size;
+000002: 
+000003: enum : Size
+000004: {
+000005:     FIXED_ENUM_NEGATIVE_ONE = -1UL,
+000006:     FIXED_ENUM_NEGATIVE_TWO = -2UL,
+000007: };
+000008: 
+000009: enum FixedByte : unsigned char
+000010: {
+000011:     FIXED_BYTE_ZERO,
+000012:     FIXED_BYTE_ONE,
+000013: };
+000014: 
+000015: int main(void)
+000016: {
+000017:     return !(sizeof(enum FixedByte) == 1 && (unsigned long)FIXED_ENUM_NEGATIVE_ONE == (unsigned long)-1);
+000018: }
+===== tests/basic_c_bit_field.c =====
+MISSING
