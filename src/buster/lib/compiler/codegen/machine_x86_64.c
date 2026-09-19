@@ -7342,7 +7342,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // definition fetch for the small set that still owns a canonical place.
     // Hand-built IR without that projection keeps the row scan as a
     // compatibility fallback.
-    if (!program->disable_target_local_promotion && function->local_places)
+    bool sparse_local_projection = function->local_places ||
+                                   ((function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) && function->local_count == 0);
+    if (!program->disable_target_local_promotion && sparse_local_projection)
     {
         for (u32 local_index = 0; local_index < function->local_count; local_index += 1)
         {
