@@ -17,26 +17,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Collect issue 793 source
+      - name: Collect repository source
         shell: bash
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/issue-793-source"
-          mkdir -p "$out/src/buster/lib/compiler/codegen" "$out/src/buster/tests/compiler/codegen" "$out/docs/agents" "$out/.github/workflows"
-          cp AGENTS.md "$out/"
-          cp src/buster/lib/compiler/codegen/codegen.c "$out/src/buster/lib/compiler/codegen/"
-          cp src/buster/lib/compiler/codegen/codegen_internal.h "$out/src/buster/lib/compiler/codegen/"
-          cp src/buster/lib/compiler/codegen/machine.c "$out/src/buster/lib/compiler/codegen/"
-          cp src/buster/lib/compiler/codegen/machine.h "$out/src/buster/lib/compiler/codegen/"
-          cp src/buster/tests/compiler/codegen/codegen_test.c "$out/src/buster/tests/compiler/codegen/"
-          cp src/buster/tests/compiler/codegen/machine_test.c "$out/src/buster/tests/compiler/codegen/"
-          cp docs/agents/machine.md docs/agents/benchmarking.md docs/agents/testing.md docs/agents/style.md "$out/docs/agents/"
-          cp .github/workflows/zen5-audit.yml "$out/.github/workflows/"
-          git rev-parse HEAD 'HEAD^{tree}' > "$out/revision.txt"
+          git rev-parse HEAD 'HEAD^{tree}' > revision.txt
+          tar --exclude=.git -czf "$RUNNER_TEMP/issue-793-repository.tar.gz" .
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: issue-793-source-${{ github.run_id }}
-          path: ${{ runner.temp }}/issue-793-source
+          name: issue-793-repository-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue-793-repository.tar.gz
           retention-days: 3
           if-no-files-found: error
