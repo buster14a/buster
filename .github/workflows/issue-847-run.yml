@@ -13,7 +13,7 @@ permissions:
 jobs:
   apply-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out the branch
         shell: bash
@@ -41,7 +41,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make test-fast
+          ./build.sh generate --cc clang --config Release --linker DEFAULT
+          BUSTER_TEST_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 ./build.sh build --config Release -t test_all
 
       - name: Publish the tested source changes
         shell: bash
