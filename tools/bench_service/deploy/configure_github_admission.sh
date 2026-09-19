@@ -22,6 +22,12 @@ if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
 fi
 
 gh auth status >/dev/null
+
+# Fail closed before any policy mutation. Reconfiguration may be rerun while
+# admission is enabled; a later API failure must not leave dispatch enabled
+# under a partially applied ruleset or environment.
+gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body false --repo "$repo"
+
 ruleset_id="$(gh api -H "X-GitHub-Api-Version: $api_version" "repos/$repo/rulesets" \
   --jq '.[] | select(.name == "Benchmark dispatch main protection") | .id' | head -n 1)"
 if [[ -n "$ruleset_id" ]]; then
@@ -55,10 +61,6 @@ PY
 
 gh api --method PUT -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/environments/benchmark-9700x" --input "$environment_payload" >/dev/null
-
-# Installation never enables dispatch. Activation is a separate, auditable
-# step after the host boundary and policy checks have been verified.
-gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body false --repo "$repo"
 
 gh api -H "X-GitHub-Api-Version: $api_version" "repos/$repo/rulesets/$ruleset_id" \
   --jq '{id, name, enforcement, bypass_actors, conditions, rules}'
