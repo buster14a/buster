@@ -1,0 +1,116 @@
+name: Diagnose issue 183 candidate
+
+on:
+  push:
+    branches:
+      - fix/183-gnu17-enum-types
+    paths:
+      - .github/workflows/issue-183-diagnose.yml
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Prepare guarded patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/issue-183-apply.py')
+          text = path.read_text()
+          start = text.index('def replace_once(')
+          end = text.index('\n\n# Preserve', start)
+          helper = '''def replace_once(path: str, old: str, new: str) -> None:
+              import re
+
+              source_path = Path(path)
+              text = source_path.read_text()
+              count = text.count(old)
+              if count == 1:
+                  source_path.write_text(text.replace(old, new, 1))
+                  return
+              if count != 0:
+                  raise SystemExit(f"{path}: expected exactly one exact match, found {count}: {old[:120]!r}")
+              parts = re.split(r"(\\s+)", old)
+              pattern = "".join(r"\\s+" if part.isspace() else re.escape(part) for part in parts if part)
+              matches = list(re.finditer(pattern, text))
+              if len(matches) != 1:
+                  raise SystemExit(f"{path}: expected exactly one whitespace-normalized match, found {len(matches)}: {old[:120]!r}")
+              match = matches[0]
+              source_path.write_text(text[:match.start()] + new + text[match.end():])'''
+          text = text[:start] + helper + text[end:]
+          old_layout = '''    u32 symbol;
+              // The declaration-point type for C23, or the completed compatible type
+              // selected for a GNU enum. This fills the former alignment hole.
+              CTypeId type;
+              u64 value;
+              bool is_negative;
+              bool is_unsigned;
+              u8 reserved[6];
+          '''
+          new_layout = '''    u32 symbol;
+              u64 value;
+              bool is_negative;
+              bool is_unsigned;
+              u8 reserved[2];
+              // The declaration-point type for C23, or the completed compatible type
+              // selected for a GNU enum. Stored in the previous tail padding.
+              CTypeId type;
+          '''
+          if text.count(old_layout) != 1:
+              raise SystemExit('could not locate staged CEnumMember replacement')
+          path.write_text(text.replace(old_layout, new_layout, 1))
+          PY
+      - name: Apply candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/issue-183-apply.py
+          git diff --check
+      - name: Configure and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUSTER_STDOUT_ASSERTS=TRUE \
+            -DBUILD_TESTING=ON
+          cmake --build build --parallel 2
+      - name: Record targeted and full-suite results
+        shell: bash
+        run: |
+          set +e
+          {
+            echo "base=${GITHUB_SHA}"
+            echo "=== targeted compile/run ==="
+            build/ide cc tests/basic_c_enum_underlying_type.c -o /tmp/basic_c_enum_underlying_type
+            targeted_compile=$?
+            echo "targeted_compile=${targeted_compile}"
+            if [ "${targeted_compile}" -eq 0 ]; then
+              /tmp/basic_c_enum_underlying_type
+              echo "targeted_run=$?"
+            fi
+            echo "=== full suite ==="
+            BUSTER_TEST_JOBS=2 build/ide test --ci=1 --verbose=1
+            echo "full_suite=$?"
+          } > .github/issue-183-test.log 2>&1
+          exit 0
+      - name: Publish diagnostic log
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/issue-183-test.log
+          git commit -m 'chore: record issue 183 candidate failures'
+          git push origin HEAD:${GITHUB_REF_NAME}
