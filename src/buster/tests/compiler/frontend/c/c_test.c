@@ -2549,6 +2549,72 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_deferred_assert_false(UnitTestArgument
     {
         BUSTER_TEST(arguments, deferred_assert_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
     }
+    TemporalArena static_assert_type_temporary = scratch_begin(0, 0);
+    String8 invalid_static_assert_sources[] = {
+        S8("_Static_assert(1.0, \"file floating control\");\n"),
+        S8("_Static_assert((void *)1, \"file pointer control\");\n"),
+        S8("int floating_control(void) { _Static_assert(1.0, \"function floating control\"); return 0; }\n"),
+        S8("int pointer_control(void) { _Static_assert((void *)1, \"function pointer control\"); return 0; }\n"),
+    };
+    for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(invalid_static_assert_sources); source_index += 1)
+    {
+        CPreprocessResult invalid_tokens = c_preprocess(
+            static_assert_type_temporary.arena, invalid_static_assert_sources[source_index],
+            (CPreprocessOptions){
+                .target = target_native,
+                .data_layout = target_data_layout(target_native),
+            });
+        CParseResult invalid_parse = c_parse(static_assert_type_temporary.arena, invalid_tokens);
+        BUSTER_TEST(arguments, invalid_tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, invalid_parse.diagnostic_count == 1);
+        if (invalid_parse.diagnostic_count == 1)
+        {
+            BUSTER_TEST(arguments, invalid_parse.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT);
+        }
+    }
+    CPreprocessResult valid_static_assert_tokens = c_preprocess(
+        static_assert_type_temporary.arena,
+        S8("_Static_assert(1, \"file integer control\");"
+           " _Static_assert((int)1.0, \"file floating-to-integer cast\");"
+           " _Static_assert((unsigned char)257, \"file narrowing integer cast\");"
+           " _Static_assert(sizeof(int) >= 2, \"file sizeof\");"
+           " _Static_assert(_Alignof(int) >= 1, \"file alignof\");"
+           " int valid_static_assert_controls(void) {"
+           " _Static_assert(1, \"function integer control\");"
+           " _Static_assert((int)1.0, \"function floating-to-integer cast\");"
+           " _Static_assert((unsigned char)257, \"function narrowing integer cast\");"
+           " _Static_assert(sizeof(int) >= 2, \"function sizeof\");"
+           " _Static_assert(_Alignof(int) >= 1, \"function alignof\");"
+           " return 0; }\n"),
+        (CPreprocessOptions){
+            .target = target_native,
+            .data_layout = target_data_layout(target_native),
+        });
+    CParseResult valid_static_assert_parse = c_parse(static_assert_type_temporary.arena, valid_static_assert_tokens);
+    CIRLowerResult valid_static_assert_ir = c_lower_to_ir(static_assert_type_temporary.arena, S8("static-assert-integer-controls.c"),
+                                                         valid_static_assert_tokens, valid_static_assert_parse, target_native);
+    BUSTER_TEST(arguments, valid_static_assert_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, valid_static_assert_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, valid_static_assert_ir.diagnostic_count == 0);
+
+    CPreprocessResult narrowing_false_tokens = c_preprocess(
+        static_assert_type_temporary.arena, S8("_Static_assert((unsigned char)256, \"narrowing cast becomes zero\");\n"),
+        (CPreprocessOptions){
+            .target = target_native,
+            .data_layout = target_data_layout(target_native),
+        });
+    CParseResult narrowing_false_parse = c_parse(static_assert_type_temporary.arena, narrowing_false_tokens);
+    CIRLowerResult narrowing_false_ir = c_lower_to_ir(static_assert_type_temporary.arena, S8("static-assert-narrowing-false.c"),
+                                                      narrowing_false_tokens, narrowing_false_parse, target_native);
+    BUSTER_TEST(arguments, narrowing_false_tokens.diagnostic_count == 0);
+    BUSTER_TEST(arguments, narrowing_false_parse.diagnostic_count == 0);
+    BUSTER_TEST(arguments, narrowing_false_parse.deferred_static_assert_count == 1);
+    BUSTER_TEST(arguments, narrowing_false_ir.diagnostic_count == 1);
+    if (narrowing_false_ir.diagnostic_count == 1)
+    {
+        BUSTER_TEST(arguments, narrowing_false_ir.diagnostics[0].kind == C_DIAGNOSTIC_STATIC_ASSERT_FAILED);
+    }
+    scratch_end(static_assert_type_temporary);
     scratch_end(deferred_assert_false_temporary);
     return result;
 }

@@ -36886,7 +36886,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 u32 expression_end = 0;
                 CIrConstantValue assertion = {0};
                 if (!c_ir_static_assert_expression_range(builder, index, assertion_end + 1, &expression_start, &expression_end) ||
-                    !c_ir_constant_evaluate(builder, expression_start, expression_end, &assertion) || !c_ir_constant_truth(builder, &assertion))
+                    !c_ir_constant_evaluate(builder, expression_start, expression_end, &assertion) ||
+                    assertion.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_truth(builder, &assertion))
                 {
                     builder->failure_message = S8("static assertion expression is not a true integer constant expression");
                     return false;
@@ -48801,7 +48802,7 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                 .kind = C_DIAGNOSTIC_STATIC_ASSERT_NOT_CONSTANT,
             };
         }
-        else if (!c_ir_constant_truth(&constant_builder, &assertion))
+        else if (assertion.kind != C_IR_CONSTANT_INTEGER || !c_ir_constant_truth(&constant_builder, &assertion))
         {
             if (result.diagnostic_count >= parse.declaration_count + parse.entity_count + parse.deferred_static_assert_count + 1)
             {
