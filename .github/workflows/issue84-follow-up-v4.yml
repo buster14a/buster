@@ -1,0 +1,82 @@
+name: Issue 84 exact hardening publication
+
+on:
+  push:
+    branches: [fix/84-transactional-hermetic-spawn]
+    paths:
+      - '.github/workflows/issue84-follow-up-v4.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: issue84-final-hardening-v2
+  cancel-in-progress: true
+
+jobs:
+  apply-test-publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out issue branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: fix/84-transactional-hermetic-spawn
+          fetch-depth: 0
+
+      - name: Apply exact reviewed transformations
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/issue84-transform.py.gz.b64" <<'PYTHON'
+          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
+          PYTHON
+          base64 --decode "$RUNNER_TEMP/issue84-transform.py.gz.b64" | gzip -d > "$RUNNER_TEMP/issue84-transform.py"
+          printf '%s  %s\n' d18d60bd7da5346620885c82aa27e48eaee5c3eb631657f9d9ad073861dafad4 "$RUNNER_TEMP/issue84-transform.py" | sha256sum --check --strict
+          python3 -m py_compile "$RUNNER_TEMP/issue84-transform.py"
+          python3 "$RUNNER_TEMP/issue84-transform.py"
+          git diff --check
+
+      - name: Build and run registered Linux tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          build/build generate --cc clang --ci --linker DEFAULT
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          BUSTER_TEST_JOBS=1 CMAKE_BUILD_PARALLEL_LEVEL=2 build/build build --config Debug -t ide
+          BUSTER_TEST_JOBS=1 build/Debug/ide test --ci=1
+
+      - name: Commit hardened implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/issue84-follow-up.yml \
+             .github/workflows/issue84-follow-up-v2.yml \
+             .github/workflows/issue84-follow-up-v3.yml \
+             .github/workflows/issue84-follow-up-v4.yml
+          git add \
+            .github/workflows/issue84-follow-up.yml \
+            .github/workflows/issue84-follow-up-v2.yml \
+            .github/workflows/issue84-follow-up-v3.yml \
+            .github/workflows/issue84-follow-up-v4.yml \
+            src/buster/lib/os.c \
+            src/buster/apps/ide/ide.c \
+            src/buster/tests/os_test.c
+          cat > "$RUNNER_TEMP/expected-paths" <<'PATHS'
+          .github/workflows/issue84-follow-up-v2.yml
+          .github/workflows/issue84-follow-up-v3.yml
+          .github/workflows/issue84-follow-up-v4.yml
+          .github/workflows/issue84-follow-up.yml
+          src/buster/apps/ide/ide.c
+          src/buster/lib/os.c
+          src/buster/tests/os_test.c
+          PATHS
+          git diff --cached --name-only | sort > "$RUNNER_TEMP/actual-paths"
+          sort "$RUNNER_TEMP/expected-paths" -o "$RUNNER_TEMP/expected-paths"
+          diff -u "$RUNNER_TEMP/expected-paths" "$RUNNER_TEMP/actual-paths"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(os): complete transactional spawn hardening'
+          git push origin HEAD:fix/84-transactional-hermetic-spawn
