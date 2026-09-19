@@ -15,10 +15,10 @@
 // stream rather than MachineVirtualRegister.definition_point, so explicit
 // mutable virtual registers are handled conservatively without an SSA
 // assumption. `machine_fast_placement_build_pinned` then lays the frame out
-// for both scan modes: `machine_fast_close_live_ranges` widens the selector's
-// stack slots to the rows a write of them may still be read at, and
-// `machine_fast_color_homes` and `machine_fast_color_slots` give one storage
-// per simultaneously live object instead of one per object.
+// for both scan modes: `machine_fast_close_live_ranges` widens selector slots
+// and allocator homes to every row where their contents may still be read,
+// and `machine_fast_color_homes` and `machine_fast_color_slots` give one
+// storage per simultaneously live object instead of one per object.
 
 // A physical register index is a bit lane, and every per-register predicate
 // the pass carries is a mask: the scan's occupancy and dirtiness, the
@@ -1893,6 +1893,108 @@ bool machine_fast_close_live_ranges_test(Arena* arena)
     return result;
 }
 #endif
+// The edit stream is a compact memory program for virtual-register homes. A
+// reload before the first spill in a block reads the value that arrived from a
+// predecessor; a spill covers that incoming value for every later point in the
+// block. Edits at one point can come from several retroactively conformed
+// successors, and their merge order is not a path order, so all reloads at the
+// point are conservatively observed before any spill there. The ordinary CFG
+// fixed point then closes each home over exactly the blocks in which its stored
+// contents can be live. A dense home index keeps the block bitsets proportional
+// to spilled values rather than to every virtual register in a large function.
+BUSTER_GLOBAL_LOCAL void machine_fast_close_home_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass,
+                                                        MachineStackPlacement const* placement, u32 const* row_blocks, u8 const* slot_needed,
+                                                        u8 const* home_opaque, u32* home_starts, u32* home_ends)
+{
+    u32 value_count = function->virtual_register_count;
+    u32 value_axis = value_count ? value_count : 1u;
+    u32 home_count = 0;
+    for (u32 value = 0; value < value_count; value += 1)
+    {
+        home_count += slot_needed[value] && !home_opaque[value];
+    }
+    if (home_count)
+    {
+        u32* home_objects = arena_allocate(arena, u32, value_axis);
+        u32* home_values = arena_allocate(arena, u32, home_count);
+        u32* starts = arena_allocate(arena, u32, home_count);
+        u32* ends = arena_allocate(arena, u32, home_count);
+        memset(home_objects, 0xff, (u64)value_axis * sizeof(*home_objects));
+        u32 object = 0;
+        for (u32 value = 0; value < value_count; value += 1)
+        {
+            if (slot_needed[value] && !home_opaque[value])
+            {
+                home_objects[value] = object;
+                home_values[object] = value;
+                starts[object] = home_starts[value];
+                ends[object] = home_ends[value];
+                object += 1;
+            }
+        }
+        u32 words = (home_count + 63u) / 64u;
+        u64 plane = (u64)function->block_count * words;
+        u64* reads = arena_allocate(arena, u64, plane ? plane : 1);
+        u64* writes = arena_allocate(arena, u64, plane ? plane : 1);
+        memset(reads, 0, (plane ? plane : 1) * sizeof(*reads));
+        memset(writes, 0, (plane ? plane : 1) * sizeof(*writes));
+        for (u32 first = 0; first < placement->edit_count;)
+        {
+            MachinePoint point = placement->edits[first].point;
+            u32 limit = first + 1u;
+            while (limit < placement->edit_count && placement->edits[limit].point == point)
+            {
+                limit += 1;
+            }
+            u32 row = machine_point_instruction(point);
+            if (row < function->instruction_count)
+            {
+                u32 block_index = row_blocks[row];
+                u64* block_reads = reads + (u64)block_index * words;
+                u64* block_writes = writes + (u64)block_index * words;
+                // Equal-point repairs have no edge execution order. Assuming
+                // every reload can precede every spill only lengthens a range.
+                for (u32 edit_index = first; edit_index < limit; edit_index += 1)
+                {
+                    MachineEdit const* edit = placement->edits + edit_index;
+                    if (edit->kind == MACHINE_EDIT_RELOAD && edit->subject < value_count)
+                    {
+                        u32 home = home_objects[edit->subject];
+                        if (home != UINT32_MAX)
+                        {
+                            u32 word = home / 64u;
+                            u64 bit = UINT64_C(1) << (home & 63u);
+                            if (!(block_writes[word] & bit))
+                            {
+                                block_reads[word] |= bit;
+                            }
+                        }
+                    }
+                }
+                for (u32 edit_index = first; edit_index < limit; edit_index += 1)
+                {
+                    MachineEdit const* edit = placement->edits + edit_index;
+                    if (edit->kind == MACHINE_EDIT_SPILL && edit->subject < value_count)
+                    {
+                        u32 home = home_objects[edit->subject];
+                        if (home != UINT32_MAX)
+                        {
+                            block_writes[home / 64u] |= UINT64_C(1) << (home & 63u);
+                        }
+                    }
+                }
+            }
+            first = limit;
+        }
+        machine_fast_close_live_ranges(arena, function, prepass, reads, writes, words, starts, ends);
+        for (u32 home = 0; home < home_count; home += 1)
+        {
+            u32 value = home_values[home];
+            home_starts[value] = starts[home];
+            home_ends[value] = ends[home];
+        }
+    }
+}
 
 // One frame slot per simultaneously live home instead of one per spilled
 // value. The caller hands each home the rows over which it may hold anything
@@ -2949,16 +3051,11 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // rows the blocks tile belongs to no block, and the home it names
         // keeps storage of its own.
         u8* home_opaque = arena_allocate(arena, u8, value_count);
-        // A home read before anything in the stream fills it holds a value
-        // that crossed into these rows from somewhere the stream does not
-        // order, so its range is not the rows between its edits.
-        u8* home_read_first = arena_allocate(arena, u8, value_count);
         u32* row_blocks = arena_allocate(arena, u32, function->instruction_count ? function->instruction_count : 1u);
         memset(slot_needed, 0, function->virtual_register_count);
         memset(home_starts, 0xff, (u64)value_count * sizeof(*home_starts));
         memset(home_ends, 0, (u64)value_count * sizeof(*home_ends));
         memset(home_opaque, 0, value_count);
-        memset(home_read_first, 0, value_count);
         // Sharing storage is an argument in row space: a range between two
         // rows must cover every row that can execute between them, and the
         // block a row belongs to has to be the one whose index the graph
@@ -2988,7 +3085,6 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
             {
                 u32 row = machine_point_instruction(edit->point);
                 u32 block_index = row < function->instruction_count ? row_blocks[row] : UINT32_MAX;
-                home_read_first[edit->subject] |= (u8)(!slot_needed[edit->subject] && edit->kind == MACHINE_EDIT_RELOAD);
                 slot_needed[edit->subject] = 1;
                 home_opaque[edit->subject] |= (u8)(block_index == UINT32_MAX || !layout_linear);
                 home_starts[edit->subject] = BUSTER_MIN(home_starts[edit->subject], row);
@@ -3002,31 +3098,18 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
         // returns-twice calls keeps one object per storage.
         bool reuse_frame_storage = layout_linear && function->returns_twice_absence_certified;
         // A withdrawn home is one the colorer never selects, so each of them
-        // gets storage of its own below.
+        // gets storage of its own below. Every remaining home is closed over
+        // the machine CFG from the allocator's own reload/spill memory program;
+        // this includes values that enter before their first lexical spill and
+        // values whose home lifetime crosses the block where they were defined.
         for (u32 register_index = 0; register_index < function->virtual_register_count; register_index += 1)
         {
-            // A home the edit rows bound is one this function both fills and
-            // empties: its value stays inside its defining block, the stream
-            // fills the home before it reads it, and every edit that names it
-            // sits in that block's rows. Then a read of the home is an edit
-            // between those rows, an iteration of a loop around the block
-            // refills it before reading it, and the range needs no closure
-            // over the loops around it.
-            //
-            // A value that leaves its block fails that: the boundary repairs
-            // that fill its home for one successor share the predecessor's
-            // terminator point with the repairs of its siblings, so the edit
-            // stream does not order them and the rows between two of its edits
-            // do not cover every row that can read the home. Those keep
-            // storage of their own, as do the homes a repair reads before this
-            // function's stream fills them.
-            u32 definition_block = prepass->definition_blocks[register_index];
-            MachineBlock const* home_block = definition_block < function->block_count ? function->blocks + definition_block : 0;
-            bool inside_block = home_block && home_starts[register_index] >= home_block->first_instruction &&
-                                home_ends[register_index] < home_block->first_instruction + home_block->instruction_count;
-            bool colorable = reuse_frame_storage && slot_needed[register_index] && !home_opaque[register_index] &&
-                             !home_read_first[register_index] && !prepass->escapes[register_index] && inside_block;
+            bool colorable = reuse_frame_storage && slot_needed[register_index] && !home_opaque[register_index];
             home_starts[register_index] = colorable ? home_starts[register_index] : UINT32_MAX;
+        }
+        if (reuse_frame_storage)
+        {
+            machine_fast_close_home_ranges(arena, function, prepass, &placement, row_blocks, slot_needed, home_opaque, home_starts, home_ends);
         }
         // The selector's frame objects share the homes' argument, over wider
         // ranges: a slot's storage has to hold from its first touched row

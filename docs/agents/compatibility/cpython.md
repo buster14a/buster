@@ -24,14 +24,14 @@ CPython's own regression suite is the oracle, and the gate is the verdict
 comparison: a test the Buster FAST build fails while the Clang build of the
 same tree passes fails the run. Tests failing in both builds are environment
 findings, reported and not gated on. Both suites run under `PYTHONHASHSEED=0
-TZ=UTC -j2 -u none --timeout 120`, so nothing touches the network, and both
-get a 512 MB stack limit for the same frame-layout reason the QuickJS harness
-raises it (issue 842: CPython tunes `Py_C_RECURSION_LIMIT` assuming an eval
-frame well under a kilobyte where Buster's is 4 KB). The NONE, MIR_STACK and
-QUALITY builds prove the whole tree still compiles, links, and answers a
-deterministic workload -- json, hashlib, pickle round trips, the class
-machinery -- byte-for-byte against the Clang build; the full suite runs once
-per side.
+TZ=UTC -j2 -u none --timeout 120`, so nothing touches the network, and both run
+with an exact 8 MiB soft stack limit. That limit is the evaluator-frame
+regression gate from issue #79: raising the stack concealed frames too large
+for CPython's recursion accounting instead of testing the ordinary Linux
+budget. The NONE, MIR_STACK and QUALITY builds prove the whole tree still
+compiles, links, and answers a deterministic workload -- json, hashlib, pickle
+round trips, the class machinery -- byte-for-byte against the Clang build; the
+full suite runs once per side.
 
 pyconfig.h is the record of what ~700 autoconf probes concluded about the
 compiler, and the harness diffs it against the Clang configure with exactly
