@@ -1,0 +1,124 @@
+name: PR 843 bounded documentation repair
+
+on:
+  push:
+    branches:
+      - codex/512-exclusive-9700x-dispatch
+    paths:
+      - '.github/workflows/pr843-doc-fix.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr-843-bounded-documentation-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/512-exclusive-9700x-dispatch
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Replace retired-workflow guidance and remove this repair workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = codex/512-exclusive-9700x-dispatch
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_range(path: str, start_marker: str, end_marker: str, replacement: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              file.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+
+          benchmarking = """- **The dedicated Ryzen 7 9700X is no longer a general GitHub Actions
+            executor.** `.github/workflows/zen5-audit.yml` is retired. The only GitHub
+            workflow allowed to select `[self-hosted, Linux, X64, buster-zen5,
+            ryzen-9700x]` is `.github/workflows/9700x-service-dispatch.yml`, which does
+            not check out repository content and invokes only the operator-installed
+            fixed gateway. Its admitted path is the one-pair `validate-buster-v1`
+            smoke recipe; it is not the former stage-1 diagnostic, an A/A
+            qualification, or a performance verdict.
+            Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
+            ruleset, protected environment, host authorization, installed identities,
+            clean queue, and independent reviewer are verified as described in
+            [`tools/bench_service/deploy/GITHUB_ADMISSION.md`](../../tools/bench_service/deploy/GITHUB_ADMISSION.md).
+            `native-retirement-performance-v1` remains blocked. Use the local trusted
+            capture methods above for ad-hoc profiling. Historical audit notes retain
+            `zen5-audit.yml` only as provenance for runs made before its retirement.
+          """
+          replace_range(
+              "docs/agents/benchmarking.md",
+              "- **`.github/workflows/zen5-audit.yml` runs the stage-1 measurement",
+              "- **Sampling the sanitized (ASan+UBSan) Debug tree with `perf` works.**",
+              benchmarking,
+          )
+
+          prerequisite = """- `.github/workflows/9700x-service-dispatch.yml` is the reviewed smoke
+            submission path. It is manual, main-only, protected-environment gated and
+            fail-closed unless `BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true`. It
+            performs no checkout and invokes only literal installed `gateway
+            capabilities`, `gateway submit` and `gateway result` commands. Keep it
+            disabled until the repository controls and host verifier in
+            `GITHUB_ADMISSION.md` are complete. It prints authenticated receipts but
+            still is not a result-bundle exporter.
+          """
+          replace_range(
+              "tools/bench_service/deploy/VALIDATE_BUSTER_V1.md",
+              "- There is no admitted smoke dispatch workflow in these deployment references.",
+              "\n\nThese missing components are implementation work",
+              prerequisite,
+          )
+
+          competing = """Before activation, verify `.github/workflows/zen5-audit.yml` is absent from
+          protected `main` and no queued or running job from an older ref targets either
+          benchmark label. Drain any previously admitted execution and verify
+          runner-group/workflow restrictions outside YAML; changing only `main` does
+          not cancel older branch workflow runs. Identify and stop competing
+          Forgejo/manual/agent execution through the operator's maintenance procedure.
+          The retired audit workflow must not be restored or used as a host probe or
+          substitute service dispatcher.
+          """
+          replace_range(
+              "tools/bench_service/deploy/VALIDATE_BUSTER_V1.md",
+              "Before activation, disable/exclude `.github/workflows/zen5-audit.yml` from this",
+              "\n\n## First execution and controlled recovery",
+              competing,
+          )
+
+          actionlint = Path(".github/actionlint.yaml")
+          text = actionlint.read_text(encoding="utf-8")
+          text = text.replace(
+              "# Keep this list synchronized exactly with the matrix in .github/workflows/ci.yml.\n",
+              "# Keep hosted labels synchronized with .github/workflows/ci.yml and the\n"
+              "# custom benchmark labels with .github/workflows/9700x-service-dispatch.yml.\n",
+          )
+          text = text.replace(
+              "    # Custom labels of the dedicated self-hosted Ryzen 9700X runner used by\n"
+              "    # .github/workflows/zen5-audit.yml.\n",
+              "    # Custom labels of the dedicated self-hosted Ryzen 9700X runner used\n"
+              "    # only by the fixed service dispatch workflow.\n",
+          )
+          actionlint.write_text(text, encoding="utf-8")
+
+          Path(".github/workflows/pr843-doc-fix.yml").unlink()
+          PY
+          git diff --check
+          test "$(grep -c 'gh workflow run zen5-audit.yml' docs/agents/benchmarking.md)" -eq 0
+          grep -Fq '.github/workflows/9700x-service-dispatch.yml' docs/agents/benchmarking.md
+          grep -Fq 'The retired audit workflow must not be restored' tools/bench_service/deploy/VALIDATE_BUSTER_V1.md
+          grep -Fq '.github/workflows/9700x-service-dispatch.yml' .github/actionlint.yaml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/agents/benchmarking.md tools/bench_service/deploy/VALIDATE_BUSTER_V1.md .github/actionlint.yaml .github/workflows/pr843-doc-fix.yml
+          git commit -m 'docs: retire direct 9700X audit workflow'
+          git push origin HEAD:codex/512-exclusive-9700x-dispatch
