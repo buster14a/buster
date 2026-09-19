@@ -662,10 +662,6 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     BUSTER_UNUSED(arguments);
 
     UnitTestResult result = {0};
-#if !BUSTER_ANDROID && !BUSTER_IOS
-    BUSTER_TEST_FIXTURE(arguments, os_process_spawn_contract_tests);
-#endif
-
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 process_test_mode = os_get_environment_variable(S8("BUSTER_OS_PROCESS_TEST_MODE"));
     if (string_starts_with_sequence(process_test_mode, S8("flood")))
@@ -767,6 +763,14 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
         os_fail_message(S8("resource failure injection was not observed"));
     }
+#endif
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Test-owned subprocess modes above must dispatch before this fixture.
+    // Otherwise each probe recursively runs the full spawn contract before
+    // reaching its sentinel, which can consume the deadlock deadline under
+    // sanitizers without exercising the resource-failure path.
+    BUSTER_TEST_FIXTURE(arguments, os_process_spawn_contract_tests);
 #endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
