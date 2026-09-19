@@ -1,0 +1,497 @@
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 2489 =====
+  2459:     return type;
+  2460: }
+  2461: 
+  2462: BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+  2463:                                                          u32 base_start, u32 base_end)
+  2464: {
+  2465:     CTypeId type = C_TYPE_ID_INVALID;
+  2466:     bool call_base = base_end > base_start + 2 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER &&
+  2467:                      c_token_is_punctuator(&preprocess.tokens[base_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+  2468:                      c_token_is_punctuator(&preprocess.tokens[base_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+  2469:     if ((base_end == base_start + 1 || call_base) && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
+  2470:     {
+  2471:         CEntityId entity_id = C_ENTITY_ID_INVALID;
+  2472:         u32 base_use_index = c_parse_identifier_use_index(result, base_start);
+  2473:         if (base_use_index != C_ID_UNDERLYING_INVALID)
+  2474:         {
+  2475:             entity_id = result->identifier_uses[base_use_index].entity;
+  2476:         }
+  2477:         CScopeId lookup_scope = scope;
+  2478:         if (lookup_scope.value == C_ID_UNDERLYING_INVALID && result->scope_count)
+  2479:         {
+  2480:             lookup_scope = (CScopeId){
+  2481:                 .value = 0,
+  2482:             };
+  2483:         }
+  2484:         if (entity_id.value == C_ID_UNDERLYING_INVALID && lookup_scope.value != C_ID_UNDERLYING_INVALID)
+  2485:         {
+  2486:             entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[base_start]);
+  2487:         }
+  2488:         type = entity_id.value < result->entity_count && result->entities[entity_id.value].kind != C_ENTITY_TYPEDEF &&
+  2489:                        result->entities[entity_id.value].kind != C_ENTITY_ENUMERATOR
+  2490:                    ? result->entities[entity_id.value].type
+  2491:                    : C_TYPE_ID_INVALID;
+  2492:         // A call base -- `_PyBaseExceptionObject_cast(self)->context` is what
+  2493:         // CPython's Py_XSETREF callers hand _Py_TYPEOF -- contributes its
+  2494:         // return type, through a function pointer's pointee when the name
+  2495:         // binds to one.
+  2496:         if (call_base && type.value < result->type_count)
+  2497:         {
+  2498:             CType* base_type = &result->types[type.value];
+  2499:             if (base_type->kind == C_TYPE_POINTER && base_type->element_type.value < result->type_count)
+  2500:             {
+  2501:                 base_type = &result->types[base_type->element_type.value];
+  2502:             }
+  2503:             type = base_type->kind == C_TYPE_FUNCTION ? base_type->return_type : C_TYPE_ID_INVALID;
+  2504:         }
+  2505:         else if (call_base && entity_id.value == C_ID_UNDERLYING_INVALID)
+  2506:         {
+  2507:             CBfloat16Builtin const* builtin = c_parse_bfloat16_builtin(c_token_spelling(preprocess.spelling_base, preprocess.tokens[base_start]));
+  2508:             if (builtin)
+  2509:             {
+  2510:                 c_parse_position_index_append(result->arena, &result->bfloat16_builtin_calls, &result->bfloat16_builtin_call_count,
+  2511:                                                &result->bfloat16_builtin_call_capacity, base_start);
+  2512:                 type = c_parse_bfloat16_builtin_result(result, builtin);
+  2513:             }
+  2514:         }
+  2515:     }
+  2516:     else if (base_start < base_end && c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+  2517:     {
+  2518:         // A cast base: `((propertyobject *) new)->prop_name` is what
+  2519:         // Py_SETREF writes through _Py_TYPEOF, so `__typeof__` over it must
+  2520:         // resolve or the declaration it types declares nothing.  The cast's
+  2521:         // own type is the whole answer -- the operand after it only carries
+  2522:         // the value -- and the machineless resolvers exist exactly for walks
+  2523:         // like this one that may run inside a machine step.
+  2524:         u32 cast_close = c_parse_matching_delimiter_indexed(result, preprocess, base_start);
+  2525:         if (cast_close < base_end && cast_close + 1 < base_end)
+  2526:         {
+  2527:             u32 type_index = base_start + 1;
+  2528:             CTypeId cast_type = c_parse_machineless_base_type(result, preprocess, scope, base_start + 1, cast_close, &type_index);
+  2529:             if (cast_type.value != C_ID_UNDERLYING_INVALID)
+  2530:             {
+  2531:                 cast_type = c_parse_pointer_chain(result, preprocess, cast_type, &type_index, cast_close);
+  2532:                 if (type_index == cast_close)
+  2533:                 {
+  2534:                     type = cast_type;
+  2535:                 }
+  2536:             }
+  2537:         }
+  2538:     }
+  2539:     return type;
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 4349 =====
+  4319:                 }
+  4320:                 else
+  4321:                 {
+  4322:                     // A machineless caller cannot enter the type-parse
+  4323:                     // machine for a sizeof over a full expression; the
+  4324:                     // operand-layout walk answers directly instead.
+  4325:                     have_layout = c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope, type_start, type_end, &size, &alignment);
+  4326:                     if (!have_layout)
+  4327:                     {
+  4328:                         return false;
+  4329:                     }
+  4330:                 }
+  4331:                 type_index = type_end;
+  4332:             }
+  4333:             if (!have_layout && (type.value == C_ID_UNDERLYING_INVALID || type_index != type_end ||
+  4334:                                  !c_parse_type_layout(machine, arena, preprocess, result, type, &size, &alignment)))
+  4335:             {
+  4336:                 return false;
+  4337:             }
+  4338:             bool evaluation_word_is_alignof = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
+  4339:             token = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), evaluation_word_is_alignof ? alignment : size),
+  4340:                                   C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+  4341:             expression_index = (literal_close != UINT32_MAX ? literal_close : type_end) - (start + 2);
+  4342:             tokens[token_count++] = token;
+  4343:             continue;
+  4344:         }
+  4345:         if (token.kind == C_TOKEN_IDENTIFIER)
+  4346:         {
+  4347:             CEntityId enumerator_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+  4348:             CEntity* constant = enumerator_id.value < result->entity_count &&
+  4349:                                         (result->entities[enumerator_id.value].kind == C_ENTITY_ENUMERATOR ||
+  4350:                                          (result->entities[enumerator_id.value].is_constexpr && result->entities[enumerator_id.value].has_constant_value))
+  4351:                                     ? &result->entities[enumerator_id.value]
+  4352:                                     : 0;
+  4353:             if (!constant)
+  4354:             {
+  4355:                 return false;
+  4356:             }
+  4357:             if (constant->constant_is_negative)
+  4358:             {
+  4359:                 tokens[token_count++] = c_space_token(&evaluation_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
+  4360:             }
+  4361:             tokens[token_count++] = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), constant->constant_value),
+  4362:                                                   C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+  4363:             continue;
+  4364:         }
+  4365:         tokens[token_count++] = c_space_retoken(&evaluation_space, preprocess.spelling_base, token);
+  4366:     }
+  4367:     CPreprocessResult evaluation = {
+  4368:         .diagnostics = arena_allocate(arena, CDiagnostic, token_count + 1),
+  4369:         .target = preprocess.target,
+  4370:         .dialect = preprocess.dialect,
+  4371:     };
+  4372:     return c_integer_expression_evaluate(arena, evaluation_space.base, tokens, token_count, 65536, &evaluation, value_out) && !evaluation.diagnostic_count;
+  4373: }
+  4374: 
+  4375: BUSTER_C_INTERNAL bool c_parse_integer_constant_range(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+  4376:                                                         CScopeId scope, u32 start, u32 end, u64* value_out)
+  4377: {
+  4378:     if (start >= end)
+  4379:     {
+  4380:         return false;
+  4381:     }
+  4382:     u32 expression_count = end - start;
+  4383:     CToken* tokens = arena_allocate(arena, CToken, expression_count + 4);
+  4384:     // The wrapper tokens reference the fixed prelude of the shared spelling
+  4385:     // space; their recovered locations are the prelude's placeholder, which
+  4386:     // no diagnostic path reads (the expression tokens keep their own).
+  4387:     tokens[0] = (CToken){
+  4388:         .offset = C_SPELLING_STATIC_ASSERT,
+  4389:         .length = C_SPELLING_STATIC_ASSERT_LENGTH,
+  4390:         .kind = C_TOKEN_IDENTIFIER,
+  4391:     };
+  4392:     tokens[1] = (CToken){
+  4393:         .offset = C_SPELLING_LEFT_PARENTHESIS,
+  4394:         .length = 1,
+  4395:         .kind = C_TOKEN_PUNCTUATOR,
+  4396:         .punctuator = C_PUNCTUATOR_LEFT_PARENTHESIS,
+  4397:     };
+  4398:     memcpy(tokens + 2, preprocess.tokens + start, sizeof(*tokens) * expression_count);
+  4399:     tokens[expression_count + 2] = (CToken){
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 10017 =====
+  9987:                         primary_end -= 1;
+  9988:                         primary_stripping = true;
+  9989:                     }
+  9990:                 }
+  9991:             }
+  9992:             if (primary_end == primary_start + 1 && preprocess.tokens[primary_start].kind == C_TOKEN_IDENTIFIER)
+  9993:             {
+  9994:                 identifier_index = primary_start;
+  9995:                 postfix_index = primary_close + 1;
+  9996:             }
+  9997:         }
+  9998:     }
+  9999:     CTypeId type = C_TYPE_ID_INVALID;
+ 10000:     bool is_enumerator = false;
+ 10001:     u32 declaration_index = UINT32_MAX;
+ 10002:     u32 index = start;
+ 10003:     if (identifier_index < end && preprocess.tokens[identifier_index].kind == C_TOKEN_IDENTIFIER)
+ 10004:     {
+ 10005:         String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[identifier_index]);
+ 10006:         CEntityId entity =
+ 10007:             c_parse_lookup_entity_symbol(result, scope,
+ 10008:                                          c_parse_symbol_or_intern(result, preprocess.tokens[identifier_index].symbol, name), name);
+ 10009:         if (entity.value < result->entity_count)
+ 10010:         {
+ 10011:             CEntity* found = &result->entities[entity.value];
+ 10012:             if (found->kind == C_ENTITY_OBJECT || found->kind == C_ENTITY_PARAMETER || found->kind == C_ENTITY_LOCAL)
+ 10013:             {
+ 10014:                 type = found->type;
+ 10015:                 declaration_index = found->declaration_index;
+ 10016:             }
+ 10017:             else if (found->kind == C_ENTITY_ENUMERATOR)
+ 10018:             {
+ 10019:                 is_enumerator = true;
+ 10020:             }
+ 10021:         }
+ 10022:         else
+ 10023:         {
+ 10024:             // A member of the enum still being declared is not an entity yet;
+ 10025:             // the member table already holds everything declared before this
+ 10026:             // initializer.
+ 10027:             for (u32 member_index = 0; member_index < result->enum_member_count && !is_enumerator; member_index += 1)
+ 10028:             {
+ 10029:                 is_enumerator = string_equal(result->enum_members[member_index].name, name);
+ 10030:             }
+ 10031:         }
+ 10032:         index = postfix_index;
+ 10033:     }
+ 10034:     bool valid = type.value != C_ID_UNDERLYING_INVALID;
+ 10035:     while (valid && index < end)
+ 10036:     {
+ 10037:         CToken token = preprocess.tokens[index];
+ 10038:         CType* record = type.value < result->type_count ? &result->types[type.value] : 0;
+ 10039:         if (!record)
+ 10040:         {
+ 10041:             valid = false;
+ 10042:         }
+ 10043:         else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+ 10044:         {
+ 10045:             u32 depth = 0;
+ 10046:             u32 close = 0;
+ 10047:             for (u32 cursor = index; cursor < end && !close; cursor += 1)
+ 10048:             {
+ 10049:                 CToken current = preprocess.tokens[cursor];
+ 10050:                 if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+ 10051:                 {
+ 10052:                     depth += 1;
+ 10053:                 }
+ 10054:                 else if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+ 10055:                 {
+ 10056:                     depth -= 1;
+ 10057:                     if (!depth)
+ 10058:                     {
+ 10059:                         close = cursor;
+ 10060:                     }
+ 10061:                 }
+ 10062:             }
+ 10063:             valid = close != 0 &&
+ 10064:                     (record->kind == C_TYPE_ARRAY || record->kind == C_TYPE_POINTER || record->kind == C_TYPE_VECTOR);
+ 10065:             type = valid ? record->element_type : type;
+ 10066:             index = valid ? close + 1 : index;
+ 10067:         }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 12866 =====
+ 12836:     return C_ENTITY_ID_INVALID;
+ 12837: }
+ 12838: 
+ 12839: BUSTER_C_INTERNAL CEntity* c_parse_first_constant_entity_symbol(CParseResult* result, u32 symbol, String8 name);
+ 12840: 
+ 12841: BUSTER_C_SHARED CEntity* c_parse_first_constant_entity(CParseResult* result, String8 name)
+ 12842: {
+ 12843:     return c_parse_first_constant_entity_symbol(result, c_parse_name_symbol(result, name), name);
+ 12844: }
+ 12845: 
+ 12846: BUSTER_C_SHARED CEntity* c_parse_first_constant_entity_token(CParseResult* result, char8 const* spelling_base, CToken token)
+ 12847: {
+ 12848:     String8 name = c_token_spelling(spelling_base, token);
+ 12849:     return c_parse_first_constant_entity_symbol(result, c_parse_symbol_or_intern(result, token.symbol, name), name);
+ 12850: }
+ 12851: 
+ 12852: BUSTER_C_INTERNAL CEntity* c_parse_first_constant_entity_symbol(CParseResult* result, u32 symbol, String8 name)
+ 12853: {
+ 12854:     if (!result->name_lookup_buckets || !result->entity_lookup_bucket_count)
+ 12855:     {
+ 12856:         return 0;
+ 12857:     }
+ 12858:     u32 bucket = (u32)c_parse_name_hash(symbol, name) & (result->entity_lookup_bucket_count - 1);
+ 12859:     // The chain is newest-first; the last predicate match is the lowest entity
+ 12860:     // index, matching an ascending scan over the entity table.
+ 12861:     CEntity* first = 0;
+ 12862:     for (CEntityId entity = result->name_lookup_buckets[bucket]; entity.value != C_ID_UNDERLYING_INVALID;
+ 12863:          entity = result->entities[entity.value].next_by_name)
+ 12864:     {
+ 12865:         CEntity* candidate = &result->entities[entity.value];
+ 12866:         if ((candidate->kind == C_ENTITY_ENUMERATOR || (candidate->is_constexpr && candidate->has_constant_value)) && string_equal(candidate->name, name))
+ 12867:         {
+ 12868:             first = candidate;
+ 12869:         }
+ 12870:     }
+ 12871:     return first;
+ 12872: }
+ 12873: 
+ 12874: BUSTER_C_SHARED bool c_parse_type_start(CParseResult* result, CScopeId scope, String8 spelling, CPreprocessDialect dialect)
+ 12875: {
+ 12876:     if (c_parse_type_word_for_dialect(spelling, dialect) || c_parse_auto_type_word(spelling))
+ 12877:     {
+ 12878:         return true;
+ 12879:     }
+ 12880:     CEntityId entity = c_parse_lookup_entity(result, scope, spelling);
+ 12881:     return entity.value != C_ID_UNDERLYING_INVALID && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+ 12882: }
+ 12883: 
+ 12884: // The token form of c_parse_type_start with its work kept for the caller:
+ 12885: // the word bits decide for a keyword without a lookup, and a name's
+ 12886: // scope-chain answer is handed back so a caller that goes on to bind that
+ 12887: // same token does not look it up a second time.  `*type_word_out` reports
+ 12888: // that the keyword tests answered, in which case `*entity_out` is invalid.
+ 12889: BUSTER_C_INTERNAL bool c_parse_type_start_token_lookup(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CToken token,
+ 12890:                                                         bool* type_word_out, CEntityId* entity_out)
+ 12891: {
+ 12892:     bool starts_type;
+ 12893:     CEntityId entity = C_ENTITY_ID_INVALID;
+ 12894:     bool type_word = c_parse_type_word_for_dialect_token(preprocess, token) || c_parse_auto_type_word_token(preprocess, token);
+ 12895:     if (type_word)
+ 12896:     {
+ 12897:         starts_type = true;
+ 12898:     }
+ 12899:     else
+ 12900:     {
+ 12901:         entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+ 12902:         starts_type = entity.value != C_ID_UNDERLYING_INVALID && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+ 12903:     }
+ 12904:     *type_word_out = type_word;
+ 12905:     *entity_out = entity;
+ 12906:     return starts_type;
+ 12907: }
+ 12908: 
+ 12909: // The token form of c_parse_type_start: word tests by interned symbol id,
+ 12910: // entity lookup through the token's own symbol.
+ 12911: BUSTER_C_SHARED bool c_parse_type_start_token(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, CToken token)
+ 12912: {
+ 12913:     bool type_word = false;
+ 12914:     CEntityId entity = C_ENTITY_ID_INVALID;
+ 12915:     return c_parse_type_start_token_lookup(result, preprocess, scope, token, &type_word, &entity);
+ 12916: }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 13947 =====
+ 13917:     if (alignment_count && is_register)
+ 13918:     {
+ 13919:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+ 13920:                            S8("alignment specifier cannot be applied to a register object"));
+ 13921:         alignment_count = 0;
+ 13922:     }
+ 13923:     // A block-scope typedef splits the run the file-scope path does: the
+ 13924:     // `_Alignas` records are the ones C forbids on a typedef, and the GNU
+ 13925:     // `aligned` ones stay for the type every declarator of the list names.
+ 13926:     else if (alignment_count && is_typedef && c_parse_typedef_alignment_run(result, preprocess, alignment_start, &alignment_count))
+ 13927:     {
+ 13928:         c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_INVALID_ALIGNMENT,
+ 13929:                            S8("alignment specifier cannot be applied to a typedef"));
+ 13930:     }
+ 13931:     CCleanupAttributeInfo declaration_cleanup = {0};
+ 13932:     c_parse_cleanup_attribute_scan(preprocess, start, declarator_start, true, &declaration_cleanup);
+ 13933:     for (u32 member_index = enum_member_start; member_index < result->enum_member_count; member_index += 1)
+ 13934:     {
+ 13935:         CEnumMember* member = &result->enum_members[member_index];
+ 13936:         CEntityId entity = {
+ 13937:             .value = result->entity_count,
+ 13938:         };
+ 13939:         BUSTER_VALIDATE(result->entity_count < result->entity_capacity);
+ 13940:         result->entities[result->entity_count++] = (CEntity){
+ 13941:             .name = member->name,
+ 13942:             .location = member->location,
+ 13943:             .type = base,
+ 13944:             .scope = scope,
+ 13945:             .next_in_scope = C_ENTITY_ID_INVALID,
+ 13946:             .declaration_index = declaration_index,
+ 13947:             .kind = C_ENTITY_ENUMERATOR,
+ 13948:             .is_definition = true,
+ 13949:             .constant_is_negative = member->is_negative,
+ 13950:             .constant_value = member->value,
+ 13951:         };
+ 13952:         c_parse_scope_add_entity(result, scope, entity, member->symbol);
+ 13953:     }
+ 13954:     u32 segment_start = declarator_start;
+ 13955:     while (segment_start < end)
+ 13956:     {
+ 13957:         u32 segment_end = segment_start;
+ 13958:         u32 depth = 0;
+ 13959:         for (; segment_end < end; segment_end += 1)
+ 13960:         {
+ 13961:             CToken token = preprocess.tokens[segment_end];
+ 13962:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+ 13963:                 c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+ 13964:             {
+ 13965:                 depth += 1;
+ 13966:             }
+ 13967:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+ 13968:                      c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+ 13969:             {
+ 13970:                 if (depth)
+ 13971:                 {
+ 13972:                     depth -= 1;
+ 13973:                 }
+ 13974:             }
+ 13975:             else if (!depth && c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+ 13976:             {
+ 13977:                 break;
+ 13978:             }
+ 13979:         }
+ 13980:         u32 suffix_end = segment_end;
+ 13981:         u32 suffix_depth = 0;
+ 13982:         for (u32 suffix_index = segment_start; suffix_index < segment_end; suffix_index += 1)
+ 13983:         {
+ 13984:             CToken token = preprocess.tokens[suffix_index];
+ 13985:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+ 13986:             {
+ 13987:                 suffix_depth += 1;
+ 13988:             }
+ 13989:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) || c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+ 13990:             {
+ 13991:                 if (suffix_depth)
+ 13992:                 {
+ 13993:                     suffix_depth -= 1;
+ 13994:                 }
+ 13995:             }
+ 13996:             else if (!suffix_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_ASSIGN))
+ 13997:             {
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 17249 =====
+ 17219:                                                                   .is_complete = true,
+ 17220:                                                               });
+ 17221:         for (u32 member_index = 0; member_index < result.enum_member_count; member_index += 1)
+ 17222:         {
+ 17223:             CEnumMember* member = &result.enum_members[member_index];
+ 17224:             u32 member_symbol = c_parse_symbol_or_intern(&result, member->symbol, member->name);
+ 17225:             if (c_parse_lookup_entity_symbol(&result,
+ 17226:                                              (CScopeId){
+ 17227:                                                  .value = 0,
+ 17228:                                              },
+ 17229:                                              member_symbol, member->name)
+ 17230:                     .value != C_ID_UNDERLYING_INVALID)
+ 17231:             {
+ 17232:                 c_parse_diagnostic(&result, member->location, C_DIAGNOSTIC_REDEFINITION, S8("redefinition of enumerator"));
+ 17233:                 continue;
+ 17234:             }
+ 17235:             CEntityId entity = {
+ 17236:                 .value = result.entity_count,
+ 17237:             };
+ 17238:             BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
+ 17239:             result.entities[result.entity_count++] = (CEntity){
+ 17240:                 .name = member->name,
+ 17241:                 .location = member->location,
+ 17242:                 .type = enum_integer_type,
+ 17243:                 .scope =
+ 17244:                     {
+ 17245:                         .value = 0,
+ 17246:                     },
+ 17247:                 .next_in_scope = C_ENTITY_ID_INVALID,
+ 17248:                 .declaration_index = C_ID_UNDERLYING_INVALID,
+ 17249:                 .kind = C_ENTITY_ENUMERATOR,
+ 17250:                 .is_definition = true,
+ 17251:                 .constant_is_negative = member->is_negative,
+ 17252:                 .constant_value = member->value,
+ 17253:             };
+ 17254:             c_parse_scope_add_entity(&result,
+ 17255:                                      (CScopeId){
+ 17256:                                          .value = 0,
+ 17257:                                      },
+ 17258:                                      entity, member_symbol);
+ 17259:         }
+ 17260:     }
+ 17261:     // A file-scope declaration's initializer may define an aggregate the same
+ 17262:     // way a function body's expression does, and nothing else walks it. This
+ 17263:     // runs ahead of the array-bound inference below because a bound may be the
+ 17264:     // sizeof of such a definition.
+ 17265:     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
+ 17266:     {
+ 17267:         CDeclaration* declaration = &result.declarations[declaration_index];
+ 17268:         if (declaration->kind == C_DECLARATION_FUNCTION)
+ 17269:         {
+ 17270:             continue;
+ 17271:         }
+ 17272:         c_parse_bind_expression_aggregates(&machine, &result, preprocess,
+ 17273:                                            (CScopeId){
+ 17274:                                                .value = 0,
+ 17275:                                            },
+ 17276:                                            declaration->token_start, declaration->token_start + declaration->token_count);
+ 17277:     }
+ 17278:     for (u32 declaration_index = 0; declaration_index < result.declaration_count; declaration_index += 1)
+ 17279:     {
+ 17280:         CDeclaration* declaration = &result.declarations[declaration_index];
+ 17281:         if (!declaration->is_constexpr || declaration->kind != C_DECLARATION_OBJECT || declaration->entity.value >= result.entity_count)
+ 17282:         {
+ 17283:             continue;
+ 17284:         }
+ 17285:         // This walk is in declaration order: an earlier integer constexpr
+ 17286:         // has its value before a later object's bound is checked. File-scope
+ 17287:         // objects do not own a function scope, so use the lexical scope here.
+ 17288:         CDeclaration scoped_declaration = *declaration;
+ 17289:         scoped_declaration.scope = (CScopeId){.value = 0};
+ 17290:         c_parse_validate_constexpr_declaration(&machine, arena, &result, preprocess, &scoped_declaration);
+ 17291:         u32 end = declaration->token_start + declaration->token_count;
+ 17292:         u32 initializer_start = end;
+ 17293:         u32 depth = 0;
+ 17294:         for (u32 token_index = declaration->token_start; token_index < end; token_index += 1)
+ 17295:         {
+ 17296:             CToken token = preprocess.tokens[token_index];
+ 17297:             if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+ 17298:                 c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
+ 17299:             {

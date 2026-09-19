@@ -1,0 +1,803 @@
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_type_layout =====
+  1414:         {
+  1415:             *requested_out = BUSTER_MAX(*requested_out, (u32)requested_alignment);
+  1416:         }
+  1417:         *alignment = BUSTER_MAX(*alignment, (u32)requested_alignment);
+  1418:     }
+  1419:     return valid;
+  1420: }
+  1421: 
+  1422: BUSTER_C_INTERNAL bool c_parse_type_layout(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+  1423:                                              CTypeId requested, u64* size_out, u32* alignment_out)
+  1424: {
+  1425:     if (requested.value >= result->type_count)
+  1426:     {
+  1427:         return false;
+  1428:     }
+  1429:     // Almost no translation unit has an aligned typedef in it, and the two
+  1430:     // scans below run once per type of the table, so the empty case is one
+  1431:     // register test rather than a call that finds nothing.
+  1432:     bool any_type_alignment = result->type_alignment_count != 0;
+  1433:     // The seed pass below resolves builtin scalars and incomplete enums from
+  1434:     // the requested record alone and takes the early exit, so answer those
+  1435:     // without walking the table.  A type a typedef gave an alignment of its own
+  1436:     // is the one exception: its answer is not derivable from its kind, so it
+  1437:     // falls through to the solve, where the alias branch reads the request.
+  1438:     if (!any_type_alignment || !c_parse_type_alignment(result, requested))
+  1439:     {
+  1440:         CType requested_type = result->types[requested.value];
+  1441:         u64 direct_size = 0;
+  1442:         u32 direct_alignment = 0;
+  1443:         if (c_parse_builtin_type_layout(preprocess.target, requested_type.kind, &direct_size, &direct_alignment))
+  1444:         {
+  1445:             if (direct_alignment)
+  1446:             {
+  1447:                 // The same promotion the seed below performs, on the one type
+  1448:                 // this exit answers for; `_Atomic double` is the common shape
+  1449:                 // and takes it unchanged, `_Atomic _Complex float` is the one
+  1450:                 // that moves.
+  1451:                 if (requested_type.is_atomic)
+  1452:                 {
+  1453:                     c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &direct_size, &direct_alignment);
+  1454:                 }
+  1455:                 *size_out = direct_size;
+  1456:                 *alignment_out = direct_alignment;
+  1457:                 return true;
+  1458:             }
+  1459:         }
+  1460:         else if (requested_type.kind == C_TYPE_ENUM && requested_type.element_type.value == C_ID_UNDERLYING_INVALID)
+  1461:         {
+  1462:             *size_out = 4;
+  1463:             *alignment_out = 4;
+  1464:             return true;
+  1465:         }
+  1466:     }
+  1467:     CTypeLayoutCache* cache = machine && preprocess.tokens && preprocess.tokens == machine->layout_cache.tokens ? &machine->layout_cache : 0;
+  1468:     if (cache && requested.value < cache->capacity && cache->states[requested.value])
+  1469:     {
+  1470:         *size_out = cache->sizes[requested.value];
+  1471:         *alignment_out = cache->alignments[requested.value];
+  1472:         return true;
+  1473:     }
+  1474:     // The type table can grow while the solve parses alignof/sizeof operand
+  1475:     // types; the scratch arrays cover the types that existed at entry and
+  1476:     // later additions stay unresolved for this query.
+  1477:     //
+  1478:     // The committed rows seed the scratch by copy rather than by a walk that
+  1479:     // reads each of them through three tests, and the three passes below
+  1480:     // visit the ids the cache has not committed rather than the whole table.
+  1481:     // The list is snapshotted here because the solve reenters the parse --
+  1482:     // an alignment specifier or an array bound may name a type of its own --
+  1483:     // and a nested query may both extend the list and move it.
+  1484:     u32 type_count = result->type_count;
+  1485:     u32* pending;
+  1486:     u32 pending_count;
+  1487:     if (cache)
+  1488:     {
+  1489:         c_type_layout_cache_reserve(cache, result->arena, type_count);
+  1490:         for (u32 type_index = cache->pending_seeded; type_index < type_count; type_index += 1)
+  1491:         {
+  1492:             c_type_layout_cache_pending_push(cache, type_index);
+  1493:         }
+  1494:         cache->pending_seeded = BUSTER_MAX(cache->pending_seeded, type_count);
+  1495:         pending_count = cache->pending_count;
+  1496:         pending = arena_allocate(arena, u32, pending_count + 1);
+  1497:         memcpy(pending, cache->pending, sizeof(*pending) * pending_count);
+  1498:     }
+  1499:     else
+  1500:     {
+  1501:         pending_count = type_count;
+  1502:         pending = arena_allocate(arena, u32, pending_count + 1);
+  1503:         for (u32 type_index = 0; type_index < type_count; type_index += 1)
+  1504:         {
+  1505:             pending[type_index] = type_index;
+  1506:         }
+  1507:     }
+  1508:     u64* sizes = arena_allocate(arena, u64, type_count + 1);
+  1509:     u32* alignments = arena_allocate(arena, u32, type_count + 1);
+  1510:     bool* resolved = arena_allocate(arena, bool, type_count + 1);
+  1511:     bool* provisional = arena_allocate(arena, bool, type_count + 1);
+  1512:     if (cache)
+  1513:     {
+  1514:         memcpy(sizes, cache->sizes, sizeof(*sizes) * type_count);
+  1515:         memcpy(alignments, cache->alignments, sizeof(*alignments) * type_count);
+  1516:         memcpy(resolved, cache->states, type_count);
+  1517:     }
+  1518:     else
+  1519:     {
+  1520:         memset(resolved, 0, sizeof(*resolved) * type_count);
+  1521:     }
+  1522:     memset(provisional, 0, sizeof(*provisional) * type_count);
+  1523:     CParseLayoutContext layout_context = {
+  1524:         .machine = machine,
+  1525:         .arena = arena,
+  1526:         .preprocess = preprocess,
+  1527:         .result = result,
+  1528:         .alignments = alignments,
+  1529:         .resolved = resolved,
+  1530:         .provisional = provisional,
+  1531:         .type_count = type_count,
+  1532:     };
+  1533:     for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
+  1534:     {
+  1535:         u32 type_index = pending[pending_index];
+  1536:         if (type_index >= type_count || resolved[type_index])
+  1537:         {
+  1538:             continue;
+  1539:         }
+  1540:         CTypeKind kind = result->types[type_index].kind;
+  1541:         u64 size = 0;
+  1542:         u32 alignment = 0;
+  1543:         if (!c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) && kind == C_TYPE_ENUM &&
+  1544:             result->types[type_index].element_type.value == C_ID_UNDERLYING_INVALID)
+  1545:         {
+  1546:             size = 4;
+  1547:             alignment = 4;
+  1548:             provisional[type_index] = true;
+  1549:         }
+  1550:         if (alignment)
+  1551:         {
+  1552:             // `_Atomic T` is a type built from T rather than a qualified T, so
+  1553:             // the copy the seed just answered from its kind takes the atomic
+  1554:             // layout of that kind.  The atomic branch of the solve below
+  1555:             // performs the same step for every kind this seed cannot answer.
+  1556:             if (result->types[type_index].is_atomic)
+  1557:             {
+  1558:                 c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &size, &alignment);
+  1559:             }
+  1560:             sizes[type_index] = size;
+  1561:             alignments[type_index] = alignment;
+  1562:             resolved[type_index] = true;
+  1563:         }
+  1564:     }
+  1565:     // An aligned alias keeps the kind it copied, so the seed just answered it
+  1566:     // with the natural layout; hand those few back to the solve below, which
+  1567:     // owns them.  Walking the records rather than testing every type in the
+  1568:     // seed is what keeps the empty case -- almost every translation unit --
+  1569:     // free: the seed runs over the whole table on every uncached query.  A
+  1570:     // cached answer already carries the replacement and is left alone.
+  1571:     for (u32 alias_index = 0; alias_index < result->type_alignment_count; alias_index += 1)
+  1572:     {
+  1573:         u32 alias_type = result->type_alignments[alias_index].type_index;
+  1574:         if (alias_type < type_count && !(cache && alias_type < cache->capacity && cache->states[alias_type]))
+  1575:         {
+  1576:             resolved[alias_type] = false;
+  1577:         }
+  1578:     }
+  1579:     if (resolved[requested.value])
+  1580:     {
+  1581:         goto requested_resolved;
+  1582:     }
+  1583:     for (u32 pass = 0; pass < type_count; pass += 1)
+  1584:     {
+  1585:         bool progress = false;
+  1586:         for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
+  1587:         {
+  1588:             u32 type_index = pending[pending_index];
+  1589:             if (type_index >= type_count || resolved[type_index])
+  1590:             {
+  1591:                 continue;
+  1592:             }
+  1593:             CType type = result->types[type_index];
+  1594:             // `typedef int cache_line __attribute__((aligned(64)))` asks for
+  1595:             // the alignment of a *type*, which replaces the natural one rather
+  1596:             // than raising it and may lower it.  The size is the aliased
+  1597:             // type's untouched -- Clang and GCC both answer `sizeof` 1 for a
+  1598:             // one-byte struct aliased at sixteen -- and the natural layout is
+  1599:             // read off the type the alias copied, which is what makes the
+  1600:             // replacement a single lookup here and in c_gen's mapping pass.
+  1601:             // The step is claimed before every branch below because an alias
+  1602:             // keeps the kind it copied and each of them would otherwise answer
+  1603:             // it with the natural layout.  Moving the body out of line to
+  1604:             // shrink this loop measured 2,7 M instructions *worse* on the
+  1605:             // self-host corpus than leaving it here for the guard to skip.
+  1606:             CTypeAlignment const* requested_type_alignment = any_type_alignment ? c_parse_type_alignment(result, (CTypeId){.value = type_index}) : 0;
+  1607:             if (requested_type_alignment)
+  1608:             {
+  1609:                 if (!type.has_unqualified_type || type.unqualified_type.value >= type_count || !resolved[type.unqualified_type.value])
+  1610:                 {
+  1611:                     continue;
+  1612:                 }
+  1613:                 u32 alias_alignment = 1;
+  1614:                 bool alias_provisional = provisional[type.unqualified_type.value];
+  1615:                 if (!c_parse_layout_alignment_specifiers(&layout_context, requested_type_alignment->alignment_start,
+  1616:                                                          requested_type_alignment->alignment_count, &alias_alignment, 0, &alias_provisional))
+  1617:                 {
+  1618:                     continue;
+  1619:                 }
+  1620:                 // An alias over an atomic type replaces the alignment but not
+  1621:                 // the padding: `typedef _Atomic struct three t; typedef t u
+  1622:                 // __attribute__((aligned(32)));` is four bytes aligned
+  1623:                 // thirty-two, because the size is the atomic type's rather than
+  1624:                 // the three-byte record this copy points at.  The alignment the
+  1625:                 // promotion would ask for is discarded here -- the request
+  1626:                 // already answered that question, which is what the alias
+  1627:                 // exists for.
+  1628:                 u64 alias_size = sizes[type.unqualified_type.value];
+  1629:                 u32 discarded_alignment = alias_alignment;
+  1630:                 if (type.is_atomic && type.kind != C_TYPE_ARRAY)
+  1631:                 {
+  1632:                     c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &alias_size, &discarded_alignment);
+  1633:                 }
+  1634:                 sizes[type_index] = alias_size;
+  1635:                 alignments[type_index] = alias_alignment;
+  1636:                 provisional[type_index] = alias_provisional;
+  1637:                 resolved[type_index] = true;
+  1638:                 if (type_index == requested.value)
+  1639:                 {
+  1640:                     goto requested_resolved;
+  1641:                 }
+  1642:                 progress = true;
+  1643:                 continue;
+  1644:             }
+  1645:             // `_Atomic T` constructs a type rather than qualifying one, so the
+  1646:             // copy is laid out from T's layout rather than from its own kind:
+  1647:             // one branch answers for every kind a copy can carry -- aggregate,
+  1648:             // enum, vector, pointer -- where re-running each of those branches
+  1649:             // would answer with the unpromoted layout.  A copy points at the
+  1650:             // type it strips to, which is what carries the natural layout here;
+  1651:             // the few atomic types built from specifiers rather than as a copy
+  1652:             // are scalars the seed above already promoted.  The aligned-alias
+  1653:             // branch runs first because a request on the alias wins over the
+  1654:             // alignment the promotion asks for: `_Atomic` written on a type
+  1655:             // that is already atomic constructs nothing, so
+  1656:             // `_Alignof(_Atomic atomic_raised_atomic)` is the alias's 32 in
+  1657:             // Clang and GCC alike.
+  1658:             if (type.is_atomic && type.kind != C_TYPE_ARRAY && type.has_unqualified_type && type.unqualified_type.value < type_count)
+  1659:             {
+  1660:                 if (!resolved[type.unqualified_type.value])
+  1661:                 {
+  1662:                     continue;
+  1663:                 }
+  1664:                 u64 atomic_size = sizes[type.unqualified_type.value];
+  1665:                 u32 atomic_alignment = alignments[type.unqualified_type.value];
+  1666:                 c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &atomic_size, &atomic_alignment);
+  1667:                 sizes[type_index] = atomic_size;
+  1668:                 alignments[type_index] = atomic_alignment;
+  1669:                 provisional[type_index] = provisional[type.unqualified_type.value];
+  1670:                 resolved[type_index] = true;
+  1671:                 if (type_index == requested.value)
+  1672:                 {
+  1673:                     goto requested_resolved;
+  1674:                 }
+  1675:                 progress = true;
+  1676:                 continue;
+  1677:             }
+  1678:             if (type.kind == C_TYPE_ENUM && type.element_type.value < type_count && resolved[type.element_type.value])
+  1679:             {
+  1680:                 sizes[type_index] = sizes[type.element_type.value];
+  1681:                 alignments[type_index] = alignments[type.element_type.value];
+  1682:                 provisional[type_index] = provisional[type.element_type.value];
+  1683:                 resolved[type_index] = true;
+  1684:                 if (type_index == requested.value)
+  1685:                 {
+  1686:                     goto requested_resolved;
+  1687:                 }
+  1688:                 progress = true;
+  1689:                 continue;
+  1690:             }
+  1691:             if (type.kind == C_TYPE_VECTOR)
+  1692:             {
+  1693:                 u64 storage_size = 0;
+  1694:                 u32 vector_alignment = 0;
+  1695:                 if (type.element_type.value >= type_count || !resolved[type.element_type.value] ||
+  1696:                     !c_vector_type_layout(preprocess.target, sizes[type.element_type.value], type.vector_byte_size, 0, &storage_size,
+  1697:                                           &vector_alignment))
+  1698:                 {
+  1699:                     continue;
+  1700:                 }
+  1701:                 sizes[type_index] = storage_size;
+  1702:                 alignments[type_index] = vector_alignment;
+  1703:                 provisional[type_index] = provisional[type.element_type.value];
+  1704:                 resolved[type_index] = true;
+  1705:                 if (type_index == requested.value)
+  1706:                 {
+  1707:                     goto requested_resolved;
+  1708:                 }
+  1709:                 progress = true;
+  1710:                 continue;
+  1711:             }
+  1712:             if (type.kind == C_TYPE_ARRAY)
+  1713:             {
+  1714:                 if (type.element_type.value >= type_count || !resolved[type.element_type.value] || type.array_bound >= result->array_bound_count)
+  1715:                 {
+  1716:                     continue;
+  1717:                 }
+  1718:                 bool array_provisional = provisional[type.element_type.value];
+  1719:                 CArrayBound bound = result->array_bounds[type.array_bound];
+  1720:                 u64 count = 0;
+  1721:                 bool unresolved_identifier = false;
+  1722:                 CToken* bound_tokens = arena_allocate(arena, CToken, bound.token_count * 2 + 1);
+  1723:                 u32 bound_token_count = 0;
+  1724:                 u64 bound_spelling_capacity = 0;
+  1725:                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
+  1726:                 {
+  1727:                     bound_spelling_capacity += c_token_length(preprocess.spelling_base, preprocess.tokens[bound.token_start + bound_index]) + 21;
+  1728:                 }
+  1729:                 CSpellingSpace bound_space = c_space_local(arena, bound_spelling_capacity);
+  1730:                 for (u32 bound_index = 0; bound_index < bound.token_count; bound_index += 1)
+  1731:                 {
+  1732:                     CToken token = preprocess.tokens[bound.token_start + bound_index];
+  1733:                     bool bound_word_is_alignof = token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
+  1734:                     if (token.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) || bound_word_is_alignof) &&
+  1735:                         bound_index + 2 < bound.token_count &&
+  1736:                         c_token_is_punctuator(&preprocess.tokens[bound.token_start + bound_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+  1737:                     {
+  1738:                         u32 operand_start = bound.token_start + bound_index + 2;
+  1739:                         u32 bound_end = bound.token_start + bound.token_count;
+  1740:                         u32 close = operand_start;
+  1741:                         u32 depth = 1;
+  1742:                         while (close < bound_end && depth)
+  1743:                         {
+  1744:                             CToken operand_token = preprocess.tokens[close];
+  1745:                             if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+  1746:                             {
+  1747:                                 depth += 1;
+  1748:                             }
+  1749:                             else if (c_token_is_punctuator(&operand_token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+  1750:                             {
+  1751:                                 depth -= 1;
+  1752:                                 if (!depth)
+  1753:                                 {
+  1754:                                     break;
+  1755:                                 }
+  1756:                             }
+  1757:                             close += 1;
+  1758:                         }
+  1759:                         u32 operand_type_index = operand_start;
+  1760:                         CParseResult operand_parse = *result;
+  1761:                         // Callers inside the explicit type-parse machine pass no
+  1762:                         // machine, because its frame stack cannot be reentered;
+  1763:                         // their operands resolve through the machineless base
+  1764:                         // type instead â typedef, named tag, or primitive, with
+  1765:                         // no declarator suffixes â so an enum constant like
+  1766:                         // `sizeof(char[sizeof(T)])` folds rather than failing
+  1767:                         // its whole enum.
+  1768:                         CTypeId operand_type;
+  1769:                         if (!depth && close > operand_start)
+  1770:                         {
+  1771:                             operand_type = machine ? c_parse_scalar_type(machine, &operand_parse, preprocess, operand_start, close, &operand_type_index)
+  1772:                                                    : c_parse_machineless_base_type(&operand_parse, preprocess,
+  1773:                                                                                     result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+  1774:                                                                                     operand_start, close, &operand_type_index);
+  1775:                         }
+  1776:                         else
+  1777:                         {
+  1778:                             operand_type = C_TYPE_ID_INVALID;
+  1779:                         }
+  1780:                         bool pointer_type = false;
+  1781:                         while (operand_type.value != C_ID_UNDERLYING_INVALID && operand_type_index < close)
+  1782:                         {
+  1783:                             CToken type_token = preprocess.tokens[operand_type_index];
+  1784:                             if (c_token_is_punctuator(&type_token, C_PUNCTUATOR_STAR))
+  1785:                             {
+  1786:                                 pointer_type = true;
+  1787:                                 operand_type_index += 1;
+  1788:                                 continue;
+  1789:                             }
+  1790:                             if (type_token.kind == C_TOKEN_IDENTIFIER &&
+  1791:                                 (string_equal(c_token_spelling(preprocess.spelling_base, type_token), S8("const")) || string_equal(c_token_spelling(preprocess.spelling_base, type_token), S8("volatile")) ||
+  1792:                                  string_equal(c_token_spelling(preprocess.spelling_base, type_token), S8("restrict"))))
+  1793:                             {
+  1794:                                 operand_type_index += 1;
+  1795:                                 continue;
+  1796:                             }
+  1797:                             operand_type = C_TYPE_ID_INVALID;
+  1798:                             break;
+  1799:                         }
+  1800:                         u64 operand_size = 0;
+  1801:                         u32 operand_alignment = 0;
+  1802:                         bool operand_resolved = operand_type.value != C_ID_UNDERLYING_INVALID && operand_type_index == close;
+  1803:                         if (operand_resolved && pointer_type)
+  1804:                         {
+  1805:                             operand_size = c_preprocess_detail(preprocess)->data_layout.pointer.size;
+  1806:                             operand_alignment = c_preprocess_detail(preprocess)->data_layout.pointer.alignment;
+  1807:                         }
+  1808:                         else if (operand_resolved && operand_type.value < type_count && resolved[operand_type.value])
+  1809:                         {
+  1810:                             operand_size = sizes[operand_type.value];
+  1811:                             operand_alignment = alignments[operand_type.value];
+  1812:                             array_provisional |= provisional[operand_type.value];
+  1813:                         }
+  1814:                         else if (operand_resolved && operand_type.value < operand_parse.type_count)
+  1815:                         {
+  1816:                             // Kind-matching answers only for kinds whose layout
+  1817:                             // the kind alone determines. A struct, union,
+  1818:                             // array, or vector operand that has not resolved
+  1819:                             // yet must stay unresolved for this pass â matching
+  1820:                             // any same-kind type folds a neighbouring type's
+  1821:                             // size into the bound â and the fixpoint retries it
+  1822:                             // once the real layout lands.
+  1823:                             CTypeKind operand_kind = operand_parse.types[operand_type.value].kind;
+  1824:                             operand_resolved = false;
+  1825:                             bool kind_determines_layout = operand_kind != C_TYPE_STRUCT && operand_kind != C_TYPE_UNION &&
+  1826:                                                           operand_kind != C_TYPE_ARRAY && operand_kind != C_TYPE_VECTOR;
+  1827:                             for (u32 candidate_index = 0; kind_determines_layout && candidate_index < type_count; candidate_index += 1)
+  1828:                             {
+  1829:                                 if (result->types[candidate_index].kind == operand_kind && resolved[candidate_index])
+  1830:                                 {
+  1831:                                     operand_size = sizes[candidate_index];
+  1832:                                     operand_alignment = alignments[candidate_index];
+  1833:                                     array_provisional |= provisional[candidate_index];
+  1834:                                     operand_resolved = true;
+  1835:                                     break;
+  1836:                                 }
+  1837:                             }
+  1838:                             if (!operand_resolved && kind_determines_layout)
+  1839:                             {
+  1840:                                 operand_resolved = c_parse_builtin_type_layout(preprocess.target, operand_kind, &operand_size, &operand_alignment);
+  1841:                             }
+  1842:                         }
+  1843:                         else
+  1844:                         {
+  1845:                             operand_resolved = false;
+  1846:                         }
+  1847:                         if (!operand_resolved)
+  1848:                         {
+  1849:                             unresolved_identifier = true;
+  1850:                             break;
+  1851:                         }
+  1852:                         bound_tokens[bound_token_count++] = c_space_token(
+  1853:                             &bound_space, string_format(arena, S8("{u64}"), bound_word_is_alignof ? operand_alignment : operand_size),
+  1854:                             C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+  1855:                         bound_index += close - (bound.token_start + bound_index);
+  1856:                         continue;
+  1857:                     }
+  1858:                     if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+  1859:                     {
+  1860:                         u32 absolute = bound.token_start + bound_index;
+  1861:                         u32 bound_end = bound.token_start + bound.token_count;
+  1862:                         u32 close = bound_end;
+  1863:                         u32 cast_depth = 0;
+  1864:                         for (u32 scan = absolute; scan < bound_end; scan += 1)
+  1865:                         {
+  1866:                             if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_LEFT_PARENTHESIS))
+  1867:                             {
+  1868:                                 cast_depth += 1;
+  1869:                             }
+  1870:                             else if (c_token_is_punctuator(&preprocess.tokens[scan], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+  1871:                             {
+  1872:                                 if (!cast_depth)
+  1873:                                 {
+  1874:                                     break;
+  1875:                                 }
+  1876:                                 cast_depth -= 1;
+  1877:                                 if (!cast_depth)
+  1878:                                 {
+  1879:                                     close = scan;
+  1880:                                     break;
+  1881:                                 }
+  1882:                             }
+  1883:                         }
+  1884:                         bool cast_type = close > absolute + 1 && close < bound_end;
+  1885:                         for (u32 cast_type_index = absolute + 1; cast_type && cast_type_index < close; cast_type_index += 1)
+  1886:                         {
+  1887:                             CToken type_token = preprocess.tokens[cast_type_index];
+  1888:                             bool type_word = type_token.kind == C_TOKEN_IDENTIFIER && c_parse_type_word_for_dialect_token(preprocess, type_token);
+  1889:                             bool typedef_name =
+  1890:                                 !type_word && c_parse_lookup_typedef_name_token(result, preprocess.spelling_base, type_token, false).value != C_ID_UNDERLYING_INVALID;
+  1891:                             cast_type = type_word || typedef_name;
+  1892:                         }
+  1893:                         if (cast_type)
+  1894:                         {
+  1895:                             bound_index += close - absolute;
+  1896:                             continue;
+  1897:                         }
+  1898:                     }
+  1899:                     if (token.kind == C_TOKEN_IDENTIFIER)
+  1900:                     {
+  1901:                         CEntity* constant = c_parse_first_constant_entity_token(result, preprocess.spelling_base, token);
+  1902:                         bool constant_is_negative = false;
+  1903:                         u64 constant_value = 0;
+  1904:                         bool folded_constant = constant != 0;
+  1905:                         if (constant)
+  1906:                         {
+  1907:                             constant_is_negative = constant->constant_is_negative;
+  1908:                             constant_value = constant->constant_value;
+  1909:                         }
+  1910:                         else
+  1911:                         {
+  1912:                             // A member of an enum still being declared is not an
+  1913:                             // entity yet; the member table already holds every
+  1914:                             // enumerator declared before this bound, so
+  1915:                             // `enum { N = 5, E = sizeof(int[N]) }` folds.
+  1916:                             String8 name = c_token_spelling(preprocess.spelling_base, token);
+  1917:                             for (u32 member_index = 0; member_index < result->enum_member_count && !folded_constant; member_index += 1)
+  1918:                             {
+  1919:                                 CEnumMember* member = &result->enum_members[member_index];
+  1920:                                 if (string_equal(member->name, name))
+  1921:                                 {
+  1922:                                     constant_is_negative = member->is_negative;
+  1923:                                     constant_value = member->value;
+  1924:                                     folded_constant = true;
+  1925:                                 }
+  1926:                             }
+  1927:                         }
+  1928:                         if (!folded_constant)
+  1929:                         {
+  1930:                             unresolved_identifier = true;
+  1931:                             break;
+  1932:                         }
+  1933:                         if (constant_is_negative)
+  1934:                         {
+  1935:                             bound_tokens[bound_token_count++] = c_space_token(&bound_space, S8("-"), C_TOKEN_PUNCTUATOR, C_PUNCTUATOR_MINUS);
+  1936:                         }
+  1937:                         bound_tokens[bound_token_count++] = c_space_token(&bound_space, string_format(arena, S8("{u64}"), constant_value),
+  1938:                                                                           C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);
+  1939:                         continue;
+  1940:                     }
+  1941:                     bound_tokens[bound_token_count++] = c_space_retoken(&bound_space, preprocess.spelling_base, token);
+  1942:                 }
+  1943:                 CPreprocessResult evaluation = {
+  1944:                     .diagnostics = arena_allocate(arena, CDiagnostic, bound.token_count + 1),
+  1945:                     .target = preprocess.target,
+  1946:                     .dialect = preprocess.dialect,
+  1947:                 };
+  1948:                 if (bound.has_inferred_count)
+  1949:                 {
+  1950:                     // Inference can rewrite the bound record in place, so an
+  1951:                     // inferred layout never outlives this query.
+  1952:                     count = bound.inferred_count;
+  1953:                     array_provisional = true;
+  1954:                 }
+  1955:                 else if (bound.is_star || unresolved_identifier || !bound.token_count ||
+  1956:                          !c_integer_expression_evaluate(arena, bound_space.base, bound_tokens, bound_token_count, 65536, &evaluation, &count) ||
+  1957:                          evaluation.diagnostic_count ||
+  1958:                          (count && sizes[type.element_type.value] > UINT64_MAX / count))
+  1959:                 {
+  1960:                     continue;
+  1961:                 }
+  1962:                 sizes[type_index] = sizes[type.element_type.value] * count;
+  1963:                 alignments[type_index] = alignments[type.element_type.value];
+  1964:                 provisional[type_index] = array_provisional;
+  1965:                 resolved[type_index] = true;
+  1966:                 if (type_index == requested.value)
+  1967:                 {
+  1968:                     goto requested_resolved;
+  1969:                 }
+  1970:                 progress = true;
+  1971:                 continue;
+  1972:             }
+  1973:             if ((type.kind != C_TYPE_STRUCT && type.kind != C_TYPE_UNION) || !type.is_complete)
+  1974:             {
+  1975:                 continue;
+  1976:             }
+  1977:             // Bits, not bytes: this mirrors the System V bit-field placement
+  1978:             // the IR layout in c_gen performs, and the two must agree or a
+  1979:             // sizeof folded during the parse contradicts the object it sizes.
+  1980:             u64 bit_position = 0;
+  1981:             u32 alignment = 1;
+  1982:             u32 pack_alignment = type.definition_start < preprocess.token_count ? c_preprocess_pack_alignment(&preprocess, type.definition_start) : 0;
+  1983:             CAggregateAttributes aggregate_attributes = c_parse_aggregate_attributes(result, (CTypeId){.value = type_index});
+  1984:             if (aggregate_attributes.is_packed)
+  1985:             {
+  1986:                 pack_alignment = 1;
+  1987:             }
+  1988:             bool fields_resolved = true;
+  1989:             bool aggregate_provisional = false;
+  1990:             for (u32 member_index = 0; member_index < type.member_count; member_index += 1)
+  1991:             {
+  1992:                 CMember member = result->members[type.member_start + member_index];
+  1993:                 if (member.type.value >= type_count)
+  1994:                 {
+  1995:                     fields_resolved = false;
+  1996:                     break;
+  1997:                 }
+  1998:                 bool flexible = c_parse_type_is_flexible_array_member(result, &type, member_index);
+  1999:                 CType* member_type = result->types + member.type.value;
+  2000:                 CTypeId layout_type = flexible ? member_type->element_type : member.type;
+  2001:                 if (layout_type.value >= type_count || !resolved[layout_type.value])
+  2002:                 {
+  2003:                     fields_resolved = false;
+  2004:                     break;
+  2005:                 }
+  2006:                 aggregate_provisional |= provisional[layout_type.value];
+  2007:                 u64 member_size = flexible ? 0 : sizes[layout_type.value];
+  2008:                 u32 natural_alignment = alignments[layout_type.value];
+  2009:                 u32 member_alignment = natural_alignment;
+  2010:                 // A byte ceiling is what makes a bit-field take the next bit
+  2011:                 // rather than the next storage unit, so the predicate is
+  2012:                 // "packed to one byte", not "ended up byte-aligned"; the IR
+  2013:                 // layout in c_gen splits the same way.
+  2014:                 bool packed_member = member.is_packed || pack_alignment == 1;
+  2015:                 if (packed_member)
+  2016:                 {
+  2017:                     member_alignment = 1;
+  2018:                 }
+  2019:                 else if (pack_alignment)
+  2020:                 {
+  2021:                     member_alignment = BUSTER_MIN(member_alignment, pack_alignment);
+  2022:                 }
+  2023:                 u32 member_alignment_request = 0;
+  2024:                 bool alignment_resolved = c_parse_layout_alignment_specifiers(&layout_context, member.alignment_start, member.alignment_count,
+  2025:                                                                               &member_alignment, &member_alignment_request, &aggregate_provisional);
+  2026:                 if (!alignment_resolved)
+  2027:                 {
+  2028:                     fields_resolved = false;
+  2029:                     break;
+  2030:                 }
+  2031:                 if (!member_alignment)
+  2032:                 {
+  2033:                     fields_resolved = false;
+  2034:                     break;
+  2035:                 }
+  2036:                 if (member.is_bit_field)
+  2037:                 {
+  2038:                     u64 unit_bits = member_size * 8;
+  2039:                     u64 alignment_bits = (u64)member_alignment * 8;
+  2040:                     if (member.bit_width > unit_bits || !unit_bits)
+  2041:                     {
+  2042:                         fields_resolved = false;
+  2043:                         break;
+  2044:                     }
+  2045:                     // An unnamed bit-field's declared type does not raise the
+  2046:                     // aggregate's alignment; a named one's does, and neither
+  2047:                     // does a GNU `aligned` written on an unnamed one.
+  2048:                     if (member.name.length)
+  2049:                     {
+  2050:                         alignment = BUSTER_MAX(alignment, member_alignment);
+  2051:                     }
+  2052:                     // GNU `aligned(N)` on a bit-field starts it at the next
+  2053:                     // multiple of N bytes -- unconditionally, not only when it
+  2054:                     // would straddle its storage unit there, and against the
+  2055:                     // operand rather than the alignment the declared type
+  2056:                     // raises it to. `unsigned a : 20; unsigned b : 5
+  2057:                     // __attribute__((aligned(1)));` puts b at bit 24 where the
+  2058:                     // straddle rule alone puts it at 20, so this is the one
+  2059:                     // request that moves a bit-field *down*. Measured against
+  2060:                     // clang and gcc 2026-08-30; the IR layout in c_gen spells
+  2061:                     // the same rule.
+  2062:                     if (type.kind != C_TYPE_UNION && member_alignment_request)
+  2063:                     {
+  2064:                         u64 request_bits = (u64)member_alignment_request * 8;
+  2065:                         u64 request_remainder = bit_position % request_bits;
+  2066:                         if (request_remainder)
+  2067:                         {
+  2068:                             bit_position += request_bits - request_remainder;
+  2069:                         }
+  2070:                     }
+  2071:                     if (type.kind == C_TYPE_UNION)
+  2072:                     {
+  2073:                         if (member.bit_width)
+  2074:                         {
+  2075:                             // The bits the member occupies, not its declared
+  2076:                             // type's width: a union member starts at bit zero
+  2077:                             // and the size rounds up to the alignment below,
+  2078:                             // which is the same arm the IR layout in c_gen
+  2079:                             // takes.
+  2080:                             bit_position = BUSTER_MAX(bit_position, (u64)member.bit_width);
+  2081:                         }
+  2082:                         continue;
+  2083:                     }
+  2084:                     if (!member.bit_width)
+  2085:                     {
+  2086:                         // Packing does not move a zero-width bit-field: GCC
+  2087:                         // and Clang keep aligning it to its declared type, so
+  2088:                         // `struct __attribute__((packed)) { int a : 3; int : 0;
+  2089:                         // int b : 3; }` still measures five bytes.
+  2090:                         u64 zero_width_bits = (u64)natural_alignment * 8;
+  2091:                         u64 zero_width_remainder = zero_width_bits ? bit_position % zero_width_bits : 0;
+  2092:                         if (zero_width_remainder)
+  2093:                         {
+  2094:                             bit_position += zero_width_bits - zero_width_remainder;
+  2095:                         }
+  2096:                         continue;
+  2097:                     }
+  2098:                     if (packed_member)
+  2099:                     {
+  2100:                         // A packed bit-field takes the next bit, with no
+  2101:                         // storage unit to straddle; the IR layout picks the
+  2102:                         // unit it is read through from the same position.
+  2103:                         bit_position += member.bit_width;
+  2104:                         continue;
+  2105:                     }
+  2106:                     u64 bit_remainder = bit_position % alignment_bits;
+  2107:                     if (bit_remainder + member.bit_width > unit_bits)
+  2108:                     {
+  2109:                         bit_position += alignment_bits - bit_remainder;
+  2110:                     }
+  2111:                     bit_position += member.bit_width;
+  2112:                     continue;
+  2113:                 }
+  2114:                 alignment = BUSTER_MAX(alignment, member_alignment);
+  2115:                 if (type.kind == C_TYPE_UNION)
+  2116:                 {
+  2117:                     bit_position = BUSTER_MAX(bit_position, member_size * 8);
+  2118:                     continue;
+  2119:                 }
+  2120:                 u64 alignment_bits = (u64)member_alignment * 8;
+  2121:                 u64 remainder = bit_position % alignment_bits;
+  2122:                 if (remainder)
+  2123:                 {
+  2124:                     bit_position += alignment_bits - remainder;
+  2125:                 }
+  2126:                 bit_position += member_size * 8;
+  2127:             }
+  2128:             if (!fields_resolved)
+  2129:             {
+  2130:                 continue;
+  2131:             }
+  2132:             if (!c_parse_layout_alignment_specifiers(&layout_context, aggregate_attributes.alignment_start, aggregate_attributes.alignment_count,
+  2133:                                                      &alignment, 0, &aggregate_provisional))
+  2134:             {
+  2135:                 continue;
+  2136:             }
+  2137:             u64 size = (bit_position + 7) / 8;
+  2138:             u64 remainder = size % alignment;
+  2139:             if (remainder)
+  2140:             {
+  2141:                 size += alignment - remainder;
+  2142:             }
+  2143:             sizes[type_index] = size;
+  2144:             alignments[type_index] = alignment;
+  2145:             provisional[type_index] = aggregate_provisional;
+  2146:             resolved[type_index] = true;
+  2147:             if (type_index == requested.value)
+  2148:             {
+  2149:                 goto requested_resolved;
+  2150:             }
+  2151:             progress = true;
+  2152:         }
+  2153:         if (!progress)
+  2154:         {
+  2155:             break;
+  2156:         }
+  2157:     }
+  2158: requested_resolved:
+  2159:     if (cache && !machine->frame_count && !machine->mutation_count)
+  2160:     {
+  2161:         for (u32 pending_index = 0; pending_index < pending_count; pending_index += 1)
+  2162:         {
+  2163:             u32 type_index = pending[pending_index];
+  2164:             if (type_index < type_count && resolved[type_index] && !provisional[type_index] && !cache->states[type_index])
+  2165:             {
+  2166:                 cache->sizes[type_index] = sizes[type_index];
+  2167:                 cache->alignments[type_index] = alignments[type_index];
+  2168:                 cache->states[type_index] = 1;
+  2169:             }
+  2170:         }
+  2171:         // Drop what this query committed off the live list, which a nested
+  2172:         // query may have extended past the snapshot above.
+  2173:         u32 kept_count = 0;
+  2174:         for (u32 pending_index = 0; pending_index < cache->pending_count; pending_index += 1)
+  2175:         {
+  2176:             u32 type_index = cache->pending[pending_index];
+  2177:             if (cache->states[type_index])
+  2178:             {
+  2179:                 cache->pending_mark[type_index] = 0;
+  2180:             }
+  2181:             else
+  2182:             {
+  2183:                 cache->pending[kept_count++] = type_index;
+  2184:             }
+  2185:         }
+  2186:         cache->pending_count = kept_count;
+  2187:     }
+  2188:     if (!resolved[requested.value])
+  2189:     {
+  2190:         return false;
+  2191:     }
+  2192:     *size_out = sizes[requested.value];
+  2193:     *alignment_out = alignments[requested.value];
+  2194:     return true;
+  2195: }
+  2196: 
+  2197: CEntityId c_parse_lookup_entity(CParseResult* result, CScopeId scope, String8 name);
+  2198: BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, CScopeId scope, u32 symbol, String8 name);
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_type_layout =====
+  4326:                     if (!have_layout)
+  4327:                     {
+  4328:                         return false;
+  4329:                     }
+  4330:                 }
+  4331:                 type_index = type_end;
+  4332:             }
+  4333:             if (!have_layout && (type.value == C_ID_UNDERLYING_INVALID || type_index != type_end ||
+  4334:                                  !c_parse_type_layout(machine, arena, preprocess, result, type, &size, &alignment)))
+  4335:             {
+  4336:                 return false;
+  4337:             }
+  4338:             bool evaluation_word_is_alignof = c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
+  4339:             token = c_space_token(&evaluation_space, string_format(arena, S8("{u64}"), evaluation_word_is_alignof ? alignment : size),
+  4340:                                   C_TOKEN_PREPROCESSING_NUMBER, C_PUNCTUATOR_NONE);

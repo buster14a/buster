@@ -1,0 +1,155 @@
+   869:     u32 alignment_start;
+   870:     u32 alignment_count;
+   871: };
+   872: 
+   873: typedef struct CEnumMember CEnumMember;
+   874: struct CEnumMember
+   875: {
+   876:     String8 name;
+   877:     CSourceLocation location;
+   878:     // Interned id of `name`, carried from the declaring token so the entity
+   879:     // filed from this record is keyed without a second intern; 0 when the
+   880:     // parse ran without a symbol table.  It sits in the alignment hole
+   881:     // ahead of `value`, so the record's size is unchanged.
+   882:     u32 symbol;
+   883:     u64 value;
+   884:     bool is_negative;
+   885:     u8 reserved[7];
+   886: };
+   887: BUSTER_CT_CHECK(sizeof(CEnumMember) == 56);
+   888: 
+   889: typedef struct CParameter CParameter;
+   890: struct CParameter
+   891: {
+   892:     String8 name;
+   893:     CSourceLocation location;
+   894:     CTypeId type;
+   895:     CEntityId entity;
+   896:     // Interned id of `name`, as CEnumMember.symbol; fills the tail padding.
+   897:     u32 symbol;
+   898: };
+   899: BUSTER_CT_CHECK(sizeof(CParameter) == 48);
+   900: 
+   901: typedef struct CParserDeclaration CParserDeclaration;
+   902: 
+   903: typedef enum CEntityKind
+   904: {
+   905:     C_ENTITY_OBJECT,
+   906:     C_ENTITY_FUNCTION,
+   907:     C_ENTITY_TYPEDEF,
+   908:     C_ENTITY_PARAMETER,
+   909:     C_ENTITY_LOCAL,
+   910:     C_ENTITY_ENUMERATOR,
+   911:     C_ENTITY_COUNT,
+   912: } CEntityKind;
+   913: 
+   914: typedef struct CEntity CEntity;
+   915: struct CEntity
+   916: {
+   917:     String8 name;
+   918:     // Interned id of `name` (0 when the parse ran without a symbol table);
+   919:     // the scope-lookup buckets and chains key on it.
+   920:     u32 symbol;
+   921:     CSourceLocation location;
+   922:     CTypeId type;
+   923:     CScopeId scope;
+   924:     CEntityId next_in_scope;
+   925:     CEntityId next_in_lookup;
+   926:     CEntityId next_typedef_in_lookup;
+   927:     CEntityId next_by_name;
+   928:     u32 declaration_index;
+   929:     u32 declaration_token_plus_one;
+   930:     u32 declaration_token_start;
+   931:     u32 declaration_token_count;
+   932:     u32 alignment_start;
+   933:     u32 alignment_count;
+   934:     CEntityKind kind;
+   935:     bool is_definition;
+   936:     bool is_static_storage;
+   937:     bool is_thread_local;
+   938:     bool is_constexpr;
+   939:     bool has_constant_value;
+   940:     bool constant_is_negative;
+   941:     bool has_cleanup;
+   942:     bool cleanup_attribute_checked;
+   943:     // Register storage on a local. Only the local declarator path records it,
+   944:     // and only one reader needs it: an assembler label on a `register` local
+   945:     // binds a machine register instead of renaming a symbol.
+   946:     bool is_register;
+   947:     u8 reserved[1];
+   948:     CEntityId cleanup_function;
+   949:     u32 cleanup_attribute_token;
+   950:     u32 cleanup_attribute_end;
+   951:     u64 constant_value;
+   952: };
+   953: 
+   954: // One shadowed binding, restored when the scope that shadowed it closes.
+   955: typedef struct CParseBindingUndo CParseBindingUndo;
+   956: struct CParseBindingUndo
+   957: {
+   958:     u32 symbol;
+   959:     CEntityId previous;
+   960: };
+   961: 
+   962: typedef struct CScope CScope;
+   963: struct CScope
+   964: {
+   965:     CScopeId parent;
+   966:     CEntityId first_entity;
+   967:     CEntityId last_entity;
+   968:     u32 token_start;
+   969:     u32 token_end;
+   970:     u32 entity_count;
+   971: };
+   972: 
+   973: typedef struct CIdentifierUse CIdentifierUse;
+   974: struct CIdentifierUse
+   975: {
+   976:     u32 token_index;
+   977:     CEntityId entity;
+   978:     CScopeId scope;
+   979: };
+   980: 
+   981: typedef enum CDeclarationKind
+   982: {
+   983:     C_DECLARATION_OBJECT,
+   984:     C_DECLARATION_FUNCTION,
+   985:     C_DECLARATION_TYPEDEF,
+   986:     C_DECLARATION_TYPE,
+   987:     C_DECLARATION_ASSEMBLY,
+   988:     C_DECLARATION_COUNT,
+   989: } CDeclarationKind;
+   990: 
+   991: typedef struct CDeclaration CDeclaration;
+   992: struct CDeclaration
+   993: {
+   994:     String8 name;
+   995:     CSourceLocation location;
+   996:     u32 token_start;
+   997:     u32 token_count;
+   998:     // The one declarator this declaration owns out of a comma-separated list,
+   999:     // initializer included and the separating ',' or ';' excluded. Zero count
+  1000:     // means the declaration was not split and owns its whole token range;
+  1001:     // token_start/token_count always span the declaration specifiers, which
+  1002:     // every declarator of the list shares.
+  1003:     u32 declarator_start;
+  1004:     u32 declarator_count;
+  1005:     u32 body_start;
+  1006:     u32 body_token_count;
+  1007:     u32 parameter_start;
+  1008:     u32 parameter_count;
+  1009:     u32 alignment_start;
+  1010:     u32 alignment_count;
+  1011:     CTypeId type;
+  1012:     CTypeId base_type;
+  1013:     CEntityId entity;
+  1014:     CScopeId scope;
+  1015:     CParserDeclaration* syntax_declaration;
+  1016:     CDeclarationKind kind;
+  1017:     bool is_definition;
+  1018:     bool is_variadic;
+  1019:     bool is_constexpr;
+  1020:     // Set on the second and later declarators of a list: the specifiers were
+  1021:     // already parsed for the first one, so base_type is supplied rather than
+  1022:     // recomputed.
+  1023:     bool is_declarator_continuation;

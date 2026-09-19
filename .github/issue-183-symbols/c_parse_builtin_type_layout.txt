@@ -1,0 +1,249 @@
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_builtin_type_layout =====
+  1113:             alignment = BUSTER_MIN(alignment, maximum);
+  1114:         }
+  1115:         *storage_size_out = storage_size;
+  1116:         *alignment_out = alignment;
+  1117:     }
+  1118:     return valid;
+  1119: }
+  1120: 
+  1121: BUSTER_C_SHARED bool c_parse_builtin_type_layout(Target target, CTypeKind kind, u64* size_out, u32* alignment_out)
+  1122: {
+  1123:     TargetDataLayout layout = target_data_layout(target);
+  1124:     u64 size = 0;
+  1125:     u32 alignment = 0;
+  1126:     switch (kind)
+  1127:     {
+  1128:     case C_TYPE_BOOL:
+  1129:         size = layout.boolean.size;
+  1130:         alignment = layout.boolean.alignment;
+  1131:         break;
+  1132:     case C_TYPE_CHAR:
+  1133:         size = layout.plain_char.size;
+  1134:         alignment = layout.plain_char.alignment;
+  1135:         break;
+  1136:     case C_TYPE_SIGNED_CHAR:
+  1137:         size = layout.signed_char.size;
+  1138:         alignment = layout.signed_char.alignment;
+  1139:         break;
+  1140:     case C_TYPE_UNSIGNED_CHAR:
+  1141:         size = layout.unsigned_char.size;
+  1142:         alignment = layout.unsigned_char.alignment;
+  1143:         break;
+  1144:     case C_TYPE_SHORT:
+  1145:         size = layout.short_integer.size;
+  1146:         alignment = layout.short_integer.alignment;
+  1147:         break;
+  1148:     case C_TYPE_UNSIGNED_SHORT:
+  1149:         size = layout.unsigned_short_integer.size;
+  1150:         alignment = layout.unsigned_short_integer.alignment;
+  1151:         break;
+  1152:     case C_TYPE_INT:
+  1153:         size = layout.integer.size;
+  1154:         alignment = layout.integer.alignment;
+  1155:         break;
+  1156:     case C_TYPE_UNSIGNED_INT:
+  1157:         size = layout.unsigned_integer.size;
+  1158:         alignment = layout.unsigned_integer.alignment;
+  1159:         break;
+  1160:     case C_TYPE_FLOAT16:
+  1161:     case C_TYPE_BFLOAT16:
+  1162:     {
+  1163:         TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
+  1164:         size = narrow.size;
+  1165:         alignment = narrow.alignment;
+  1166:         break;
+  1167:     }
+  1168:     case C_TYPE_FLOAT:
+  1169:         size = layout.float_type.size;
+  1170:         alignment = layout.float_type.alignment;
+  1171:         break;
+  1172:     case C_TYPE_LONG:
+  1173:         size = layout.long_integer.size;
+  1174:         alignment = layout.long_integer.alignment;
+  1175:         break;
+  1176:     case C_TYPE_UNSIGNED_LONG:
+  1177:         size = layout.unsigned_long_integer.size;
+  1178:         alignment = layout.unsigned_long_integer.alignment;
+  1179:         break;
+  1180:     case C_TYPE_LONG_LONG:
+  1181:         size = layout.long_long_integer.size;
+  1182:         alignment = layout.long_long_integer.alignment;
+  1183:         break;
+  1184:     case C_TYPE_UNSIGNED_LONG_LONG:
+  1185:         size = layout.unsigned_long_long_integer.size;
+  1186:         alignment = layout.unsigned_long_long_integer.alignment;
+  1187:         break;
+  1188:     case C_TYPE_DOUBLE:
+  1189:         size = layout.double_type.size;
+  1190:         alignment = layout.double_type.alignment;
+  1191:         break;
+  1192:     case C_TYPE_NULLPTR:
+  1193:     case C_TYPE_POINTER:
+  1194:     case C_TYPE_FUNCTION:
+  1195:         size = layout.pointer.size;
+  1196:         alignment = layout.pointer.alignment;
+  1197:         break;
+  1198:     case C_TYPE_LONG_DOUBLE:
+  1199:         size = layout.long_double_type.size;
+  1200:         alignment = layout.long_double_type.alignment;
+  1201:         break;
+  1202:     // A complex value is two contiguous elements of its real type, so it is
+  1203:     // twice as wide and no more strictly aligned. Clang agrees on all three
+  1204:     // for every target here: sizeof/_Alignof are {8,4}, {16,8} and
+  1205:     // {2*sizeof(long double), _Alignof(long double)}.
+  1206:     case C_TYPE_FLOAT16_COMPLEX:
+  1207:         size = layout.float16_type.size * 2;
+  1208:         alignment = layout.float16_type.alignment;
+  1209:         break;
+  1210:     case C_TYPE_FLOAT_COMPLEX:
+  1211:         size = layout.float_type.size * 2;
+  1212:         alignment = layout.float_type.alignment;
+  1213:         break;
+  1214:     case C_TYPE_DOUBLE_COMPLEX:
+  1215:         size = layout.double_type.size * 2;
+  1216:         alignment = layout.double_type.alignment;
+  1217:         break;
+  1218:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+  1219:         size = layout.long_double_type.size * 2;
+  1220:         alignment = layout.long_double_type.alignment;
+  1221:         break;
+  1222:     case C_TYPE_INT128:
+  1223:         size = layout.integer128.size;
+  1224:         alignment = layout.integer128.alignment;
+  1225:         break;
+  1226:     case C_TYPE_UNSIGNED_INT128:
+  1227:         size = layout.unsigned_integer128.size;
+  1228:         alignment = layout.unsigned_integer128.alignment;
+  1229:         break;
+  1230:     case C_TYPE_VA_LIST:
+  1231:         size = layout.va_list.size;
+  1232:         alignment = layout.va_list.alignment;
+  1233:         break;
+  1234:     // GNU gives `void` a size and an alignment of one so that arithmetic on a
+  1235:     // `void *` steps by bytes; clang and gcc both fold `sizeof(void)`,
+  1236:     // `sizeof(const void)` and `_Alignof(void)` to 1. It is an extension for
+  1237:     // that arithmetic and for `sizeof`, never a licence to declare a `void`
+  1238:     // object: every refusal of one keys on the *kind*, not on a zero size.
+  1239:     case C_TYPE_VOID:
+  1240:         size = 1;
+  1241:         alignment = 1;
+  1242:         break;
+  1243:     case C_TYPE_ARRAY:
+  1244:     case C_TYPE_VECTOR:
+  1245:     case C_TYPE_STRUCT:
+  1246:     case C_TYPE_UNION:
+  1247:     case C_TYPE_ENUM:
+  1248:     case C_TYPE_INVALID:
+  1249:     case C_TYPE_COUNT:
+  1250:         return false;
+  1251:     }
+  1252:     *size_out = size;
+  1253:     *alignment_out = alignment;
+  1254:     return true;
+  1255: }
+  1256: 
+  1257: /* The layout `_Atomic T` has, given T's own.  Clang treats `_Atomic T` as
+  1258:    *constructing* a type rather than qualifying one: a value it could operate on
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_builtin_type_layout =====
+  1435:     // without walking the table.  A type a typedef gave an alignment of its own
+  1436:     // is the one exception: its answer is not derivable from its kind, so it
+  1437:     // falls through to the solve, where the alias branch reads the request.
+  1438:     if (!any_type_alignment || !c_parse_type_alignment(result, requested))
+  1439:     {
+  1440:         CType requested_type = result->types[requested.value];
+  1441:         u64 direct_size = 0;
+  1442:         u32 direct_alignment = 0;
+  1443:         if (c_parse_builtin_type_layout(preprocess.target, requested_type.kind, &direct_size, &direct_alignment))
+  1444:         {
+  1445:             if (direct_alignment)
+  1446:             {
+  1447:                 // The same promotion the seed below performs, on the one type
+  1448:                 // this exit answers for; `_Atomic double` is the common shape
+  1449:                 // and takes it unchanged, `_Atomic _Complex float` is the one
+  1450:                 // that moves.
+  1451:                 if (requested_type.is_atomic)
+  1452:                 {
+  1453:                     c_atomic_promoted_layout(target_data_layout(preprocess.target).atomic_max_width, &direct_size, &direct_alignment);
+  1454:                 }
+  1455:                 *size_out = direct_size;
+  1456:                 *alignment_out = direct_alignment;
+  1457:                 return true;
+  1458:             }
+  1459:         }
+  1460:         else if (requested_type.kind == C_TYPE_ENUM && requested_type.element_type.value == C_ID_UNDERLYING_INVALID)
+  1461:         {
+  1462:             *size_out = 4;
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_builtin_type_layout =====
+  1535:         u32 type_index = pending[pending_index];
+  1536:         if (type_index >= type_count || resolved[type_index])
+  1537:         {
+  1538:             continue;
+  1539:         }
+  1540:         CTypeKind kind = result->types[type_index].kind;
+  1541:         u64 size = 0;
+  1542:         u32 alignment = 0;
+  1543:         if (!c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) && kind == C_TYPE_ENUM &&
+  1544:             result->types[type_index].element_type.value == C_ID_UNDERLYING_INVALID)
+  1545:         {
+  1546:             size = 4;
+  1547:             alignment = 4;
+  1548:             provisional[type_index] = true;
+  1549:         }
+  1550:         if (alignment)
+  1551:         {
+  1552:             // `_Atomic T` is a type built from T rather than a qualified T, so
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_builtin_type_layout =====
+  2991:     {
+  2992:         return C_TYPE_ID_INVALID;
+  2993:     }
+  2994:     left = c_parse_expression_promoted_kind(left);
+  2995:     right = c_parse_expression_promoted_kind(right);
+  2996:     u64 left_size = 0;
+  2997:     u64 right_size = 0;
+  2998:     u32 ignored_alignment = 0;
+  2999:     if (!c_parse_builtin_type_layout(target, left, &left_size, &ignored_alignment) ||
+  3000:         !c_parse_builtin_type_layout(target, right, &right_size, &ignored_alignment))
+  3001:     {
+  3002:         return C_TYPE_ID_INVALID;
+  3003:     }
+  3004:     CTypeKind result_kind = left;
+  3005:     bool left_signed = c_parse_expression_signed_kind(left);
+  3006:     bool right_signed = c_parse_expression_signed_kind(right);
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_builtin_type_layout =====
+  2992:         return C_TYPE_ID_INVALID;
+  2993:     }
+  2994:     left = c_parse_expression_promoted_kind(left);
+  2995:     right = c_parse_expression_promoted_kind(right);
+  2996:     u64 left_size = 0;
+  2997:     u64 right_size = 0;
+  2998:     u32 ignored_alignment = 0;
+  2999:     if (!c_parse_builtin_type_layout(target, left, &left_size, &ignored_alignment) ||
+  3000:         !c_parse_builtin_type_layout(target, right, &right_size, &ignored_alignment))
+  3001:     {
+  3002:         return C_TYPE_ID_INVALID;
+  3003:     }
+  3004:     CTypeKind result_kind = left;
+  3005:     bool left_signed = c_parse_expression_signed_kind(left);
+  3006:     bool right_signed = c_parse_expression_signed_kind(right);
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_builtin_type_layout =====
+  5502:     }
+  5503:     if (element_type.value >= result->type_count)
+  5504:     {
+  5505:         return false;
+  5506:     }
+  5507:     CTypeKind kind = result->types[element_type.value].kind;
+  5508:     u64 size = 0;
+  5509:     u32 alignment = 0;
+  5510:     if (!c_parse_builtin_type_layout(preprocess.target, kind, &size, &alignment) || size != decoded.element_width)
+  5511:     {
+  5512:         return false;
+  5513:     }
+  5514:     if (decoded.encoding == C_IR_STRING_ENCODING_ORDINARY || decoded.encoding == C_IR_STRING_ENCODING_UTF8)
+  5515:     {
+  5516:         return decoded.element_width == 1 && (kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR);

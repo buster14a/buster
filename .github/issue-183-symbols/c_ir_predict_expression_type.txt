@@ -1,0 +1,21 @@
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_predict_expression_type =====
+ 31145:     if (!c_ir_query_conditional_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end, &result) &&
+ 31146:         builder->queries->has_request)
+ 31147:     {
+ 31148:         return IR_TYPE_ID_INVALID;
+ 31149:     }
+ 31150:     return result.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : result;
+ 31151: }
+ 31152: 
+ 31153: BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end)
+ 31154: {
+ 31155:     CIrQueryFrame result = {0};
+ 31156:     if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) || !result.success)
+ 31157:     {
+ 31158:         return builder->s32_type;
+ 31159:     }
+ 31160:     return result.result_type;
+ 31161: }
+ 31162: 
+ 31163: BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* builder)
+ 31164: {

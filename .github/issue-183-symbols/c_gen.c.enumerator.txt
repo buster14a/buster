@@ -1,0 +1,497 @@
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 4640 =====
+  4610: // a type, qualifier, tag, typeof or _Atomic keyword, a decoration
+  4611: // c_ir_primitive_type_kind steps over (an attribute, an asm label, a `[[`
+  4612: // attribute) or an identifier naming a typedef, and nothing else, so:
+  4613: // - a number, a string, a character and every punctuator but `[` is refused
+  4614: //   outright;
+  4615: // - an identifier the parser bound to a local, object, parameter,
+  4616: //   enumerator or function is refused too: the prefix reads that binding
+  4617: //   before any scope lookup, and none of them is a typedef.  Its spelling
+  4618: //   must not be one of the keywords above, which
+  4619: //   c_parse_type_name_start_word_token answers from the word bits (an
+  4620: //   interned spelling outside the predefined range is no keyword; symbol 0
+  4621: //   is unclassified and stays a candidate).
+  4622: // An unbound identifier keeps the scope-chain lookup the probe does for it,
+  4623: // and a typedef is the candidate the probe exists for.
+  4624: BUSTER_C_INTERNAL bool c_ir_group_may_be_type_name(CIntegerIrBuilder* builder, u32 open)
+  4625: {
+  4626:     bool result = true;
+  4627:     if (open + 1 < builder->preprocess.token_count)
+  4628:     {
+  4629:         CToken first = builder->preprocess.tokens[open + 1];
+  4630:         if (first.kind != C_TOKEN_IDENTIFIER)
+  4631:         {
+  4632:             result = first.punctuator == C_PUNCTUATOR_LEFT_BRACKET;
+  4633:         }
+  4634:         else if (first.symbol && !c_parse_type_name_start_word_token(builder->preprocess, first))
+  4635:         {
+  4636:             CEntityId entity = c_ir_identifier_entity(builder, open + 1);
+  4637:             if (entity.value < builder->parse.entity_count)
+  4638:             {
+  4639:                 CEntityKind kind = builder->parse.entities[entity.value].kind;
+  4640:                 result = kind != C_ENTITY_LOCAL && kind != C_ENTITY_OBJECT && kind != C_ENTITY_PARAMETER && kind != C_ENTITY_ENUMERATOR &&
+  4641:                          kind != C_ENTITY_FUNCTION;
+  4642:             }
+  4643:         }
+  4644:     }
+  4645:     return result;
+  4646: }
+  4647: 
+  4648: // The memo slot for the group opening at `open`, in the body-token array
+  4649: // prepared_call_indices also spans: a `(` outside the body -- a parameter
+  4650: // bound's declarator, a global initializer -- has none and is probed each
+  4651: // time.
+  4652: BUSTER_C_INTERNAL u32* c_ir_group_type_name_slot(CIntegerIrBuilder* builder, u32 open)
+  4653: {
+  4654:     u32* slot = 0;
+  4655:     if (builder->group_type_names && open >= builder->body_token_start && open - builder->body_token_start < builder->body_token_count)
+  4656:     {
+  4657:         slot = builder->group_type_names + (open - builder->body_token_start);
+  4658:     }
+  4659:     return slot;
+  4660: }
+  4661: 
+  4662: // Whether a probe's answer for the group `open .. close` may be stored.  A
+  4663: // group headed by typeof/__typeof__/__typeof/typeof_unqual reads the locals
+  4664: // declared so far, so its answer can change between two probes; a lone
+  4665: // identifier the parser left unbound is looked up at file scope by
+  4666: // c_ir_type_name and at the declaration's scope by the query, so the two
+  4667: // probe paths may not share one answer for it.  Everything else is a
+  4668: // function of the tokens and the parse alone.
+  4669: BUSTER_C_INTERNAL bool c_ir_group_type_name_memoizable(CIntegerIrBuilder* builder, u32 open, u32 close)
+  4670: {
+  4671:     bool result = true;
+  4672:     CToken first = builder->preprocess.tokens[open + 1];
+  4673:     if (first.kind == C_TOKEN_IDENTIFIER)
+  4674:     {
+  4675:         String8 spelling = c_token_spelling(builder->preprocess.spelling_base, first);
+  4676:         if (string_equal(spelling, S8("typeof")) || string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("__typeof")) ||
+  4677:             string_equal(spelling, S8("typeof_unqual")))
+  4678:         {
+  4679:             result = false;
+  4680:         }
+  4681:         else if (close == open + 2 && c_ir_identifier_entity(builder, open + 1).value == C_ID_UNDERLYING_INVALID)
+  4682:         {
+  4683:             result = false;
+  4684:         }
+  4685:     }
+  4686:     return result;
+  4687: }
+  4688: 
+  4689: BUSTER_C_INTERNAL u32 c_ir_group_type_name_encode(IrTypeId type)
+  4690: {
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 24350 =====
+ 24320:             }
+ 24321:             u32 value_start = item_start;
+ 24322:             u32 nested_designator_start = UINT32_MAX;
+ 24323:             u32 designator_equals = UINT32_MAX;
+ 24324:             CToken promoted_member = {0};
+ 24325:             bool promoted_designator = false;
+ 24326:             if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_LEFT_BRACKET))
+ 24327:             {
+ 24328:                 u32 close = c_ir_matching_delimiter_cached(builder, item_start, index, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+ 24329:                 u64 designated = UINT64_MAX;
+ 24330:                 if (close >= index || close + 1 >= index || !c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_ASSIGN) ||
+ 24331:                     close != item_start + 2)
+ 24332:                 {
+ 24333:                     if (close < index && c_ir_array_designator_has_range(builder, item_start, close))
+ 24334:                     {
+ 24335:                         builder->failure_message = S8("range designators are only supported for static aggregate initializers");
+ 24336:                     }
+ 24337:                     goto c_ir_nested_compound_failed;
+ 24338:                 }
+ 24339:                 CToken designator = builder->preprocess.tokens[item_start + 1];
+ 24340:                 if (designator.kind == C_TOKEN_PREPROCESSING_NUMBER)
+ 24341:                 {
+ 24342:                     if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, designator), &designated))
+ 24343:                     {
+ 24344:                         goto c_ir_nested_compound_failed;
+ 24345:                     }
+ 24346:                 }
+ 24347:                 else if (designator.kind == C_TOKEN_IDENTIFIER)
+ 24348:                 {
+ 24349:                     CEntityId entity = c_ir_identifier_entity(builder, item_start + 1);
+ 24350:                     if (entity.value >= builder->parse.entity_count || builder->parse.entities[entity.value].kind != C_ENTITY_ENUMERATOR ||
+ 24351:                         builder->parse.entities[entity.value].constant_is_negative)
+ 24352:                     {
+ 24353:                         goto c_ir_nested_compound_failed;
+ 24354:                     }
+ 24355:                     designated = builder->parse.entities[entity.value].constant_value;
+ 24356:                 }
+ 24357:                 if (designated > UINT32_MAX)
+ 24358:                 {
+ 24359:                     goto c_ir_nested_compound_failed;
+ 24360:                 }
+ 24361:                 selected_index = (u32)designated;
+ 24362:                 nested_designator_start = close + 1;
+ 24363:                 designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
+ 24364:                 if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
+ 24365:                 {
+ 24366:                     goto c_ir_nested_compound_failed;
+ 24367:                 }
+ 24368:                 value_start = designator_equals + 1;
+ 24369:             }
+ 24370:             else if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_DOT))
+ 24371:             {
+ 24372:                 if (item_start + 2 >= index || builder->preprocess.tokens[item_start + 1].kind != C_TOKEN_IDENTIFIER)
+ 24373:                 {
+ 24374:                     goto c_ir_nested_compound_failed;
+ 24375:                 }
+ 24376:                 selected_index = type->field_count;
+ 24377:                 for (u32 field_index = 0; field_index < type->field_count; field_index += 1)
+ 24378:                 {
+ 24379:                     if (string_equal(type->fields[field_index].name, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[item_start + 1])))
+ 24380:                     {
+ 24381:                         selected_index = field_index;
+ 24382:                         break;
+ 24383:                     }
+ 24384:                 }
+ 24385:                 if (selected_index == type->field_count)
+ 24386:                 {
+ 24387:                     promoted_designator = true;
+ 24388:                     promoted_member = builder->preprocess.tokens[item_start + 1];
+ 24389:                     selected_index = 0;
+ 24390:                 }
+ 24391:                 nested_designator_start = item_start + 2;
+ 24392:                 designator_equals = c_ir_designator_chain_end(builder, nested_designator_start, index);
+ 24393:                 if (designator_equals >= index || !c_token_is_punctuator(&builder->preprocess.tokens[designator_equals], C_PUNCTUATOR_ASSIGN))
+ 24394:                 {
+ 24395:                     goto c_ir_nested_compound_failed;
+ 24396:                 }
+ 24397:                 value_start = designator_equals + 1;
+ 24398:             }
+ 24399:             u64 child_count = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count : type->field_count;
+ 24400:             if ((!promoted_designator && selected_index >= child_count) || value_start >= index)
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25460 =====
+ 25430:     if (math_link_name.length)
+ 25431:     {
+ 25432:         if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+ 25433:         {
+ 25434:             return false;
+ 25435:         }
+ 25436:         u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+ 25437:         if (close >= end)
+ 25438:         {
+ 25439:             return false;
+ 25440:         }
+ 25441:         bool predicate = string_equal(math_link_name, S8("isnan")) || string_equal(math_link_name, S8("isnanf")) ||
+ 25442:                          string_equal(math_link_name, S8("isinf")) || string_equal(math_link_name, S8("isinff")) ||
+ 25443:                          string_equal(math_link_name, S8("isinf_sign")) || string_equal(math_link_name, S8("isfinite"));
+ 25444:         bool single = math_link_name.length && math_link_name.pointer[math_link_name.length - 1] == 'f';
+ 25445:         *type_out = predicate ? builder->s32_type : single ? builder->f32_type : builder->f64_type;
+ 25446:         return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+ 25447:     }
+ 25448: 
+ 25449:     CEntityId entity = c_ir_identifier_entity_or_lookup(builder, start);
+ 25450:     CIntegerIrLocal* local = c_ir_find_local_by_entity(builder, entity);
+ 25451:     IrTypeId type = IR_TYPE_ID_INVALID;
+ 25452:     if (local)
+ 25453:     {
+ 25454:         if (local->is_variable_length_array)
+ 25455:         {
+ 25456:             return false;
+ 25457:         }
+ 25458:         type = local->type;
+ 25459:     }
+ 25460:     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
+ 25461:     {
+ 25462:         type = builder->s32_type;
+ 25463:     }
+ 25464:     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+ 25465:     {
+ 25466:         CTypeId c_type = builder->parse.entities[entity.value].type;
+ 25467:         if (c_type.value < builder->parse.type_count)
+ 25468:         {
+ 25469:             type = builder->c_type_ir_map[c_type.value];
+ 25470:         }
+ 25471:     }
+ 25472:     if (type.value == IR_ID_UNDERLYING_INVALID && chain_start < end &&
+ 25473:         c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+ 25474:     {
+ 25475:         // A direct call through a function name resolves to the declared return type.
+ 25476:         CIrPreparedCall* prepared_call = c_ir_prepared_call_find(builder, start);
+ 25477:         u32 close = UINT32_MAX;
+ 25478:         if (prepared_call && builder->function && prepared_call->emitted && prepared_call->result.value < builder->function->value_count)
+ 25479:         {
+ 25480:             type = builder->function->values[prepared_call->result.value].canonical_type;
+ 25481:             close = prepared_call->close_index;
+ 25482:         }
+ 25483:         else
+ 25484:         {
+ 25485:             u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+ 25486:             if (declaration_index != UINT32_MAX && builder->signatures)
+ 25487:             {
+ 25488:                 type = builder->signatures[declaration_index].return_type;
+ 25489:                 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+ 25490:             }
+ 25491:             else if (declaration_index != UINT32_MAX && declaration_index < builder->parse.declaration_count)
+ 25492:             {
+ 25493:                 // No signatures exist while the type-mapping fixed point
+ 25494:                 // evaluates array bounds, and a bound like
+ 25495:                 // `char buffer[sizeof(helper())]` that fails here classifies
+ 25496:                 // the local as a VLA — which a static local then rejects.
+ 25497:                 // Resolve the declared return type through the parse
+ 25498:                 // declaration instead; an unmapped return type still fails,
+ 25499:                 // deferring the bound to a later mapping round rather than
+ 25500:                 // guessing.
+ 25501:                 CDeclaration* function_declaration = &builder->parse.declarations[declaration_index];
+ 25502:                 if (function_declaration->type.value < builder->parse.type_count)
+ 25503:                 {
+ 25504:                     CType* function_type = &builder->parse.types[function_declaration->type.value];
+ 25505:                     if (function_type->kind == C_TYPE_FUNCTION && function_type->return_type.value < builder->parse.type_count)
+ 25506:                     {
+ 25507:                         type = builder->c_type_ir_map[function_type->return_type.value];
+ 25508:                     }
+ 25509:                 }
+ 25510:                 if (type.value != IR_ID_UNDERLYING_INVALID)
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 27828 =====
+ 27798:                 else if (entity.value < builder->parse.entity_count &&
+ 27799:                          (builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT ||
+ 27800:                           (builder->parse.entities[entity.value].kind == C_ENTITY_LOCAL && !local)))
+ 27801:                 {
+ 27802:                     IrValueId place = c_ir_emit_global_place(builder, entity, source);
+ 27803:                     if (place.value != IR_ID_UNDERLYING_INVALID && index + 2 < end &&
+ 27804:                         (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_DOT) ||
+ 27805:                          c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_ARROW)) &&
+ 27806:                         builder->preprocess.tokens[index + 2].kind == C_TOKEN_IDENTIFIER)
+ 27807:                     {
+ 27808:                         IrValueId operand = place;
+ 27809:                         if (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_ARROW))
+ 27810:                         {
+ 27811:                             IrTypeId place_type = builder->function->values[place.value].canonical_type;
+ 27812:                             operand = c_ir_emit_arrow_operand_from_place(builder, place, place_type, source);
+ 27813:                         }
+ 27814:                         place =
+ 27815:                             c_ir_emit_field_place_from_value(builder, operand, builder->preprocess.tokens[index + 1], builder->preprocess.tokens[index + 2]);
+ 27816:                         index += 2;
+ 27817:                     }
+ 27818:                     if (place.value != IR_ID_UNDERLYING_INVALID)
+ 27819:                     {
+ 27820:                         value_place = place;
+ 27821:                         IrTypeId type = builder->function->values[place.value].canonical_type;
+ 27822:                         IrType* type_value = ir_type_from_id(&builder->program->types, type);
+ 27823:                         value = type_value && (type_value->kind == IR_TYPE_ARRAY || (type_value->is_atomic && c_ir_postfix_update_at(builder, index, end)))
+ 27824:                                     ? place
+ 27825:                                     : c_ir_emit_expression_place_value(builder, place, type, source);
+ 27826:                     }
+ 27827:                 }
+ 27828:                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
+ 27829:                 {
+ 27830:                     CEntity* enumerator = &builder->parse.entities[entity.value];
+ 27831:                     value = c_ir_emit_integer_value(builder, enumerator->constant_value, enumerator->constant_is_negative, token);
+ 27832:                 }
+ 27833:                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_FUNCTION)
+ 27834:                 {
+ 27835:                     value = c_ir_emit_function_pointer(builder, token, c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token)));
+ 27836:                 }
+ 27837:             }
+ 27838:             if (value.value != IR_ID_UNDERLYING_INVALID && value_place.value != IR_ID_UNDERLYING_INVALID && index + 1 < end &&
+ 27839:                 (c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_PLUS_PLUS) ||
+ 27840:                  c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_MINUS_MINUS)))
+ 27841:             {
+ 27842:                 IrTypeId type = builder->function->values[value_place.value].canonical_type;
+ 27843:                 value = c_ir_emit_increment(builder, value_place, type, value, builder->preprocess.tokens[index + 1], false);
+ 27844:                 index += 1;
+ 27845:             }
+ 27846:             if (value.value == IR_ID_UNDERLYING_INVALID)
+ 27847:             {
+ 27848:                 if (!builder->failure_message.length)
+ 27849:                 {
+ 27850:                     // A callee token is not an identifier *use*: a direct call
+ 27851:                     // resolves through the function-name index, so the parser
+ 27852:                     // records no binding for it, and reporting the name as
+ 27853:                     // unbound blames the declaration when it is the call that
+ 27854:                     // could not be resolved.  Look the name up before saying
+ 27855:                     // so, and say which of the two failed.
+ 27856:                     CEntityId failed_entity = c_ir_identifier_entity_or_lookup(builder, identifier_index);
+ 27857:                     bool called = identifier_index + 1 < end &&
+ 27858:                                   c_token_is_punctuator(&builder->preprocess.tokens[identifier_index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+ 27859:                     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, token);
+ 27860:                     builder->failure_message =
+ 27861:                         failed_entity.value >= builder->parse.entity_count
+ 27862:                             ? string_format(builder->arena, S8("could not lower unbound identifier '{S8}'"), spelling)
+ 27863:                         : called ? string_format(builder->arena, S8("could not lower call to '{S8}' bound to C entity {u32} of kind {u32}"), spelling,
+ 27864:                                                  failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind)
+ 27865:                                  : string_format(builder->arena, S8("could not lower identifier '{S8}' bound to C entity {u32} of kind {u32}"), spelling,
+ 27866:                                                  failed_entity.value, (u32)builder->parse.entities[failed_entity.value].kind);
+ 27867:                 }
+ 27868:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 27869:                 return;
+ 27870:             }
+ 27871:             values[value_count++] = value;
+ 27872:             expect_operand = false;
+ 27873:             continue;
+ 27874:         }
+ 27875:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) && index + 2 < end &&
+ 27876:             c_token_is_punctuator(&builder->preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_BRACE))
+ 27877:         {
+ 27878:             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 30781 =====
+ 30751:                             candidate = IR_TYPE_ID_INVALID;
+ 30752:                             break;
+ 30753:                         }
+ 30754:                         candidate = field_type;
+ 30755:                         postfix += 2;
+ 30756:                         consumed_postfix = true;
+ 30757:                     }
+ 30758:                 }
+ 30759:                 if (consumed_postfix)
+ 30760:                 {
+ 30761:                     index = postfix - 1;
+ 30762:                 }
+ 30763:             }
+ 30764:             else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
+ 30765:             {
+ 30766:                 CTypeId c_type = builder->parse.entities[entity.value].type;
+ 30767:                 if (c_type.value < builder->parse.type_count)
+ 30768:                 {
+ 30769:                     candidate = builder->c_type_ir_map[c_type.value];
+ 30770:                     if (index + 1 < end)
+ 30771:                     {
+ 30772:                         IrTypeId postfix_type = candidate;
+ 30773:                         if (c_ir_static_postfix_type(builder, &postfix_type, index + 1, end))
+ 30774:                         {
+ 30775:                             candidate = postfix_type;
+ 30776:                             index = end - 1;
+ 30777:                         }
+ 30778:                     }
+ 30779:                 }
+ 30780:             }
+ 30781:             else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
+ 30782:             {
+ 30783:                 candidate = builder->s32_type;
+ 30784:             }
+ 30785:             else
+ 30786:             {
+ 30787:                 u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+ 30788:                 if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
+ 30789:                 {
+ 30790:                     candidate = c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->declaration_functions[declaration_index]->canonical_type);
+ 30791:                 }
+ 30792:             }
+ 30793:         }
+ 30794:         if (candidate.value == IR_ID_UNDERLYING_INVALID)
+ 30795:         {
+ 30796:             continue;
+ 30797:         }
+ 30798:         if (candidate_token_index > start && c_token_is_punctuator(&builder->preprocess.tokens[candidate_token_index - 1], C_PUNCTUATOR_AMPERSAND))
+ 30799:         {
+ 30800:             candidate = c_ir_add_pointer_type(builder->program, builder->pointer_types, candidate);
+ 30801:         }
+ 30802:         else if (candidate_token_index > start && c_token_is_punctuator(&builder->preprocess.tokens[candidate_token_index - 1], C_PUNCTUATOR_STAR))
+ 30803:         {
+ 30804:             IrType* pointer = ir_type_from_id(&builder->program->types, candidate);
+ 30805:             if (pointer && pointer->kind == IR_TYPE_POINTER)
+ 30806:             {
+ 30807:                 candidate = pointer->element_type;
+ 30808:             }
+ 30809:         }
+ 30810:         IrType* candidate_value = ir_type_from_id(&builder->program->types, candidate);
+ 30811:         if (candidate_value && candidate_value->kind == IR_TYPE_ARRAY)
+ 30812:         {
+ 30813:             candidate = c_ir_add_pointer_type(builder->program, builder->pointer_types, candidate_value->element_type);
+ 30814:         }
+ 30815:         IrType* current = ir_type_from_id(&builder->program->types, result);
+ 30816:         IrType* next = ir_type_from_id(&builder->program->types, candidate);
+ 30817:         if (!current || (current->kind == IR_TYPE_BOOLEAN && next && next->kind != IR_TYPE_BOOLEAN) ||
+ 30818:             (next && next->kind == IR_TYPE_FLOAT &&
+ 30819:              (current->kind != IR_TYPE_FLOAT || c_ir_float_conversion_rank(next) > c_ir_float_conversion_rank(current))) ||
+ 30820:             (next && current && next->kind == IR_TYPE_INTEGER && current->kind == IR_TYPE_INTEGER && next->bit_width > current->bit_width))
+ 30821:         {
+ 30822:             result = candidate;
+ 30823:         }
+ 30824:     }
+ 30825:     return result.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : result;
+ 30826: }
+ 30827: 
+ 30828: BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type)
+ 30829: {
+ 30830:     IrType* left = ir_type_from_id(&builder->program->types, left_type);
+ 30831:     IrType* right = ir_type_from_id(&builder->program->types, right_type);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 43131 =====
+ 43101:                     .symbol = global->initializer_symbol,
+ 43102:                     .addend = global->initializer_addend,
+ 43103:                     .kind = C_IR_CONSTANT_POINTER,
+ 43104:                 };
+ 43105:                 return true;
+ 43106:             }
+ 43107:             return false;
+ 43108:         }
+ 43109:     }
+ 43110: 
+ 43111:     return false;
+ 43112: }
+ 43113: 
+ 43114: BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 token_index, CIrConstantValue* result)
+ 43115: {
+ 43116:     CToken token = builder->preprocess.tokens[token_index];
+ 43117:     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("false"))))
+ 43118:     {
+ 43119:         *result = c_ir_constant_integer(builder->bool_type, string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")));
+ 43120:         return true;
+ 43121:     }
+ 43122:     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("nullptr")))
+ 43123:     {
+ 43124:         *result = (CIrConstantValue){.type = builder->nullptr_type, .kind = C_IR_CONSTANT_POINTER};
+ 43125:         return true;
+ 43126:     }
+ 43127:     CEntityId entity_id = c_ir_constant_entity_at(builder, token_index);
+ 43128:     if (entity_id.value < builder->parse.entity_count)
+ 43129:     {
+ 43130:         CEntity* entity = builder->parse.entities + entity_id.value;
+ 43131:         if (entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value))
+ 43132:         {
+ 43133:             IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : builder->s32_type;
+ 43134:             u64 value = entity->constant_value;
+ 43135:             if (entity->constant_is_negative)
+ 43136:             {
+ 43137:                 value = 0 - value;
+ 43138:             }
+ 43139:             *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, value);
+ 43140:             return true;
+ 43141:         }
+ 43142:         // A function-local static is C_ENTITY_LOCAL with a symbol -- the
+ 43143:         // clinic macros write `.kwtuple = (&_kwtuple.ob_base.ob_base)` where
+ 43144:         // _kwtuple is exactly that -- and it folds like any file-scope
+ 43145:         // object.  An automatic local has no symbol and stays refused.
+ 43146:         bool static_local = entity->kind == C_ENTITY_LOCAL && builder->entity_symbols[entity_id.value].value != IR_ID_UNDERLYING_INVALID;
+ 43147:         if ((entity->kind == C_ENTITY_OBJECT || static_local) && entity->type.value < builder->parse.type_count)
+ 43148:         {
+ 43149:             IrSymbolId symbol = builder->entity_symbols[entity_id.value];
+ 43150:             IrTypeId type = builder->c_type_ir_map[entity->type.value];
+ 43151:             IrType* type_value = ir_type_from_id(&builder->program->types, type);
+ 43152:             if (type_value && type_value->layout.resolved)
+ 43153:             {
+ 43154:                 *result = (CIrConstantValue){
+ 43155:                     .type = type,
+ 43156:                     .symbol = symbol,
+ 43157:                     .kind = C_IR_CONSTANT_LVALUE,
+ 43158:                 };
+ 43159:                 return true;
+ 43160:             }
+ 43161:         }
+ 43162:         if (entity->kind == C_ENTITY_FUNCTION && entity->type.value < builder->parse.type_count)
+ 43163:         {
+ 43164:             IrTypeId function_type = builder->c_type_ir_map[entity->type.value];
+ 43165:             IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, function_type);
+ 43166:             if (pointer_type.value != IR_ID_UNDERLYING_INVALID)
+ 43167:             {
+ 43168:                 *result = (CIrConstantValue){
+ 43169:                     .type = pointer_type,
+ 43170:                     .symbol = builder->entity_symbols[entity_id.value],
+ 43171:                     .kind = C_IR_CONSTANT_POINTER,
+ 43172:                 };
+ 43173:                 return result->symbol.value != IR_ID_UNDERLYING_INVALID;
+ 43174:             }
+ 43175:         }
+ 43176:     }
+ 43177: 
+ 43178:     return false;
+ 43179: }
+ 43180: 
+ 43181: BUSTER_C_INTERNAL bool c_ir_constant_lvalue_field(CIntegerIrBuilder* builder, CIrConstantValue* value, String8 name)

@@ -1,0 +1,2078 @@
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 43 =====
+    23: //   diagnostics.
+    24: //
+    25: // Types and declarators are parsed by CTypeParseMachine (types in
+    26: // c_internal.h), an explicit frame stack in place of recursion: each
+    27: // CTypeParseFrameKind has a c_type_parse_*_step function dispatched by
+    28: // c_type_parse_machine_run. Speculative parses record every published-type
+    29: // mutation (c_type_parse_record_mutation) so c_type_parse_rollback can
+    30: // restore the shared type table after a failed attempt.
+    31: //
+    32: // Layout, in file order; each anchor is a definition to search for:
+    33: //   c_parse_token_class_compute,                  keyword and token
+    34: //   c_parse_position_index_build                  classification, the
+    35: //                                                 matching-delimiter index
+    36: //   c_parse_builtin_type_layout,                  target-dependent type
+    37: //   c_parse_type_layout                           sizes/alignments, aggregate
+    38: //                                                 and bit-field layout
+    39: //   c_semantic_check_named_call_arities          bound call constraints without IR
+    40: //   c_parse_bfloat16_builtin,                    target builtin signatures
+    41: //   c_parse_validate_bfloat16_builtin_calls       checked before unused pruning
+    42: //   c_parse_direct_expression_base ..             expression typing without
+    43: //   c_parse_conditional_expression_type           lowering (usual arithmetic
+    44: //                                                 conversions, precedence,
+    45: //                                                 and the null-pointer-
+    46: //                                                 constant rule a conditional
+    47: //                                                 picks a pointer type with)
+    48: //   c_parse_static_assert_evaluate                _Static_assert, including
+    49: //                                                 deferral past unresolved
+    50: //                                                 array bounds
+    51: //   c_parse_initializer_designator,               initializer shapes and
+    52: //   c_parse_infer_initializer_array_count_core    array-bound inference
+    53: //   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
+    54: //   c_parse_primitive_type                        construction, attributes
+    55: //   c_parse_word_bits_compute,                    specifier words answered
+    56: //   c_parse_word_bits_token                       from the interned symbol
+    57: //                                                 id (C_WORD_* bits), with
+    58: //                                                 the spelling ladders as
+    59: //                                                 the symbol-0 fallback
+    60: //   c_type_parse_alignment_step ..                the type-parse machine
+    61: //   c_type_parse_machine_run                      steps
+    62: //   c_parse_scalar_type_core_begin,               declarators: pointers,
+    63: //   c_parse_pointer_chain, c_parse_array_suffixes arrays, parameters
+    64: //   c_parse_validate_constexpr_declaration,       constexpr, type
+    65: //   c_parse_types_compatible                      compatibility
+    66: //   c_parse_validate_cleanup_attribute            __attribute__((cleanup))
+    67: //   c_parse_name_symbol .. c_parse_lookup_*       symbol interning, scopes,
+    68: //                                                 entity lookup
+    69: //   c_parse_local_declarations                    block-scope declarations,
+    70: //                                                 auto inference, local
+    71: //                                                 functions
+    72: //   c_parse_label_address_prefix_proven,          statement boundaries, asm
+    73: //   c_parse_statement_end                         goto, label addresses
+    74: //   c_parse_bind_function_body                    binds body identifiers to
+    75: //                                                 entities, indexes scopes
+    76: //   c_parse_token_census_reference,               the token-shape census that
+    77: //   c_parse_token_census                          sizes c_analyze_semantics'
+    78: //                                                 tables: contiguous sidecar
+    79: //                                                 shape compares plus a
+    80: //                                                 symbol-byte projection for
+    81: //                                                 the rare `for` spelling,
+    82: //                                                 with the scalar reference
+    83: //                                                 kept as the differential gate
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 1222 =====
+  1202:     // A complex value is two contiguous elements of its real type, so it is
+  1203:     // twice as wide and no more strictly aligned. Clang agrees on all three
+  1204:     // for every target here: sizeof/_Alignof are {8,4}, {16,8} and
+  1205:     // {2*sizeof(long double), _Alignof(long double)}.
+  1206:     case C_TYPE_FLOAT16_COMPLEX:
+  1207:         size = layout.float16_type.size * 2;
+  1208:         alignment = layout.float16_type.alignment;
+  1209:         break;
+  1210:     case C_TYPE_FLOAT_COMPLEX:
+  1211:         size = layout.float_type.size * 2;
+  1212:         alignment = layout.float_type.alignment;
+  1213:         break;
+  1214:     case C_TYPE_DOUBLE_COMPLEX:
+  1215:         size = layout.double_type.size * 2;
+  1216:         alignment = layout.double_type.alignment;
+  1217:         break;
+  1218:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+  1219:         size = layout.long_double_type.size * 2;
+  1220:         alignment = layout.long_double_type.alignment;
+  1221:         break;
+  1222:     case C_TYPE_INT128:
+  1223:         size = layout.integer128.size;
+  1224:         alignment = layout.integer128.alignment;
+  1225:         break;
+  1226:     case C_TYPE_UNSIGNED_INT128:
+  1227:         size = layout.unsigned_integer128.size;
+  1228:         alignment = layout.unsigned_integer128.alignment;
+  1229:         break;
+  1230:     case C_TYPE_VA_LIST:
+  1231:         size = layout.va_list.size;
+  1232:         alignment = layout.va_list.alignment;
+  1233:         break;
+  1234:     // GNU gives `void` a size and an alignment of one so that arithmetic on a
+  1235:     // `void *` steps by bytes; clang and gcc both fold `sizeof(void)`,
+  1236:     // `sizeof(const void)` and `_Alignof(void)` to 1. It is an extension for
+  1237:     // that arithmetic and for `sizeof`, never a licence to declare a `void`
+  1238:     // object: every refusal of one keys on the *kind*, not on a zero size.
+  1239:     case C_TYPE_VOID:
+  1240:         size = 1;
+  1241:         alignment = 1;
+  1242:         break;
+  1243:     case C_TYPE_ARRAY:
+  1244:     case C_TYPE_VECTOR:
+  1245:     case C_TYPE_STRUCT:
+  1246:     case C_TYPE_UNION:
+  1247:     case C_TYPE_ENUM:
+  1248:     case C_TYPE_INVALID:
+  1249:     case C_TYPE_COUNT:
+  1250:         return false;
+  1251:     }
+  1252:     *size_out = size;
+  1253:     *alignment_out = alignment;
+  1254:     return true;
+  1255: }
+  1256: 
+  1257: /* The layout `_Atomic T` has, given T's own.  Clang treats `_Atomic T` as
+  1258:    *constructing* a type rather than qualifying one: a value it could operate on
+  1259:    lock-free is padded up to the next power of two and aligned there, which is
+  1260:    what makes `_Atomic struct { char a, b, c; }` four bytes aligned four where
+  1261:    the record itself is three bytes aligned one, and what gives every atomic
+  1262:    scalar an alignment equal to its size -- `_Atomic _Complex double` is
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 1226 =====
+  1206:     case C_TYPE_FLOAT16_COMPLEX:
+  1207:         size = layout.float16_type.size * 2;
+  1208:         alignment = layout.float16_type.alignment;
+  1209:         break;
+  1210:     case C_TYPE_FLOAT_COMPLEX:
+  1211:         size = layout.float_type.size * 2;
+  1212:         alignment = layout.float_type.alignment;
+  1213:         break;
+  1214:     case C_TYPE_DOUBLE_COMPLEX:
+  1215:         size = layout.double_type.size * 2;
+  1216:         alignment = layout.double_type.alignment;
+  1217:         break;
+  1218:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+  1219:         size = layout.long_double_type.size * 2;
+  1220:         alignment = layout.long_double_type.alignment;
+  1221:         break;
+  1222:     case C_TYPE_INT128:
+  1223:         size = layout.integer128.size;
+  1224:         alignment = layout.integer128.alignment;
+  1225:         break;
+  1226:     case C_TYPE_UNSIGNED_INT128:
+  1227:         size = layout.unsigned_integer128.size;
+  1228:         alignment = layout.unsigned_integer128.alignment;
+  1229:         break;
+  1230:     case C_TYPE_VA_LIST:
+  1231:         size = layout.va_list.size;
+  1232:         alignment = layout.va_list.alignment;
+  1233:         break;
+  1234:     // GNU gives `void` a size and an alignment of one so that arithmetic on a
+  1235:     // `void *` steps by bytes; clang and gcc both fold `sizeof(void)`,
+  1236:     // `sizeof(const void)` and `_Alignof(void)` to 1. It is an extension for
+  1237:     // that arithmetic and for `sizeof`, never a licence to declare a `void`
+  1238:     // object: every refusal of one keys on the *kind*, not on a zero size.
+  1239:     case C_TYPE_VOID:
+  1240:         size = 1;
+  1241:         alignment = 1;
+  1242:         break;
+  1243:     case C_TYPE_ARRAY:
+  1244:     case C_TYPE_VECTOR:
+  1245:     case C_TYPE_STRUCT:
+  1246:     case C_TYPE_UNION:
+  1247:     case C_TYPE_ENUM:
+  1248:     case C_TYPE_INVALID:
+  1249:     case C_TYPE_COUNT:
+  1250:         return false;
+  1251:     }
+  1252:     *size_out = size;
+  1253:     *alignment_out = alignment;
+  1254:     return true;
+  1255: }
+  1256: 
+  1257: /* The layout `_Atomic T` has, given T's own.  Clang treats `_Atomic T` as
+  1258:    *constructing* a type rather than qualifying one: a value it could operate on
+  1259:    lock-free is padded up to the next power of two and aligned there, which is
+  1260:    what makes `_Atomic struct { char a, b, c; }` four bytes aligned four where
+  1261:    the record itself is three bytes aligned one, and what gives every atomic
+  1262:    scalar an alignment equal to its size -- `_Atomic _Complex double` is
+  1263:    sixteen-byte aligned where the complex type is eight.  The ceiling is the
+  1264:    target's maximum lock-free width, `TargetDataLayout::atomic_max_width`: 128
+  1265:    bits everywhere here but wasm64 and BPF, where it is 64.  A type wider than
+  1266:    that keeps T's layout untouched, so the rule is not "round every aggregate
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 2893 =====
+  2873:     }
+  2874:     return end;
+  2875: }
+  2876: 
+  2877: BUSTER_C_INTERNAL CTypeId c_parse_expression_scalar_type(CParseResult* result, CTypeKind kind)
+  2878: {
+  2879:     return c_parse_add_type(result, (CType){
+  2880:                                         .element_type = C_TYPE_ID_INVALID,
+  2881:                                         .return_type = C_TYPE_ID_INVALID,
+  2882:                                         .unqualified_type = C_TYPE_ID_INVALID,
+  2883:                                         .array_bound = C_ARRAY_BOUND_INVALID,
+  2884:                                         .kind = kind,
+  2885:                                         .is_complete = true,
+  2886:                                     });
+  2887: }
+  2888: 
+  2889: BUSTER_C_INTERNAL bool c_parse_expression_integer_kind(CTypeKind kind)
+  2890: {
+  2891:     return kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+  2892:            kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG ||
+  2893:            kind == C_TYPE_LONG_LONG || kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_INT128 || kind == C_TYPE_UNSIGNED_INT128 || kind == C_TYPE_ENUM;
+  2894: }
+  2895: 
+  2896: BUSTER_C_INTERNAL bool c_parse_expression_signed_kind(CTypeKind kind)
+  2897: {
+  2898:     return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_SHORT || kind == C_TYPE_INT || kind == C_TYPE_LONG || kind == C_TYPE_LONG_LONG ||
+  2899:            kind == C_TYPE_INT128 || kind == C_TYPE_ENUM;
+  2900: }
+  2901: 
+  2902: BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
+  2903: {
+  2904:     switch (kind)
+  2905:     {
+  2906:     case C_TYPE_CHAR:
+  2907:     case C_TYPE_SIGNED_CHAR:
+  2908:     case C_TYPE_UNSIGNED_CHAR:
+  2909:         return C_TYPE_UNSIGNED_CHAR;
+  2910:     case C_TYPE_SHORT:
+  2911:     case C_TYPE_UNSIGNED_SHORT:
+  2912:         return C_TYPE_UNSIGNED_SHORT;
+  2913:     case C_TYPE_INT:
+  2914:     case C_TYPE_UNSIGNED_INT:
+  2915:     case C_TYPE_ENUM:
+  2916:         return C_TYPE_UNSIGNED_INT;
+  2917:     case C_TYPE_LONG:
+  2918:     case C_TYPE_UNSIGNED_LONG:
+  2919:         return C_TYPE_UNSIGNED_LONG;
+  2920:     case C_TYPE_LONG_LONG:
+  2921:     case C_TYPE_UNSIGNED_LONG_LONG:
+  2922:         return C_TYPE_UNSIGNED_LONG_LONG;
+  2923:     case C_TYPE_INT128:
+  2924:     case C_TYPE_UNSIGNED_INT128:
+  2925:         return C_TYPE_UNSIGNED_INT128;
+  2926:     case C_TYPE_INVALID:
+  2927:     case C_TYPE_VOID:
+  2928:     case C_TYPE_BOOL:
+  2929:     case C_TYPE_FLOAT16:
+  2930:     case C_TYPE_BFLOAT16:
+  2931:     case C_TYPE_FLOAT:
+  2932:     case C_TYPE_DOUBLE:
+  2933:     case C_TYPE_LONG_DOUBLE:
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 2899 =====
+  2879:     return c_parse_add_type(result, (CType){
+  2880:                                         .element_type = C_TYPE_ID_INVALID,
+  2881:                                         .return_type = C_TYPE_ID_INVALID,
+  2882:                                         .unqualified_type = C_TYPE_ID_INVALID,
+  2883:                                         .array_bound = C_ARRAY_BOUND_INVALID,
+  2884:                                         .kind = kind,
+  2885:                                         .is_complete = true,
+  2886:                                     });
+  2887: }
+  2888: 
+  2889: BUSTER_C_INTERNAL bool c_parse_expression_integer_kind(CTypeKind kind)
+  2890: {
+  2891:     return kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+  2892:            kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG ||
+  2893:            kind == C_TYPE_LONG_LONG || kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_INT128 || kind == C_TYPE_UNSIGNED_INT128 || kind == C_TYPE_ENUM;
+  2894: }
+  2895: 
+  2896: BUSTER_C_INTERNAL bool c_parse_expression_signed_kind(CTypeKind kind)
+  2897: {
+  2898:     return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_SHORT || kind == C_TYPE_INT || kind == C_TYPE_LONG || kind == C_TYPE_LONG_LONG ||
+  2899:            kind == C_TYPE_INT128 || kind == C_TYPE_ENUM;
+  2900: }
+  2901: 
+  2902: BUSTER_C_INTERNAL CTypeKind c_parse_expression_unsigned_kind(CTypeKind kind)
+  2903: {
+  2904:     switch (kind)
+  2905:     {
+  2906:     case C_TYPE_CHAR:
+  2907:     case C_TYPE_SIGNED_CHAR:
+  2908:     case C_TYPE_UNSIGNED_CHAR:
+  2909:         return C_TYPE_UNSIGNED_CHAR;
+  2910:     case C_TYPE_SHORT:
+  2911:     case C_TYPE_UNSIGNED_SHORT:
+  2912:         return C_TYPE_UNSIGNED_SHORT;
+  2913:     case C_TYPE_INT:
+  2914:     case C_TYPE_UNSIGNED_INT:
+  2915:     case C_TYPE_ENUM:
+  2916:         return C_TYPE_UNSIGNED_INT;
+  2917:     case C_TYPE_LONG:
+  2918:     case C_TYPE_UNSIGNED_LONG:
+  2919:         return C_TYPE_UNSIGNED_LONG;
+  2920:     case C_TYPE_LONG_LONG:
+  2921:     case C_TYPE_UNSIGNED_LONG_LONG:
+  2922:         return C_TYPE_UNSIGNED_LONG_LONG;
+  2923:     case C_TYPE_INT128:
+  2924:     case C_TYPE_UNSIGNED_INT128:
+  2925:         return C_TYPE_UNSIGNED_INT128;
+  2926:     case C_TYPE_INVALID:
+  2927:     case C_TYPE_VOID:
+  2928:     case C_TYPE_BOOL:
+  2929:     case C_TYPE_FLOAT16:
+  2930:     case C_TYPE_BFLOAT16:
+  2931:     case C_TYPE_FLOAT:
+  2932:     case C_TYPE_DOUBLE:
+  2933:     case C_TYPE_LONG_DOUBLE:
+  2934:     case C_TYPE_FLOAT16_COMPLEX:
+  2935:     case C_TYPE_FLOAT_COMPLEX:
+  2936:     case C_TYPE_DOUBLE_COMPLEX:
+  2937:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+  2938:     case C_TYPE_VA_LIST:
+  2939:     case C_TYPE_NULLPTR:
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 2923 =====
+  2903: {
+  2904:     switch (kind)
+  2905:     {
+  2906:     case C_TYPE_CHAR:
+  2907:     case C_TYPE_SIGNED_CHAR:
+  2908:     case C_TYPE_UNSIGNED_CHAR:
+  2909:         return C_TYPE_UNSIGNED_CHAR;
+  2910:     case C_TYPE_SHORT:
+  2911:     case C_TYPE_UNSIGNED_SHORT:
+  2912:         return C_TYPE_UNSIGNED_SHORT;
+  2913:     case C_TYPE_INT:
+  2914:     case C_TYPE_UNSIGNED_INT:
+  2915:     case C_TYPE_ENUM:
+  2916:         return C_TYPE_UNSIGNED_INT;
+  2917:     case C_TYPE_LONG:
+  2918:     case C_TYPE_UNSIGNED_LONG:
+  2919:         return C_TYPE_UNSIGNED_LONG;
+  2920:     case C_TYPE_LONG_LONG:
+  2921:     case C_TYPE_UNSIGNED_LONG_LONG:
+  2922:         return C_TYPE_UNSIGNED_LONG_LONG;
+  2923:     case C_TYPE_INT128:
+  2924:     case C_TYPE_UNSIGNED_INT128:
+  2925:         return C_TYPE_UNSIGNED_INT128;
+  2926:     case C_TYPE_INVALID:
+  2927:     case C_TYPE_VOID:
+  2928:     case C_TYPE_BOOL:
+  2929:     case C_TYPE_FLOAT16:
+  2930:     case C_TYPE_BFLOAT16:
+  2931:     case C_TYPE_FLOAT:
+  2932:     case C_TYPE_DOUBLE:
+  2933:     case C_TYPE_LONG_DOUBLE:
+  2934:     case C_TYPE_FLOAT16_COMPLEX:
+  2935:     case C_TYPE_FLOAT_COMPLEX:
+  2936:     case C_TYPE_DOUBLE_COMPLEX:
+  2937:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+  2938:     case C_TYPE_VA_LIST:
+  2939:     case C_TYPE_NULLPTR:
+  2940:     case C_TYPE_POINTER:
+  2941:     case C_TYPE_ARRAY:
+  2942:     case C_TYPE_VECTOR:
+  2943:     case C_TYPE_FUNCTION:
+  2944:     case C_TYPE_STRUCT:
+  2945:     case C_TYPE_UNION:
+  2946:     case C_TYPE_COUNT:
+  2947:         return C_TYPE_INVALID;
+  2948:     }
+  2949:     return C_TYPE_INVALID;
+  2950: }
+  2951: 
+  2952: BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
+  2953: {
+  2954:     if (kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+  2955:         kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_ENUM)
+  2956:     {
+  2957:         return C_TYPE_INT;
+  2958:     }
+  2959:     return kind;
+  2960: }
+  2961: 
+  2962: BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id)
+  2963: {
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 2924 =====
+  2904:     switch (kind)
+  2905:     {
+  2906:     case C_TYPE_CHAR:
+  2907:     case C_TYPE_SIGNED_CHAR:
+  2908:     case C_TYPE_UNSIGNED_CHAR:
+  2909:         return C_TYPE_UNSIGNED_CHAR;
+  2910:     case C_TYPE_SHORT:
+  2911:     case C_TYPE_UNSIGNED_SHORT:
+  2912:         return C_TYPE_UNSIGNED_SHORT;
+  2913:     case C_TYPE_INT:
+  2914:     case C_TYPE_UNSIGNED_INT:
+  2915:     case C_TYPE_ENUM:
+  2916:         return C_TYPE_UNSIGNED_INT;
+  2917:     case C_TYPE_LONG:
+  2918:     case C_TYPE_UNSIGNED_LONG:
+  2919:         return C_TYPE_UNSIGNED_LONG;
+  2920:     case C_TYPE_LONG_LONG:
+  2921:     case C_TYPE_UNSIGNED_LONG_LONG:
+  2922:         return C_TYPE_UNSIGNED_LONG_LONG;
+  2923:     case C_TYPE_INT128:
+  2924:     case C_TYPE_UNSIGNED_INT128:
+  2925:         return C_TYPE_UNSIGNED_INT128;
+  2926:     case C_TYPE_INVALID:
+  2927:     case C_TYPE_VOID:
+  2928:     case C_TYPE_BOOL:
+  2929:     case C_TYPE_FLOAT16:
+  2930:     case C_TYPE_BFLOAT16:
+  2931:     case C_TYPE_FLOAT:
+  2932:     case C_TYPE_DOUBLE:
+  2933:     case C_TYPE_LONG_DOUBLE:
+  2934:     case C_TYPE_FLOAT16_COMPLEX:
+  2935:     case C_TYPE_FLOAT_COMPLEX:
+  2936:     case C_TYPE_DOUBLE_COMPLEX:
+  2937:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+  2938:     case C_TYPE_VA_LIST:
+  2939:     case C_TYPE_NULLPTR:
+  2940:     case C_TYPE_POINTER:
+  2941:     case C_TYPE_ARRAY:
+  2942:     case C_TYPE_VECTOR:
+  2943:     case C_TYPE_FUNCTION:
+  2944:     case C_TYPE_STRUCT:
+  2945:     case C_TYPE_UNION:
+  2946:     case C_TYPE_COUNT:
+  2947:         return C_TYPE_INVALID;
+  2948:     }
+  2949:     return C_TYPE_INVALID;
+  2950: }
+  2951: 
+  2952: BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
+  2953: {
+  2954:     if (kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+  2955:         kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_ENUM)
+  2956:     {
+  2957:         return C_TYPE_INT;
+  2958:     }
+  2959:     return kind;
+  2960: }
+  2961: 
+  2962: BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id)
+  2963: {
+  2964:     if (left_id.value >= result->type_count || right_id.value >= result->type_count)
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 2925 =====
+  2905:     {
+  2906:     case C_TYPE_CHAR:
+  2907:     case C_TYPE_SIGNED_CHAR:
+  2908:     case C_TYPE_UNSIGNED_CHAR:
+  2909:         return C_TYPE_UNSIGNED_CHAR;
+  2910:     case C_TYPE_SHORT:
+  2911:     case C_TYPE_UNSIGNED_SHORT:
+  2912:         return C_TYPE_UNSIGNED_SHORT;
+  2913:     case C_TYPE_INT:
+  2914:     case C_TYPE_UNSIGNED_INT:
+  2915:     case C_TYPE_ENUM:
+  2916:         return C_TYPE_UNSIGNED_INT;
+  2917:     case C_TYPE_LONG:
+  2918:     case C_TYPE_UNSIGNED_LONG:
+  2919:         return C_TYPE_UNSIGNED_LONG;
+  2920:     case C_TYPE_LONG_LONG:
+  2921:     case C_TYPE_UNSIGNED_LONG_LONG:
+  2922:         return C_TYPE_UNSIGNED_LONG_LONG;
+  2923:     case C_TYPE_INT128:
+  2924:     case C_TYPE_UNSIGNED_INT128:
+  2925:         return C_TYPE_UNSIGNED_INT128;
+  2926:     case C_TYPE_INVALID:
+  2927:     case C_TYPE_VOID:
+  2928:     case C_TYPE_BOOL:
+  2929:     case C_TYPE_FLOAT16:
+  2930:     case C_TYPE_BFLOAT16:
+  2931:     case C_TYPE_FLOAT:
+  2932:     case C_TYPE_DOUBLE:
+  2933:     case C_TYPE_LONG_DOUBLE:
+  2934:     case C_TYPE_FLOAT16_COMPLEX:
+  2935:     case C_TYPE_FLOAT_COMPLEX:
+  2936:     case C_TYPE_DOUBLE_COMPLEX:
+  2937:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+  2938:     case C_TYPE_VA_LIST:
+  2939:     case C_TYPE_NULLPTR:
+  2940:     case C_TYPE_POINTER:
+  2941:     case C_TYPE_ARRAY:
+  2942:     case C_TYPE_VECTOR:
+  2943:     case C_TYPE_FUNCTION:
+  2944:     case C_TYPE_STRUCT:
+  2945:     case C_TYPE_UNION:
+  2946:     case C_TYPE_COUNT:
+  2947:         return C_TYPE_INVALID;
+  2948:     }
+  2949:     return C_TYPE_INVALID;
+  2950: }
+  2951: 
+  2952: BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
+  2953: {
+  2954:     if (kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+  2955:         kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_ENUM)
+  2956:     {
+  2957:         return C_TYPE_INT;
+  2958:     }
+  2959:     return kind;
+  2960: }
+  2961: 
+  2962: BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* result, Target target, CTypeId left_id, CTypeId right_id)
+  2963: {
+  2964:     if (left_id.value >= result->type_count || right_id.value >= result->type_count)
+  2965:     {
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3173 =====
+  3153:                 {
+  3154:                     extended = true;
+  3155:                 }
+  3156:                 else if (letter == 'i' || letter == 'I' || letter == 'j' || letter == 'J')
+  3157:                 {
+  3158:                     imaginary = true;
+  3159:                 }
+  3160:                 else
+  3161:                 {
+  3162:                     break;
+  3163:                 }
+  3164:             }
+  3165:             kind = half ? C_TYPE_FLOAT16 : single ? C_TYPE_FLOAT : extended ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+  3166:             if (imaginary)
+  3167:             {
+  3168:                 kind = c_type_kind_complex_of(kind);
+  3169:             }
+  3170:         }
+  3171:         else
+  3172:         {
+  3173:             bool is_unsigned = false;
+  3174:             u32 long_count = 0;
+  3175:             u32 msvc_width = c_integer_msvc_literal_width(first_spelling, &is_unsigned);
+  3176:             for (u64 index = first_spelling.length; !msvc_width && index != 0; index -= 1)
+  3177:             {
+  3178:                 u8 byte = first_spelling.pointer[index - 1];
+  3179:                 if (byte == 'u' || byte == 'U')
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3175 =====
+  3155:                 }
+  3156:                 else if (letter == 'i' || letter == 'I' || letter == 'j' || letter == 'J')
+  3157:                 {
+  3158:                     imaginary = true;
+  3159:                 }
+  3160:                 else
+  3161:                 {
+  3162:                     break;
+  3163:                 }
+  3164:             }
+  3165:             kind = half ? C_TYPE_FLOAT16 : single ? C_TYPE_FLOAT : extended ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+  3166:             if (imaginary)
+  3167:             {
+  3168:                 kind = c_type_kind_complex_of(kind);
+  3169:             }
+  3170:         }
+  3171:         else
+  3172:         {
+  3173:             bool is_unsigned = false;
+  3174:             u32 long_count = 0;
+  3175:             u32 msvc_width = c_integer_msvc_literal_width(first_spelling, &is_unsigned);
+  3176:             for (u64 index = first_spelling.length; !msvc_width && index != 0; index -= 1)
+  3177:             {
+  3178:                 u8 byte = first_spelling.pointer[index - 1];
+  3179:                 if (byte == 'u' || byte == 'U')
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3181 =====
+  3161:                 {
+  3162:                     break;
+  3163:                 }
+  3164:             }
+  3165:             kind = half ? C_TYPE_FLOAT16 : single ? C_TYPE_FLOAT : extended ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+  3166:             if (imaginary)
+  3167:             {
+  3168:                 kind = c_type_kind_complex_of(kind);
+  3169:             }
+  3170:         }
+  3171:         else
+  3172:         {
+  3173:             bool is_unsigned = false;
+  3174:             u32 long_count = 0;
+  3175:             u32 msvc_width = c_integer_msvc_literal_width(first_spelling, &is_unsigned);
+  3176:             for (u64 index = first_spelling.length; !msvc_width && index != 0; index -= 1)
+  3177:             {
+  3178:                 u8 byte = first_spelling.pointer[index - 1];
+  3179:                 if (byte == 'u' || byte == 'U')
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+  3216:     }
+  3217:     if (first.kind == C_TOKEN_STRING_LITERAL)
+  3218:     {
+  3219:         u32 literal_end = start + 1;
+  3220:         while (literal_end < end && preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+  3221:         {
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3192 =====
+  3172:         {
+  3173:             bool is_unsigned = false;
+  3174:             u32 long_count = 0;
+  3175:             u32 msvc_width = c_integer_msvc_literal_width(first_spelling, &is_unsigned);
+  3176:             for (u64 index = first_spelling.length; !msvc_width && index != 0; index -= 1)
+  3177:             {
+  3178:                 u8 byte = first_spelling.pointer[index - 1];
+  3179:                 if (byte == 'u' || byte == 'U')
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+  3216:     }
+  3217:     if (first.kind == C_TOKEN_STRING_LITERAL)
+  3218:     {
+  3219:         u32 literal_end = start + 1;
+  3220:         while (literal_end < end && preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+  3221:         {
+  3222:             literal_end += 1;
+  3223:         }
+  3224:         if (literal_end == end)
+  3225:         {
+  3226:             return c_parse_string_literal_expression_type(arena, preprocess, result, start, end);
+  3227:         }
+  3228:     }
+  3229:     if (first.kind == C_TOKEN_IDENTIFIER)
+  3230:     {
+  3231:         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
+  3232:             start + 1 < end)
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3193 =====
+  3173:             bool is_unsigned = false;
+  3174:             u32 long_count = 0;
+  3175:             u32 msvc_width = c_integer_msvc_literal_width(first_spelling, &is_unsigned);
+  3176:             for (u64 index = first_spelling.length; !msvc_width && index != 0; index -= 1)
+  3177:             {
+  3178:                 u8 byte = first_spelling.pointer[index - 1];
+  3179:                 if (byte == 'u' || byte == 'U')
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+  3216:     }
+  3217:     if (first.kind == C_TOKEN_STRING_LITERAL)
+  3218:     {
+  3219:         u32 literal_end = start + 1;
+  3220:         while (literal_end < end && preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+  3221:         {
+  3222:             literal_end += 1;
+  3223:         }
+  3224:         if (literal_end == end)
+  3225:         {
+  3226:             return c_parse_string_literal_expression_type(arena, preprocess, result, start, end);
+  3227:         }
+  3228:     }
+  3229:     if (first.kind == C_TOKEN_IDENTIFIER)
+  3230:     {
+  3231:         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
+  3232:             start + 1 < end)
+  3233:         {
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3194 =====
+  3174:             u32 long_count = 0;
+  3175:             u32 msvc_width = c_integer_msvc_literal_width(first_spelling, &is_unsigned);
+  3176:             for (u64 index = first_spelling.length; !msvc_width && index != 0; index -= 1)
+  3177:             {
+  3178:                 u8 byte = first_spelling.pointer[index - 1];
+  3179:                 if (byte == 'u' || byte == 'U')
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+  3216:     }
+  3217:     if (first.kind == C_TOKEN_STRING_LITERAL)
+  3218:     {
+  3219:         u32 literal_end = start + 1;
+  3220:         while (literal_end < end && preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+  3221:         {
+  3222:             literal_end += 1;
+  3223:         }
+  3224:         if (literal_end == end)
+  3225:         {
+  3226:             return c_parse_string_literal_expression_type(arena, preprocess, result, start, end);
+  3227:         }
+  3228:     }
+  3229:     if (first.kind == C_TOKEN_IDENTIFIER)
+  3230:     {
+  3231:         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
+  3232:             start + 1 < end)
+  3233:         {
+  3234:             return c_parse_expression_scalar_type(result,
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3198 =====
+  3178:                 u8 byte = first_spelling.pointer[index - 1];
+  3179:                 if (byte == 'u' || byte == 'U')
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+  3216:     }
+  3217:     if (first.kind == C_TOKEN_STRING_LITERAL)
+  3218:     {
+  3219:         u32 literal_end = start + 1;
+  3220:         while (literal_end < end && preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+  3221:         {
+  3222:             literal_end += 1;
+  3223:         }
+  3224:         if (literal_end == end)
+  3225:         {
+  3226:             return c_parse_string_literal_expression_type(arena, preprocess, result, start, end);
+  3227:         }
+  3228:     }
+  3229:     if (first.kind == C_TOKEN_IDENTIFIER)
+  3230:     {
+  3231:         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
+  3232:             start + 1 < end)
+  3233:         {
+  3234:             return c_parse_expression_scalar_type(result,
+  3235:                                                   target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
+  3236:         }
+  3237:         if (c_preprocess_dialect_is_c23(preprocess.dialect) && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("false"))) &&
+  3238:             end == start + 1)
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3199 =====
+  3179:                 if (byte == 'u' || byte == 'U')
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+  3216:     }
+  3217:     if (first.kind == C_TOKEN_STRING_LITERAL)
+  3218:     {
+  3219:         u32 literal_end = start + 1;
+  3220:         while (literal_end < end && preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+  3221:         {
+  3222:             literal_end += 1;
+  3223:         }
+  3224:         if (literal_end == end)
+  3225:         {
+  3226:             return c_parse_string_literal_expression_type(arena, preprocess, result, start, end);
+  3227:         }
+  3228:     }
+  3229:     if (first.kind == C_TOKEN_IDENTIFIER)
+  3230:     {
+  3231:         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
+  3232:             start + 1 < end)
+  3233:         {
+  3234:             return c_parse_expression_scalar_type(result,
+  3235:                                                   target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
+  3236:         }
+  3237:         if (c_preprocess_dialect_is_c23(preprocess.dialect) && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("false"))) &&
+  3238:             end == start + 1)
+  3239:         {
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3200 =====
+  3180:                 {
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+  3216:     }
+  3217:     if (first.kind == C_TOKEN_STRING_LITERAL)
+  3218:     {
+  3219:         u32 literal_end = start + 1;
+  3220:         while (literal_end < end && preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+  3221:         {
+  3222:             literal_end += 1;
+  3223:         }
+  3224:         if (literal_end == end)
+  3225:         {
+  3226:             return c_parse_string_literal_expression_type(arena, preprocess, result, start, end);
+  3227:         }
+  3228:     }
+  3229:     if (first.kind == C_TOKEN_IDENTIFIER)
+  3230:     {
+  3231:         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
+  3232:             start + 1 < end)
+  3233:         {
+  3234:             return c_parse_expression_scalar_type(result,
+  3235:                                                   target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
+  3236:         }
+  3237:         if (c_preprocess_dialect_is_c23(preprocess.dialect) && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("false"))) &&
+  3238:             end == start + 1)
+  3239:         {
+  3240:             return c_parse_expression_scalar_type(result, C_TYPE_BOOL);
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 3201 =====
+  3181:                     is_unsigned = true;
+  3182:                 }
+  3183:                 else if (byte == 'l' || byte == 'L')
+  3184:                 {
+  3185:                     long_count += 1;
+  3186:                 }
+  3187:                 else
+  3188:                 {
+  3189:                     break;
+  3190:                 }
+  3191:             }
+  3192:             kind = long_count >= 2   ? (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG)
+  3193:                    : long_count == 1 ? (is_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG)
+  3194:                    : is_unsigned     ? C_TYPE_UNSIGNED_INT
+  3195:                                      : C_TYPE_INT;
+  3196:             if (msvc_width)
+  3197:             {
+  3198:                 kind = msvc_width == 8 ? (is_unsigned ? C_TYPE_UNSIGNED_CHAR : C_TYPE_SIGNED_CHAR)
+  3199:                        : msvc_width == 16 ? (is_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT)
+  3200:                        : msvc_width == 32 ? (is_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT)
+  3201:                                           : (is_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG);
+  3202:             }
+  3203:         }
+  3204:         return end == start + 1 ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
+  3205:     }
+  3206:     if (first.kind == C_TOKEN_CHARACTER_LITERAL && end == start + 1)
+  3207:     {
+  3208:         String8 spelling = c_token_spelling(preprocess.spelling_base, first);
+  3209:         CTypeKind kind = C_TYPE_INT;
+  3210:         if (spelling.length && spelling.pointer[0] == 'L')
+  3211:         {
+  3212:             kind = target_uses_16_bit_wchar(preprocess.target) ? C_TYPE_UNSIGNED_SHORT :
+  3213:                    target_uses_unsigned_wchar(preprocess.target) ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  3214:         }
+  3215:         return c_parse_expression_scalar_type(result, kind);
+  3216:     }
+  3217:     if (first.kind == C_TOKEN_STRING_LITERAL)
+  3218:     {
+  3219:         u32 literal_end = start + 1;
+  3220:         while (literal_end < end && preprocess.tokens[literal_end].kind == C_TOKEN_STRING_LITERAL)
+  3221:         {
+  3222:             literal_end += 1;
+  3223:         }
+  3224:         if (literal_end == end)
+  3225:         {
+  3226:             return c_parse_string_literal_expression_type(arena, preprocess, result, start, end);
+  3227:         }
+  3228:     }
+  3229:     if (first.kind == C_TOKEN_IDENTIFIER)
+  3230:     {
+  3231:         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
+  3232:             start + 1 < end)
+  3233:         {
+  3234:             return c_parse_expression_scalar_type(result,
+  3235:                                                   target_uses_llp64_data_model(preprocess.target) ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG);
+  3236:         }
+  3237:         if (c_preprocess_dialect_is_c23(preprocess.dialect) && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("true")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("false"))) &&
+  3238:             end == start + 1)
+  3239:         {
+  3240:             return c_parse_expression_scalar_type(result, C_TYPE_BOOL);
+  3241:         }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 6173 =====
+  6153:     }
+  6154:     case 5:
+  6155:     {
+  6156:         return string_equal(spelling, S8("_Bool")) || string_equal(spelling, S8("short")) || string_equal(spelling, S8("float")) ||
+  6157:                string_equal(spelling, S8("const")) || string_equal(spelling, S8("union"));
+  6158:     }
+  6159:     case 6:
+  6160:     {
+  6161:         return string_equal(spelling, S8("signed")) || string_equal(spelling, S8("double")) || string_equal(spelling, S8("extern")) ||
+  6162:                string_equal(spelling, S8("static")) || string_equal(spelling, S8("inline")) || string_equal(spelling, S8("struct")) ||
+  6163:                string_equal(spelling, S8("__bf16"));
+  6164:     }
+  6165:     case 7:
+  6166:     {
+  6167:         return string_equal(spelling, S8("_Atomic")) || string_equal(spelling, S8("typedef")) || string_equal(spelling, S8("__const"));
+  6168:     }
+  6169:     case 8:
+  6170:     {
+  6171:         return string_equal(spelling, S8("_Alignas")) || string_equal(spelling, S8("unsigned")) || string_equal(spelling, S8("volatile")) ||
+  6172:                string_equal(spelling, S8("restrict")) || string_equal(spelling, S8("register")) || string_equal(spelling, S8("__thread")) ||
+  6173:                string_equal(spelling, S8("__inline")) || string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__int128")) ||
+  6174:                string_equal(spelling, S8("__typeof")) || string_equal(spelling, S8("_Complex")) || string_equal(spelling, S8("_Float16"));
+  6175:     }
+  6176:     case 9:
+  6177:     {
+  6178:         return string_equal(spelling, S8("_Noreturn")) || string_equal(spelling, S8("__const__")) || string_equal(spelling, S8("__complex"));
+  6179:     }
+  6180:     case 10:
+  6181:     {
+  6182:         return string_equal(spelling, S8("__inline__")) || string_equal(spelling, S8("__typeof__")) || string_equal(spelling, S8("__volatile")) ||
+  6183:                string_equal(spelling, S8("__restrict")) || string_equal(spelling, S8("__signed__")) || string_equal(spelling, S8("_Imaginary"));
+  6184:     }
+  6185:     case 11:
+  6186:     {
+  6187:         return string_equal(spelling, S8("__complex__"));
+  6188:     }
+  6189:     case 12:
+  6190:     {
+  6191:         return string_equal(spelling, S8("__volatile__")) || string_equal(spelling, S8("__restrict__"));
+  6192:     }
+  6193:     case 13:
+  6194:     {
+  6195:         return string_equal(spelling, S8("_Thread_local")) || string_equal(spelling, S8("__extension__"));
+  6196:     }
+  6197:     case 17:
+  6198:     {
+  6199:         return string_equal(spelling, S8("__builtin_va_list"));
+  6200:     }
+  6201:     default:
+  6202:     {
+  6203:         return false;
+  6204:     }
+  6205:     }
+  6206: }
+  6207: 
+  6208: BUSTER_C_SHARED bool c_parse_type_word_for_dialect(String8 spelling, CPreprocessDialect dialect)
+  6209: {
+  6210:     return c_parse_type_word(spelling) ||
+  6211:            (c_preprocess_dialect_is_gnu(dialect) && string_equal(spelling, S8("__auto_type"))) ||
+  6212:            ((c_preprocess_dialect_is_gnu(dialect) || c_preprocess_dialect_is_c23(dialect)) && string_equal(spelling, S8("typeof"))) ||
+  6213:            (c_preprocess_dialect_is_c23(dialect) && (string_equal(spelling, S8("constexpr")) || string_equal(spelling, S8("typeof_unqual"))));
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 6478 =====
+  6458:             seen_type = true;
+  6459:         }
+  6460:         else if (string_equal(spelling, S8("char")))
+  6461:         {
+  6462:             duplicate |= seen_char;
+  6463:             seen_char = true;
+  6464:             seen_type = true;
+  6465:         }
+  6466:         else if (string_equal(spelling, S8("short")))
+  6467:         {
+  6468:             duplicate |= seen_short;
+  6469:             seen_short = true;
+  6470:             seen_type = true;
+  6471:         }
+  6472:         else if (string_equal(spelling, S8("int")))
+  6473:         {
+  6474:             duplicate |= seen_int;
+  6475:             seen_int = true;
+  6476:             seen_type = true;
+  6477:         }
+  6478:         else if (string_equal(spelling, S8("__int128")))
+  6479:         {
+  6480:             duplicate |= seen_int128;
+  6481:             seen_int128 = true;
+  6482:             seen_type = true;
+  6483:         }
+  6484:         else if (string_equal(spelling, S8("signed")) || string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__signed__")))
+  6485:         {
+  6486:             duplicate |= seen_signed;
+  6487:             seen_signed = true;
+  6488:             seen_type = true;
+  6489:         }
+  6490:         else if (string_equal(spelling, S8("unsigned")))
+  6491:         {
+  6492:             duplicate |= seen_unsigned;
+  6493:             seen_unsigned = true;
+  6494:             seen_type = true;
+  6495:         }
+  6496:         else if (string_equal(spelling, S8("long")))
+  6497:         {
+  6498:             long_count += 1;
+  6499:             seen_type = true;
+  6500:         }
+  6501:         else if (string_equal(spelling, S8("float")))
+  6502:         {
+  6503:             duplicate |= seen_float;
+  6504:             seen_float = true;
+  6505:             seen_type = true;
+  6506:         }
+  6507:         else if (string_equal(spelling, S8("_Float16")))
+  6508:         {
+  6509:             duplicate |= seen_float16;
+  6510:             seen_float16 = true;
+  6511:             seen_type = true;
+  6512:         }
+  6513:         else if (string_equal(spelling, S8("__bf16")))
+  6514:         {
+  6515:             duplicate |= seen_bfloat16;
+  6516:             seen_bfloat16 = true;
+  6517:             seen_type = true;
+  6518:         }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 6619 =====
+  6599:             type.kind = C_TYPE_BFLOAT16;
+  6600:         }
+  6601:         else if (seen_float16)
+  6602:         {
+  6603:             type.kind = C_TYPE_FLOAT16;
+  6604:         }
+  6605:         else if (seen_float)
+  6606:         {
+  6607:             type.kind = C_TYPE_FLOAT;
+  6608:         }
+  6609:         else if (seen_double)
+  6610:         {
+  6611:             type.kind = long_count ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+  6612:         }
+  6613:         else if (seen_short)
+  6614:         {
+  6615:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
+  6616:         }
+  6617:         else if (seen_int128)
+  6618:         {
+  6619:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT128 : C_TYPE_INT128;
+  6620:         }
+  6621:         else if (long_count >= 2)
+  6622:         {
+  6623:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
+  6624:         }
+  6625:         else if (long_count == 1)
+  6626:         {
+  6627:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
+  6628:         }
+  6629:         else
+  6630:         {
+  6631:             type.kind = seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  6632:         }
+  6633:         if (type.kind == C_TYPE_VA_LIST)
+  6634:         {
+  6635:             parsed = c_parse_variable_argument_list_type(result);
+  6636:             if (type.is_const || type.is_volatile || type.is_restrict || type.is_atomic)
+  6637:             {
+  6638:                 parsed = c_parse_add_qualified_type(result, parsed, type);
+  6639:             }
+  6640:         }
+  6641:         else if (type.kind != C_TYPE_INVALID)
+  6642:         {
+  6643:             parsed = c_parse_add_type(result, type);
+  6644:         }
+  6645:     }
+  6646:     return parsed;
+  6647: }
+  6648: 
+  6649: BUSTER_C_SHARED CTypeId c_parse_pointer_chain(CParseResult* result, CPreprocessResult preprocess, CTypeId base, u32* index, u32 end);
+  6650: 
+  6651: BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end);
+  6652: 
+  6653: // How many parent links separate `scope` from `candidate`, or UINT32_MAX when
+  6654: // `candidate` is not `scope` or one of its ancestors.  Distance is what makes
+  6655: // the innermost visible tag win the scan below.
+  6656: BUSTER_C_SHARED u32 c_parse_scope_distance(CParseResult* result, CScopeId candidate, CScopeId scope)
+  6657: {
+  6658:     // A type recorded without a scope -- a hand-built result, or a parse that
+  6659:     // ran before the scope table existed -- reads as the file scope, which is
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 7440 =====
+  7420:             seen_type = true;
+  7421:         }
+  7422:         else if (string_equal(spelling, S8("char")))
+  7423:         {
+  7424:             duplicate |= seen_char;
+  7425:             seen_char = true;
+  7426:             seen_type = true;
+  7427:         }
+  7428:         else if (string_equal(spelling, S8("short")))
+  7429:         {
+  7430:             duplicate |= seen_short;
+  7431:             seen_short = true;
+  7432:             seen_type = true;
+  7433:         }
+  7434:         else if (string_equal(spelling, S8("int")))
+  7435:         {
+  7436:             duplicate |= seen_int;
+  7437:             seen_int = true;
+  7438:             seen_type = true;
+  7439:         }
+  7440:         else if (string_equal(spelling, S8("__int128")))
+  7441:         {
+  7442:             duplicate |= seen_int128;
+  7443:             seen_int128 = true;
+  7444:             seen_type = true;
+  7445:         }
+  7446:         else if (string_equal(spelling, S8("signed")) || string_equal(spelling, S8("__signed")) || string_equal(spelling, S8("__signed__")))
+  7447:         {
+  7448:             duplicate |= seen_signed;
+  7449:             seen_signed = true;
+  7450:             seen_type = true;
+  7451:         }
+  7452:         else if (string_equal(spelling, S8("unsigned")))
+  7453:         {
+  7454:             duplicate |= seen_unsigned;
+  7455:             seen_unsigned = true;
+  7456:             seen_type = true;
+  7457:         }
+  7458:         else if (string_equal(spelling, S8("long")))
+  7459:         {
+  7460:             long_count += 1;
+  7461:             seen_type = true;
+  7462:         }
+  7463:         else if (string_equal(spelling, S8("float")))
+  7464:         {
+  7465:             duplicate |= seen_float;
+  7466:             seen_float = true;
+  7467:             seen_type = true;
+  7468:         }
+  7469:         else if (string_equal(spelling, S8("_Float16")))
+  7470:         {
+  7471:             duplicate |= seen_float16;
+  7472:             seen_float16 = true;
+  7473:             seen_type = true;
+  7474:         }
+  7475:         else if (string_equal(spelling, S8("__bf16")))
+  7476:         {
+  7477:             duplicate |= seen_bfloat16;
+  7478:             seen_bfloat16 = true;
+  7479:             seen_type = true;
+  7480:         }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 7557 =====
+  7537:         result = C_TYPE_BOOL;
+  7538:     }
+  7539:     else if (seen_char)
+  7540:     {
+  7541:         result = seen_unsigned ? C_TYPE_UNSIGNED_CHAR : seen_signed ? C_TYPE_SIGNED_CHAR : C_TYPE_CHAR;
+  7542:     }
+  7543:     else if (seen_float)
+  7544:     {
+  7545:         result = C_TYPE_FLOAT;
+  7546:     }
+  7547:     else if (seen_double)
+  7548:     {
+  7549:         result = long_count ? C_TYPE_LONG_DOUBLE : C_TYPE_DOUBLE;
+  7550:     }
+  7551:     else if (seen_short)
+  7552:     {
+  7553:         result = seen_unsigned ? C_TYPE_UNSIGNED_SHORT : C_TYPE_SHORT;
+  7554:     }
+  7555:     else if (seen_int128)
+  7556:     {
+  7557:         result = seen_unsigned ? C_TYPE_UNSIGNED_INT128 : C_TYPE_INT128;
+  7558:     }
+  7559:     else if (long_count >= 2)
+  7560:     {
+  7561:         result = seen_unsigned ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_LONG_LONG;
+  7562:     }
+  7563:     else if (long_count == 1)
+  7564:     {
+  7565:         result = seen_unsigned ? C_TYPE_UNSIGNED_LONG : C_TYPE_LONG;
+  7566:     }
+  7567:     else
+  7568:     {
+  7569:         result = seen_unsigned ? C_TYPE_UNSIGNED_INT : C_TYPE_INT;
+  7570:     }
+  7571: 
+  7572:     return result;
+  7573: }
+  7574: 
+  7575: // Does the identifier at `index` name a type on its own?  The answer comes
+  7576: // from c_ir_primitive_type_kind run over that one token: a word the scan
+  7577: // collects names a type, and a qualifier, storage class or function
+  7578: // specifier it steps over does not -- so the question is asked of the same
+  7579: // ladder the specifier sets are built from and no second list of spellings
+  7580: // can drift from it.  A tag keyword names a type through the aggregate
+  7581: // branch rather than the scan, and is read from the well-known set that
+  7582: // branch already tests.  Callers ask it of a word standing beside a type
+  7583: // that is spelled some other way, where a second type specifier is the
+  7584: // constraint violation C_DIAGNOSTIC_INVALID_TYPE_SPECIFIERS reports.
+  7585: BUSTER_C_INTERNAL bool c_parse_type_specifier_token(CPreprocessResult preprocess, u32 index)
+  7586: {
+  7587:     u32 declarator_start = index;
+  7588:     u32 invalid_specifier = UINT32_MAX;
+  7589:     CTypeKind kind = c_ir_primitive_type_kind(preprocess, index, index + 1, &declarator_start, &invalid_specifier);
+  7590:     return kind != C_TYPE_INVALID || invalid_specifier != UINT32_MAX ||
+  7591:            c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index], C_PARSE_AGGREGATE_KEYWORDS);
+  7592: }
+  7593: 
+  7594: BUSTER_C_SHARED bool c_parse_attribute_unsigned(String8 spelling, u32* value_out)
+  7595: {
+  7596:     u32 base = 10;
+  7597:     u64 index = 0;
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 7722 =====
+  7702:                 !(c_parse_token_class_compute(c_token_spelling(preprocess.spelling_base, preprocess.tokens[index])) & C_TOKEN_CLASS_VECTOR_SIZE) ||
+  7703:                 !c_parse_vector_size_argument(result, preprocess, scope, index, end, &vector_byte_size))
+  7704:             {
+  7705:                 continue;
+  7706:             }
+  7707:             break;
+  7708:         }
+  7709:     }
+  7710:     if (!vector_byte_size)
+  7711:     {
+  7712:         return base;
+  7713:     }
+  7714:     if (base.value >= result->type_count)
+  7715:     {
+  7716:         return C_TYPE_ID_INVALID;
+  7717:     }
+  7718:     CTypeKind base_kind = result->types[base.value].kind;
+  7719:     // GNU's vector_size accepts any integer or floating element; `_Float16`
+  7720:     // joins the ladder because clang's `avx512fp16intrin.h` builds `__m512h`,
+  7721:     // `__m256h` and `__m128h` out of it.
+  7722:     bool arithmetic = (base_kind >= C_TYPE_CHAR && base_kind <= C_TYPE_UNSIGNED_INT128) || base_kind == C_TYPE_FLOAT16 || base_kind == C_TYPE_BFLOAT16 ||
+  7723:                       base_kind == C_TYPE_FLOAT || base_kind == C_TYPE_DOUBLE;
+  7724:     if (!arithmetic)
+  7725:     {
+  7726:         return C_TYPE_ID_INVALID;
+  7727:     }
+  7728:     return c_parse_add_type(result, (CType){
+  7729:                                         .element_type = base,
+  7730:                                         .return_type = C_TYPE_ID_INVALID,
+  7731:                                         .array_bound = C_ARRAY_BOUND_INVALID,
+  7732:                                         .vector_byte_size = vector_byte_size,
+  7733:                                         .kind = C_TYPE_VECTOR,
+  7734:                                         .is_complete = true,
+  7735:                                     });
+  7736: }
+  7737: 
+  7738: BUSTER_C_SHARED CEntityId c_parse_lookup_typedef_name(CParseResult* result, String8 name, bool oldest);
+  7739: 
+  7740: BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
+  7741:                                                            u32* declarator_start)
+  7742: {
+  7743:     CType qualifiers = {
+  7744:         .element_type = C_TYPE_ID_INVALID,
+  7745:         .return_type = C_TYPE_ID_INVALID,
+  7746:         .array_bound = C_ARRAY_BOUND_INVALID,
+  7747:     };
+  7748:     bool has_qualifier = false;
+  7749:     u32 typedef_index = start;
+  7750:     while (typedef_index < end && preprocess.tokens[typedef_index].kind == C_TOKEN_IDENTIFIER)
+  7751:     {
+  7752:         u32 alignment_end = c_parse_skip_alignment_specifiers(preprocess, typedef_index, end);
+  7753:         if (alignment_end != typedef_index)
+  7754:         {
+  7755:             typedef_index = c_parse_skip_attributes(preprocess, alignment_end, end);
+  7756:             continue;
+  7757:         }
+  7758:         if (c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[typedef_index], &qualifiers))
+  7759:         {
+  7760:             has_qualifier = true;
+  7761:         }
+  7762:         else if (!c_parse_atomic_declaration_prefix_token(preprocess, preprocess.tokens[typedef_index], &qualifiers))
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 10395 =====
+ 10375:             enum_underlying_type = c_parse_primitive_type(result, preprocess, underlying_start, underlying_end, &underlying_declarator);
+ 10376:         }
+ 10377:         CType* underlying = enum_underlying_type.value < result->type_count ? &result->types[enum_underlying_type.value] : 0;
+ 10378:         bool integer_underlying = false;
+ 10379:         if (underlying)
+ 10380:         {
+ 10381:             switch (underlying->kind)
+ 10382:             {
+ 10383:             case C_TYPE_BOOL:
+ 10384:             case C_TYPE_CHAR:
+ 10385:             case C_TYPE_SIGNED_CHAR:
+ 10386:             case C_TYPE_UNSIGNED_CHAR:
+ 10387:             case C_TYPE_SHORT:
+ 10388:             case C_TYPE_UNSIGNED_SHORT:
+ 10389:             case C_TYPE_INT:
+ 10390:             case C_TYPE_UNSIGNED_INT:
+ 10391:             case C_TYPE_LONG:
+ 10392:             case C_TYPE_UNSIGNED_LONG:
+ 10393:             case C_TYPE_LONG_LONG:
+ 10394:             case C_TYPE_UNSIGNED_LONG_LONG:
+ 10395:             case C_TYPE_INT128:
+ 10396:             case C_TYPE_UNSIGNED_INT128:
+ 10397:             {
+ 10398:                 integer_underlying = true;
+ 10399:                 break;
+ 10400:             }
+ 10401:             case C_TYPE_INVALID:
+ 10402:             case C_TYPE_VOID:
+ 10403:             case C_TYPE_FLOAT16:
+ 10404:             case C_TYPE_BFLOAT16:
+ 10405:             case C_TYPE_FLOAT:
+ 10406:             case C_TYPE_DOUBLE:
+ 10407:             case C_TYPE_LONG_DOUBLE:
+ 10408:             case C_TYPE_FLOAT16_COMPLEX:
+ 10409:             case C_TYPE_FLOAT_COMPLEX:
+ 10410:             case C_TYPE_DOUBLE_COMPLEX:
+ 10411:             case C_TYPE_LONG_DOUBLE_COMPLEX:
+ 10412:             case C_TYPE_VA_LIST:
+ 10413:             case C_TYPE_NULLPTR:
+ 10414:             case C_TYPE_POINTER:
+ 10415:             case C_TYPE_ARRAY:
+ 10416:             case C_TYPE_VECTOR:
+ 10417:             case C_TYPE_FUNCTION:
+ 10418:             case C_TYPE_STRUCT:
+ 10419:             case C_TYPE_UNION:
+ 10420:             case C_TYPE_ENUM:
+ 10421:             case C_TYPE_COUNT:
+ 10422:             {
+ 10423:                 break;
+ 10424:             }
+ 10425:             }
+ 10426:         }
+ 10427:         if (!integer_underlying || underlying_declarator != underlying_end)
+ 10428:         {
+ 10429:             return C_TYPE_ID_INVALID;
+ 10430:         }
+ 10431:         index = underlying_end;
+ 10432:     }
+ 10433:     CTypeId type = c_parse_aggregate_lookup(result, kind, tag, frame->scope);
+ 10434:     bool definition = index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
+ 10435:     if (!definition)
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 10396 =====
+ 10376:         }
+ 10377:         CType* underlying = enum_underlying_type.value < result->type_count ? &result->types[enum_underlying_type.value] : 0;
+ 10378:         bool integer_underlying = false;
+ 10379:         if (underlying)
+ 10380:         {
+ 10381:             switch (underlying->kind)
+ 10382:             {
+ 10383:             case C_TYPE_BOOL:
+ 10384:             case C_TYPE_CHAR:
+ 10385:             case C_TYPE_SIGNED_CHAR:
+ 10386:             case C_TYPE_UNSIGNED_CHAR:
+ 10387:             case C_TYPE_SHORT:
+ 10388:             case C_TYPE_UNSIGNED_SHORT:
+ 10389:             case C_TYPE_INT:
+ 10390:             case C_TYPE_UNSIGNED_INT:
+ 10391:             case C_TYPE_LONG:
+ 10392:             case C_TYPE_UNSIGNED_LONG:
+ 10393:             case C_TYPE_LONG_LONG:
+ 10394:             case C_TYPE_UNSIGNED_LONG_LONG:
+ 10395:             case C_TYPE_INT128:
+ 10396:             case C_TYPE_UNSIGNED_INT128:
+ 10397:             {
+ 10398:                 integer_underlying = true;
+ 10399:                 break;
+ 10400:             }
+ 10401:             case C_TYPE_INVALID:
+ 10402:             case C_TYPE_VOID:
+ 10403:             case C_TYPE_FLOAT16:
+ 10404:             case C_TYPE_BFLOAT16:
+ 10405:             case C_TYPE_FLOAT:
+ 10406:             case C_TYPE_DOUBLE:
+ 10407:             case C_TYPE_LONG_DOUBLE:
+ 10408:             case C_TYPE_FLOAT16_COMPLEX:
+ 10409:             case C_TYPE_FLOAT_COMPLEX:
+ 10410:             case C_TYPE_DOUBLE_COMPLEX:
+ 10411:             case C_TYPE_LONG_DOUBLE_COMPLEX:
+ 10412:             case C_TYPE_VA_LIST:
+ 10413:             case C_TYPE_NULLPTR:
+ 10414:             case C_TYPE_POINTER:
+ 10415:             case C_TYPE_ARRAY:
+ 10416:             case C_TYPE_VECTOR:
+ 10417:             case C_TYPE_FUNCTION:
+ 10418:             case C_TYPE_STRUCT:
+ 10419:             case C_TYPE_UNION:
+ 10420:             case C_TYPE_ENUM:
+ 10421:             case C_TYPE_COUNT:
+ 10422:             {
+ 10423:                 break;
+ 10424:             }
+ 10425:             }
+ 10426:         }
+ 10427:         if (!integer_underlying || underlying_declarator != underlying_end)
+ 10428:         {
+ 10429:             return C_TYPE_ID_INVALID;
+ 10430:         }
+ 10431:         index = underlying_end;
+ 10432:     }
+ 10433:     CTypeId type = c_parse_aggregate_lookup(result, kind, tag, frame->scope);
+ 10434:     bool definition = index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
+ 10435:     if (!definition)
+ 10436:     {
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 12100 =====
+ 12080:                         .right = right_type.element_type,
+ 12081:                     };
+ 12082:                 }
+ 12083:             }
+ 12084:             break;
+ 12085:         }
+ 12086:         case C_TYPE_INVALID:
+ 12087:         case C_TYPE_VOID:
+ 12088:         case C_TYPE_BOOL:
+ 12089:         case C_TYPE_CHAR:
+ 12090:         case C_TYPE_SIGNED_CHAR:
+ 12091:         case C_TYPE_UNSIGNED_CHAR:
+ 12092:         case C_TYPE_SHORT:
+ 12093:         case C_TYPE_UNSIGNED_SHORT:
+ 12094:         case C_TYPE_INT:
+ 12095:         case C_TYPE_UNSIGNED_INT:
+ 12096:         case C_TYPE_LONG:
+ 12097:         case C_TYPE_UNSIGNED_LONG:
+ 12098:         case C_TYPE_LONG_LONG:
+ 12099:         case C_TYPE_UNSIGNED_LONG_LONG:
+ 12100:         case C_TYPE_INT128:
+ 12101:         case C_TYPE_UNSIGNED_INT128:
+ 12102:         case C_TYPE_FLOAT16:
+ 12103:         case C_TYPE_BFLOAT16:
+ 12104:         case C_TYPE_FLOAT:
+ 12105:         case C_TYPE_DOUBLE:
+ 12106:         case C_TYPE_LONG_DOUBLE:
+ 12107:         case C_TYPE_FLOAT16_COMPLEX:
+ 12108:         case C_TYPE_FLOAT_COMPLEX:
+ 12109:         case C_TYPE_DOUBLE_COMPLEX:
+ 12110:         case C_TYPE_LONG_DOUBLE_COMPLEX:
+ 12111:         case C_TYPE_VA_LIST:
+ 12112:         case C_TYPE_NULLPTR:
+ 12113:         case C_TYPE_COUNT:
+ 12114:         {
+ 12115:             break;
+ 12116:         }
+ 12117:         }
+ 12118:     }
+ 12119:     scratch_end(temporary);
+ 12120:     return compatible;
+ 12121: }
+ 12122: 
+ 12123: BUSTER_C_INTERNAL CSourceLocation c_parse_cleanup_attribute_location(CPreprocessResult preprocess, CCleanupAttributeInfo attribute)
+ 12124: {
+ 12125:     CSourceLocation result;
+ 12126:     if (attribute.first_start < preprocess.token_count)
+ 12127:     {
+ 12128:         result = c_preprocess_token_location(&preprocess, preprocess.tokens[attribute.first_start]);
+ 12129:     }
+ 12130:     else
+ 12131:     {
+ 12132:         result = (CSourceLocation){0};
+ 12133:     }
+ 12134: 
+ 12135:     return result;
+ 12136: }
+ 12137: 
+ 12138: BUSTER_C_INTERNAL void c_parse_cleanup_diagnostic(CParseResult* result, CPreprocessResult preprocess, CCleanupAttributeInfo attribute, String8 message)
+ 12139: {
+ 12140:     c_parse_diagnostic(result, c_parse_cleanup_attribute_location(preprocess, attribute), C_DIAGNOSTIC_INVALID_CLEANUP_ATTRIBUTE, message);
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 12101 =====
+ 12081:                     };
+ 12082:                 }
+ 12083:             }
+ 12084:             break;
+ 12085:         }
+ 12086:         case C_TYPE_INVALID:
+ 12087:         case C_TYPE_VOID:
+ 12088:         case C_TYPE_BOOL:
+ 12089:         case C_TYPE_CHAR:
+ 12090:         case C_TYPE_SIGNED_CHAR:
+ 12091:         case C_TYPE_UNSIGNED_CHAR:
+ 12092:         case C_TYPE_SHORT:
+ 12093:         case C_TYPE_UNSIGNED_SHORT:
+ 12094:         case C_TYPE_INT:
+ 12095:         case C_TYPE_UNSIGNED_INT:
+ 12096:         case C_TYPE_LONG:
+ 12097:         case C_TYPE_UNSIGNED_LONG:
+ 12098:         case C_TYPE_LONG_LONG:
+ 12099:         case C_TYPE_UNSIGNED_LONG_LONG:
+ 12100:         case C_TYPE_INT128:
+ 12101:         case C_TYPE_UNSIGNED_INT128:
+ 12102:         case C_TYPE_FLOAT16:
+ 12103:         case C_TYPE_BFLOAT16:
+ 12104:         case C_TYPE_FLOAT:
+ 12105:         case C_TYPE_DOUBLE:
+ 12106:         case C_TYPE_LONG_DOUBLE:
+ 12107:         case C_TYPE_FLOAT16_COMPLEX:
+ 12108:         case C_TYPE_FLOAT_COMPLEX:
+ 12109:         case C_TYPE_DOUBLE_COMPLEX:
+ 12110:         case C_TYPE_LONG_DOUBLE_COMPLEX:
+ 12111:         case C_TYPE_VA_LIST:
+ 12112:         case C_TYPE_NULLPTR:
+ 12113:         case C_TYPE_COUNT:
+ 12114:         {
+ 12115:             break;
+ 12116:         }
+ 12117:         }
+ 12118:     }
+ 12119:     scratch_end(temporary);
+ 12120:     return compatible;
+ 12121: }
+ 12122: 
+ 12123: BUSTER_C_INTERNAL CSourceLocation c_parse_cleanup_attribute_location(CPreprocessResult preprocess, CCleanupAttributeInfo attribute)
+ 12124: {
+ 12125:     CSourceLocation result;
+ 12126:     if (attribute.first_start < preprocess.token_count)
+ 12127:     {
+ 12128:         result = c_preprocess_token_location(&preprocess, preprocess.tokens[attribute.first_start]);
+ 12129:     }
+ 12130:     else
+ 12131:     {
+ 12132:         result = (CSourceLocation){0};
+ 12133:     }
+ 12134: 
+ 12135:     return result;
+ 12136: }
+ 12137: 
+ 12138: BUSTER_C_INTERNAL void c_parse_cleanup_diagnostic(CParseResult* result, CPreprocessResult preprocess, CCleanupAttributeInfo attribute, String8 message)
+ 12139: {
+ 12140:     c_parse_diagnostic(result, c_parse_cleanup_attribute_location(preprocess, attribute), C_DIAGNOSTIC_INVALID_CLEANUP_ATTRIBUTE, message);
+ 12141: }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 13074 =====
+ 13054:         if (!bracket_depth || token.kind != C_TOKEN_IDENTIFIER || c_parse_declaration_keyword_at(result, preprocess, token_index) ||
+ 13055:             c_parse_identifier_is_bound(result, token_index))
+ 13056:         {
+ 13057:             continue;
+ 13058:         }
+ 13059:         bool member = token_index > start && (c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_DOT) ||
+ 13060:                                               c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_ARROW));
+ 13061:         bool tag_name = token_index > start && preprocess.tokens[token_index - 1].kind == C_TOKEN_IDENTIFIER &&
+ 13062:                         c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[token_index - 1], C_PARSE_AGGREGATE_KEYWORDS);
+ 13063:         if (!member && !tag_name)
+ 13064:         {
+ 13065:             c_parse_bind_identifier(arena, result, preprocess, scope, token_index);
+ 13066:         }
+ 13067:     }
+ 13068: }
+ 13069: 
+ 13070: BUSTER_C_INTERNAL bool c_type_kind_is_integer(CTypeKind kind)
+ 13071: {
+ 13072:     return kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+ 13073:            kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG ||
+ 13074:            kind == C_TYPE_LONG_LONG || kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_INT128 || kind == C_TYPE_UNSIGNED_INT128 || kind == C_TYPE_ENUM;
+ 13075: }
+ 13076: 
+ 13077: BUSTER_C_INTERNAL bool c_type_kind_is_signed_integer(CTypeKind kind)
+ 13078: {
+ 13079:     return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_SHORT || kind == C_TYPE_INT || kind == C_TYPE_LONG || kind == C_TYPE_LONG_LONG ||
+ 13080:            kind == C_TYPE_INT128 || kind == C_TYPE_ENUM;
+ 13081: }
+ 13082: 
+ 13083: BUSTER_C_INTERNAL bool c_parse_integer_expression_is_unsigned(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
+ 13084: {
+ 13085:     for (u32 index = start; index < end; index += 1)
+ 13086:     {
+ 13087:         CToken token = preprocess.tokens[index];
+ 13088:         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+ 13089:         {
+ 13090:             String8 token_spelling = c_token_spelling(preprocess.spelling_base, token);
+ 13091:             for (u64 byte_index = 0; byte_index < token_spelling.length; byte_index += 1)
+ 13092:             {
+ 13093:                 char8 byte = token_spelling.pointer[byte_index];
+ 13094:                 if (byte == 'u' || byte == 'U')
+ 13095:                 {
+ 13096:                     return true;
+ 13097:                 }
+ 13098:             }
+ 13099:             continue;
+ 13100:         }
+ 13101:         if (token.kind != C_TOKEN_IDENTIFIER)
+ 13102:         {
+ 13103:             continue;
+ 13104:         }
+ 13105:         CEntityId entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+ 13106:         if (entity_id.value >= result->entity_count)
+ 13107:         {
+ 13108:             continue;
+ 13109:         }
+ 13110:         CTypeId type_id = result->entities[entity_id.value].type;
+ 13111:         if (type_id.value >= result->type_count)
+ 13112:         {
+ 13113:             continue;
+ 13114:         }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 13080 =====
+ 13060:                                               c_token_is_punctuator(&preprocess.tokens[token_index - 1], C_PUNCTUATOR_ARROW));
+ 13061:         bool tag_name = token_index > start && preprocess.tokens[token_index - 1].kind == C_TOKEN_IDENTIFIER &&
+ 13062:                         c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[token_index - 1], C_PARSE_AGGREGATE_KEYWORDS);
+ 13063:         if (!member && !tag_name)
+ 13064:         {
+ 13065:             c_parse_bind_identifier(arena, result, preprocess, scope, token_index);
+ 13066:         }
+ 13067:     }
+ 13068: }
+ 13069: 
+ 13070: BUSTER_C_INTERNAL bool c_type_kind_is_integer(CTypeKind kind)
+ 13071: {
+ 13072:     return kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+ 13073:            kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG ||
+ 13074:            kind == C_TYPE_LONG_LONG || kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_INT128 || kind == C_TYPE_UNSIGNED_INT128 || kind == C_TYPE_ENUM;
+ 13075: }
+ 13076: 
+ 13077: BUSTER_C_INTERNAL bool c_type_kind_is_signed_integer(CTypeKind kind)
+ 13078: {
+ 13079:     return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_SHORT || kind == C_TYPE_INT || kind == C_TYPE_LONG || kind == C_TYPE_LONG_LONG ||
+ 13080:            kind == C_TYPE_INT128 || kind == C_TYPE_ENUM;
+ 13081: }
+ 13082: 
+ 13083: BUSTER_C_INTERNAL bool c_parse_integer_expression_is_unsigned(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
+ 13084: {
+ 13085:     for (u32 index = start; index < end; index += 1)
+ 13086:     {
+ 13087:         CToken token = preprocess.tokens[index];
+ 13088:         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+ 13089:         {
+ 13090:             String8 token_spelling = c_token_spelling(preprocess.spelling_base, token);
+ 13091:             for (u64 byte_index = 0; byte_index < token_spelling.length; byte_index += 1)
+ 13092:             {
+ 13093:                 char8 byte = token_spelling.pointer[byte_index];
+ 13094:                 if (byte == 'u' || byte == 'U')
+ 13095:                 {
+ 13096:                     return true;
+ 13097:                 }
+ 13098:             }
+ 13099:             continue;
+ 13100:         }
+ 13101:         if (token.kind != C_TOKEN_IDENTIFIER)
+ 13102:         {
+ 13103:             continue;
+ 13104:         }
+ 13105:         CEntityId entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+ 13106:         if (entity_id.value >= result->entity_count)
+ 13107:         {
+ 13108:             continue;
+ 13109:         }
+ 13110:         CTypeId type_id = result->entities[entity_id.value].type;
+ 13111:         if (type_id.value >= result->type_count)
+ 13112:         {
+ 13113:             continue;
+ 13114:         }
+ 13115:         CTypeKind kind = result->types[type_id.value].kind;
+ 13116:         if (kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_UNSIGNED_LONG ||
+ 13117:             kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_UNSIGNED_INT128)
+ 13118:         {
+ 13119:             return true;
+ 13120:         }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 13083 =====
+ 13063:         if (!member && !tag_name)
+ 13064:         {
+ 13065:             c_parse_bind_identifier(arena, result, preprocess, scope, token_index);
+ 13066:         }
+ 13067:     }
+ 13068: }
+ 13069: 
+ 13070: BUSTER_C_INTERNAL bool c_type_kind_is_integer(CTypeKind kind)
+ 13071: {
+ 13072:     return kind == C_TYPE_BOOL || kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_SHORT ||
+ 13073:            kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_INT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_LONG || kind == C_TYPE_UNSIGNED_LONG ||
+ 13074:            kind == C_TYPE_LONG_LONG || kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_INT128 || kind == C_TYPE_UNSIGNED_INT128 || kind == C_TYPE_ENUM;
+ 13075: }
+ 13076: 
+ 13077: BUSTER_C_INTERNAL bool c_type_kind_is_signed_integer(CTypeKind kind)
+ 13078: {
+ 13079:     return kind == C_TYPE_CHAR || kind == C_TYPE_SIGNED_CHAR || kind == C_TYPE_SHORT || kind == C_TYPE_INT || kind == C_TYPE_LONG || kind == C_TYPE_LONG_LONG ||
+ 13080:            kind == C_TYPE_INT128 || kind == C_TYPE_ENUM;
+ 13081: }
+ 13082: 
+ 13083: BUSTER_C_INTERNAL bool c_parse_integer_expression_is_unsigned(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end)
+ 13084: {
+ 13085:     for (u32 index = start; index < end; index += 1)
+ 13086:     {
+ 13087:         CToken token = preprocess.tokens[index];
+ 13088:         if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+ 13089:         {
+ 13090:             String8 token_spelling = c_token_spelling(preprocess.spelling_base, token);
+ 13091:             for (u64 byte_index = 0; byte_index < token_spelling.length; byte_index += 1)
+ 13092:             {
+ 13093:                 char8 byte = token_spelling.pointer[byte_index];
+ 13094:                 if (byte == 'u' || byte == 'U')
+ 13095:                 {
+ 13096:                     return true;
+ 13097:                 }
+ 13098:             }
+ 13099:             continue;
+ 13100:         }
+ 13101:         if (token.kind != C_TOKEN_IDENTIFIER)
+ 13102:         {
+ 13103:             continue;
+ 13104:         }
+ 13105:         CEntityId entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+ 13106:         if (entity_id.value >= result->entity_count)
+ 13107:         {
+ 13108:             continue;
+ 13109:         }
+ 13110:         CTypeId type_id = result->entities[entity_id.value].type;
+ 13111:         if (type_id.value >= result->type_count)
+ 13112:         {
+ 13113:             continue;
+ 13114:         }
+ 13115:         CTypeKind kind = result->types[type_id.value].kind;
+ 13116:         if (kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_UNSIGNED_LONG ||
+ 13117:             kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_UNSIGNED_INT128)
+ 13118:         {
+ 13119:             return true;
+ 13120:         }
+ 13121:     }
+ 13122:     return false;
+ 13123: }
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 13117 =====
+ 13097:                 }
+ 13098:             }
+ 13099:             continue;
+ 13100:         }
+ 13101:         if (token.kind != C_TOKEN_IDENTIFIER)
+ 13102:         {
+ 13103:             continue;
+ 13104:         }
+ 13105:         CEntityId entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+ 13106:         if (entity_id.value >= result->entity_count)
+ 13107:         {
+ 13108:             continue;
+ 13109:         }
+ 13110:         CTypeId type_id = result->entities[entity_id.value].type;
+ 13111:         if (type_id.value >= result->type_count)
+ 13112:         {
+ 13113:             continue;
+ 13114:         }
+ 13115:         CTypeKind kind = result->types[type_id.value].kind;
+ 13116:         if (kind == C_TYPE_UNSIGNED_CHAR || kind == C_TYPE_UNSIGNED_SHORT || kind == C_TYPE_UNSIGNED_INT || kind == C_TYPE_UNSIGNED_LONG ||
+ 13117:             kind == C_TYPE_UNSIGNED_LONG_LONG || kind == C_TYPE_UNSIGNED_INT128)
+ 13118:         {
+ 13119:             return true;
+ 13120:         }
+ 13121:     }
+ 13122:     return false;
+ 13123: }
+ 13124: 
+ 13125: BUSTER_C_INTERNAL bool c_parse_record_constexpr_integer(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+ 13126:                                                           CPreprocessResult preprocess, CScopeId scope, CEntityId entity_id, u32 initializer_start,
+ 13127:                                                           u32 initializer_end)
+ 13128: {
+ 13129:     if (entity_id.value >= result->entity_count)
+ 13130:     {
+ 13131:         return false;
+ 13132:     }
+ 13133:     CEntity* entity = &result->entities[entity_id.value];
+ 13134:     if (entity->is_constexpr && entity->type.value < result->type_count)
+ 13135:     {
+ 13136:         CType value_type = result->types[entity->type.value];
+ 13137:         if (c_type_kind_is_integer(value_type.kind))
+ 13138:         {
+ 13139:             Arena* conflicts[] = {
+ 13140:                 arena,
+ 13141:             };
+ 13142:             TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+ 13143:             u64 value = 0;
+ 13144:             bool evaluated =
+ 13145:                 c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
+ 13146:             scratch_end(temporary);
+ 13147:             if (!evaluated)
+ 13148:             {
+ 13149:                 c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+ 13150:                                    S8("integer constexpr initializer must be an integer constant expression"));
+ 13151:                 return false;
+ 13152:             }
+ 13153:             bool expression_unsigned = c_parse_integer_expression_is_unsigned(result, preprocess, scope, initializer_start, initializer_end);
+ 13154:             bool negative = value > INT64_MAX && !expression_unsigned;
+ 13155:             u64 magnitude = negative ? 0 - value : value;
+ 13156:             u64 size = 0;
+ 13157:             u32 alignment = 0;
+
+===== src/buster/lib/compiler/frontend/c/c_parse.c hit 13153 =====
+ 13133:     CEntity* entity = &result->entities[entity_id.value];
+ 13134:     if (entity->is_constexpr && entity->type.value < result->type_count)
+ 13135:     {
+ 13136:         CType value_type = result->types[entity->type.value];
+ 13137:         if (c_type_kind_is_integer(value_type.kind))
+ 13138:         {
+ 13139:             Arena* conflicts[] = {
+ 13140:                 arena,
+ 13141:             };
+ 13142:             TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
+ 13143:             u64 value = 0;
+ 13144:             bool evaluated =
+ 13145:                 c_parse_integer_constant_range(machine, temporary.arena, preprocess, result, scope, initializer_start, initializer_end, &value);
+ 13146:             scratch_end(temporary);
+ 13147:             if (!evaluated)
+ 13148:             {
+ 13149:                 c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+ 13150:                                    S8("integer constexpr initializer must be an integer constant expression"));
+ 13151:                 return false;
+ 13152:             }
+ 13153:             bool expression_unsigned = c_parse_integer_expression_is_unsigned(result, preprocess, scope, initializer_start, initializer_end);
+ 13154:             bool negative = value > INT64_MAX && !expression_unsigned;
+ 13155:             u64 magnitude = negative ? 0 - value : value;
+ 13156:             u64 size = 0;
+ 13157:             u32 alignment = 0;
+ 13158:             bool representable = c_parse_builtin_type_layout(preprocess.target, value_type.kind, &size, &alignment);
+ 13159:             BUSTER_UNUSED(alignment);
+ 13160:             if (representable && size <= 8)
+ 13161:             {
+ 13162:                 u32 bits = (u32)(size * 8);
+ 13163:                 bool target_signed = c_type_kind_is_signed_integer(value_type.kind);
+ 13164:                 if (target_signed)
+ 13165:                 {
+ 13166:                     u64 positive_max = bits == 64 ? (u64)INT64_MAX : ((u64)1 << (bits - 1)) - 1;
+ 13167:                     u64 negative_max = positive_max + 1;
+ 13168:                     representable = negative ? magnitude <= negative_max : magnitude <= positive_max;
+ 13169:                 }
+ 13170:                 else
+ 13171:                 {
+ 13172:                     u64 maximum = value_type.kind == C_TYPE_BOOL ? 1 : bits == 64 ? UINT64_MAX : ((u64)1 << bits) - 1;
+ 13173:                     representable = !negative && magnitude <= maximum;
+ 13174:                 }
+ 13175:             }
+ 13176:             if (!representable)
+ 13177:             {
+ 13178:                 c_parse_diagnostic(result, entity->location, C_DIAGNOSTIC_INVALID_CONSTEXPR,
+ 13179:                                    S8("integer constexpr initializer is not exactly representable in the declared type"));
+ 13180:                 return false;
+ 13181:             }
+ 13182:             entity->has_constant_value = true;
+ 13183:             entity->constant_is_negative = negative;
+ 13184:             entity->constant_value = magnitude;
+ 13185:         }
+ 13186:     }
+ 13187: 
+ 13188:     return true;
+ 13189: }
+ 13190: 
+ 13191: BUSTER_C_SHARED bool c_parse_validate_constexpr_initializer(CTypeParseMachine* machine, Arena* arena, CParseResult* result,
+ 13192:                                                                 CPreprocessResult preprocess, CScopeId scope, CEntityId entity_id,
+ 13193:                                                                 u32 initializer_start, u32 initializer_end)

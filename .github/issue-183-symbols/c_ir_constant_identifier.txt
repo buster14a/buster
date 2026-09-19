@@ -1,0 +1,78 @@
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_constant_identifier =====
+ 43106:             }
+ 43107:             return false;
+ 43108:         }
+ 43109:     }
+ 43110: 
+ 43111:     return false;
+ 43112: }
+ 43113: 
+ 43114: BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 token_index, CIrConstantValue* result)
+ 43115: {
+ 43116:     CToken token = builder->preprocess.tokens[token_index];
+ 43117:     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && (string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")) || string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("false"))))
+ 43118:     {
+ 43119:         *result = c_ir_constant_integer(builder->bool_type, string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("true")));
+ 43120:         return true;
+ 43121:     }
+ 43122:     if (c_preprocess_dialect_is_c23(builder->preprocess.dialect) && string_equal(c_token_spelling(builder->preprocess.spelling_base, token), S8("nullptr")))
+ 43123:     {
+ 43124:         *result = (CIrConstantValue){.type = builder->nullptr_type, .kind = C_IR_CONSTANT_POINTER};
+ 43125:         return true;
+ 43126:     }
+ 43127:     CEntityId entity_id = c_ir_constant_entity_at(builder, token_index);
+ 43128:     if (entity_id.value < builder->parse.entity_count)
+ 43129:     {
+ 43130:         CEntity* entity = builder->parse.entities + entity_id.value;
+ 43131:         if (entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value))
+ 43132:         {
+ 43133:             IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : builder->s32_type;
+ 43134:             u64 value = entity->constant_value;
+ 43135:             if (entity->constant_is_negative)
+ 43136:             {
+ 43137:                 value = 0 - value;
+ 43138:             }
+ 43139:             *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, value);
+ 43140:             return true;
+ 43141:         }
+ 43142:         // A function-local static is C_ENTITY_LOCAL with a symbol -- the
+ 43143:         // clinic macros write `.kwtuple = (&_kwtuple.ob_base.ob_base)` where
+ 43144:         // _kwtuple is exactly that -- and it folds like any file-scope
+ 43145:         // object.  An automatic local has no symbol and stays refused.
+ 43146:         bool static_local = entity->kind == C_ENTITY_LOCAL && builder->entity_symbols[entity_id.value].value != IR_ID_UNDERLYING_INVALID;
+ 43147:         if ((entity->kind == C_ENTITY_OBJECT || static_local) && entity->type.value < builder->parse.type_count)
+ 43148:         {
+ 43149:             IrSymbolId symbol = builder->entity_symbols[entity_id.value];
+ 43150:             IrTypeId type = builder->c_type_ir_map[entity->type.value];
+ 43151:             IrType* type_value = ir_type_from_id(&builder->program->types, type);
+ 43152:             if (type_value && type_value->layout.resolved)
+ 43153:             {
+ 43154:                 *result = (CIrConstantValue){
+ 43155:                     .type = type,
+ 43156:                     .symbol = symbol,
+ 43157:                     .kind = C_IR_CONSTANT_LVALUE,
+ 43158:                 };
+ 43159:                 return true;
+ 43160:             }
+ 43161:         }
+ 43162:         if (entity->kind == C_ENTITY_FUNCTION && entity->type.value < builder->parse.type_count)
+ 43163:         {
+ 43164:             IrTypeId function_type = builder->c_type_ir_map[entity->type.value];
+ 43165:             IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, function_type);
+ 43166:             if (pointer_type.value != IR_ID_UNDERLYING_INVALID)
+ 43167:             {
+ 43168:                 *result = (CIrConstantValue){
+ 43169:                     .type = pointer_type,
+ 43170:                     .symbol = builder->entity_symbols[entity_id.value],
+ 43171:                     .kind = C_IR_CONSTANT_POINTER,
+ 43172:                 };
+ 43173:                 return result->symbol.value != IR_ID_UNDERLYING_INVALID;
+ 43174:             }
+ 43175:         }
+ 43176:     }
+ 43177: 
+ 43178:     return false;
+ 43179: }
+ 43180: 
+ 43181: BUSTER_C_INTERNAL bool c_ir_constant_lvalue_field(CIntegerIrBuilder* builder, CIrConstantValue* value, String8 name)
+ 43182: {

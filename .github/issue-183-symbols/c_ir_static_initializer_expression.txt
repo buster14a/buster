@@ -1,0 +1,1 @@
+NOT FOUND c_ir_static_initializer_expression

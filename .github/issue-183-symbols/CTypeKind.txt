@@ -1,0 +1,155 @@
+   658: BUSTER_CT_CHECK(sizeof(CNodeId) == sizeof(CIdUnderlying));
+   659: BUSTER_CT_CHECK(sizeof(CTypeId) == sizeof(CIdUnderlying));
+   660: BUSTER_CT_CHECK(sizeof(CEntityId) == sizeof(CIdUnderlying));
+   661: BUSTER_CT_CHECK(sizeof(CScopeId) == sizeof(CIdUnderlying));
+   662: 
+   663: typedef enum CTypeKind
+   664: {
+   665:     C_TYPE_INVALID,
+   666:     C_TYPE_VOID,
+   667:     C_TYPE_BOOL,
+   668:     C_TYPE_CHAR,
+   669:     C_TYPE_SIGNED_CHAR,
+   670:     C_TYPE_UNSIGNED_CHAR,
+   671:     C_TYPE_SHORT,
+   672:     C_TYPE_UNSIGNED_SHORT,
+   673:     C_TYPE_INT,
+   674:     C_TYPE_UNSIGNED_INT,
+   675:     C_TYPE_LONG,
+   676:     C_TYPE_UNSIGNED_LONG,
+   677:     C_TYPE_LONG_LONG,
+   678:     C_TYPE_UNSIGNED_LONG_LONG,
+   679:     C_TYPE_INT128,
+   680:     C_TYPE_UNSIGNED_INT128,
+   681:     // IEEE-754 binary16, spelled `_Float16`.  It is a real type, not a
+   682:     // storage-only alias: it has its own two-byte layout, its own rank below
+   683:     // `float` in the usual arithmetic conversions, and its own place in the
+   684:     // vector element ladder.  Clang's `avx512fp16intrin.h` declares
+   685:     // `__m512h` out of it, which is what brought it in.
+   686:     C_TYPE_FLOAT16,
+   687:     C_TYPE_BFLOAT16,
+   688:     C_TYPE_FLOAT,
+   689:     C_TYPE_DOUBLE,
+   690:     C_TYPE_LONG_DOUBLE,
+   691:     // The three C99 complex types and the `_Float16 _Complex` extension
+   692:     // beside them. Each is laid out as two contiguous elements of its
+   693:     // underlying real type -- real part first -- which is both what the
+   694:     // psABIs specify and what lets the IR model them as two-field
+   695:     // aggregates (see c_ir_scalar_type). Clang's `_mm512_set1_pch` takes a
+   696:     // `_Float16 _Complex` parameter, which is what brought the half form in.
+   697:     C_TYPE_FLOAT16_COMPLEX,
+   698:     C_TYPE_FLOAT_COMPLEX,
+   699:     C_TYPE_DOUBLE_COMPLEX,
+   700:     C_TYPE_LONG_DOUBLE_COMPLEX,
+   701:     C_TYPE_VA_LIST,
+   702:     C_TYPE_NULLPTR,
+   703:     C_TYPE_POINTER,
+   704:     C_TYPE_ARRAY,
+   705:     C_TYPE_VECTOR,
+   706:     C_TYPE_FUNCTION,
+   707:     C_TYPE_STRUCT,
+   708:     C_TYPE_UNION,
+   709:     C_TYPE_ENUM,
+   710:     C_TYPE_COUNT,
+   711: } CTypeKind;
+   712: 
+   713: // The complex kinds and their underlying real kind, in both directions. Every
+   714: // complex question in the frontend goes through these three so the mapping
+   715: // lives in one place; `c_type_kind_complex_of` returns C_TYPE_INVALID for a
+   716: // real kind that has no complex counterpart (C only defines the three).
+   717: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_type_kind_is_complex(CTypeKind kind)
+   718: {
+   719:     return kind == C_TYPE_FLOAT16_COMPLEX || kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
+   720: }
+   721: 
+   722: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_element(CTypeKind kind)
+   723: {
+   724:     return kind == C_TYPE_FLOAT16_COMPLEX       ? C_TYPE_FLOAT16
+   725:            : kind == C_TYPE_FLOAT_COMPLEX       ? C_TYPE_FLOAT
+   726:            : kind == C_TYPE_DOUBLE_COMPLEX      ? C_TYPE_DOUBLE
+   727:            : kind == C_TYPE_LONG_DOUBLE_COMPLEX ? C_TYPE_LONG_DOUBLE
+   728:                                                 : C_TYPE_INVALID;
+   729: }
+   730: 
+   731: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_of(CTypeKind kind)
+   732: {
+   733:     return kind == C_TYPE_FLOAT16       ? C_TYPE_FLOAT16_COMPLEX
+   734:            : kind == C_TYPE_FLOAT       ? C_TYPE_FLOAT_COMPLEX
+   735:            : kind == C_TYPE_DOUBLE      ? C_TYPE_DOUBLE_COMPLEX
+   736:            : kind == C_TYPE_LONG_DOUBLE ? C_TYPE_LONG_DOUBLE_COMPLEX
+   737:                                         : C_TYPE_INVALID;
+   738: }
+   739: 
+   740: typedef struct CArrayBound CArrayBound;
+   741: struct CArrayBound
+   742: {
+   743:     u64 inferred_count;
+   744:     u32 token_start;
+   745:     u32 token_count;
+   746:     bool is_static;
+   747:     bool is_star;
+   748:     bool has_inferred_count;
+   749:     u8 reserved;
+   750: };
+   751: 
+   752: typedef struct CType CType;
+   753: struct CType
+   754: {
+   755:     String8 tag;
+   756:     // The scope a tagged aggregate was declared in, so two block-scope
+   757:     // definitions of one tag in sibling functions stay two types -- clang's
+   758:     // xmmintrin.h defines `struct __mm_storeh_pi_struct` inside two
+   759:     // intrinsics -- and a reference resolves to the innermost visible one.
+   760:     // Meaningful only for struct/union/enum types with a tag; everything
+   761:     // else leaves it zero, which is the file scope.
+   762:     CScopeId tag_scope;
+   763:     CTypeId element_type;
+   764:     CTypeId return_type;
+   765:     CTypeId unqualified_type;
+   766:     u32 array_bound;
+   767:     u32 parameter_start;
+   768:     u32 parameter_count;
+   769:     u32 member_start;
+   770:     u32 member_count;
+   771:     u32 enum_member_start;
+   772:     u32 enum_member_count;
+   773:     u32 definition_start;
+   774:     u32 definition_token_count;
+   775:     u32 vector_byte_size;
+   776:     CTypeKind kind;
+   777:     bool is_const;
+   778:     bool is_volatile;
+   779:     bool is_restrict;
+   780:     bool is_atomic;
+   781:     bool is_variadic;
+   782:     bool is_complete;
+   783:     // GNU's transparent_union: a parameter of this union type accepts an
+   784:     // argument of any member's type, passed as that member's own bits.
+   785:     bool is_transparent_union;
+   786:     bool has_unqualified_type;
+   787:     // The function type was written `()`, with no parameter list at all --
+   788:     // not `(void)`, which declares zero parameters. C11 6.2.7p3 makes an
+   789:     // unprototyped declaration compatible with a non-variadic prototype, so
+   790:     // musl's `long __syscall_cp_asm();` and the eight-parameter prototype
+   791:     // beside it declare one function rather than two conflicting ones.
+   792:     bool is_unprototyped;
+   793: };
+   794: 
+   795: typedef struct CMember CMember;
+   796: struct CMember
+   797: {
+   798:     String8 name;
+   799:     CSourceLocation location;
+   800:     CTypeId type;
+   801:     u32 alignment_start;
+   802:     u32 alignment_count;
+   803:     u32 bit_width;
+   804:     u32 bit_width_token_start;
+   805:     u32 bit_width_token_count;
+   806:     bool is_bit_field;
+   807:     // A GNU `packed` attribute on this member alone
+   808:     // (`struct { char c; int i __attribute__((packed)); }`): the member is
+   809:     // placed at byte alignment, which also stops it from raising the
+   810:     // aggregate's own alignment.
+   811:     bool is_packed;
+   812:     u8 reserved[2];

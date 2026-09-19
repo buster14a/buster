@@ -1,0 +1,63 @@
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_conditional_expression_type =====
+ 12409:                                                 .array_bound = C_ARRAY_BOUND_INVALID,
+ 12410:                                                 .kind = C_TYPE_POINTER,
+ 12411:                                             });
+ 12412:         }
+ 12413:     }
+ 12414:     return type;
+ 12415: }
+ 12416: 
+ 12417: BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+ 12418:                                                                 CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end)
+ 12419: {
+ 12420:     left = c_parse_auto_decay_type(result, left);
+ 12421:     right = c_parse_auto_decay_type(result, right);
+ 12422:     if (left.value >= result->type_count || right.value >= result->type_count)
+ 12423:     {
+ 12424:         return C_TYPE_ID_INVALID;
+ 12425:     }
+ 12426:     CType left_value = result->types[left.value];
+ 12427:     CType right_value = result->types[right.value];
+ 12428:     if (left_value.kind == C_TYPE_NULLPTR && right_value.kind == C_TYPE_POINTER)
+ 12429:     {
+ 12430:         return right;
+ 12431:     }
+ 12432:     if (right_value.kind == C_TYPE_NULLPTR && left_value.kind == C_TYPE_POINTER)
+ 12433:     {
+ 12434:         return left;
+ 12435:     }
+ 12436:     // The pointer rules need the arms' spellings and the arithmetic ones do
+ 12437:     // not, so the constant walk they rest on runs only when an arm is a
+ 12438:     // pointer -- `condition ? 1 : 2` never pays for it.
+ 12439:     if (left_value.kind == C_TYPE_POINTER || right_value.kind == C_TYPE_POINTER)
+ 12440:     {
+ 12441:         return c_parse_conditional_pointer_type(arena, preprocess, result, scope, left, right, left_start, left_end, right_start, right_end);
+ 12442:     }
+ 12443:     if (left_value.kind == right_value.kind &&
+ 12444:         (left_value.kind == C_TYPE_STRUCT || left_value.kind == C_TYPE_UNION || left_value.kind == C_TYPE_ENUM))
+ 12445:     {
+ 12446:         CTypeId left_unqualified = c_parse_unqualified_type(result, left);
+ 12447:         CTypeId right_unqualified = c_parse_unqualified_type(result, right);
+ 12448:         if (c_parse_types_compatible(arena, result, preprocess, left_unqualified, right_unqualified))
+ 12449:         {
+ 12450:             CType qualifiers = {
+ 12451:                 .is_const = left_value.is_const || right_value.is_const,
+ 12452:                 .is_volatile = left_value.is_volatile || right_value.is_volatile,
+ 12453:                 .is_restrict = left_value.is_restrict || right_value.is_restrict,
+ 12454:                 .is_atomic = left_value.is_atomic || right_value.is_atomic,
+ 12455:             };
+ 12456:             return (qualifiers.is_const || qualifiers.is_volatile || qualifiers.is_restrict || qualifiers.is_atomic)
+ 12457:                        ? c_parse_add_qualified_type(result, left_unqualified, qualifiers)
+ 12458:                        : left_unqualified;
+ 12459:         }
+ 12460:         return C_TYPE_ID_INVALID;
+ 12461:     }
+ 12462:     if (left.value == right.value)
+ 12463:     {
+ 12464:         return left;
+ 12465:     }
+ 12466:     return c_parse_expression_arithmetic_type(result, preprocess.target, left, right);
+ 12467: }
+ 12468: 
+ 12469: // Names resolve to intern ids through the borrowed preprocess table; a parse
+ 12470: // without one (hand-built tests) keeps every symbol 0 and the lookups below

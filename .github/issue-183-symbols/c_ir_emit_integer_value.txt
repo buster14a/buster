@@ -1,0 +1,100 @@
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_emit_integer_value =====
+  8588:         return IR_VALUE_ID_INVALID;
+  8589:     }
+  8590:     IrType* array_type = ir_type_from_id(&builder->program->types, builder->function->values[value.value].canonical_type);
+  8591:     IrType* pointer_type = ir_type_from_id(&builder->program->types, target_type);
+  8592:     if (!array_type || array_type->kind != IR_TYPE_ARRAY || !pointer_type || pointer_type->kind != IR_TYPE_POINTER)
+  8593:     {
+  8594:         return value;
+  8595:     }
+  8596:     IrValueId zero = c_ir_emit_integer_value(builder, 0, false, (CToken){0});
+  8597:     IrValueId first = c_ir_emit_index_place(builder, value, zero, source);
+  8598:     IrValueId address = c_ir_emit_address_of_place(builder, first, array_type->element_type, source);
+  8599:     return c_ir_emit_cast(builder, address, target_type, source);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_emit_integer_value =====
+  8695:     return result;
+  8696: }
+  8697: 
+  8698: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token, IrTypeId type)
+  8699: {
+  8700:     return c_ir_emit_integer_value_at(builder, value, is_negative, c_ir_token_source_range(builder, token), type);
+  8701: }
+  8702: 
+  8703: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token)
+  8704: {
+  8705:     return c_ir_emit_integer_value_typed(builder, value, is_negative, token, builder->s32_type);
+  8706: }
+  8707: 
+  8708: typedef struct CIrVlaLayout CIrVlaLayout;
+  8709: struct CIrVlaLayout
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_emit_integer_value =====
+ 21893:     {
+ 21894:         if (!*value_count || cast_type.value == IR_ID_UNDERLYING_INVALID)
+ 21895:         {
+ 21896:             return false;
+ 21897:         }
+ 21898:         u32 first = *value_count - 1;
+ 21899:         IrType* source_type = ir_type_from_id(&builder->program->types, builder->function->values[values[first].value].canonical_type);
+ 21900:         IrType* destination_type = ir_type_from_id(&builder->program->types, cast_type);
+ 21901:         IrValueId result = destination_type && destination_type->kind == IR_TYPE_VOID ? c_ir_emit_integer_value(builder, 0, false, (CToken){0})
+ 21902:                            : source_type && source_type->kind == IR_TYPE_ARRAY && destination_type && destination_type->kind == IR_TYPE_POINTER
+ 21903:                                ? c_ir_decay_array(builder, values[first], cast_type, source)
+ 21904:                                : c_ir_emit_cast(builder, values[first], cast_type, source);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_emit_integer_value =====
+ 30014:     IrBlockId false_block = frame->as.logical.false_block;
+ 30015:     IrBlockId merge_block = frame->as.logical.merge_block;
+ 30016:     IrSourceRange source = frame->as.logical.source;
+ 30017:     if (!machine->child_result.success || !c_ir_switch_block(builder, true_block))
+ 30018:     {
+ 30019:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 30020:         return;
+ 30021:     }
+ 30022:     IrValueId one = c_ir_emit_integer_value(builder, 1, false, (CToken){0});
+ 30023:     one = c_ir_truth_value(builder, one, source);
+ 30024:     if (!c_ir_emit_store_place(builder, place, builder->bool_type, one, source) || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &merge_block, 1, source) ||
+ 30025:         !c_ir_switch_block(builder, false_block))
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_emit_integer_value =====
+ 30022:     IrValueId one = c_ir_emit_integer_value(builder, 1, false, (CToken){0});
+ 30023:     one = c_ir_truth_value(builder, one, source);
+ 30024:     if (!c_ir_emit_store_place(builder, place, builder->bool_type, one, source) || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &merge_block, 1, source) ||
+ 30025:         !c_ir_switch_block(builder, false_block))
+ 30026:     {
+ 30027:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 30028:         return;
+ 30029:     }
+ 30030:     IrValueId zero = c_ir_emit_integer_value(builder, 0, false, (CToken){0});
+ 30031:     zero = c_ir_truth_value(builder, zero, source);
+ 30032:     if (!c_ir_emit_store_place(builder, place, builder->bool_type, zero, source) || !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &merge_block, 1, source) ||
+ 30033:         !c_ir_switch_block(builder, merge_block))
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_emit_integer_value =====
+ 31403:     }
+ 31404:     if (!c_ir_switch_block(builder, frame->as.conditional.final_block))
+ 31405:     {
+ 31406:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31407:         return;
+ 31408:     }
+ 31409:     IrType* result_type = ir_type_from_id(&builder->program->types, frame->as.conditional.type);
+ 31410:     IrValueId value = result_type && result_type->kind == IR_TYPE_VOID
+ 31411:                           ? c_ir_emit_integer_value(builder, 0, false, (CToken){0})
+ 31412:                           : c_ir_emit_load_place(builder, frame->as.conditional.place, frame->as.conditional.type, frame->as.conditional.source);
+ 31413:     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+ 31414: }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_emit_integer_value =====
+ 31463:         // A cast to void still evaluates an assignment for its side effect.
+ 31464:         // Lower the assignment through the statement machine and provide the
+ 31465:         // discarded value expected by the surrounding comma/expression walk.
+ 31466:         if (!machine->child_result.success)
+ 31467:         {
+ 31468:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31469:             return;
+ 31470:         }
+ 31471:         frame->as.expression.value = c_ir_emit_integer_value(builder, 0, false, (CToken){0});
+ 31472:         if (frame->as.expression.value.value == IR_ID_UNDERLYING_INVALID)
+ 31473:         {
+ 31474:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);

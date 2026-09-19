@@ -1,0 +1,3212 @@
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 420 =====
+   400:     case C_TYPE_SIGNED_CHAR:
+   401:         return S8("signed char");
+   402:     case C_TYPE_UNSIGNED_CHAR:
+   403:         return S8("unsigned char");
+   404:     case C_TYPE_SHORT:
+   405:         return S8("short");
+   406:     case C_TYPE_UNSIGNED_SHORT:
+   407:         return S8("unsigned short");
+   408:     case C_TYPE_INT:
+   409:         return S8("int");
+   410:     case C_TYPE_UNSIGNED_INT:
+   411:         return S8("unsigned int");
+   412:     case C_TYPE_LONG:
+   413:         return S8("long");
+   414:     case C_TYPE_UNSIGNED_LONG:
+   415:         return S8("unsigned long");
+   416:     case C_TYPE_LONG_LONG:
+   417:         return S8("long long");
+   418:     case C_TYPE_UNSIGNED_LONG_LONG:
+   419:         return S8("unsigned long long");
+   420:     case C_TYPE_INT128:
+   421:         return S8("__int128");
+   422:     case C_TYPE_UNSIGNED_INT128:
+   423:         return S8("unsigned __int128");
+   424:     case C_TYPE_FLOAT16:
+   425:     case C_TYPE_BFLOAT16:
+   426:         return kind == C_TYPE_BFLOAT16 ? S8("__bf16") : S8("_Float16");
+   427:     case C_TYPE_FLOAT:
+   428:         return S8("float");
+   429:     case C_TYPE_DOUBLE:
+   430:         return S8("double");
+   431:     case C_TYPE_LONG_DOUBLE:
+   432:         return S8("long double");
+   433:     case C_TYPE_FLOAT16_COMPLEX:
+   434:         return S8("_Float16 _Complex");
+   435:     case C_TYPE_FLOAT_COMPLEX:
+   436:         return S8("float _Complex");
+   437:     case C_TYPE_DOUBLE_COMPLEX:
+   438:         return S8("double _Complex");
+   439:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+   440:         return S8("long double _Complex");
+   441:     case C_TYPE_VA_LIST:
+   442:         return S8("va_list");
+   443:     case C_TYPE_NULLPTR:
+   444:         return S8("nullptr_t");
+   445:     case C_TYPE_INVALID:
+   446:     case C_TYPE_POINTER:
+   447:     case C_TYPE_ARRAY:
+   448:     case C_TYPE_VECTOR:
+   449:     case C_TYPE_FUNCTION:
+   450:     case C_TYPE_STRUCT:
+   451:     case C_TYPE_UNION:
+   452:     case C_TYPE_ENUM:
+   453:     case C_TYPE_COUNT:
+   454:         return (String8){0};
+   455:     }
+   456:     return (String8){0};
+   457: }
+   458: 
+   459: BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
+   460: {
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 421 =====
+   401:         return S8("signed char");
+   402:     case C_TYPE_UNSIGNED_CHAR:
+   403:         return S8("unsigned char");
+   404:     case C_TYPE_SHORT:
+   405:         return S8("short");
+   406:     case C_TYPE_UNSIGNED_SHORT:
+   407:         return S8("unsigned short");
+   408:     case C_TYPE_INT:
+   409:         return S8("int");
+   410:     case C_TYPE_UNSIGNED_INT:
+   411:         return S8("unsigned int");
+   412:     case C_TYPE_LONG:
+   413:         return S8("long");
+   414:     case C_TYPE_UNSIGNED_LONG:
+   415:         return S8("unsigned long");
+   416:     case C_TYPE_LONG_LONG:
+   417:         return S8("long long");
+   418:     case C_TYPE_UNSIGNED_LONG_LONG:
+   419:         return S8("unsigned long long");
+   420:     case C_TYPE_INT128:
+   421:         return S8("__int128");
+   422:     case C_TYPE_UNSIGNED_INT128:
+   423:         return S8("unsigned __int128");
+   424:     case C_TYPE_FLOAT16:
+   425:     case C_TYPE_BFLOAT16:
+   426:         return kind == C_TYPE_BFLOAT16 ? S8("__bf16") : S8("_Float16");
+   427:     case C_TYPE_FLOAT:
+   428:         return S8("float");
+   429:     case C_TYPE_DOUBLE:
+   430:         return S8("double");
+   431:     case C_TYPE_LONG_DOUBLE:
+   432:         return S8("long double");
+   433:     case C_TYPE_FLOAT16_COMPLEX:
+   434:         return S8("_Float16 _Complex");
+   435:     case C_TYPE_FLOAT_COMPLEX:
+   436:         return S8("float _Complex");
+   437:     case C_TYPE_DOUBLE_COMPLEX:
+   438:         return S8("double _Complex");
+   439:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+   440:         return S8("long double _Complex");
+   441:     case C_TYPE_VA_LIST:
+   442:         return S8("va_list");
+   443:     case C_TYPE_NULLPTR:
+   444:         return S8("nullptr_t");
+   445:     case C_TYPE_INVALID:
+   446:     case C_TYPE_POINTER:
+   447:     case C_TYPE_ARRAY:
+   448:     case C_TYPE_VECTOR:
+   449:     case C_TYPE_FUNCTION:
+   450:     case C_TYPE_STRUCT:
+   451:     case C_TYPE_UNION:
+   452:     case C_TYPE_ENUM:
+   453:     case C_TYPE_COUNT:
+   454:         return (String8){0};
+   455:     }
+   456:     return (String8){0};
+   457: }
+   458: 
+   459: BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
+   460: {
+   461:     TargetDataLayout layout = target_data_layout(target);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 422 =====
+   402:     case C_TYPE_UNSIGNED_CHAR:
+   403:         return S8("unsigned char");
+   404:     case C_TYPE_SHORT:
+   405:         return S8("short");
+   406:     case C_TYPE_UNSIGNED_SHORT:
+   407:         return S8("unsigned short");
+   408:     case C_TYPE_INT:
+   409:         return S8("int");
+   410:     case C_TYPE_UNSIGNED_INT:
+   411:         return S8("unsigned int");
+   412:     case C_TYPE_LONG:
+   413:         return S8("long");
+   414:     case C_TYPE_UNSIGNED_LONG:
+   415:         return S8("unsigned long");
+   416:     case C_TYPE_LONG_LONG:
+   417:         return S8("long long");
+   418:     case C_TYPE_UNSIGNED_LONG_LONG:
+   419:         return S8("unsigned long long");
+   420:     case C_TYPE_INT128:
+   421:         return S8("__int128");
+   422:     case C_TYPE_UNSIGNED_INT128:
+   423:         return S8("unsigned __int128");
+   424:     case C_TYPE_FLOAT16:
+   425:     case C_TYPE_BFLOAT16:
+   426:         return kind == C_TYPE_BFLOAT16 ? S8("__bf16") : S8("_Float16");
+   427:     case C_TYPE_FLOAT:
+   428:         return S8("float");
+   429:     case C_TYPE_DOUBLE:
+   430:         return S8("double");
+   431:     case C_TYPE_LONG_DOUBLE:
+   432:         return S8("long double");
+   433:     case C_TYPE_FLOAT16_COMPLEX:
+   434:         return S8("_Float16 _Complex");
+   435:     case C_TYPE_FLOAT_COMPLEX:
+   436:         return S8("float _Complex");
+   437:     case C_TYPE_DOUBLE_COMPLEX:
+   438:         return S8("double _Complex");
+   439:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+   440:         return S8("long double _Complex");
+   441:     case C_TYPE_VA_LIST:
+   442:         return S8("va_list");
+   443:     case C_TYPE_NULLPTR:
+   444:         return S8("nullptr_t");
+   445:     case C_TYPE_INVALID:
+   446:     case C_TYPE_POINTER:
+   447:     case C_TYPE_ARRAY:
+   448:     case C_TYPE_VECTOR:
+   449:     case C_TYPE_FUNCTION:
+   450:     case C_TYPE_STRUCT:
+   451:     case C_TYPE_UNION:
+   452:     case C_TYPE_ENUM:
+   453:     case C_TYPE_COUNT:
+   454:         return (String8){0};
+   455:     }
+   456:     return (String8){0};
+   457: }
+   458: 
+   459: BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
+   460: {
+   461:     TargetDataLayout layout = target_data_layout(target);
+   462:     *ir_kind = IR_TYPE_INTEGER;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 423 =====
+   403:         return S8("unsigned char");
+   404:     case C_TYPE_SHORT:
+   405:         return S8("short");
+   406:     case C_TYPE_UNSIGNED_SHORT:
+   407:         return S8("unsigned short");
+   408:     case C_TYPE_INT:
+   409:         return S8("int");
+   410:     case C_TYPE_UNSIGNED_INT:
+   411:         return S8("unsigned int");
+   412:     case C_TYPE_LONG:
+   413:         return S8("long");
+   414:     case C_TYPE_UNSIGNED_LONG:
+   415:         return S8("unsigned long");
+   416:     case C_TYPE_LONG_LONG:
+   417:         return S8("long long");
+   418:     case C_TYPE_UNSIGNED_LONG_LONG:
+   419:         return S8("unsigned long long");
+   420:     case C_TYPE_INT128:
+   421:         return S8("__int128");
+   422:     case C_TYPE_UNSIGNED_INT128:
+   423:         return S8("unsigned __int128");
+   424:     case C_TYPE_FLOAT16:
+   425:     case C_TYPE_BFLOAT16:
+   426:         return kind == C_TYPE_BFLOAT16 ? S8("__bf16") : S8("_Float16");
+   427:     case C_TYPE_FLOAT:
+   428:         return S8("float");
+   429:     case C_TYPE_DOUBLE:
+   430:         return S8("double");
+   431:     case C_TYPE_LONG_DOUBLE:
+   432:         return S8("long double");
+   433:     case C_TYPE_FLOAT16_COMPLEX:
+   434:         return S8("_Float16 _Complex");
+   435:     case C_TYPE_FLOAT_COMPLEX:
+   436:         return S8("float _Complex");
+   437:     case C_TYPE_DOUBLE_COMPLEX:
+   438:         return S8("double _Complex");
+   439:     case C_TYPE_LONG_DOUBLE_COMPLEX:
+   440:         return S8("long double _Complex");
+   441:     case C_TYPE_VA_LIST:
+   442:         return S8("va_list");
+   443:     case C_TYPE_NULLPTR:
+   444:         return S8("nullptr_t");
+   445:     case C_TYPE_INVALID:
+   446:     case C_TYPE_POINTER:
+   447:     case C_TYPE_ARRAY:
+   448:     case C_TYPE_VECTOR:
+   449:     case C_TYPE_FUNCTION:
+   450:     case C_TYPE_STRUCT:
+   451:     case C_TYPE_UNION:
+   452:     case C_TYPE_ENUM:
+   453:     case C_TYPE_COUNT:
+   454:         return (String8){0};
+   455:     }
+   456:     return (String8){0};
+   457: }
+   458: 
+   459: BUSTER_C_INTERNAL bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment)
+   460: {
+   461:     TargetDataLayout layout = target_data_layout(target);
+   462:     *ir_kind = IR_TYPE_INTEGER;
+   463:     *bit_width = 0;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 526 =====
+   506:         *alignment = layout.unsigned_integer.alignment;
+   507:         return true;
+   508:     case C_TYPE_LONG:
+   509:         *bit_width = layout.long_integer.bit_width;
+   510:         *is_signed = true;
+   511:         *alignment = layout.long_integer.alignment;
+   512:         return true;
+   513:     case C_TYPE_UNSIGNED_LONG:
+   514:         *bit_width = layout.unsigned_long_integer.bit_width;
+   515:         *alignment = layout.unsigned_long_integer.alignment;
+   516:         return true;
+   517:     case C_TYPE_LONG_LONG:
+   518:         *bit_width = layout.long_long_integer.bit_width;
+   519:         *is_signed = true;
+   520:         *alignment = layout.long_long_integer.alignment;
+   521:         return true;
+   522:     case C_TYPE_UNSIGNED_LONG_LONG:
+   523:         *bit_width = layout.unsigned_long_long_integer.bit_width;
+   524:         *alignment = layout.unsigned_long_long_integer.alignment;
+   525:         return true;
+   526:     case C_TYPE_INT128:
+   527:         *bit_width = layout.integer128.bit_width;
+   528:         *is_signed = true;
+   529:         *alignment = layout.integer128.alignment;
+   530:         return true;
+   531:     case C_TYPE_UNSIGNED_INT128:
+   532:         *bit_width = layout.unsigned_integer128.bit_width;
+   533:         *alignment = layout.unsigned_integer128.alignment;
+   534:         return true;
+   535:     case C_TYPE_FLOAT16:
+   536:     case C_TYPE_BFLOAT16:
+   537:     {
+   538:         TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
+   539:         *ir_kind = IR_TYPE_FLOAT;
+   540:         *bit_width = narrow.bit_width;
+   541:         *alignment = narrow.alignment;
+   542:         return true;
+   543:     }
+   544:     case C_TYPE_FLOAT:
+   545:         *ir_kind = IR_TYPE_FLOAT;
+   546:         *bit_width = layout.float_type.bit_width;
+   547:         *alignment = layout.float_type.alignment;
+   548:         return true;
+   549:     case C_TYPE_DOUBLE:
+   550:         *ir_kind = IR_TYPE_FLOAT;
+   551:         *bit_width = layout.double_type.bit_width;
+   552:         *alignment = layout.double_type.alignment;
+   553:         return true;
+   554:     case C_TYPE_LONG_DOUBLE:
+   555:         *ir_kind = IR_TYPE_FLOAT;
+   556:         *bit_width = layout.long_double_type.bit_width;
+   557:         *alignment = layout.long_double_type.alignment;
+   558:         return true;
+   559:     case C_TYPE_VA_LIST:
+   560:         *ir_kind = IR_TYPE_VA_LIST;
+   561:         *bit_width = layout.va_list.bit_width;
+   562:         *alignment = layout.va_list.alignment;
+   563:         return true;
+   564:     case C_TYPE_NULLPTR:
+   565:         *ir_kind = IR_TYPE_POINTER;
+   566:         *bit_width = layout.pointer.bit_width;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 531 =====
+   511:         *alignment = layout.long_integer.alignment;
+   512:         return true;
+   513:     case C_TYPE_UNSIGNED_LONG:
+   514:         *bit_width = layout.unsigned_long_integer.bit_width;
+   515:         *alignment = layout.unsigned_long_integer.alignment;
+   516:         return true;
+   517:     case C_TYPE_LONG_LONG:
+   518:         *bit_width = layout.long_long_integer.bit_width;
+   519:         *is_signed = true;
+   520:         *alignment = layout.long_long_integer.alignment;
+   521:         return true;
+   522:     case C_TYPE_UNSIGNED_LONG_LONG:
+   523:         *bit_width = layout.unsigned_long_long_integer.bit_width;
+   524:         *alignment = layout.unsigned_long_long_integer.alignment;
+   525:         return true;
+   526:     case C_TYPE_INT128:
+   527:         *bit_width = layout.integer128.bit_width;
+   528:         *is_signed = true;
+   529:         *alignment = layout.integer128.alignment;
+   530:         return true;
+   531:     case C_TYPE_UNSIGNED_INT128:
+   532:         *bit_width = layout.unsigned_integer128.bit_width;
+   533:         *alignment = layout.unsigned_integer128.alignment;
+   534:         return true;
+   535:     case C_TYPE_FLOAT16:
+   536:     case C_TYPE_BFLOAT16:
+   537:     {
+   538:         TargetTypeLayout narrow = kind == C_TYPE_BFLOAT16 ? layout.bfloat16_type : layout.float16_type;
+   539:         *ir_kind = IR_TYPE_FLOAT;
+   540:         *bit_width = narrow.bit_width;
+   541:         *alignment = narrow.alignment;
+   542:         return true;
+   543:     }
+   544:     case C_TYPE_FLOAT:
+   545:         *ir_kind = IR_TYPE_FLOAT;
+   546:         *bit_width = layout.float_type.bit_width;
+   547:         *alignment = layout.float_type.alignment;
+   548:         return true;
+   549:     case C_TYPE_DOUBLE:
+   550:         *ir_kind = IR_TYPE_FLOAT;
+   551:         *bit_width = layout.double_type.bit_width;
+   552:         *alignment = layout.double_type.alignment;
+   553:         return true;
+   554:     case C_TYPE_LONG_DOUBLE:
+   555:         *ir_kind = IR_TYPE_FLOAT;
+   556:         *bit_width = layout.long_double_type.bit_width;
+   557:         *alignment = layout.long_double_type.alignment;
+   558:         return true;
+   559:     case C_TYPE_VA_LIST:
+   560:         *ir_kind = IR_TYPE_VA_LIST;
+   561:         *bit_width = layout.va_list.bit_width;
+   562:         *alignment = layout.va_list.alignment;
+   563:         return true;
+   564:     case C_TYPE_NULLPTR:
+   565:         *ir_kind = IR_TYPE_POINTER;
+   566:         *bit_width = layout.pointer.bit_width;
+   567:         *alignment = layout.pointer.alignment;
+   568:         return true;
+   569:     // The complex kinds are two-element aggregates, not scalars; they are
+   570:     // built by c_ir_scalar_type before it reaches this ladder.
+   571:     case C_TYPE_FLOAT16_COMPLEX:
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 6400 =====
+  6380: BUSTER_C_INTERNAL bool c_ir_emit_runtime_call_source(CIntegerIrBuilder* builder, IrSourceRange source, String8 link_name, IrTypeId return_type,
+  6381:                                                       IrTypeId* parameter_types, IrValueId* arguments, u32 argument_count,
+  6382:                                                       IrValueId* result_out);
+  6383: 
+  6384: BUSTER_C_INTERNAL bool c_ir_wide_atomic_runtime_required(CIntegerIrBuilder* builder, IrTypeId atomic_type)
+  6385: {
+  6386:     IrType* type = ir_type_from_id(&builder->program->types, atomic_type);
+  6387:     return type && type->is_atomic && type->layout.resolved && type->layout.size == 16 &&
+  6388:            builder->target.cpu_arch == CPU_ARCH_X86_64 &&
+  6389:            !target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16);
+  6390: }
+  6391: 
+  6392: // The type-specific libatomic entry points erase the C object's signedness,
+  6393: // atomic/volatile qualifiers and aggregate spelling at their ABI boundary.
+  6394: // Use one unsigned bit representation and one plain pointer type so every
+  6395: // source spelling in a translation unit reuses exactly one imported symbol.
+  6396: BUSTER_C_INTERNAL bool c_ir_wide_atomic_runtime_arguments(CIntegerIrBuilder* builder, IrValueId place, IrTypeId atomic_type,
+  6397:                                                            IrSourceRange source, IrTypeId* bits_type_out, IrTypeId* pointer_type_out,
+  6398:                                                            IrValueId* address_out)
+  6399: {
+  6400:     IrTypeId bits_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_INT128);
+  6401:     IrValueId bits_place = bits_type.value != IR_ID_UNDERLYING_INVALID
+  6402:                                ? c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, bits_type, source)
+  6403:                                : IR_VALUE_ID_INVALID;
+  6404:     IrTypeId bits_place_type = bits_place.value < builder->function->value_count
+  6405:                                    ? builder->function->values[bits_place.value].canonical_type
+  6406:                                    : IR_TYPE_ID_INVALID;
+  6407:     IrValueId qualified_address = bits_place_type.value != IR_ID_UNDERLYING_INVALID
+  6408:                                       ? c_ir_emit_address_of_place(builder, bits_place, bits_place_type, source)
+  6409:                                       : IR_VALUE_ID_INVALID;
+  6410:     IrTypeId pointer_type = bits_type.value != IR_ID_UNDERLYING_INVALID
+  6411:                                 ? c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type)
+  6412:                                 : IR_TYPE_ID_INVALID;
+  6413:     IrValueId address = qualified_address.value != IR_ID_UNDERLYING_INVALID && pointer_type.value != IR_ID_UNDERLYING_INVALID
+  6414:                             ? c_ir_emit_cast_instruction(builder, qualified_address, pointer_type,
+  6415:                                                          IR_CONVERSION_POINTER_REINTERPRET, source)
+  6416:                             : IR_VALUE_ID_INVALID;
+  6417:     bool valid = bits_place.value != IR_ID_UNDERLYING_INVALID && pointer_type.value != IR_ID_UNDERLYING_INVALID &&
+  6418:                  address.value != IR_ID_UNDERLYING_INVALID;
+  6419:     if (!valid && !builder->failure_message.length)
+  6420:     {
+  6421:         builder->failure_message = S8("could not form a canonical address for a 16-byte atomic runtime call");
+  6422:     }
+  6423:     if (valid)
+  6424:     {
+  6425:         *bits_type_out = bits_type;
+  6426:         *pointer_type_out = pointer_type;
+  6427:         *address_out = address;
+  6428:     }
+  6429:     return valid;
+  6430: }
+  6431: 
+  6432: BUSTER_C_INTERNAL IrValueId c_ir_emit_wide_atomic_runtime_load(CIntegerIrBuilder* builder, IrValueId place, IrTypeId atomic_type,
+  6433:                                                                 IrSourceRange source, IrMemoryOrder order)
+  6434: {
+  6435:     IrType* atomic = ir_type_from_id(&builder->program->types, atomic_type);
+  6436:     IrTypeId value_type = atomic ? atomic->unqualified_type : IR_TYPE_ID_INVALID;
+  6437:     IrType* value = ir_type_from_id(&builder->program->types, value_type);
+  6438:     bool aggregate = value && (value->kind == IR_TYPE_STRUCT || value->kind == IR_TYPE_UNION);
+  6439:     IrTypeId bits_type = IR_TYPE_ID_INVALID;
+  6440:     IrTypeId pointer_type = IR_TYPE_ID_INVALID;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 8774 =====
+  8754:     {
+  8755:         result = !integer->is_signed || value <= INT64_MAX;
+  8756:     }
+  8757:     else if (!integer->is_signed)
+  8758:     {
+  8759:         result = value <= (((u64)1 << integer->bit_width) - 1);
+  8760:     }
+  8761:     else
+  8762:     {
+  8763:         result = value <= (((u64)1 << (integer->bit_width - 1)) - 1);
+  8764:     }
+  8765: 
+  8766:     return result;
+  8767: }
+  8768: 
+  8769: BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
+  8770: {
+  8771:     IrTypeId result = IR_TYPE_ID_INVALID;
+  8772:     bool suffix_valid = true;
+  8773:     bool decimal = !spelling.length || spelling.pointer[0] != '0';
+  8774:     bool is_unsigned = false;
+  8775:     u32 long_count = 0;
+  8776:     u64 suffix_start = spelling.length;
+  8777:     u32 msvc_width = c_integer_msvc_literal_width(spelling, &is_unsigned);
+  8778:     if (msvc_width)
+  8779:     {
+  8780:         long_count = 2;
+  8781:     }
+  8782:     while (!msvc_width && suffix_start)
+  8783:     {
+  8784:         u8 byte = spelling.pointer[suffix_start - 1];
+  8785:         if (byte != 'u' && byte != 'U' && byte != 'l' && byte != 'L')
+  8786:         {
+  8787:             break;
+  8788:         }
+  8789:         suffix_start -= 1;
+  8790:     }
+  8791:     for (u64 index = suffix_start; suffix_valid && !msvc_width && index < spelling.length;)
+  8792:     {
+  8793:         u8 byte = spelling.pointer[index];
+  8794:         if (byte == 'u' || byte == 'U')
+  8795:         {
+  8796:             if (is_unsigned)
+  8797:             {
+  8798:                 suffix_valid = false;
+  8799:             }
+  8800:             is_unsigned = true;
+  8801:             index += 1;
+  8802:         }
+  8803:         else
+  8804:         {
+  8805:             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
+  8806:             if (long_count || count > 2)
+  8807:             {
+  8808:                 suffix_valid = false;
+  8809:             }
+  8810:             long_count = count;
+  8811:             index += count;
+  8812:         }
+  8813:     }
+  8814:     CTypeKind candidates[6] = {0};
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 8777 =====
+  8757:     else if (!integer->is_signed)
+  8758:     {
+  8759:         result = value <= (((u64)1 << integer->bit_width) - 1);
+  8760:     }
+  8761:     else
+  8762:     {
+  8763:         result = value <= (((u64)1 << (integer->bit_width - 1)) - 1);
+  8764:     }
+  8765: 
+  8766:     return result;
+  8767: }
+  8768: 
+  8769: BUSTER_C_INTERNAL IrTypeId c_ir_integer_literal_type(CIntegerIrBuilder* builder, String8 spelling, u64 value)
+  8770: {
+  8771:     IrTypeId result = IR_TYPE_ID_INVALID;
+  8772:     bool suffix_valid = true;
+  8773:     bool decimal = !spelling.length || spelling.pointer[0] != '0';
+  8774:     bool is_unsigned = false;
+  8775:     u32 long_count = 0;
+  8776:     u64 suffix_start = spelling.length;
+  8777:     u32 msvc_width = c_integer_msvc_literal_width(spelling, &is_unsigned);
+  8778:     if (msvc_width)
+  8779:     {
+  8780:         long_count = 2;
+  8781:     }
+  8782:     while (!msvc_width && suffix_start)
+  8783:     {
+  8784:         u8 byte = spelling.pointer[suffix_start - 1];
+  8785:         if (byte != 'u' && byte != 'U' && byte != 'l' && byte != 'L')
+  8786:         {
+  8787:             break;
+  8788:         }
+  8789:         suffix_start -= 1;
+  8790:     }
+  8791:     for (u64 index = suffix_start; suffix_valid && !msvc_width && index < spelling.length;)
+  8792:     {
+  8793:         u8 byte = spelling.pointer[index];
+  8794:         if (byte == 'u' || byte == 'U')
+  8795:         {
+  8796:             if (is_unsigned)
+  8797:             {
+  8798:                 suffix_valid = false;
+  8799:             }
+  8800:             is_unsigned = true;
+  8801:             index += 1;
+  8802:         }
+  8803:         else
+  8804:         {
+  8805:             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
+  8806:             if (long_count || count > 2)
+  8807:             {
+  8808:                 suffix_valid = false;
+  8809:             }
+  8810:             long_count = count;
+  8811:             index += count;
+  8812:         }
+  8813:     }
+  8814:     CTypeKind candidates[6] = {0};
+  8815:     u32 candidate_count = 0;
+  8816: #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
+  8817:     if (suffix_valid)
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 8796 =====
+  8776:     u64 suffix_start = spelling.length;
+  8777:     u32 msvc_width = c_integer_msvc_literal_width(spelling, &is_unsigned);
+  8778:     if (msvc_width)
+  8779:     {
+  8780:         long_count = 2;
+  8781:     }
+  8782:     while (!msvc_width && suffix_start)
+  8783:     {
+  8784:         u8 byte = spelling.pointer[suffix_start - 1];
+  8785:         if (byte != 'u' && byte != 'U' && byte != 'l' && byte != 'L')
+  8786:         {
+  8787:             break;
+  8788:         }
+  8789:         suffix_start -= 1;
+  8790:     }
+  8791:     for (u64 index = suffix_start; suffix_valid && !msvc_width && index < spelling.length;)
+  8792:     {
+  8793:         u8 byte = spelling.pointer[index];
+  8794:         if (byte == 'u' || byte == 'U')
+  8795:         {
+  8796:             if (is_unsigned)
+  8797:             {
+  8798:                 suffix_valid = false;
+  8799:             }
+  8800:             is_unsigned = true;
+  8801:             index += 1;
+  8802:         }
+  8803:         else
+  8804:         {
+  8805:             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
+  8806:             if (long_count || count > 2)
+  8807:             {
+  8808:                 suffix_valid = false;
+  8809:             }
+  8810:             long_count = count;
+  8811:             index += count;
+  8812:         }
+  8813:     }
+  8814:     CTypeKind candidates[6] = {0};
+  8815:     u32 candidate_count = 0;
+  8816: #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
+  8817:     if (suffix_valid)
+  8818:     {
+  8819:         if (msvc_width && msvc_width < 64)
+  8820:         {
+  8821:             CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR : msvc_width == 16 ? C_TYPE_SHORT : C_TYPE_INT;
+  8822:             CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_INT;
+  8823:             C_INTEGER_LITERAL_CANDIDATE(is_unsigned ? unsigned_kind : signed_kind);
+  8824:         }
+  8825:         else if (!long_count && !is_unsigned)
+  8826:         {
+  8827:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
+  8828:             if (!decimal)
+  8829:             {
+  8830:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+  8831:             }
+  8832:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8833:             if (!decimal)
+  8834:             {
+  8835:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8836:             }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 8800 =====
+  8780:         long_count = 2;
+  8781:     }
+  8782:     while (!msvc_width && suffix_start)
+  8783:     {
+  8784:         u8 byte = spelling.pointer[suffix_start - 1];
+  8785:         if (byte != 'u' && byte != 'U' && byte != 'l' && byte != 'L')
+  8786:         {
+  8787:             break;
+  8788:         }
+  8789:         suffix_start -= 1;
+  8790:     }
+  8791:     for (u64 index = suffix_start; suffix_valid && !msvc_width && index < spelling.length;)
+  8792:     {
+  8793:         u8 byte = spelling.pointer[index];
+  8794:         if (byte == 'u' || byte == 'U')
+  8795:         {
+  8796:             if (is_unsigned)
+  8797:             {
+  8798:                 suffix_valid = false;
+  8799:             }
+  8800:             is_unsigned = true;
+  8801:             index += 1;
+  8802:         }
+  8803:         else
+  8804:         {
+  8805:             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
+  8806:             if (long_count || count > 2)
+  8807:             {
+  8808:                 suffix_valid = false;
+  8809:             }
+  8810:             long_count = count;
+  8811:             index += count;
+  8812:         }
+  8813:     }
+  8814:     CTypeKind candidates[6] = {0};
+  8815:     u32 candidate_count = 0;
+  8816: #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
+  8817:     if (suffix_valid)
+  8818:     {
+  8819:         if (msvc_width && msvc_width < 64)
+  8820:         {
+  8821:             CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR : msvc_width == 16 ? C_TYPE_SHORT : C_TYPE_INT;
+  8822:             CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_INT;
+  8823:             C_INTEGER_LITERAL_CANDIDATE(is_unsigned ? unsigned_kind : signed_kind);
+  8824:         }
+  8825:         else if (!long_count && !is_unsigned)
+  8826:         {
+  8827:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
+  8828:             if (!decimal)
+  8829:             {
+  8830:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+  8831:             }
+  8832:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8833:             if (!decimal)
+  8834:             {
+  8835:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8836:             }
+  8837:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8838:             if (!decimal)
+  8839:             {
+  8840:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 8823 =====
+  8803:         else
+  8804:         {
+  8805:             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
+  8806:             if (long_count || count > 2)
+  8807:             {
+  8808:                 suffix_valid = false;
+  8809:             }
+  8810:             long_count = count;
+  8811:             index += count;
+  8812:         }
+  8813:     }
+  8814:     CTypeKind candidates[6] = {0};
+  8815:     u32 candidate_count = 0;
+  8816: #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
+  8817:     if (suffix_valid)
+  8818:     {
+  8819:         if (msvc_width && msvc_width < 64)
+  8820:         {
+  8821:             CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR : msvc_width == 16 ? C_TYPE_SHORT : C_TYPE_INT;
+  8822:             CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_INT;
+  8823:             C_INTEGER_LITERAL_CANDIDATE(is_unsigned ? unsigned_kind : signed_kind);
+  8824:         }
+  8825:         else if (!long_count && !is_unsigned)
+  8826:         {
+  8827:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
+  8828:             if (!decimal)
+  8829:             {
+  8830:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+  8831:             }
+  8832:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8833:             if (!decimal)
+  8834:             {
+  8835:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8836:             }
+  8837:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8838:             if (!decimal)
+  8839:             {
+  8840:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8841:             }
+  8842:         }
+  8843:         else if (!long_count)
+  8844:         {
+  8845:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+  8846:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8847:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8848:         }
+  8849:         else if (long_count == 1 && !is_unsigned)
+  8850:         {
+  8851:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8852:             if (!decimal)
+  8853:             {
+  8854:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8855:             }
+  8856:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8857:             if (!decimal)
+  8858:             {
+  8859:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8860:             }
+  8861:         }
+  8862:         else if (long_count == 1)
+  8863:         {
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 8825 =====
+  8805:             u32 count = index + 1 < spelling.length && (spelling.pointer[index + 1] == 'l' || spelling.pointer[index + 1] == 'L') ? 2 : 1;
+  8806:             if (long_count || count > 2)
+  8807:             {
+  8808:                 suffix_valid = false;
+  8809:             }
+  8810:             long_count = count;
+  8811:             index += count;
+  8812:         }
+  8813:     }
+  8814:     CTypeKind candidates[6] = {0};
+  8815:     u32 candidate_count = 0;
+  8816: #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
+  8817:     if (suffix_valid)
+  8818:     {
+  8819:         if (msvc_width && msvc_width < 64)
+  8820:         {
+  8821:             CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR : msvc_width == 16 ? C_TYPE_SHORT : C_TYPE_INT;
+  8822:             CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_INT;
+  8823:             C_INTEGER_LITERAL_CANDIDATE(is_unsigned ? unsigned_kind : signed_kind);
+  8824:         }
+  8825:         else if (!long_count && !is_unsigned)
+  8826:         {
+  8827:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT);
+  8828:             if (!decimal)
+  8829:             {
+  8830:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+  8831:             }
+  8832:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8833:             if (!decimal)
+  8834:             {
+  8835:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8836:             }
+  8837:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8838:             if (!decimal)
+  8839:             {
+  8840:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8841:             }
+  8842:         }
+  8843:         else if (!long_count)
+  8844:         {
+  8845:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+  8846:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8847:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8848:         }
+  8849:         else if (long_count == 1 && !is_unsigned)
+  8850:         {
+  8851:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8852:             if (!decimal)
+  8853:             {
+  8854:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8855:             }
+  8856:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8857:             if (!decimal)
+  8858:             {
+  8859:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8860:             }
+  8861:         }
+  8862:         else if (long_count == 1)
+  8863:         {
+  8864:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8865:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 8849 =====
+  8829:             {
+  8830:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+  8831:             }
+  8832:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8833:             if (!decimal)
+  8834:             {
+  8835:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8836:             }
+  8837:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8838:             if (!decimal)
+  8839:             {
+  8840:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8841:             }
+  8842:         }
+  8843:         else if (!long_count)
+  8844:         {
+  8845:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
+  8846:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8847:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8848:         }
+  8849:         else if (long_count == 1 && !is_unsigned)
+  8850:         {
+  8851:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8852:             if (!decimal)
+  8853:             {
+  8854:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8855:             }
+  8856:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8857:             if (!decimal)
+  8858:             {
+  8859:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8860:             }
+  8861:         }
+  8862:         else if (long_count == 1)
+  8863:         {
+  8864:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8865:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8866:         }
+  8867:         else if (!is_unsigned)
+  8868:         {
+  8869:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8870:             if (!decimal)
+  8871:             {
+  8872:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8873:             }
+  8874:         }
+  8875:         else
+  8876:         {
+  8877:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8878:         }
+  8879:     }
+  8880: #undef C_INTEGER_LITERAL_CANDIDATE
+  8881:     for (u32 index = 0; result.value == IR_ID_UNDERLYING_INVALID && index < candidate_count; index += 1)
+  8882:     {
+  8883:         if (c_ir_integer_literal_fits(builder, candidates[index], value))
+  8884:         {
+  8885:             result = builder->scalar_types[candidates[index]];
+  8886:         }
+  8887:     }
+  8888:     return result;
+  8889: }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 8867 =====
+  8847:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8848:         }
+  8849:         else if (long_count == 1 && !is_unsigned)
+  8850:         {
+  8851:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG);
+  8852:             if (!decimal)
+  8853:             {
+  8854:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8855:             }
+  8856:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8857:             if (!decimal)
+  8858:             {
+  8859:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8860:             }
+  8861:         }
+  8862:         else if (long_count == 1)
+  8863:         {
+  8864:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
+  8865:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8866:         }
+  8867:         else if (!is_unsigned)
+  8868:         {
+  8869:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_LONG_LONG);
+  8870:             if (!decimal)
+  8871:             {
+  8872:                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8873:             }
+  8874:         }
+  8875:         else
+  8876:         {
+  8877:             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+  8878:         }
+  8879:     }
+  8880: #undef C_INTEGER_LITERAL_CANDIDATE
+  8881:     for (u32 index = 0; result.value == IR_ID_UNDERLYING_INVALID && index < candidate_count; index += 1)
+  8882:     {
+  8883:         if (c_ir_integer_literal_fits(builder, candidates[index], value))
+  8884:         {
+  8885:             result = builder->scalar_types[candidates[index]];
+  8886:         }
+  8887:     }
+  8888:     return result;
+  8889: }
+  8890: 
+  8891: BUSTER_C_INTERNAL IrValueId c_ir_emit_integer(CIntegerIrBuilder* builder, CToken token)
+  8892: {
+  8893:     u64 value = 0;
+  8894:     if (!c_conditional_number(c_token_spelling(builder->preprocess.spelling_base, token), &value))
+  8895:     {
+  8896:         return IR_VALUE_ID_INVALID;
+  8897:     }
+  8898:     IrTypeId type = c_ir_integer_literal_type(builder, c_token_spelling(builder->preprocess.spelling_base, token), value);
+  8899:     IrValueId result;
+  8900:     if (type.value == IR_TYPE_ID_INVALID.value)
+  8901:     {
+  8902:         result = IR_VALUE_ID_INVALID;
+  8903:     }
+  8904:     else
+  8905:     {
+  8906:         result = c_ir_emit_integer_value_typed(builder, value, false, token, type);
+  8907:     }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 10403 =====
+ 10383:     if (status == C_IR_ROUND_OK)
+ 10384:     {
+ 10385:         *result_out = (CIrExt80Value){.significand = significand, .exponent_sign = exponent_sign, .rank = rank};
+ 10386:     }
+ 10387:     else if (status == C_IR_ROUND_OVERFLOW)
+ 10388:     {
+ 10389:         *result_out = c_ir_ext80_value_infinity(negative, rank);
+ 10390:     }
+ 10391:     else if (status == C_IR_ROUND_UNDERFLOW)
+ 10392:     {
+ 10393:         *result_out = c_ir_ext80_value_zero(negative, rank);
+ 10394:     }
+ 10395:     else
+ 10396:     {
+ 10397:         result = false;
+ 10398:     }
+ 10399: 
+ 10400:     return result;
+ 10401: }
+ 10402: 
+ 10403: // One operand in the common real type the usual arithmetic conversions pick.
+ 10404: // Only an integer operand can lose anything here -- a float widens into a
+ 10405: // double exactly and every encoded value is already exact in the x87 format --
+ 10406: // but that loss is real: `16777217 * 1.0f` holds 2^24 because the integer
+ 10407: // rounds to float before the multiply, not after it.
+ 10408: BUSTER_C_INTERNAL bool c_ir_ext80_value_convert(CIrExt80Value* value, u8 rank)
+ 10409: {
+ 10410:     bool result = true;
+ 10411:     if (value->rank != rank && rank != C_IR_EXT80_RANK_LONG_DOUBLE && !c_ir_ext80_value_is_special(*value) && value->significand)
+ 10412:     {
+ 10413:         CIrExt80Big numerator;
+ 10414:         CIrExt80Big denominator;
+ 10415:         s32 binary_exponent = 0;
+ 10416:         bool negative = false;
+ 10417:         c_ir_ext80_big_set_u64(&denominator, 1);
+ 10418:         result = c_ir_ext80_value_rational(*value, &numerator, &binary_exponent, &negative) &&
+ 10419:                  c_ir_ext80_value_round(&numerator, &denominator, binary_exponent, negative, rank, value);
+ 10420:     }
+ 10421:     value->rank = rank;
+ 10422: 
+ 10423:     return result;
+ 10424: }
+ 10425: 
+ 10426: // The IEEE special cases, which answer before the rational core sees anything.
+ 10427: // The invalid combinations among them -- inf minus inf, inf times zero, inf
+ 10428: // over inf, zero over zero -- have to give the same answer as
+ 10429: // c_ir_fold_float_invalid_operation gives an in-function constant, because
+ 10430: // the sign IEEE-754 leaves unspecified is a compatibility choice and the two
+ 10431: // paths would otherwise print `nan` and `-nan` for one spelling.  They also
+ 10432: // do not care where the operation would round: the NaN is the same value at
+ 10433: // every precision and widens exactly.
+ 10434: //
+ 10435: // A NaN operand wins outright and keeps its own sign, the left one first; the
+ 10436: // sign flip a subtraction applies to its right operand happens only after
+ 10437: // that, which is why `1.0L - -nan` is still negative.  Everything else is the
+ 10438: // ordinary infinity and division-by-zero algebra, with the invalid
+ 10439: // combinations -- inf minus inf, inf times zero, inf over inf, zero over zero
+ 10440: // -- becoming the default NaN.  A finite operation returns false and the
+ 10441: // caller folds it as a rational instead.
+ 10442: BUSTER_C_INTERNAL bool c_ir_ext80_value_special(CPunctuator op, CIrExt80Value left, CIrExt80Value right, u8 rank, CIrExt80Value* result_out)
+ 10443: {
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 10623 =====
+ 10603:             if (comparison >= 0)
+ 10604:             {
+ 10605:                 negative = left_negative && comparison > 0;
+ 10606:                 valid = c_ir_ext80_big_subtract_shifted(&left_numerator, &right_numerator, 0);
+ 10607:             }
+ 10608:             else
+ 10609:             {
+ 10610:                 valid = c_ir_ext80_big_subtract_shifted(&right_numerator, &left_numerator, 0);
+ 10611:                 c_ir_ext80_big_copy(&left_numerator, &right_numerator);
+ 10612:                 negative = right_negative;
+ 10613:             }
+ 10614:         }
+ 10615:     }
+ 10616:     if (!valid || exponent > INT32_MAX || exponent < INT32_MIN)
+ 10617:     {
+ 10618:         return false;
+ 10619:     }
+ 10620:     return c_ir_ext80_value_round(&left_numerator, &denominator, (s32)exponent, negative, rank, result_out);
+ 10621: }
+ 10622: 
+ 10623: // The usual arithmetic conversions decide where an operation rounds: both
+ 10624: // operands convert to the common real type first and the result rounds there.
+ 10625: // Integer arithmetic is still refused, because it does not round at all --
+ 10626: // `1/3` would need its own truncating semantics, and a fold that answered 0.5
+ 10627: // for it would be silently wrong rather than merely absent.
+ 10628: BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
+ 10629: {
+ 10630:     u8 rank = left.rank > right.rank ? left.rank : right.rank;
+ 10631:     bool result;
+ 10632:     if (rank == C_IR_EXT80_RANK_INTEGER || !c_ir_ext80_value_convert(&left, rank) || !c_ir_ext80_value_convert(&right, rank))
+ 10633:     {
+ 10634:         result = false;
+ 10635:     }
+ 10636:     else if (c_ir_ext80_value_special(op, left, right, rank, result_out))
+ 10637:     {
+ 10638:         result = true;
+ 10639:     }
+ 10640:     else
+ 10641:     {
+ 10642:         result = c_ir_ext80_value_binary(op, left, right, rank, result_out);
+ 10643:     }
+ 10644: 
+ 10645:     return result;
+ 10646: }
+ 10647: 
+ 10648: // One numeric token as the long double value it converts to.  The three cases
+ 10649: // are the literal's own type: an L-suffixed spelling is already this format, a
+ 10650: // plain or f-suffixed spelling rounds to double or float first and widens
+ 10651: // exactly, and an integer spelling converts from its own integer type, where a
+ 10652: // leading minus on an unsigned literal wraps before the widening.
+ 10653: //
+ 10654: // A spelling whose magnitude does not fit its own type is not a refusal: C
+ 10655: // gives it the infinity or the signed zero, and musl spells `INFINITY` as
+ 10656: // `1e5000f` whenever the compiler does not offer the GNU builtins, which is
+ 10657: // how an overflowing literal reaches a static initializer in the first place.
+ 10658: BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 token_index, bool negative, CIrExt80Value* value_out)
+ 10659: {
+ 10660:     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]);
+ 10661:     u64 significand = 0;
+ 10662:     u16 exponent_sign = 0;
+ 10663:     bool floating = c_number_is_float(spelling);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 10632 =====
+ 10612:                 negative = right_negative;
+ 10613:             }
+ 10614:         }
+ 10615:     }
+ 10616:     if (!valid || exponent > INT32_MAX || exponent < INT32_MIN)
+ 10617:     {
+ 10618:         return false;
+ 10619:     }
+ 10620:     return c_ir_ext80_value_round(&left_numerator, &denominator, (s32)exponent, negative, rank, result_out);
+ 10621: }
+ 10622: 
+ 10623: // The usual arithmetic conversions decide where an operation rounds: both
+ 10624: // operands convert to the common real type first and the result rounds there.
+ 10625: // Integer arithmetic is still refused, because it does not round at all --
+ 10626: // `1/3` would need its own truncating semantics, and a fold that answered 0.5
+ 10627: // for it would be silently wrong rather than merely absent.
+ 10628: BUSTER_C_INTERNAL bool c_ir_ext80_fold_apply(CPunctuator op, CIrExt80Value left, CIrExt80Value right, CIrExt80Value* result_out)
+ 10629: {
+ 10630:     u8 rank = left.rank > right.rank ? left.rank : right.rank;
+ 10631:     bool result;
+ 10632:     if (rank == C_IR_EXT80_RANK_INTEGER || !c_ir_ext80_value_convert(&left, rank) || !c_ir_ext80_value_convert(&right, rank))
+ 10633:     {
+ 10634:         result = false;
+ 10635:     }
+ 10636:     else if (c_ir_ext80_value_special(op, left, right, rank, result_out))
+ 10637:     {
+ 10638:         result = true;
+ 10639:     }
+ 10640:     else
+ 10641:     {
+ 10642:         result = c_ir_ext80_value_binary(op, left, right, rank, result_out);
+ 10643:     }
+ 10644: 
+ 10645:     return result;
+ 10646: }
+ 10647: 
+ 10648: // One numeric token as the long double value it converts to.  The three cases
+ 10649: // are the literal's own type: an L-suffixed spelling is already this format, a
+ 10650: // plain or f-suffixed spelling rounds to double or float first and widens
+ 10651: // exactly, and an integer spelling converts from its own integer type, where a
+ 10652: // leading minus on an unsigned literal wraps before the widening.
+ 10653: //
+ 10654: // A spelling whose magnitude does not fit its own type is not a refusal: C
+ 10655: // gives it the infinity or the signed zero, and musl spells `INFINITY` as
+ 10656: // `1e5000f` whenever the compiler does not offer the GNU builtins, which is
+ 10657: // how an overflowing literal reaches a static initializer in the first place.
+ 10658: BUSTER_C_INTERNAL bool c_ir_ext80_fold_number(CIntegerIrBuilder* builder, u32 token_index, bool negative, CIrExt80Value* value_out)
+ 10659: {
+ 10660:     String8 spelling = c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[token_index]);
+ 10661:     u64 significand = 0;
+ 10662:     u16 exponent_sign = 0;
+ 10663:     bool floating = c_number_is_float(spelling);
+ 10664:     char8 suffix = 0;
+ 10665:     c_ir_float_suffix(spelling, &suffix);
+ 10666:     bool long_suffix = suffix == 'l' || suffix == 'L';
+ 10667:     u8 status = C_IR_ROUND_FAILED;
+ 10668:     u8 rank = C_IR_EXT80_RANK_INTEGER;
+ 10669:     if (floating && long_suffix)
+ 10670:     {
+ 10671:         rank = C_IR_EXT80_RANK_LONG_DOUBLE;
+ 10672:         status = c_ir_ext80_parse_long_literal(spelling, negative, &significand, &exponent_sign);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 12462 =====
+ 12442:         .spelling_base = quoted.pointer,
+ 12443:         .token_count = 1,
+ 12444:         .dialect = builder->preprocess.dialect,
+ 12445:     };
+ 12446:     CIrDecodedString decoded = {0};
+ 12447:     IrValueId result;
+ 12448:     if (!c_ir_decode_string_literal_range_for_target(builder->arena, quoted_preprocess, builder->target, 0, 1, &decoded))
+ 12449:     {
+ 12450:         result = IR_VALUE_ID_INVALID;
+ 12451:     }
+ 12452:     else
+ 12453:     {
+ 12454:         result = c_ir_emit_string_contents_typed(builder, token, decoded, IR_TYPE_ID_INVALID);
+ 12455:     }
+ 12456: 
+ 12457:     return result;
+ 12458: }
+ 12459: 
+ 12460: BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end);
+ 12461: 
+ 12462: BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
+ 12463: 
+ 12464: // An empty String8 legitimately carries a null pointer, which buster_hash_64
+ 12465: // must not be handed.
+ 12466: BUSTER_C_INTERNAL u64 c_ir_function_name_hash(String8 name)
+ 12467: {
+ 12468:     return buster_hash_64(name.pointer ? (u8*)name.pointer : (u8*)"", name.length);
+ 12469: }
+ 12470: 
+ 12471: BUSTER_C_INTERNAL CIrFunctionNameResolution* c_ir_function_name_resolution(CIntegerIrBuilder* builder, String8 name)
+ 12472: {
+ 12473:     CIrFunctionNameIndex* index = builder->function_names;
+ 12474:     if (index && index->bucket_count)
+ 12475:     {
+ 12476:         u32 bucket = (u32)(c_ir_function_name_hash(name) % index->bucket_count);
+ 12477:         for (u32 group_index = index->buckets[bucket]; group_index != UINT32_MAX; group_index = index->groups[group_index].next_in_bucket)
+ 12478:         {
+ 12479:             CIrFunctionNameResolution* group = index->groups + group_index;
+ 12480:             if (string_equal(group->name, name))
+ 12481:             {
+ 12482:                 return group;
+ 12483:             }
+ 12484:         }
+ 12485:     }
+ 12486: 
+ 12487:     return 0;
+ 12488: }
+ 12489: 
+ 12490: // The symbol-keyed form of the lookup above: an interned callee token resolves
+ 12491: // through one load, an uninterned one through the spelling.
+ 12492: BUSTER_C_INTERNAL CIrFunctionNameResolution* c_ir_function_name_resolution_symbol(CIntegerIrBuilder* builder, u32 symbol, String8 name)
+ 12493: {
+ 12494:     CIrFunctionNameIndex* index = builder->function_names;
+ 12495:     CIrFunctionNameResolution* result;
+ 12496:     if (index && symbol && symbol < index->symbol_limit)
+ 12497:     {
+ 12498:         u32 group_index = index->symbol_groups[symbol];
+ 12499:         result = group_index != UINT32_MAX ? index->groups + group_index : 0;
+ 12500:     }
+ 12501:     else
+ 12502:     {
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 15335 =====
+ 15315:                 call.symbol = symbol;
+ 15316:                 call.result = call_result;
+ 15317:                 IrSourceRange call_source = source;
+ 15318:                 IrInstructionId call_id = c_ir_append_instruction(builder, call, call_source);
+ 15319:                 builder->function->values[call_result.value].definition = call_id;
+ 15320:                 result = call_result;
+ 15321:             }
+ 15322:         }
+ 15323:     }
+ 15324: 
+ 15325:     return result;
+ 15326: }
+ 15327: 
+ 15328: // Read the sign in the original format: a floating conversion can quiet a
+ 15329: // signaling NaN or raise overflow/underflow, neither of which signbit permits.
+ 15330: BUSTER_C_INTERNAL IrValueId c_ir_emit_signbit_value(CIntegerIrBuilder* builder, CToken token, IrValueId value)
+ 15331: {
+ 15332:     IrValueId result = IR_VALUE_ID_INVALID;
+ 15333:     IrTypeId value_type = value.value < builder->function->value_count ? builder->function->values[value.value].canonical_type : IR_TYPE_ID_INVALID;
+ 15334:     IrType* type = ir_type_from_id(&builder->program->types, value_type);
+ 15335:     if (type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 32 || type->bit_width == 64 || type->bit_width == 80 || type->bit_width == 128))
+ 15336:     {
+ 15337:         IrSourceRange source = c_ir_token_source_range(builder, token);
+ 15338:         u32 width = type->bit_width;
+ 15339:         CTypeKind bits_kind = width == 32 ? C_TYPE_UNSIGNED_INT : width == 80 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_LONG_LONG;
+ 15340:         IrTypeId bits_type = c_ir_builder_scalar_type(builder, bits_kind);
+ 15341:         IrValueId slot = c_ir_emit_temporary(builder, value_type, source);
+ 15342:         if (bits_type.value != IR_ID_UNDERLYING_INVALID && slot.value != IR_ID_UNDERLYING_INVALID &&
+ 15343:             c_ir_emit_store_place(builder, slot, value_type, value, source))
+ 15344:         {
+ 15345:             IrTypeId bits_pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, bits_type);
+ 15346:             IrValueId address = c_ir_emit_address_of_place(builder, slot, value_type, source);
+ 15347:             IrValueId bits_address = address.value != IR_ID_UNDERLYING_INVALID && bits_pointer_type.value != IR_ID_UNDERLYING_INVALID
+ 15348:                                          ? c_ir_emit_cast(builder, address, bits_pointer_type, source) : IR_VALUE_ID_INVALID;
+ 15349:             IrValueId bits_place = IR_VALUE_ID_INVALID;
+ 15350:             if (bits_address.value != IR_ID_UNDERLYING_INVALID)
+ 15351:             {
+ 15352:                 // The supported formats are little-endian. The wide sign field
+ 15353:                 // starts at byte eight: the x87 sign/exponent or binary128 high limb.
+ 15354:                 if (width > 64)
+ 15355:                 {
+ 15356:                     IrValueId index = c_ir_emit_integer_value_typed(builder, width == 80 ? 4u : 1u, false, token, builder->s32_type);
+ 15357:                     if (index.value != IR_ID_UNDERLYING_INVALID)
+ 15358:                     {
+ 15359:                         bits_place = c_ir_emit_index_place(builder, bits_address, index, source);
+ 15360:                     }
+ 15361:                 }
+ 15362:                 else
+ 15363:                 {
+ 15364:                     bits_place = c_ir_emit_dereference_place(builder, bits_address, source);
+ 15365:                 }
+ 15366:             }
+ 15367:             IrValueId bits = bits_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, bits_place, bits_type, source) : IR_VALUE_ID_INVALID;
+ 15368:             IrValueId shift = c_ir_emit_integer_value_typed(builder, width == 32 ? 31u : width == 80 ? 15u : 63u, false, token, bits_type);
+ 15369:             if (bits.value != IR_ID_UNDERLYING_INVALID && shift.value != IR_ID_UNDERLYING_INVALID)
+ 15370:             {
+ 15371:                 IrValueId sign = c_ir_emit_binary_value(builder, bits, shift, bits_type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+ 15372:                 if (sign.value != IR_ID_UNDERLYING_INVALID)
+ 15373:                 {
+ 15374:                     result = c_ir_emit_cast(builder, sign, builder->s32_type, source);
+ 15375:                 }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 16146 =====
+ 16126:         if (!target_complex)
+ 16127:         {
+ 16128:             return c_ir_emit_cast(builder, real, target_type, source);
+ 16129:         }
+ 16130:         IrTypeId target_element = target_complex->element_type;
+ 16131:         real = c_ir_emit_cast(builder, real, target_element, source);
+ 16132:         imaginary = c_ir_emit_cast(builder, imaginary, target_element, source);
+ 16133:         return c_ir_complex_compose(builder, target_type, real, imaginary, source);
+ 16134:     }
+ 16135:     if (!target_complex)
+ 16136:     {
+ 16137:         return IR_VALUE_ID_INVALID;
+ 16138:     }
+ 16139:     IrTypeId target_element = target_complex->element_type;
+ 16140:     IrValueId real = c_ir_emit_cast(builder, value, target_element, source);
+ 16141:     IrValueId imaginary = c_ir_complex_zero(builder, target_element, source);
+ 16142:     return c_ir_complex_compose(builder, target_type, real, imaginary, source);
+ 16143: }
+ 16144: 
+ 16145: // The result type of an arithmetic operation with at least one complex
+ 16146: // operand: complex, over the usual arithmetic type of the two corresponding
+ 16147: // real types (C11 6.3.1.8p1).
+ 16148: BUSTER_C_INTERNAL IrTypeId c_ir_complex_result_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type)
+ 16149: {
+ 16150:     IrType* left = ir_type_from_id(&builder->program->types, left_type);
+ 16151:     IrType* right = ir_type_from_id(&builder->program->types, right_type);
+ 16152:     if (!left || !right || (!left->is_complex && !right->is_complex))
+ 16153:     {
+ 16154:         return IR_TYPE_ID_INVALID;
+ 16155:     }
+ 16156:     IrTypeId left_real = left->is_complex ? left->element_type : left_type;
+ 16157:     IrTypeId right_real = right->is_complex ? right->element_type : right_type;
+ 16158:     IrTypeId element = c_ir_usual_arithmetic_type(builder, left_real, right_real);
+ 16159:     return c_ir_complex_type_for_element(builder, element);
+ 16160: }
+ 16161: 
+ 16162: // `__real__ E` and `__imag__ E` as values. GNU allows either on a real
+ 16163: // operand too: `__real__ x` is `x` and `__imag__ x` is a positive zero of
+ 16164: // x's type, which is what Clang emits, and it is what makes the operators
+ 16165: // usable in code that is generic over real and complex.
+ 16166: BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_part_operator(CIntegerIrBuilder* builder, IrValueId value, bool imaginary, IrSourceRange source)
+ 16167: {
+ 16168:     IrType* complex_type = c_ir_value_complex_type(builder, value);
+ 16169:     if (!complex_type)
+ 16170:     {
+ 16171:         if (value.value >= builder->function->value_count)
+ 16172:         {
+ 16173:             return IR_VALUE_ID_INVALID;
+ 16174:         }
+ 16175:         IrTypeId type_id = builder->function->values[value.value].canonical_type;
+ 16176:         IrType* type = ir_type_from_id(&builder->program->types, type_id);
+ 16177:         if (!type || (type->kind != IR_TYPE_FLOAT && type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN))
+ 16178:         {
+ 16179:             builder->failure_message = S8("__real__ and __imag__ require an arithmetic operand");
+ 16180:             return IR_VALUE_ID_INVALID;
+ 16181:         }
+ 16182:         if (!imaginary)
+ 16183:         {
+ 16184:             return value;
+ 16185:         }
+ 16186:         return type->kind == IR_TYPE_FLOAT ? c_ir_complex_zero(builder, type_id, source)
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 16158 =====
+ 16138:     }
+ 16139:     IrTypeId target_element = target_complex->element_type;
+ 16140:     IrValueId real = c_ir_emit_cast(builder, value, target_element, source);
+ 16141:     IrValueId imaginary = c_ir_complex_zero(builder, target_element, source);
+ 16142:     return c_ir_complex_compose(builder, target_type, real, imaginary, source);
+ 16143: }
+ 16144: 
+ 16145: // The result type of an arithmetic operation with at least one complex
+ 16146: // operand: complex, over the usual arithmetic type of the two corresponding
+ 16147: // real types (C11 6.3.1.8p1).
+ 16148: BUSTER_C_INTERNAL IrTypeId c_ir_complex_result_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type)
+ 16149: {
+ 16150:     IrType* left = ir_type_from_id(&builder->program->types, left_type);
+ 16151:     IrType* right = ir_type_from_id(&builder->program->types, right_type);
+ 16152:     if (!left || !right || (!left->is_complex && !right->is_complex))
+ 16153:     {
+ 16154:         return IR_TYPE_ID_INVALID;
+ 16155:     }
+ 16156:     IrTypeId left_real = left->is_complex ? left->element_type : left_type;
+ 16157:     IrTypeId right_real = right->is_complex ? right->element_type : right_type;
+ 16158:     IrTypeId element = c_ir_usual_arithmetic_type(builder, left_real, right_real);
+ 16159:     return c_ir_complex_type_for_element(builder, element);
+ 16160: }
+ 16161: 
+ 16162: // `__real__ E` and `__imag__ E` as values. GNU allows either on a real
+ 16163: // operand too: `__real__ x` is `x` and `__imag__ x` is a positive zero of
+ 16164: // x's type, which is what Clang emits, and it is what makes the operators
+ 16165: // usable in code that is generic over real and complex.
+ 16166: BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_part_operator(CIntegerIrBuilder* builder, IrValueId value, bool imaginary, IrSourceRange source)
+ 16167: {
+ 16168:     IrType* complex_type = c_ir_value_complex_type(builder, value);
+ 16169:     if (!complex_type)
+ 16170:     {
+ 16171:         if (value.value >= builder->function->value_count)
+ 16172:         {
+ 16173:             return IR_VALUE_ID_INVALID;
+ 16174:         }
+ 16175:         IrTypeId type_id = builder->function->values[value.value].canonical_type;
+ 16176:         IrType* type = ir_type_from_id(&builder->program->types, type_id);
+ 16177:         if (!type || (type->kind != IR_TYPE_FLOAT && type->kind != IR_TYPE_INTEGER && type->kind != IR_TYPE_BOOLEAN))
+ 16178:         {
+ 16179:             builder->failure_message = S8("__real__ and __imag__ require an arithmetic operand");
+ 16180:             return IR_VALUE_ID_INVALID;
+ 16181:         }
+ 16182:         if (!imaginary)
+ 16183:         {
+ 16184:             return value;
+ 16185:         }
+ 16186:         return type->kind == IR_TYPE_FLOAT ? c_ir_complex_zero(builder, type_id, source)
+ 16187:                                            : c_ir_emit_integer_value_typed(builder, 0, false, (CToken){0}, type_id);
+ 16188:     }
+ 16189:     IrTypeId element = complex_type->element_type;
+ 16190:     IrValueId place = c_ir_complex_operand_place(builder, value, source);
+ 16191:     if (place.value == IR_ID_UNDERLYING_INVALID)
+ 16192:     {
+ 16193:         return IR_VALUE_ID_INVALID;
+ 16194:     }
+ 16195:     return c_ir_complex_part(builder, place, element, imaginary ? 1u : 0u, source);
+ 16196: }
+ 16197: 
+ 16198: // `+ - * /`, unary `-`, GNU unary `~` (conjugation) and `== !=` where at
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 18942 =====
+ 18922:                                    : (atomic->layout.resolved ? atomic->layout.size : 0);
+ 18923:             IrTypeId generic_bits_type = IR_TYPE_ID_INVALID;
+ 18924:             if (selected->builtin_atomic_generic)
+ 18925:             {
+ 18926:                 if (atomic_width != 1 && atomic_width != 2 && atomic_width != 4 && atomic_width != 8)
+ 18927:                 {
+ 18928:                     builder->failure_token_index = selected->token_index;
+ 18929:                     builder->failure_message =
+ 18930:                         S8("GNU generic atomic builtins require an object whose size is 1, 2, 4, or 8 bytes");
+ 18931:                     return false;
+ 18932:                 }
+ 18933:                 generic_bits_type = c_ir_unsigned_type_of_size(builder, atomic_width);
+ 18934:                 if (generic_bits_type.value == IR_ID_UNDERLYING_INVALID)
+ 18935:                 {
+ 18936:                     return false;
+ 18937:                 }
+ 18938:             }
+ 18939:             bool wide_atomic_runtime = builder->target.cpu_arch == CPU_ARCH_X86_64 && atomic_width == 16 &&
+ 18940:                                        !target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_CX16);
+ 18941:             IrTypeId wide_atomic_runtime_type = wide_atomic_runtime
+ 18942:                                                     ? c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_INT128)
+ 18943:                                                     : IR_TYPE_ID_INVALID;
+ 18944:             IrTypeId wide_atomic_runtime_pointer_type = wide_atomic_runtime_type.value != IR_ID_UNDERLYING_INVALID
+ 18945:                                                             ? c_ir_add_pointer_type(builder->program, builder->pointer_types, wide_atomic_runtime_type)
+ 18946:                                                             : IR_TYPE_ID_INVALID;
+ 18947:             if (wide_atomic_runtime && (wide_atomic_runtime_type.value == IR_ID_UNDERLYING_INVALID ||
+ 18948:                                         wide_atomic_runtime_pointer_type.value == IR_ID_UNDERLYING_INVALID))
+ 18949:             {
+ 18950:                 return false;
+ 18951:             }
+ 18952:             if (c_ir_type_contains_wide_float(builder->program, builder->wide_float_cache, atomic_type))
+ 18953:             {
+ 18954:                 builder->failure_message = S8("C IR lowering does not yet support atomic wide floating-point builtins");
+ 18955:                 return false;
+ 18956:             }
+ 18957:             // The success order is the last argument for every shape except a
+ 18958:             // compare-exchange, which carries a failure order behind it.
+ 18959:             u32 order_index = expected_count ? expected_count - 1 : 0;
+ 18960:             u32 failure_order_index = expected_count ? expected_count - 1 : 0;
+ 18961:             if (selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG ||
+ 18962:                 selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK)
+ 18963:             {
+ 18964:                 order_index = expected_count - 2;
+ 18965:             }
+ 18966:             IrMemoryOrder order = selected->builtin_atomic_sequential ? IR_MEMORY_ORDER_SEQUENTIAL : IR_MEMORY_ORDER_RELAXED;
+ 18967:             if (!selected->builtin_atomic_sequential && selected->builtin_atomic != C_IR_ATOMIC_BUILTIN_INIT &&
+ 18968:                 !c_ir_atomic_memory_order(builder, starts[order_index], ends[order_index], &order))
+ 18969:             {
+ 18970:                 return false;
+ 18971:             }
+ 18972:             IrValueId generic_load_result_place = IR_VALUE_ID_INVALID;
+ 18973:             if (selected->builtin_atomic_generic && selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_LOAD)
+ 18974:             {
+ 18975:                 if (continuation == C_IR_PREPARED_CALL_CONTINUATION_ATOMIC_RESULT_PLACE)
+ 18976:                 {
+ 18977:                     if (!child_success)
+ 18978:                     {
+ 18979:                         return C_IR_PREPARED_CALL_STEP_FAILED;
+ 18980:                     }
+ 18981:                     generic_load_result_place = c_ir_emit_dereference_place(builder, child_value, source);
+ 18982:                     IrTypeId result_type = generic_load_result_place.value < builder->function->value_count
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 19083 =====
+ 19063:                     desired = c_ir_emit_cast(builder, desired, value_type_id, source);
+ 19064:                 }
+ 19065:                 if (desired.value == IR_ID_UNDERLYING_INVALID)
+ 19066:                 {
+ 19067:                     return false;
+ 19068:                 }
+ 19069:                 IrTypeId comparison_type = value_type_id;
+ 19070:                 IrValueId comparison_place = place;
+ 19071:                 IrValueId comparison_expected = expected;
+ 19072:                 IrValueId comparison_desired = desired;
+ 19073:                 if (representation_value)
+ 19074:                 {
+ 19075:                     if (!selected->builtin_atomic_generic &&
+ 19076:                         (selected->builtin_atomic_gnu || !c_ir_atomic_aggregate_access_representable(builder, atomic_type)))
+ 19077:                     {
+ 19078:                         builder->failure_message = S8("C IR lowering does not support this atomic aggregate compare-exchange width");
+ 19079:                         return false;
+ 19080:                     }
+ 19081:                     comparison_type = selected->builtin_atomic_generic
+ 19082:                                           ? generic_bits_type
+ 19083:                                           : (atomic_width == 16 ? c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_INT128)
+ 19084:                                                                 : c_ir_unsigned_type_of_size(builder, atomic_width));
+ 19085:                     comparison_place = c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, comparison_type, source);
+ 19086:                     comparison_expected = c_ir_atomic_aggregate_bits_value(builder, expected, value_type_id, comparison_type, true, source);
+ 19087:                     comparison_desired = c_ir_atomic_aggregate_bits_value(builder, desired, value_type_id, comparison_type, true, source);
+ 19088:                     if (comparison_place.value == IR_ID_UNDERLYING_INVALID || comparison_expected.value == IR_ID_UNDERLYING_INVALID ||
+ 19089:                         comparison_desired.value == IR_ID_UNDERLYING_INVALID)
+ 19090:                     {
+ 19091:                         return false;
+ 19092:                     }
+ 19093:                 }
+ 19094:                 if (wide_atomic_runtime)
+ 19095:                 {
+ 19096:                     if (!aggregate_value)
+ 19097:                     {
+ 19098:                         comparison_type = wide_atomic_runtime_type;
+ 19099:                         comparison_place = c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, comparison_type, source);
+ 19100:                         comparison_expected = c_ir_emit_cast(builder, expected, comparison_type, source);
+ 19101:                         comparison_desired = c_ir_emit_cast(builder, desired, comparison_type, source);
+ 19102:                         if (comparison_place.value == IR_ID_UNDERLYING_INVALID || comparison_expected.value == IR_ID_UNDERLYING_INVALID ||
+ 19103:                             comparison_desired.value == IR_ID_UNDERLYING_INVALID)
+ 19104:                         {
+ 19105:                             return false;
+ 19106:                         }
+ 19107:                     }
+ 19108:                     IrValueId expected_bits_place = c_ir_emit_temporary(builder, comparison_type, source);
+ 19109:                     IrTypeId comparison_place_type = comparison_place.value < builder->function->value_count
+ 19110:                                                          ? builder->function->values[comparison_place.value].canonical_type
+ 19111:                                                          : IR_TYPE_ID_INVALID;
+ 19112:                     IrValueId comparison_address = c_ir_emit_address_of_place(builder, comparison_place, comparison_place_type, source);
+ 19113:                     IrValueId expected_address = c_ir_emit_address_of_place(builder, expected_bits_place, comparison_type, source);
+ 19114:                     comparison_address = comparison_address.value != IR_ID_UNDERLYING_INVALID
+ 19115:                                              ? c_ir_emit_cast_instruction(builder, comparison_address, wide_atomic_runtime_pointer_type,
+ 19116:                                                                           IR_CONVERSION_POINTER_REINTERPRET, source)
+ 19117:                                              : IR_VALUE_ID_INVALID;
+ 19118:                     IrValueId success_order = c_ir_emit_integer_value_typed(builder, (u64)order, false, token, builder->s32_type);
+ 19119:                     IrValueId failed_order = c_ir_emit_integer_value_typed(builder, (u64)failure_order, false, token, builder->s32_type);
+ 19120:                     IrTypeId parameter_types[5] = {wide_atomic_runtime_pointer_type, wide_atomic_runtime_pointer_type, comparison_type,
+ 19121:                                                    builder->s32_type, builder->s32_type};
+ 19122:                     IrValueId arguments[5] = {comparison_address, expected_address, comparison_desired, success_order, failed_order};
+ 19123:                     selected->result = IR_VALUE_ID_INVALID;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 19450 =====
+ 19430:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_AND      ? IR_ATOMIC_BITWISE_AND
+ 19431:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_OR       ? IR_ATOMIC_BITWISE_OR
+ 19432:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_XOR      ? IR_ATOMIC_BITWISE_XOR
+ 19433:                                                   : selected->builtin_atomic == C_IR_ATOMIC_BUILTIN_FETCH_NAND     ? IR_ATOMIC_BITWISE_NAND
+ 19434:                                                                                                                    : IR_ATOMIC_EXCHANGE;
+ 19435:                     IrTypeId operation_type = value_type_id;
+ 19436:                     IrValueId operation_place = place;
+ 19437:                     IrValueId operation_value = value;
+ 19438:                     if (representation_value)
+ 19439:                     {
+ 19440:                         if ((selected->builtin_atomic_generic && operation != IR_ATOMIC_EXCHANGE) ||
+ 19441:                             (!selected->builtin_atomic_generic &&
+ 19442:                              (selected->builtin_atomic_gnu || operation != IR_ATOMIC_EXCHANGE ||
+ 19443:                               !c_ir_atomic_aggregate_access_representable(builder, atomic_type))))
+ 19444:                         {
+ 19445:                             builder->failure_message = S8("C IR lowering does not support this atomic aggregate read-modify-write");
+ 19446:                             return false;
+ 19447:                         }
+ 19448:                         operation_type = selected->builtin_atomic_generic
+ 19449:                                              ? generic_bits_type
+ 19450:                                              : (atomic_width == 16 ? c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_INT128)
+ 19451:                                                                    : c_ir_unsigned_type_of_size(builder, atomic_width));
+ 19452:                         operation_place = c_ir_atomic_aggregate_bits_place(builder, place, atomic_type, operation_type, source);
+ 19453:                         operation_value = c_ir_atomic_aggregate_bits_value(builder, value, value_type_id, operation_type, true, source);
+ 19454:                         if (operation_place.value == IR_ID_UNDERLYING_INVALID || operation_value.value == IR_ID_UNDERLYING_INVALID)
+ 19455:                         {
+ 19456:                             return false;
+ 19457:                         }
+ 19458:                     }
+ 19459:                     if (wide_atomic_runtime && !aggregate_value)
+ 19460:                     {
+ 19461:                         operation_type = wide_atomic_runtime_type;
+ 19462:                         operation_value = c_ir_emit_cast(builder, value, operation_type, source);
+ 19463:                         if (operation_value.value == IR_ID_UNDERLYING_INVALID)
+ 19464:                         {
+ 19465:                             return false;
+ 19466:                         }
+ 19467:                     }
+ 19468:                     IrValueId previous = IR_VALUE_ID_INVALID;
+ 19469:                     if (wide_atomic_runtime)
+ 19470:                     {
+ 19471:                         String8 runtime_name = operation == IR_ATOMIC_ADD          ? S8("__atomic_fetch_add_16")
+ 19472:                                                : operation == IR_ATOMIC_SUBTRACT ? S8("__atomic_fetch_sub_16")
+ 19473:                                                : operation == IR_ATOMIC_BITWISE_AND ? S8("__atomic_fetch_and_16")
+ 19474:                                                : operation == IR_ATOMIC_BITWISE_OR  ? S8("__atomic_fetch_or_16")
+ 19475:                                                : operation == IR_ATOMIC_BITWISE_XOR ? S8("__atomic_fetch_xor_16")
+ 19476:                                                : operation == IR_ATOMIC_BITWISE_NAND ? S8("__atomic_fetch_nand_16")
+ 19477:                                                                                       : S8("__atomic_exchange_16");
+ 19478:                         IrTypeId runtime_type = IR_TYPE_ID_INVALID;
+ 19479:                         IrTypeId runtime_pointer_type = IR_TYPE_ID_INVALID;
+ 19480:                         IrValueId address = IR_VALUE_ID_INVALID;
+ 19481:                         bool runtime_arguments = c_ir_wide_atomic_runtime_arguments(builder, place, atomic_type, source,
+ 19482:                                                                                      &runtime_type, &runtime_pointer_type, &address);
+ 19483:                         IrValueId order_value = c_ir_emit_integer_value_typed(builder, (u64)order, false, token, builder->s32_type);
+ 19484:                         IrTypeId parameter_types[3] = {runtime_pointer_type, runtime_type, builder->s32_type};
+ 19485:                         IrValueId arguments[3] = {address, operation_value, order_value};
+ 19486:                         if (!runtime_arguments || runtime_type.value != operation_type.value ||
+ 19487:                             runtime_pointer_type.value != wide_atomic_runtime_pointer_type.value ||
+ 19488:                             address.value == IR_ID_UNDERLYING_INVALID || order_value.value == IR_ID_UNDERLYING_INVALID ||
+ 19489:                             !c_ir_emit_runtime_call(builder, token, runtime_name, runtime_type,
+ 19490:                                                     parameter_types, arguments, BUSTER_ARRAY_LENGTH(arguments), &previous))
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 19906 =====
+ 19886:                 imaginary_part = child_value;
+ 19887:             }
+ 19888:             else if (continuation == C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_REAL)
+ 19889:             {
+ 19890:                 if (!child_success)
+ 19891:                 {
+ 19892:                     return C_IR_PREPARED_CALL_STEP_FAILED;
+ 19893:                 }
+ 19894:                 frame->as.prepared_call.state->first = child_value;
+ 19895:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_IMAGINARY, starts[1], ends[1], false);
+ 19896:             }
+ 19897:             else
+ 19898:             {
+ 19899:                 return c_ir_prepared_call_request_expression(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_COMPLEX_REAL, starts[0], ends[0], false);
+ 19900:             }
+ 19901:             if (real_part.value >= builder->function->value_count || imaginary_part.value >= builder->function->value_count)
+ 19902:             {
+ 19903:                 return false;
+ 19904:             }
+ 19905:             IrSourceRange complex_source = c_ir_token_source_range(builder, token);
+ 19906:             IrTypeId element = c_ir_usual_arithmetic_type(builder, builder->function->values[real_part.value].canonical_type,
+ 19907:                                                           builder->function->values[imaginary_part.value].canonical_type);
+ 19908:             IrType* element_type = ir_type_from_id(&builder->program->types, element);
+ 19909:             IrTypeId complex_type = element_type && element_type->kind == IR_TYPE_FLOAT ? c_ir_complex_type_for_element(builder, element) : IR_TYPE_ID_INVALID;
+ 19910:             if (complex_type.value == IR_ID_UNDERLYING_INVALID)
+ 19911:             {
+ 19912:                 builder->failure_message = S8("__builtin_complex takes two real floating-point arguments");
+ 19913:                 builder->failure_token_index = selected->token_index;
+ 19914:                 return false;
+ 19915:             }
+ 19916:             real_part = c_ir_emit_cast(builder, real_part, element, complex_source);
+ 19917:             imaginary_part = c_ir_emit_cast(builder, imaginary_part, element, complex_source);
+ 19918:             if (real_part.value == IR_ID_UNDERLYING_INVALID || imaginary_part.value == IR_ID_UNDERLYING_INVALID)
+ 19919:             {
+ 19920:                 return false;
+ 19921:             }
+ 19922:             selected->result = c_ir_complex_compose(builder, complex_type, real_part, imaginary_part, complex_source);
+ 19923:             if (selected->result.value == IR_ID_UNDERLYING_INVALID)
+ 19924:             {
+ 19925:                 return false;
+ 19926:             }
+ 19927:             selected->argument_count = argument_count;
+ 19928:             selected->emitted = true;
+ 19929:             remaining -= 1;
+ 19930:             continue;
+ 19931:         }
+ 19932:         // `__builtin_frame_address(0)` answers the current frame's stack
+ 19933:         // pointer. That is an address inside the frame rather than the frame
+ 19934:         // base GCC documents, which is what its callers actually use it for:
+ 19935:         // QuickJS compares one against another to measure recursion depth.
+ 19936:         // A non-zero level asks for a caller's frame, which needs a frame
+ 19937:         // pointer chain this backend does not promise, so it is refused
+ 19938:         // instead of answered approximately.
+ 19939:         if (selected->builtin_frame_address)
+ 19940:         {
+ 19941:             CIrConstantValue frame_level = {0};
+ 19942:             if (selected->close_index <= selected->open_index + 1 ||
+ 19943:                 !c_ir_constant_evaluate(builder, selected->open_index + 1, selected->close_index, &frame_level) || frame_level.kind != C_IR_CONSTANT_INTEGER)
+ 19944:             {
+ 19945:                 builder->failure_message = S8("__builtin_frame_address requires an integer constant level");
+ 19946:                 builder->failure_token_index = selected->token_index;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25279 =====
+ 25259:             }
+ 25260:             *type = value->element_type;
+ 25261:             value = ir_type_from_id(&builder->program->types, *type);
+ 25262:         }
+ 25263:         if (!value || (value->kind != IR_TYPE_STRUCT && value->kind != IR_TYPE_UNION) || index + 1 >= end ||
+ 25264:             builder->preprocess.tokens[index + 1].kind != C_TOKEN_IDENTIFIER)
+ 25265:         {
+ 25266:             return false;
+ 25267:         }
+ 25268:         IrTypeId member_type = IR_TYPE_ID_INVALID;
+ 25269:         if (!c_ir_promoted_member_type(builder, *type, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[index + 1]), &member_type))
+ 25270:         {
+ 25271:             return false;
+ 25272:         }
+ 25273:         *type = member_type;
+ 25274:         index += 2;
+ 25275:     }
+ 25276:     return index == end && type->value != IR_ID_UNDERLYING_INVALID;
+ 25277: }
+ 25278: 
+ 25279: BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type);
+ 25280: BUSTER_C_INTERNAL u32 c_ir_unary_expression_end(CIntegerIrBuilder* builder, u32 start, u32 end);
+ 25281: BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out);
+ 25282: BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields);
+ 25283: 
+ 25284: BUSTER_C_INTERNAL IrTypeId c_ir_sizeof_operand_decay(CIntegerIrBuilder* builder, IrTypeId type)
+ 25285: {
+ 25286:     IrType* value = ir_type_from_id(&builder->program->types, type);
+ 25287:     IrTypeId result;
+ 25288:     if (value && value->kind == IR_TYPE_ARRAY)
+ 25289:     {
+ 25290:         result = c_ir_add_pointer_type(builder->program, builder->pointer_types, value->element_type);
+ 25291:     }
+ 25292:     else
+ 25293:     {
+ 25294:         result = type;
+ 25295:     }
+ 25296: 
+ 25297:     return result;
+ 25298: }
+ 25299: 
+ 25300: BUSTER_C_INTERNAL bool c_ir_sizeof_operand_postfix_chain_attempt(CIntegerIrBuilder* builder, IrTypeId* type, u32 index, u32 end, bool promote_bit_fields)
+ 25301: {
+ 25302:     while (index < end)
+ 25303:     {
+ 25304:         IrType* value = ir_type_from_id(&builder->program->types, *type);
+ 25305:         if (!value)
+ 25306:         {
+ 25307:             return false;
+ 25308:         }
+ 25309:         CToken token = builder->preprocess.tokens[index];
+ 25310:         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+ 25311:         {
+ 25312:             u32 close = c_ir_matching_delimiter_cached(builder, index, end, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
+ 25313:             if (close >= end)
+ 25314:             {
+ 25315:                 return false;
+ 25316:             }
+ 25317:             // `E1[E2]` may be written with the subscripted operand on either
+ 25318:             // side (C11 6.5.2.1p2), so an integer on the left names the
+ 25319:             // element of whatever the brackets hold -- `sizeof 0[letters]` is
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25542 =====
+ 25522:     else if (type.value == IR_ID_UNDERLYING_INVALID)
+ 25523:     {
+ 25524:         // A bare function name resolves to its function type so a call applied
+ 25525:         // through parentheses, e.g. `(name)(...)`, still reaches the return type.
+ 25526:         u32 declaration_index = c_ir_find_function(builder, c_token_spelling(builder->preprocess.spelling_base, token));
+ 25527:         if (declaration_index != UINT32_MAX && builder->declaration_functions && builder->declaration_functions[declaration_index])
+ 25528:         {
+ 25529:             type = builder->declaration_functions[declaration_index]->canonical_type;
+ 25530:         }
+ 25531:     }
+ 25532:     if (type.value == IR_ID_UNDERLYING_INVALID)
+ 25533:     {
+ 25534:         return false;
+ 25535:     }
+ 25536:     *type_out = type;
+ 25537:     return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, chain_start, end, promote_bit_fields);
+ 25538: }
+ 25539: 
+ 25540: /* Resolves the C result type of a sizeof/alignof expression operand strictly: every
+ 25541:    sub-operand must resolve through a mapped entity, literal, cast, or call before any
+ 25542:    type is combined, and binary operators apply the usual arithmetic conversions (so
+ 25543:    narrow operands promote to int and mixed widths take the wider side). Returning
+ 25544:    false defers to the older per-shape paths and ultimately the caller's fallback; a
+ 25545:    guessed type must never come out of this function, because the guessed size folds
+ 25546:    silently into the program (the 2026-08-08 array-bound incident, and the same
+ 25547:    defect shape in function bodies). */
+ 25548: BUSTER_C_INTERNAL bool c_ir_sizeof_operand_type_attempt_depth(CIntegerIrBuilder* builder, u32 start, u32 end, IrTypeId* type_out, u32 remaining_depth, bool promote_bit_fields)
+ 25549: {
+ 25550:     // This resolver is a speculative type query: false lets the caller use
+ 25551:     // the ordinary expression paths.  Bound its recursive precedence walk so
+ 25552:     // adversarially deep, otherwise-valid expressions cannot exhaust the host
+ 25553:     // stack in sanitizer/fuzz configurations, whose instrumented frames are
+ 25554:     // substantially larger than Release frames.
+ 25555:     if (!remaining_depth)
+ 25556:     {
+ 25557:         return false;
+ 25558:     }
+ 25559:     remaining_depth -= 1;
+ 25560:     // GNU __extension__ is a diagnostic-only marker on the expression that
+ 25561:     // follows it; it contributes no value and no type of its own, so strip it
+ 25562:     // the same way a redundant parenthesis is stripped, and keep stripping
+ 25563:     // both until neither applies.  musl's <complex.h> spells `I` as
+ 25564:     // `(__extension__ (0.0f+1.0fi))` under __GNUC__, and leaving the marker in
+ 25565:     // this walk made the whole group resolve as the leading `0.0f` -- so
+ 25566:     // `0*I` was a float, `2.0+0*I` was a double, and every <tgmath.h> macro
+ 25567:     // reached through a complex argument selected the real function.
+ 25568:     bool trimmed = true;
+ 25569:     while (trimmed)
+ 25570:     {
+ 25571:         trimmed = false;
+ 25572:         while (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+ 25573:                c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1)
+ 25574:         {
+ 25575:             start += 1;
+ 25576:             end -= 1;
+ 25577:             trimmed = true;
+ 25578:         }
+ 25579:         while (start < end && builder->preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER &&
+ 25580:                string_equal(c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start]), S8("__extension__")))
+ 25581:         {
+ 25582:             start += 1;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25792 =====
+ 25772:         {
+ 25773:             return false;
+ 25774:         }
+ 25775:         u32 true_start = first_question + 1;
+ 25776:         u32 true_end = first_colon;
+ 25777:         if (true_start == true_end)
+ 25778:         {
+ 25779:             // GNU `a ?: b` reuses the condition as the true arm.
+ 25780:             true_start = start;
+ 25781:             true_end = first_question;
+ 25782:         }
+ 25783:         IrTypeId true_type = IR_TYPE_ID_INVALID;
+ 25784:         IrTypeId false_type = IR_TYPE_ID_INVALID;
+ 25785:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, true_start, true_end, &true_type, remaining_depth, true) ||
+ 25786:             !c_ir_sizeof_operand_type_attempt_depth(builder, first_colon + 1, end, &false_type, remaining_depth, true))
+ 25787:         {
+ 25788:             return false;
+ 25789:         }
+ 25790:         true_type = c_ir_sizeof_operand_decay(builder, true_type);
+ 25791:         false_type = c_ir_sizeof_operand_decay(builder, false_type);
+ 25792:         IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, true_type, false_type);
+ 25793:         if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
+ 25794:         {
+ 25795:             *type_out = arithmetic;
+ 25796:             return true;
+ 25797:         }
+ 25798:         IrTypeId merged = c_ir_conditional_result_type_attempt(builder, true_type, false_type, true_start, true_end, first_colon + 1, end);
+ 25799:         if (builder->queries->has_request || merged.value == IR_ID_UNDERLYING_INVALID)
+ 25800:         {
+ 25801:             return false;
+ 25802:         }
+ 25803:         *type_out = merged;
+ 25804:         return true;
+ 25805:     }
+ 25806:     if (logical_index != UINT32_MAX)
+ 25807:     {
+ 25808:         *type_out = builder->s32_type;
+ 25809:         return true;
+ 25810:     }
+ 25811:     u32 bitwise_index = bit_or_index != UINT32_MAX ? bit_or_index : bit_xor_index != UINT32_MAX ? bit_xor_index : bit_and_index;
+ 25812:     if (bitwise_index != UINT32_MAX)
+ 25813:     {
+ 25814:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25815:         IrTypeId right = IR_TYPE_ID_INVALID;
+ 25816:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, bitwise_index, &left, remaining_depth, true) ||
+ 25817:             !c_ir_sizeof_operand_type_attempt_depth(builder, bitwise_index + 1, end, &right, remaining_depth, true))
+ 25818:         {
+ 25819:             return false;
+ 25820:         }
+ 25821:         IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
+ 25822:         if (result.value == IR_ID_UNDERLYING_INVALID)
+ 25823:         {
+ 25824:             return false;
+ 25825:         }
+ 25826:         *type_out = result;
+ 25827:         return true;
+ 25828:     }
+ 25829:     if (comparison_index != UINT32_MAX)
+ 25830:     {
+ 25831:         *type_out = builder->s32_type;
+ 25832:         return true;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25821 =====
+ 25801:             return false;
+ 25802:         }
+ 25803:         *type_out = merged;
+ 25804:         return true;
+ 25805:     }
+ 25806:     if (logical_index != UINT32_MAX)
+ 25807:     {
+ 25808:         *type_out = builder->s32_type;
+ 25809:         return true;
+ 25810:     }
+ 25811:     u32 bitwise_index = bit_or_index != UINT32_MAX ? bit_or_index : bit_xor_index != UINT32_MAX ? bit_xor_index : bit_and_index;
+ 25812:     if (bitwise_index != UINT32_MAX)
+ 25813:     {
+ 25814:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25815:         IrTypeId right = IR_TYPE_ID_INVALID;
+ 25816:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, bitwise_index, &left, remaining_depth, true) ||
+ 25817:             !c_ir_sizeof_operand_type_attempt_depth(builder, bitwise_index + 1, end, &right, remaining_depth, true))
+ 25818:         {
+ 25819:             return false;
+ 25820:         }
+ 25821:         IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
+ 25822:         if (result.value == IR_ID_UNDERLYING_INVALID)
+ 25823:         {
+ 25824:             return false;
+ 25825:         }
+ 25826:         *type_out = result;
+ 25827:         return true;
+ 25828:     }
+ 25829:     if (comparison_index != UINT32_MAX)
+ 25830:     {
+ 25831:         *type_out = builder->s32_type;
+ 25832:         return true;
+ 25833:     }
+ 25834:     if (shift_index != UINT32_MAX)
+ 25835:     {
+ 25836:         // A shift yields the promoted left operand; the right operand never widens it.
+ 25837:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25838:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, shift_index, &left, remaining_depth, true))
+ 25839:         {
+ 25840:             return false;
+ 25841:         }
+ 25842:         IrTypeId promoted = c_ir_usual_arithmetic_type(builder, left, left);
+ 25843:         IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+ 25844:         if (!promoted_value || promoted_value->kind != IR_TYPE_INTEGER)
+ 25845:         {
+ 25846:             return false;
+ 25847:         }
+ 25848:         *type_out = promoted;
+ 25849:         return true;
+ 25850:     }
+ 25851:     if (additive_index != UINT32_MAX)
+ 25852:     {
+ 25853:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25854:         IrTypeId right = IR_TYPE_ID_INVALID;
+ 25855:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, additive_index, &left, remaining_depth, true) ||
+ 25856:             !c_ir_sizeof_operand_type_attempt_depth(builder, additive_index + 1, end, &right, remaining_depth, true))
+ 25857:         {
+ 25858:             return false;
+ 25859:         }
+ 25860:         left = c_ir_sizeof_operand_decay(builder, left);
+ 25861:         right = c_ir_sizeof_operand_decay(builder, right);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25842 =====
+ 25822:         if (result.value == IR_ID_UNDERLYING_INVALID)
+ 25823:         {
+ 25824:             return false;
+ 25825:         }
+ 25826:         *type_out = result;
+ 25827:         return true;
+ 25828:     }
+ 25829:     if (comparison_index != UINT32_MAX)
+ 25830:     {
+ 25831:         *type_out = builder->s32_type;
+ 25832:         return true;
+ 25833:     }
+ 25834:     if (shift_index != UINT32_MAX)
+ 25835:     {
+ 25836:         // A shift yields the promoted left operand; the right operand never widens it.
+ 25837:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25838:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, shift_index, &left, remaining_depth, true))
+ 25839:         {
+ 25840:             return false;
+ 25841:         }
+ 25842:         IrTypeId promoted = c_ir_usual_arithmetic_type(builder, left, left);
+ 25843:         IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+ 25844:         if (!promoted_value || promoted_value->kind != IR_TYPE_INTEGER)
+ 25845:         {
+ 25846:             return false;
+ 25847:         }
+ 25848:         *type_out = promoted;
+ 25849:         return true;
+ 25850:     }
+ 25851:     if (additive_index != UINT32_MAX)
+ 25852:     {
+ 25853:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25854:         IrTypeId right = IR_TYPE_ID_INVALID;
+ 25855:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, additive_index, &left, remaining_depth, true) ||
+ 25856:             !c_ir_sizeof_operand_type_attempt_depth(builder, additive_index + 1, end, &right, remaining_depth, true))
+ 25857:         {
+ 25858:             return false;
+ 25859:         }
+ 25860:         left = c_ir_sizeof_operand_decay(builder, left);
+ 25861:         right = c_ir_sizeof_operand_decay(builder, right);
+ 25862:         IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, left, right);
+ 25863:         if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
+ 25864:         {
+ 25865:             *type_out = arithmetic;
+ 25866:             return true;
+ 25867:         }
+ 25868:         IrType* left_value = ir_type_from_id(&builder->program->types, left);
+ 25869:         IrType* right_value = ir_type_from_id(&builder->program->types, right);
+ 25870:         if (!left_value || !right_value)
+ 25871:         {
+ 25872:             return false;
+ 25873:         }
+ 25874:         bool minus = c_token_is_punctuator(&builder->preprocess.tokens[additive_index], C_PUNCTUATOR_MINUS);
+ 25875:         bool left_integer = left_value->kind == IR_TYPE_BOOLEAN || left_value->kind == IR_TYPE_INTEGER || left_value->kind == IR_TYPE_ENUM;
+ 25876:         bool right_integer = right_value->kind == IR_TYPE_BOOLEAN || right_value->kind == IR_TYPE_INTEGER || right_value->kind == IR_TYPE_ENUM;
+ 25877:         if (left_value->kind == IR_TYPE_POINTER && right_value->kind == IR_TYPE_POINTER && minus)
+ 25878:         {
+ 25879:             *type_out = builder->ptrdiff_type;
+ 25880:             return true;
+ 25881:         }
+ 25882:         if (left_value->kind == IR_TYPE_POINTER && right_integer)
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25862 =====
+ 25842:         IrTypeId promoted = c_ir_usual_arithmetic_type(builder, left, left);
+ 25843:         IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+ 25844:         if (!promoted_value || promoted_value->kind != IR_TYPE_INTEGER)
+ 25845:         {
+ 25846:             return false;
+ 25847:         }
+ 25848:         *type_out = promoted;
+ 25849:         return true;
+ 25850:     }
+ 25851:     if (additive_index != UINT32_MAX)
+ 25852:     {
+ 25853:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25854:         IrTypeId right = IR_TYPE_ID_INVALID;
+ 25855:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, additive_index, &left, remaining_depth, true) ||
+ 25856:             !c_ir_sizeof_operand_type_attempt_depth(builder, additive_index + 1, end, &right, remaining_depth, true))
+ 25857:         {
+ 25858:             return false;
+ 25859:         }
+ 25860:         left = c_ir_sizeof_operand_decay(builder, left);
+ 25861:         right = c_ir_sizeof_operand_decay(builder, right);
+ 25862:         IrTypeId arithmetic = c_ir_usual_arithmetic_type(builder, left, right);
+ 25863:         if (arithmetic.value != IR_ID_UNDERLYING_INVALID)
+ 25864:         {
+ 25865:             *type_out = arithmetic;
+ 25866:             return true;
+ 25867:         }
+ 25868:         IrType* left_value = ir_type_from_id(&builder->program->types, left);
+ 25869:         IrType* right_value = ir_type_from_id(&builder->program->types, right);
+ 25870:         if (!left_value || !right_value)
+ 25871:         {
+ 25872:             return false;
+ 25873:         }
+ 25874:         bool minus = c_token_is_punctuator(&builder->preprocess.tokens[additive_index], C_PUNCTUATOR_MINUS);
+ 25875:         bool left_integer = left_value->kind == IR_TYPE_BOOLEAN || left_value->kind == IR_TYPE_INTEGER || left_value->kind == IR_TYPE_ENUM;
+ 25876:         bool right_integer = right_value->kind == IR_TYPE_BOOLEAN || right_value->kind == IR_TYPE_INTEGER || right_value->kind == IR_TYPE_ENUM;
+ 25877:         if (left_value->kind == IR_TYPE_POINTER && right_value->kind == IR_TYPE_POINTER && minus)
+ 25878:         {
+ 25879:             *type_out = builder->ptrdiff_type;
+ 25880:             return true;
+ 25881:         }
+ 25882:         if (left_value->kind == IR_TYPE_POINTER && right_integer)
+ 25883:         {
+ 25884:             *type_out = left;
+ 25885:             return true;
+ 25886:         }
+ 25887:         if (!minus && left_integer && right_value->kind == IR_TYPE_POINTER)
+ 25888:         {
+ 25889:             *type_out = right;
+ 25890:             return true;
+ 25891:         }
+ 25892:         return false;
+ 25893:     }
+ 25894:     if (multiplicative_index != UINT32_MAX)
+ 25895:     {
+ 25896:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25897:         IrTypeId right = IR_TYPE_ID_INVALID;
+ 25898:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, multiplicative_index, &left, remaining_depth, true) ||
+ 25899:             !c_ir_sizeof_operand_type_attempt_depth(builder, multiplicative_index + 1, end, &right, remaining_depth, true))
+ 25900:         {
+ 25901:             return false;
+ 25902:         }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25903 =====
+ 25883:         {
+ 25884:             *type_out = left;
+ 25885:             return true;
+ 25886:         }
+ 25887:         if (!minus && left_integer && right_value->kind == IR_TYPE_POINTER)
+ 25888:         {
+ 25889:             *type_out = right;
+ 25890:             return true;
+ 25891:         }
+ 25892:         return false;
+ 25893:     }
+ 25894:     if (multiplicative_index != UINT32_MAX)
+ 25895:     {
+ 25896:         IrTypeId left = IR_TYPE_ID_INVALID;
+ 25897:         IrTypeId right = IR_TYPE_ID_INVALID;
+ 25898:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start, multiplicative_index, &left, remaining_depth, true) ||
+ 25899:             !c_ir_sizeof_operand_type_attempt_depth(builder, multiplicative_index + 1, end, &right, remaining_depth, true))
+ 25900:         {
+ 25901:             return false;
+ 25902:         }
+ 25903:         IrTypeId result = c_ir_usual_arithmetic_type(builder, left, right);
+ 25904:         if (result.value == IR_ID_UNDERLYING_INVALID)
+ 25905:         {
+ 25906:             return false;
+ 25907:         }
+ 25908:         *type_out = result;
+ 25909:         return true;
+ 25910:     }
+ 25911:     CToken first = builder->preprocess.tokens[start];
+ 25912:     if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(builder->preprocess.spelling_base, first), S8("sizeof")) || c_parse_alignof_word(c_token_spelling(builder->preprocess.spelling_base, first))))
+ 25913:     {
+ 25914:         if (start + 1 >= end)
+ 25915:         {
+ 25916:             return false;
+ 25917:         }
+ 25918:         bool parenthesized = c_token_is_punctuator(&builder->preprocess.tokens[start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+ 25919:                              c_ir_matching_delimiter_cached(builder, start + 1, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == end - 1;
+ 25920:         if (!parenthesized && c_ir_unary_expression_end(builder, start + 1, end) != end)
+ 25921:         {
+ 25922:             return false;
+ 25923:         }
+ 25924:         *type_out = builder->size_type;
+ 25925:         return true;
+ 25926:     }
+ 25927:     if (c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION))
+ 25928:     {
+ 25929:         *type_out = builder->s32_type;
+ 25930:         return true;
+ 25931:     }
+ 25932:     if (c_token_is_punctuator(&first, C_PUNCTUATOR_STAR))
+ 25933:     {
+ 25934:         IrTypeId operand = IR_TYPE_ID_INVALID;
+ 25935:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, false))
+ 25936:         {
+ 25937:             return false;
+ 25938:         }
+ 25939:         IrType* value = ir_type_from_id(&builder->program->types, operand);
+ 25940:         if (!value || (value->kind != IR_TYPE_POINTER && value->kind != IR_TYPE_ARRAY))
+ 25941:         {
+ 25942:             return false;
+ 25943:         }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 25965 =====
+ 25945:         return true;
+ 25946:     }
+ 25947:     if (c_token_is_punctuator(&first, C_PUNCTUATOR_AMPERSAND))
+ 25948:     {
+ 25949:         IrTypeId operand = IR_TYPE_ID_INVALID;
+ 25950:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, false))
+ 25951:         {
+ 25952:             return false;
+ 25953:         }
+ 25954:         *type_out = c_ir_add_pointer_type(builder->program, builder->pointer_types, operand);
+ 25955:         return true;
+ 25956:     }
+ 25957:     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS) ||
+ 25958:         c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE))
+ 25959:     {
+ 25960:         IrTypeId operand = IR_TYPE_ID_INVALID;
+ 25961:         if (!c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, &operand, remaining_depth, true))
+ 25962:         {
+ 25963:             return false;
+ 25964:         }
+ 25965:         IrTypeId promoted = c_ir_usual_arithmetic_type(builder, operand, operand);
+ 25966:         IrType* promoted_value = ir_type_from_id(&builder->program->types, promoted);
+ 25967:         if (!promoted_value || (c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) && promoted_value->kind != IR_TYPE_INTEGER))
+ 25968:         {
+ 25969:             return false;
+ 25970:         }
+ 25971:         *type_out = promoted;
+ 25972:         return true;
+ 25973:     }
+ 25974:     if (c_token_is_punctuator(&first, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&first, C_PUNCTUATOR_MINUS_MINUS))
+ 25975:     {
+ 25976:         return c_ir_sizeof_operand_type_attempt_depth(builder, start + 1, end, type_out, remaining_depth, promote_bit_fields);
+ 25977:     }
+ 25978:     if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
+ 25979:     {
+ 25980:         u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+ 25981:         if (close >= end)
+ 25982:         {
+ 25983:             return false;
+ 25984:         }
+ 25985:         IrTypeId cast_type = IR_TYPE_ID_INVALID;
+ 25986:         bool named = c_ir_query_group_type_name(builder, start, close, &cast_type);
+ 25987:         if (builder->queries->has_request)
+ 25988:         {
+ 25989:             return false;
+ 25990:         }
+ 25991:         if (named && cast_type.value != IR_ID_UNDERLYING_INVALID)
+ 25992:         {
+ 25993:             if (close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_BRACE))
+ 25994:             {
+ 25995:                 u32 initializer_close = c_ir_matching_delimiter_cached(builder, close + 1, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE);
+ 25996:                 if (initializer_close >= end)
+ 25997:                 {
+ 25998:                     return false;
+ 25999:                 }
+ 26000:                 IrTypeId literal_type = IR_TYPE_ID_INVALID;
+ 26001:                 if (!c_ir_query_compound_type(builder, start + 1, close, close + 1, initializer_close, &literal_type) ||
+ 26002:                     literal_type.value == IR_ID_UNDERLYING_INVALID)
+ 26003:                 {
+ 26004:                     return false;
+ 26005:                 }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 30310 =====
+ 30290:             if (initializer_close < end)
+ 30291:             {
+ 30292:                 c_ir_query_compound_type(builder, start + 1, close, close + 1, initializer_close, &compound_type);
+ 30293:                 if (builder->queries->has_request)
+ 30294:                 {
+ 30295:                     return IR_TYPE_ID_INVALID;
+ 30296:                 }
+ 30297:             }
+ 30298:             if (compound_type.value != IR_ID_UNDERLYING_INVALID)
+ 30299:             {
+ 30300:                 return compound_type;
+ 30301:             }
+ 30302:         }
+ 30303:     }
+ 30304:     c_ir_expression_core_range(builder, &start, &end);
+ 30305:     // Resolve complete arithmetic/cast expressions before the legacy
+ 30306:     // identifier scan below.  That scan is intentionally a cheap fallback,
+ 30307:     // but for `((int)(pointer_difference)) + index` it retained the last
+ 30308:     // member's pointer type and made a surrounding conditional appear to
+ 30309:     // merge `int` with `pointer`.  The strict operand resolver already knows
+ 30310:     // the usual arithmetic conversions and pointer arithmetic, so use its
+ 30311:     // result whenever the full range is unambiguous.
+ 30312:     IrTypeId strict_type = IR_TYPE_ID_INVALID;
+ 30313:     if (c_ir_sizeof_operand_type_attempt(builder, start, end, &strict_type))
+ 30314:     {
+ 30315:         // The strict operand walk deliberately preserves an array's declared
+ 30316:         // type so callers such as sizeof can distinguish an array from its
+ 30317:         // element pointer.  An ordinary expression value, however, applies
+ 30318:         // the C array-to-pointer conversion before a conditional compares
+ 30319:         // the branch types (for example `array : 0`).
+ 30320:         IrType* strict_value = ir_type_from_id(&builder->program->types, strict_type);
+ 30321:         if (strict_value && strict_value->kind == IR_TYPE_FUNCTION)
+ 30322:         {
+ 30323:             // Function designators decay to pointers in value contexts.  The
+ 30324:             // strict operand query intentionally retains the declared
+ 30325:             // function type for sizeof/type-only callers, so perform the
+ 30326:             // value-context conversion here (not in the query itself).  This
+ 30327:             // matters for `lax ? iter_auxlax : iter_auxstrict` passed to
+ 30328:             // lua_pushcfunction.
+ 30329:             return c_ir_add_pointer_type(builder->program, builder->pointer_types, strict_type);
+ 30330:         }
+ 30331:         return c_ir_sizeof_operand_decay(builder, strict_type);
+ 30332:     }
+ 30333:     if (builder->queries->has_request)
+ 30334:     {
+ 30335:         return IR_TYPE_ID_INVALID;
+ 30336:     }
+ 30337:     // Parenthesized function designators are still calls: `(gzgetc)(g)` is
+ 30338:     // common in zlib's gzgetc macro and must predict the declared return type
+ 30339:     // rather than the function-pointer type of the designator.  The strict
+ 30340:     // operand resolver already handles the parenthesized postfix call chain.
+ 30341:     if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+ 30342:     {
+ 30343:         u32 close = c_ir_matching_delimiter_cached(builder, start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+ 30344:         if (close + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[close + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
+ 30345:         {
+ 30346:             IrTypeId call_type = IR_TYPE_ID_INVALID;
+ 30347:             bool call_ready = c_ir_sizeof_operand_type_attempt(builder, start, end, &call_type);
+ 30348:             if (builder->queries->has_request)
+ 30349:             {
+ 30350:                 return IR_TYPE_ID_INVALID;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 30389 =====
+ 30369:         if (builder->queries->has_request)
+ 30370:         {
+ 30371:             return IR_TYPE_ID_INVALID;
+ 30372:         }
+ 30373:         if (assignment_type_ready && assignment_type.value != IR_ID_UNDERLYING_INVALID)
+ 30374:         {
+ 30375:             return assignment_type;
+ 30376:         }
+ 30377:     }
+ 30378:     // Unary integer operators keep the promoted operand type. In particular,
+ 30379:     // a cast under `~` must not fall through to the s32 literal fallback.
+ 30380:     if (start < end && (c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_TILDE) ||
+ 30381:                         c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_PLUS) ||
+ 30382:                         c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_MINUS)))
+ 30383:     {
+ 30384:         IrTypeId operand_type = IR_TYPE_ID_INVALID;
+ 30385:         if (!c_ir_query_prediction(builder, start + 1, end, &operand_type) && builder->queries->has_request)
+ 30386:         {
+ 30387:             return IR_TYPE_ID_INVALID;
+ 30388:         }
+ 30389:         IrTypeId predicted = c_ir_usual_arithmetic_type(builder, operand_type, operand_type);
+ 30390:         IrType* predicted_value = ir_type_from_id(&builder->program->types, predicted);
+ 30391:         if (predicted_value && predicted_value->kind == IR_TYPE_INTEGER)
+ 30392:         {
+ 30393:             return predicted;
+ 30394:         }
+ 30395:     }
+ 30396:     // Unary dereference changes the operand's pointer/array type to its
+ 30397:     // element type.  Keep this in the prediction path as well as the lowering
+ 30398:     // path; otherwise a conditional such as `*p++ ? ... : int_call()` is
+ 30399:     // predicted as a pointer and the later comparison rejects an ordinary
+ 30400:     // promoted character result against a nonzero integer.
+ 30401:     if (start < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_STAR))
+ 30402:     {
+ 30403:         IrTypeId dereferenced_type = IR_TYPE_ID_INVALID;
+ 30404:         if (c_ir_sizeof_operand_type_attempt(builder, start, end, &dereferenced_type))
+ 30405:         {
+ 30406:             return dereferenced_type;
+ 30407:         }
+ 30408:     }
+ 30409:     if (start + 1 < end && c_token_is_punctuator(&builder->preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND_AMPERSAND) &&
+ 30410:         builder->preprocess.tokens[start + 1].kind == C_TOKEN_IDENTIFIER)
+ 30411:     {
+ 30412:         CIrLabel* label = c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(builder->preprocess.spelling_base, builder->preprocess.tokens[start + 1]));
+ 30413:         if (label && start + 2 == end)
+ 30414:         {
+ 30415:             return c_ir_add_pointer_type(builder->program, builder->pointer_types, builder->void_type);
+ 30416:         }
+ 30417:     }
+ 30418:     {
+ 30419:         for (u32 index = start; index < end; index += 1)
+ 30420:         {
+ 30421:             CToken token = builder->preprocess.tokens[index];
+ 30422:             CIrGroupScan scan = c_ir_scan_delimiter_group(builder, &index, end);
+ 30423:             if (scan == C_IR_GROUP_SCAN_SKIPPED)
+ 30424:             {
+ 30425:                 continue;
+ 30426:             }
+ 30427:             if (scan == C_IR_GROUP_SCAN_UNCLOSED)
+ 30428:             {
+ 30429:                 break;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 30828 =====
+ 30808:             }
+ 30809:         }
+ 30810:         IrType* candidate_value = ir_type_from_id(&builder->program->types, candidate);
+ 30811:         if (candidate_value && candidate_value->kind == IR_TYPE_ARRAY)
+ 30812:         {
+ 30813:             candidate = c_ir_add_pointer_type(builder->program, builder->pointer_types, candidate_value->element_type);
+ 30814:         }
+ 30815:         IrType* current = ir_type_from_id(&builder->program->types, result);
+ 30816:         IrType* next = ir_type_from_id(&builder->program->types, candidate);
+ 30817:         if (!current || (current->kind == IR_TYPE_BOOLEAN && next && next->kind != IR_TYPE_BOOLEAN) ||
+ 30818:             (next && next->kind == IR_TYPE_FLOAT &&
+ 30819:              (current->kind != IR_TYPE_FLOAT || c_ir_float_conversion_rank(next) > c_ir_float_conversion_rank(current))) ||
+ 30820:             (next && current && next->kind == IR_TYPE_INTEGER && current->kind == IR_TYPE_INTEGER && next->bit_width > current->bit_width))
+ 30821:         {
+ 30822:             result = candidate;
+ 30823:         }
+ 30824:     }
+ 30825:     return result.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : result;
+ 30826: }
+ 30827: 
+ 30828: BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type)
+ 30829: {
+ 30830:     IrType* left = ir_type_from_id(&builder->program->types, left_type);
+ 30831:     IrType* right = ir_type_from_id(&builder->program->types, right_type);
+ 30832:     if (!left || !right)
+ 30833:     {
+ 30834:         return IR_TYPE_ID_INVALID;
+ 30835:     }
+ 30836:     // One complex operand makes the result complex, over the usual arithmetic
+ 30837:     // type of the two corresponding real types (C11 6.3.1.8p1).
+ 30838:     if (left->is_complex || right->is_complex)
+ 30839:     {
+ 30840:         return c_ir_complex_result_type(builder, left_type, right_type);
+ 30841:     }
+ 30842:     if (left->kind == IR_TYPE_BOOLEAN || left->kind == IR_TYPE_ENUM || (left->kind == IR_TYPE_INTEGER && left->bit_width < 32))
+ 30843:     {
+ 30844:         left_type = builder->s32_type;
+ 30845:         left = ir_type_from_id(&builder->program->types, left_type);
+ 30846:     }
+ 30847:     if (right->kind == IR_TYPE_BOOLEAN || right->kind == IR_TYPE_ENUM || (right->kind == IR_TYPE_INTEGER && right->bit_width < 32))
+ 30848:     {
+ 30849:         right_type = builder->s32_type;
+ 30850:         right = ir_type_from_id(&builder->program->types, right_type);
+ 30851:     }
+ 30852:     bool left_arithmetic = left && (left->kind == IR_TYPE_INTEGER || left->kind == IR_TYPE_FLOAT);
+ 30853:     bool right_arithmetic = right && (right->kind == IR_TYPE_INTEGER || right->kind == IR_TYPE_FLOAT);
+ 30854:     if (!left_arithmetic || !right_arithmetic)
+ 30855:     {
+ 30856:         return IR_TYPE_ID_INVALID;
+ 30857:     }
+ 30858:     if (left->kind == IR_TYPE_FLOAT || right->kind == IR_TYPE_FLOAT)
+ 30859:     {
+ 30860:         if (left->kind != IR_TYPE_FLOAT)
+ 30861:         {
+ 30862:             return right_type;
+ 30863:         }
+ 30864:         if (right->kind != IR_TYPE_FLOAT)
+ 30865:         {
+ 30866:             return left_type;
+ 30867:         }
+ 30868:         return c_ir_float_conversion_rank(right) > c_ir_float_conversion_rank(left) ? right_type : left_type;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 30836 =====
+ 30816:         IrType* next = ir_type_from_id(&builder->program->types, candidate);
+ 30817:         if (!current || (current->kind == IR_TYPE_BOOLEAN && next && next->kind != IR_TYPE_BOOLEAN) ||
+ 30818:             (next && next->kind == IR_TYPE_FLOAT &&
+ 30819:              (current->kind != IR_TYPE_FLOAT || c_ir_float_conversion_rank(next) > c_ir_float_conversion_rank(current))) ||
+ 30820:             (next && current && next->kind == IR_TYPE_INTEGER && current->kind == IR_TYPE_INTEGER && next->bit_width > current->bit_width))
+ 30821:         {
+ 30822:             result = candidate;
+ 30823:         }
+ 30824:     }
+ 30825:     return result.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : result;
+ 30826: }
+ 30827: 
+ 30828: BUSTER_C_INTERNAL IrTypeId c_ir_usual_arithmetic_type(CIntegerIrBuilder* builder, IrTypeId left_type, IrTypeId right_type)
+ 30829: {
+ 30830:     IrType* left = ir_type_from_id(&builder->program->types, left_type);
+ 30831:     IrType* right = ir_type_from_id(&builder->program->types, right_type);
+ 30832:     if (!left || !right)
+ 30833:     {
+ 30834:         return IR_TYPE_ID_INVALID;
+ 30835:     }
+ 30836:     // One complex operand makes the result complex, over the usual arithmetic
+ 30837:     // type of the two corresponding real types (C11 6.3.1.8p1).
+ 30838:     if (left->is_complex || right->is_complex)
+ 30839:     {
+ 30840:         return c_ir_complex_result_type(builder, left_type, right_type);
+ 30841:     }
+ 30842:     if (left->kind == IR_TYPE_BOOLEAN || left->kind == IR_TYPE_ENUM || (left->kind == IR_TYPE_INTEGER && left->bit_width < 32))
+ 30843:     {
+ 30844:         left_type = builder->s32_type;
+ 30845:         left = ir_type_from_id(&builder->program->types, left_type);
+ 30846:     }
+ 30847:     if (right->kind == IR_TYPE_BOOLEAN || right->kind == IR_TYPE_ENUM || (right->kind == IR_TYPE_INTEGER && right->bit_width < 32))
+ 30848:     {
+ 30849:         right_type = builder->s32_type;
+ 30850:         right = ir_type_from_id(&builder->program->types, right_type);
+ 30851:     }
+ 30852:     bool left_arithmetic = left && (left->kind == IR_TYPE_INTEGER || left->kind == IR_TYPE_FLOAT);
+ 30853:     bool right_arithmetic = right && (right->kind == IR_TYPE_INTEGER || right->kind == IR_TYPE_FLOAT);
+ 30854:     if (!left_arithmetic || !right_arithmetic)
+ 30855:     {
+ 30856:         return IR_TYPE_ID_INVALID;
+ 30857:     }
+ 30858:     if (left->kind == IR_TYPE_FLOAT || right->kind == IR_TYPE_FLOAT)
+ 30859:     {
+ 30860:         if (left->kind != IR_TYPE_FLOAT)
+ 30861:         {
+ 30862:             return right_type;
+ 30863:         }
+ 30864:         if (right->kind != IR_TYPE_FLOAT)
+ 30865:         {
+ 30866:             return left_type;
+ 30867:         }
+ 30868:         return c_ir_float_conversion_rank(right) > c_ir_float_conversion_rank(left) ? right_type : left_type;
+ 30869:     }
+ 30870:     if (left_type.value == right_type.value)
+ 30871:     {
+ 30872:         return left_type;
+ 30873:     }
+ 30874:     if (left->is_signed == right->is_signed)
+ 30875:     {
+ 30876:         return right->bit_width > left->bit_width ? right_type : left_type;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 31074 =====
+ 31054:     // branches of one type keep the fast path above, so only a mismatch
+ 31055:     // decays here.
+ 31056:     if (true_value->kind == IR_TYPE_ARRAY && false_value->kind != IR_TYPE_ARRAY)
+ 31057:     {
+ 31058:         true_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, true_value->element_type);
+ 31059:         true_value = ir_type_from_id(&builder->program->types, true_type);
+ 31060:     }
+ 31061:     else if (false_value->kind == IR_TYPE_ARRAY && true_value->kind != IR_TYPE_ARRAY)
+ 31062:     {
+ 31063:         false_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, false_value->element_type);
+ 31064:         false_value = ir_type_from_id(&builder->program->types, false_type);
+ 31065:     }
+ 31066:     if (!true_value || !false_value)
+ 31067:     {
+ 31068:         return IR_TYPE_ID_INVALID;
+ 31069:     }
+ 31070:     if (true_type.value == false_type.value)
+ 31071:     {
+ 31072:         return true_type;
+ 31073:     }
+ 31074:     IrTypeId arithmetic_type = c_ir_usual_arithmetic_type(builder, true_type, false_type);
+ 31075:     if (arithmetic_type.value != IR_ID_UNDERLYING_INVALID)
+ 31076:     {
+ 31077:         return arithmetic_type;
+ 31078:     }
+ 31079:     bool true_null_constant = false;
+ 31080:     bool false_null_constant = false;
+ 31081:     IrTypeId result;
+ 31082:     if (!c_ir_query_null_pointer_constant(builder, true_type, true_start, true_end, &true_null_constant) && builder->queries->has_request)
+ 31083:     {
+ 31084:         result = IR_TYPE_ID_INVALID;
+ 31085:     }
+ 31086:     else if (!c_ir_query_null_pointer_constant(builder, false_type, false_start, false_end, &false_null_constant) && builder->queries->has_request)
+ 31087:     {
+ 31088:         result = IR_TYPE_ID_INVALID;
+ 31089:     }
+ 31090:     else
+ 31091:     {
+ 31092:         result = c_ir_conditional_pointer_type(builder, true_type, false_type, true_null_constant, false_null_constant);
+ 31093:     }
+ 31094: 
+ 31095:     return result;
+ 31096: }
+ 31097: 
+ 31098: BUSTER_C_INTERNAL IrTypeId c_ir_conditional_result_type(CIntegerIrBuilder* builder, IrTypeId true_type, IrTypeId false_type, u32 true_start, u32 true_end,
+ 31099:                                                           u32 false_start, u32 false_end)
+ 31100: {
+ 31101:     CIrQueryFrame root = {
+ 31102:         .first_type = true_type,
+ 31103:         .second_type = false_type,
+ 31104:         .start = true_start,
+ 31105:         .end = true_end,
+ 31106:         .third = false_start,
+ 31107:         .fourth = false_end,
+ 31108:         .kind = C_IR_QUERY_FRAME_CONDITIONAL_TYPE,
+ 31109:     };
+ 31110:     CIrQueryFrame result = {0};
+ 31111:     if (!c_ir_query_execute(builder, root, &result) || !result.success)
+ 31112:     {
+ 31113:         return IR_TYPE_ID_INVALID;
+ 31114:     }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 39106 =====
+ 39086:                             u32 narrowed_bits = 0;
+ 39087:                             memcpy(&narrowed_bits, &narrowed, sizeof(narrowed_bits));
+ 39088:                             bits = narrowed_bits;
+ 39089:                         }
+ 39090:                         else
+ 39091:                         {
+ 39092:                             memcpy(&bits, &converted.floating, sizeof(bits));
+ 39093:                         }
+ 39094:                     }
+ 39095:                     else
+ 39096:                     {
+ 39097:                         bits = converted.integer;
+ 39098:                         sign_extend = type->is_signed && c_ir_integer_signed_value(bits, type) < 0;
+ 39099:                     }
+ 39100:                     if (task.is_bit_field)
+ 39101:                     {
+ 39102:                         u64 unit = task.access_size ? task.access_size : type->layout.size;
+ 39103:                         if (!task.bit_width || task.bit_offset + task.bit_width > unit * 8 || task.bit_width > 64) return false;
+ 39104:                         c_ir_constant_deposit_bit_field(program, bytes, task.offset, unit, task.bit_offset, task.bit_width, bits, false);
+ 39105:                     }
+ 39106:                     else if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128 && type->layout.size == 16)
+ 39107:                     {
+ 39108:                         u64 low_offset = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? 0 : 8;
+ 39109:                         c_ir_constant_store_unit_bits(program, 8, bytes, task.offset + low_offset, converted.integer, false);
+ 39110:                         c_ir_constant_store_unit_bits(program, 8, bytes, task.offset + 8 - low_offset, converted.integer_high, false);
+ 39111:                     }
+ 39112:                     else
+ 39113:                     {
+ 39114:                         c_ir_constant_store_bits(program, type, bytes, task.offset, bits, sign_extend);
+ 39115:                     }
+ 39116:                     continue;
+ 39117:                 }
+ 39118:             }
+ 39119:             u32 label_index = 0;
+ 39120:             IrTypeId label_cast_type = IR_TYPE_ID_INVALID;
+ 39121:             if (type->kind == IR_TYPE_POINTER && c_ir_label_address_expression(builder, task.start, task.end, &label_index, &label_cast_type))
+ 39122:             {
+ 39123:                 IrType* element = ir_type_from_id(&program->types, type->element_type);
+ 39124:                 IrType* cast_element = 0;
+ 39125:                 if (label_cast_type.value != IR_ID_UNDERLYING_INVALID)
+ 39126:                 {
+ 39127:                     IrType* cast = ir_type_from_id(&program->types, label_cast_type);
+ 39128:                     cast_element = cast ? ir_type_from_id(&program->types, cast->element_type) : 0;
+ 39129:                 }
+ 39130:                 CIrLabel* label = builder->function ? c_ir_label_find(builder->labels, builder->label_count, c_token_spelling(preprocess.spelling_base, preprocess.tokens[label_index])) : 0;
+ 39131:                 if (!element || element->kind != IR_TYPE_VOID || (label_cast_type.value != IR_ID_UNDERLYING_INVALID &&
+ 39132:                                                                    (!cast_element || cast_element->kind != IR_TYPE_VOID)) || !label || !relocations ||
+ 39133:                     !relocation_count || *relocation_count >= relocation_capacity || !builder->function)
+ 39134:                 {
+ 39135:                     return false;
+ 39136:                 }
+ 39137:                 if (relocation_base > UINT64_MAX - task.offset)
+ 39138:                 {
+ 39139:                     return false;
+ 39140:                 }
+ 39141:                 relocations[(*relocation_count)++] = (IrGlobalRelocation){
+ 39142:                     .symbol = builder->function->symbol,
+ 39143:                     .label_block = label->block,
+ 39144:                     .offset = relocation_base + task.offset,
+ 39145:                     .is_label_address = true,
+ 39146:                 };
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 41778 =====
+ 41758:         bytes[7] = (u8)(bits >> 56);
+ 41759:         break;
+ 41760:     default:
+ 41761:         BUSTER_TODO();
+ 41762:     }
+ 41763: }
+ 41764: 
+ 41765: // The evaluator's unary `+`/`-` on an integer constant of `*type`
+ 41766: // (c_ir_constant_apply_unary): a boolean or narrow operand is promoted to
+ 41767: // int first -- no literal type is that narrow, but the rule is kept so the
+ 41768: // arm and the evaluator cannot disagree -- and the result is masked to the
+ 41769: // operand's width.  False for the 128-bit operand, whose wide negate stays
+ 41770: // with the evaluator.
+ 41771: BUSTER_C_INTERNAL bool c_ir_constant_initializer_leaf_unary(CIntegerIrBuilder* builder, IrType** type, u64* integer, bool negative)
+ 41772: {
+ 41773:     IrType* operand = *type;
+ 41774:     if (operand->kind == IR_TYPE_BOOLEAN || (operand->kind == IR_TYPE_INTEGER && operand->bit_width < 32))
+ 41775:     {
+ 41776:         operand = ir_type_from_id(&builder->program->types, builder->s32_type);
+ 41777:     }
+ 41778:     bool applied = operand && !(operand->kind == IR_TYPE_INTEGER && operand->bit_width == 128);
+ 41779:     if (applied)
+ 41780:     {
+ 41781:         u64 value = negative ? 0 - *integer : *integer;
+ 41782:         *integer = value & c_ir_integer_type_mask(operand);
+ 41783:         *type = operand;
+ 41784:     }
+ 41785:     return applied;
+ 41786: }
+ 41787: 
+ 41788: // An integer constant of `literal_type` stored into the integer member
+ 41789: // `child`: c_ir_constant_cast replays a signed source's sign bit before the
+ 41790: // target mask. A boolean tests nonzero before that narrowing.
+ 41791: BUSTER_C_INTERNAL void c_ir_constant_initializer_store_integer_leaf(IrType* child, IrType* literal_type, u64 integer, u8* bytes)
+ 41792: {
+ 41793:     u64 value = literal_type->is_signed ? (u64)c_ir_integer_signed_value(integer, literal_type) : integer;
+ 41794:     u64 converted = child->kind == IR_TYPE_BOOLEAN ? value != 0 : value & c_ir_integer_type_mask(child);
+ 41795:     c_ir_constant_store_little_endian(bytes, child->layout.size, converted);
+ 41796: }
+ 41797: 
+ 41798: // A floating value stored into the binary16, f32 or f64 member `child`: the
+ 41799: // cast rounds at the member's own precision (c_ir_constant_cast), and the
+ 41800: // folder writes that value's bits.
+ 41801: BUSTER_C_INTERNAL void c_ir_constant_initializer_store_float_leaf(IrType* child, f64 floating, u8* bytes)
+ 41802: {
+ 41803:     u64 bits = 0;
+ 41804:     if (child->bit_width == 16)
+ 41805:     {
+ 41806:         bits = child->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_bits_from_f64(floating) : c_ir_float16_bits_from_f64(floating);
+ 41807:     }
+ 41808:     else if (child->bit_width == 32)
+ 41809:     {
+ 41810:         f32 narrowed = (f32)(f64)(f32)floating;
+ 41811:         u32 narrowed_bits = 0;
+ 41812:         memcpy(&narrowed_bits, &narrowed, sizeof(narrowed_bits));
+ 41813:         bits = narrowed_bits;
+ 41814:     }
+ 41815:     else
+ 41816:     {
+ 41817:         memcpy(&bits, &floating, sizeof(bits));
+ 41818:     }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 43062 =====
+ 43042:                 global->bytes.pointer && global->bytes.length == 16)
+ 43043:             {
+ 43044:                 *result = c_ir_constant_integer(global->type, 0);
+ 43045:                 if (builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE)
+ 43046:                 {
+ 43047:                     memcpy(&result->integer, global->bytes.pointer, 8);
+ 43048:                     memcpy(&result->integer_high, global->bytes.pointer + 8, 8);
+ 43049:                 }
+ 43050:                 else
+ 43051:                 {
+ 43052:                     memcpy(&result->integer_high, global->bytes.pointer, 8);
+ 43053:                     memcpy(&result->integer, global->bytes.pointer + 8, 8);
+ 43054:                 }
+ 43055:                 return true;
+ 43056:             }
+ 43057:             if (type && type->kind == IR_TYPE_FLOAT && global->initializer_kind == IR_GLOBAL_INITIALIZER_ZERO)
+ 43058:             {
+ 43059:                 *result = (CIrConstantValue){.type = global->type, .kind = C_IR_CONSTANT_FLOAT};
+ 43060:                 return true;
+ 43061:             }
+ 43062:             if (type && type->kind == IR_TYPE_FLOAT && (type->bit_width == 80 || type->bit_width == 128) &&
+ 43063:                 global->initializer_kind == IR_GLOBAL_INITIALIZER_BYTES && global->bytes.pointer && global->bytes.length == type->layout.size)
+ 43064:             {
+ 43065:                 *result = (CIrConstantValue){.type = global->type, .kind = C_IR_CONSTANT_FLOAT};
+ 43066:                 u32 payload_size = type->bit_width / 8;
+ 43067:                 for (u32 byte = 0; byte < payload_size; byte += 1)
+ 43068:                 {
+ 43069:                     u32 offset = builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte : payload_size - byte - 1;
+ 43070:                     if (byte < 8) result->integer |= (u64)global->bytes.pointer[offset] << (byte * 8);
+ 43071:                     else result->integer_high |= (u64)global->bytes.pointer[offset] << ((byte - 8) * 8);
+ 43072:                 }
+ 43073:                 return true;
+ 43074:             }
+ 43075:             if (global->initializer_kind == IR_GLOBAL_INITIALIZER_FLOAT && type && type->kind == IR_TYPE_FLOAT && type->bit_width <= 64)
+ 43076:             {
+ 43077:                 f64 value = 0.0;
+ 43078:                 if (type->bit_width == 16)
+ 43079:                 {
+ 43080:                     value = type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_to_f64(global->initializer_bits)
+ 43081:                                                                          : c_ir_float16_to_f64(global->initializer_bits);
+ 43082:                 }
+ 43083:                 else if (type->bit_width == 32)
+ 43084:                 {
+ 43085:                     f32 narrowed = 0.0f;
+ 43086:                     u32 bits = (u32)global->initializer_bits;
+ 43087:                     memcpy(&narrowed, &bits, sizeof(narrowed));
+ 43088:                     value = (f64)narrowed;
+ 43089:                 }
+ 43090:                 else
+ 43091:                 {
+ 43092:                     memcpy(&value, &global->initializer_bits, sizeof(value));
+ 43093:                 }
+ 43094:                 *result = (CIrConstantValue){.type = global->type, .floating = value, .kind = C_IR_CONSTANT_FLOAT};
+ 43095:                 return true;
+ 43096:             }
+ 43097:             if (global->initializer_kind == IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS && type && type->kind == IR_TYPE_POINTER)
+ 43098:             {
+ 43099:                 *result = (CIrConstantValue){
+ 43100:                     .type = global->type,
+ 43101:                     .symbol = global->initializer_symbol,
+ 43102:                     .addend = global->initializer_addend,
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 44207 =====
+ 44187:                                       : c_ir_constant_float_to_integer(source.floating, target, &integer);
+ 44188:                         if (success)
+ 44189:                         {
+ 44190:                             *result = c_ir_constant_integer(target_type, integer.low & c_ir_integer_type_mask(target));
+ 44191:                             result->integer_high = target->bit_width == 128 ? integer.high : 0;
+ 44192:                         }
+ 44193:                     }
+ 44194:                     else
+ 44195:                     {
+ 44196:                         success = source.kind == C_IR_CONSTANT_INTEGER ||
+ 44197:                                   (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID && source.addend == 0);
+ 44198:                         if (success)
+ 44199:                         {
+ 44200:                             u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer : 0;
+ 44201:                             IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? source_type : 0;
+ 44202:                             // Replay a negative narrow source's sign before the
+ 44203:                             // target mask. Narrowing still discards the high bits.
+ 44204:                             if (source_integer_type && source_integer_type->is_signed)
+ 44205:                                 integer = (u64)c_ir_integer_signed_value(integer, source_integer_type);
+ 44206:                             *result = c_ir_constant_integer(target_type, integer & c_ir_integer_type_mask(target));
+ 44207:                             if (target->kind == IR_TYPE_INTEGER && target->bit_width == 128 && source.kind == C_IR_CONSTANT_INTEGER)
+ 44208:                             {
+ 44209:                                 result->integer_high = source.integer_high;
+ 44210:                                 if (source_integer_type && source_integer_type->kind == IR_TYPE_INTEGER && source_integer_type->bit_width < 128 &&
+ 44211:                                     source_integer_type->is_signed && source_integer_type->bit_width &&
+ 44212:                                     (source.integer & ((u64)1 << (source_integer_type->bit_width - 1))))
+ 44213:                                     result->integer_high = UINT64_MAX;
+ 44214:                             }
+ 44215:                         }
+ 44216:                     }
+ 44217:                 }
+ 44218:             }
+ 44219:         }
+ 44220:     }
+ 44221:     return success;
+ 44222: }
+ 44223: 
+ 44224: BUSTER_C_INTERNAL IrTypeId c_ir_constant_common_type(CIntegerIrBuilder* builder, IrTypeId left, IrTypeId right)
+ 44225: {
+ 44226:     IrType* left_value = ir_type_from_id(&builder->program->types, left);
+ 44227:     IrType* right_value = ir_type_from_id(&builder->program->types, right);
+ 44228:     if (left_value && right_value && (left_value->kind == IR_TYPE_FLOAT || right_value->kind == IR_TYPE_FLOAT ||
+ 44229:                                       c_ir_constant_type_is_integer(left_value) || c_ir_constant_type_is_integer(right_value)))
+ 44230:     {
+ 44231:         return c_ir_usual_arithmetic_type(builder, left, right);
+ 44232:     }
+ 44233:     return IR_TYPE_ID_INVALID;
+ 44234: }
+ 44235: 
+ 44236: BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CConditionalOperator operation, IrTypeId cast_type,
+ 44237:                                                     CIrConstantValue* value)
+ 44238: {
+ 44239:     bool success = false;
+ 44240:     if (operation == C_CONDITIONAL_CAST)
+ 44241:     {
+ 44242:         CIrConstantValue cast = {0};
+ 44243:         success = c_ir_constant_cast(builder, value, cast_type, &cast);
+ 44244:         if (success)
+ 44245:             *value = cast;
+ 44246:     }
+ 44247:     else if (operation == C_CONDITIONAL_ADDRESS_OF)
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 44210 =====
+ 44190:                             *result = c_ir_constant_integer(target_type, integer.low & c_ir_integer_type_mask(target));
+ 44191:                             result->integer_high = target->bit_width == 128 ? integer.high : 0;
+ 44192:                         }
+ 44193:                     }
+ 44194:                     else
+ 44195:                     {
+ 44196:                         success = source.kind == C_IR_CONSTANT_INTEGER ||
+ 44197:                                   (source.kind == C_IR_CONSTANT_POINTER && source.symbol.value == IR_ID_UNDERLYING_INVALID && source.addend == 0);
+ 44198:                         if (success)
+ 44199:                         {
+ 44200:                             u64 integer = source.kind == C_IR_CONSTANT_INTEGER ? source.integer : 0;
+ 44201:                             IrType* source_integer_type = source.kind == C_IR_CONSTANT_INTEGER ? source_type : 0;
+ 44202:                             // Replay a negative narrow source's sign before the
+ 44203:                             // target mask. Narrowing still discards the high bits.
+ 44204:                             if (source_integer_type && source_integer_type->is_signed)
+ 44205:                                 integer = (u64)c_ir_integer_signed_value(integer, source_integer_type);
+ 44206:                             *result = c_ir_constant_integer(target_type, integer & c_ir_integer_type_mask(target));
+ 44207:                             if (target->kind == IR_TYPE_INTEGER && target->bit_width == 128 && source.kind == C_IR_CONSTANT_INTEGER)
+ 44208:                             {
+ 44209:                                 result->integer_high = source.integer_high;
+ 44210:                                 if (source_integer_type && source_integer_type->kind == IR_TYPE_INTEGER && source_integer_type->bit_width < 128 &&
+ 44211:                                     source_integer_type->is_signed && source_integer_type->bit_width &&
+ 44212:                                     (source.integer & ((u64)1 << (source_integer_type->bit_width - 1))))
+ 44213:                                     result->integer_high = UINT64_MAX;
+ 44214:                             }
+ 44215:                         }
+ 44216:                     }
+ 44217:                 }
+ 44218:             }
+ 44219:         }
+ 44220:     }
+ 44221:     return success;
+ 44222: }
+ 44223: 
+ 44224: BUSTER_C_INTERNAL IrTypeId c_ir_constant_common_type(CIntegerIrBuilder* builder, IrTypeId left, IrTypeId right)
+ 44225: {
+ 44226:     IrType* left_value = ir_type_from_id(&builder->program->types, left);
+ 44227:     IrType* right_value = ir_type_from_id(&builder->program->types, right);
+ 44228:     if (left_value && right_value && (left_value->kind == IR_TYPE_FLOAT || right_value->kind == IR_TYPE_FLOAT ||
+ 44229:                                       c_ir_constant_type_is_integer(left_value) || c_ir_constant_type_is_integer(right_value)))
+ 44230:     {
+ 44231:         return c_ir_usual_arithmetic_type(builder, left, right);
+ 44232:     }
+ 44233:     return IR_TYPE_ID_INVALID;
+ 44234: }
+ 44235: 
+ 44236: BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CConditionalOperator operation, IrTypeId cast_type,
+ 44237:                                                     CIrConstantValue* value)
+ 44238: {
+ 44239:     bool success = false;
+ 44240:     if (operation == C_CONDITIONAL_CAST)
+ 44241:     {
+ 44242:         CIrConstantValue cast = {0};
+ 44243:         success = c_ir_constant_cast(builder, value, cast_type, &cast);
+ 44244:         if (success)
+ 44245:             *value = cast;
+ 44246:     }
+ 44247:     else if (operation == C_CONDITIONAL_ADDRESS_OF)
+ 44248:     {
+ 44249:         if (value->kind == C_IR_CONSTANT_LVALUE)
+ 44250:         {
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 44231 =====
+ 44211:                                     source_integer_type->is_signed && source_integer_type->bit_width &&
+ 44212:                                     (source.integer & ((u64)1 << (source_integer_type->bit_width - 1))))
+ 44213:                                     result->integer_high = UINT64_MAX;
+ 44214:                             }
+ 44215:                         }
+ 44216:                     }
+ 44217:                 }
+ 44218:             }
+ 44219:         }
+ 44220:     }
+ 44221:     return success;
+ 44222: }
+ 44223: 
+ 44224: BUSTER_C_INTERNAL IrTypeId c_ir_constant_common_type(CIntegerIrBuilder* builder, IrTypeId left, IrTypeId right)
+ 44225: {
+ 44226:     IrType* left_value = ir_type_from_id(&builder->program->types, left);
+ 44227:     IrType* right_value = ir_type_from_id(&builder->program->types, right);
+ 44228:     if (left_value && right_value && (left_value->kind == IR_TYPE_FLOAT || right_value->kind == IR_TYPE_FLOAT ||
+ 44229:                                       c_ir_constant_type_is_integer(left_value) || c_ir_constant_type_is_integer(right_value)))
+ 44230:     {
+ 44231:         return c_ir_usual_arithmetic_type(builder, left, right);
+ 44232:     }
+ 44233:     return IR_TYPE_ID_INVALID;
+ 44234: }
+ 44235: 
+ 44236: BUSTER_C_INTERNAL bool c_ir_constant_apply_unary(CIntegerIrBuilder* builder, CConditionalOperator operation, IrTypeId cast_type,
+ 44237:                                                     CIrConstantValue* value)
+ 44238: {
+ 44239:     bool success = false;
+ 44240:     if (operation == C_CONDITIONAL_CAST)
+ 44241:     {
+ 44242:         CIrConstantValue cast = {0};
+ 44243:         success = c_ir_constant_cast(builder, value, cast_type, &cast);
+ 44244:         if (success)
+ 44245:             *value = cast;
+ 44246:     }
+ 44247:     else if (operation == C_CONDITIONAL_ADDRESS_OF)
+ 44248:     {
+ 44249:         if (value->kind == C_IR_CONSTANT_LVALUE)
+ 44250:         {
+ 44251:             IrTypeId pointer_type = c_ir_add_pointer_type(builder->program, builder->pointer_types, value->type);
+ 44252:             success = pointer_type.value != IR_ID_UNDERLYING_INVALID;
+ 44253:             if (success)
+ 44254:             {
+ 44255:                 value->type = pointer_type;
+ 44256:                 value->kind = C_IR_CONSTANT_POINTER;
+ 44257:             }
+ 44258:         }
+ 44259:     }
+ 44260:     else if (value->kind == C_IR_CONSTANT_UNKNOWN)
+ 44261:     {
+ 44262:         success = true;
+ 44263:     }
+ 44264:     else if (operation == C_CONDITIONAL_DEREFERENCE)
+ 44265:     {
+ 44266:         IrType* pointer = ir_type_from_id(&builder->program->types, value->type);
+ 44267:         success = value->kind == C_IR_CONSTANT_POINTER && pointer && pointer->kind == IR_TYPE_POINTER;
+ 44268:         if (success)
+ 44269:         {
+ 44270:             value->type = pointer->element_type;
+ 44271:             value->kind = C_IR_CONSTANT_LVALUE;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 44304 =====
+ 44284:             if (value->kind == C_IR_CONSTANT_FLOAT && operation != C_CONDITIONAL_BITWISE_NOT)
+ 44285:             {
+ 44286:                 if (operation == C_CONDITIONAL_UNARY_MINUS)
+ 44287:                 {
+ 44288:                     if (type->bit_width > 64) value->integer_high ^= type->bit_width == 80 ? UINT64_C(0x8000) : UINT64_C(0x8000000000000000);
+ 44289:                     else value->floating = -value->floating;
+ 44290:                 }
+ 44291:                 success = true;
+ 44292:             }
+ 44293:             else if (c_ir_constant_type_is_integer(type))
+ 44294:             {
+ 44295:                 // All three unary integer operators promote. Cast the value,
+ 44296:                 // not just its type, so signed char/short retain their sign.
+ 44297:                 IrTypeId promoted = c_ir_constant_common_type(builder, value->type, value->type);
+ 44298:                 success = c_ir_constant_cast(builder, value, promoted, value);
+ 44299:                 if (success)
+ 44300:                 {
+ 44301:                     type = ir_type_from_id(&builder->program->types, value->type);
+ 44302:                     if (operation == C_CONDITIONAL_UNARY_MINUS)
+ 44303:                     {
+ 44304:                         if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+ 44305:                         {
+ 44306:                             CIrWideInteger negated = c_ir_wide_negate((CIrWideInteger){.low = value->integer, .high = value->integer_high});
+ 44307:                             value->integer = negated.low;
+ 44308:                             value->integer_high = negated.high;
+ 44309:                         }
+ 44310:                         else
+ 44311:                             value->integer = 0 - value->integer;
+ 44312:                     }
+ 44313:                     else if (operation == C_CONDITIONAL_BITWISE_NOT)
+ 44314:                     {
+ 44315:                         value->integer = ~value->integer;
+ 44316:                         if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+ 44317:                             value->integer_high = ~value->integer_high;
+ 44318:                     }
+ 44319:                     value->integer &= c_ir_integer_type_mask(type);
+ 44320:                 }
+ 44321:             }
+ 44322:         }
+ 44323:     }
+ 44324:     return success;
+ 44325: }
+ 44326: 
+ 44327: BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CConditionalOperator operation, const CIrConstantValue* left_input,
+ 44328:                                                      const CIrConstantValue* right_input, CIrConstantValue* result)
+ 44329: {
+ 44330:     CIrConstantValue left = *left_input;
+ 44331:     CIrConstantValue right = *right_input;
+ 44332:     if (operation == C_CONDITIONAL_COMMA)
+ 44333:     {
+ 44334:         // A known right value does not make the evaluated left operand
+ 44335:         // constant. In particular, a call must not disappear from a probe.
+ 44336:         if (!c_ir_constant_normalize(builder, &left)) return false;
+ 44337:         *result = left.kind == C_IR_CONSTANT_UNKNOWN ? (CIrConstantValue){.type = right.type, .kind = C_IR_CONSTANT_UNKNOWN} : right;
+ 44338:         return true;
+ 44339:     }
+ 44340:     if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
+ 44341:     {
+ 44342:         if (left.kind != C_IR_CONSTANT_UNKNOWN && !c_ir_constant_normalize(builder, &left))
+ 44343:         {
+ 44344:             return false;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 44316 =====
+ 44296:                 // not just its type, so signed char/short retain their sign.
+ 44297:                 IrTypeId promoted = c_ir_constant_common_type(builder, value->type, value->type);
+ 44298:                 success = c_ir_constant_cast(builder, value, promoted, value);
+ 44299:                 if (success)
+ 44300:                 {
+ 44301:                     type = ir_type_from_id(&builder->program->types, value->type);
+ 44302:                     if (operation == C_CONDITIONAL_UNARY_MINUS)
+ 44303:                     {
+ 44304:                         if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+ 44305:                         {
+ 44306:                             CIrWideInteger negated = c_ir_wide_negate((CIrWideInteger){.low = value->integer, .high = value->integer_high});
+ 44307:                             value->integer = negated.low;
+ 44308:                             value->integer_high = negated.high;
+ 44309:                         }
+ 44310:                         else
+ 44311:                             value->integer = 0 - value->integer;
+ 44312:                     }
+ 44313:                     else if (operation == C_CONDITIONAL_BITWISE_NOT)
+ 44314:                     {
+ 44315:                         value->integer = ~value->integer;
+ 44316:                         if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+ 44317:                             value->integer_high = ~value->integer_high;
+ 44318:                     }
+ 44319:                     value->integer &= c_ir_integer_type_mask(type);
+ 44320:                 }
+ 44321:             }
+ 44322:         }
+ 44323:     }
+ 44324:     return success;
+ 44325: }
+ 44326: 
+ 44327: BUSTER_C_INTERNAL bool c_ir_constant_apply_binary(CIntegerIrBuilder* builder, CConditionalOperator operation, const CIrConstantValue* left_input,
+ 44328:                                                      const CIrConstantValue* right_input, CIrConstantValue* result)
+ 44329: {
+ 44330:     CIrConstantValue left = *left_input;
+ 44331:     CIrConstantValue right = *right_input;
+ 44332:     if (operation == C_CONDITIONAL_COMMA)
+ 44333:     {
+ 44334:         // A known right value does not make the evaluated left operand
+ 44335:         // constant. In particular, a call must not disappear from a probe.
+ 44336:         if (!c_ir_constant_normalize(builder, &left)) return false;
+ 44337:         *result = left.kind == C_IR_CONSTANT_UNKNOWN ? (CIrConstantValue){.type = right.type, .kind = C_IR_CONSTANT_UNKNOWN} : right;
+ 44338:         return true;
+ 44339:     }
+ 44340:     if (operation == C_CONDITIONAL_LOGICAL_AND || operation == C_CONDITIONAL_LOGICAL_OR)
+ 44341:     {
+ 44342:         if (left.kind != C_IR_CONSTANT_UNKNOWN && !c_ir_constant_normalize(builder, &left))
+ 44343:         {
+ 44344:             return false;
+ 44345:         }
+ 44346:         if (right.kind != C_IR_CONSTANT_UNKNOWN && !c_ir_constant_normalize(builder, &right))
+ 44347:         {
+ 44348:             return false;
+ 44349:         }
+ 44350:         bool left_known = left.kind != C_IR_CONSTANT_UNKNOWN;
+ 44351:         bool right_known = right.kind != C_IR_CONSTANT_UNKNOWN;
+ 44352:         if (left_known && right_known)
+ 44353:         {
+ 44354:             bool value = operation == C_CONDITIONAL_LOGICAL_AND ? c_ir_constant_truth(builder, &left) && c_ir_constant_truth(builder, &right)
+ 44355:                                                                 : c_ir_constant_truth(builder, &left) || c_ir_constant_truth(builder, &right);
+ 44356:             *result = c_ir_constant_integer(builder->s32_type, value);
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 44607 =====
+ 44587:             return false;
+ 44588:         if (!operand_is_nan && left.floating != left.floating)
+ 44589:         {
+ 44590:             u64 quiet_nan = UINT64_C(0x7ff8000000000000);
+ 44591:             memcpy(&left.floating, &quiet_nan, sizeof(left.floating));
+ 44592:         }
+ 44593:         // The carrier is f64, but an f32 expression rounds here, before
+ 44594:         // another operation or conversion can observe excess precision; a
+ 44595:         // `_Float16` expression rounds for the same reason, one format down.
+ 44596:         if (type->bit_width == 16)
+ 44597:             left.floating = type->float_format == IR_FLOAT_FORMAT_BFLOAT16 ? c_ir_bfloat16_round(left.floating) : c_ir_float16_round(left.floating);
+ 44598:         else if (type->bit_width == 32)
+ 44599:             left.floating = (f64)(f32)left.floating;
+ 44600:         *result = left;
+ 44601:         return true;
+ 44602:     }
+ 44603:     if (!type || !c_ir_constant_type_is_integer(type))
+ 44604:     {
+ 44605:         return false;
+ 44606:     }
+ 44607:     if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128)
+ 44608:     {
+ 44609:         CIrWideInteger left_wide = {.low = left.integer, .high = left.integer_high};
+ 44610:         CIrWideInteger right_wide = {.low = right.integer, .high = right.integer_high};
+ 44611:         CIrWideInteger value = {0};
+ 44612:         bool comparison = false;
+ 44613:         bool is_comparison = false;
+ 44614:         switch (operation)
+ 44615:         {
+ 44616:         case C_CONDITIONAL_MULTIPLY: value = c_ir_wide_multiply(left_wide, right_wide); break;
+ 44617:         case C_CONDITIONAL_DIVIDE:
+ 44618:         case C_CONDITIONAL_REMAINDER:
+ 44619:         {
+ 44620:             if (!right_wide.low && !right_wide.high)
+ 44621:             {
+ 44622:                 *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
+ 44623:                 return true;
+ 44624:             }
+ 44625:             bool left_negative = type->is_signed && (left_wide.high >> 63);
+ 44626:             bool right_negative = type->is_signed && (right_wide.high >> 63);
+ 44627:             if (type->is_signed && left_wide.low == 0 && left_wide.high == ((u64)1 << 63) && right_wide.low == UINT64_MAX &&
+ 44628:                 right_wide.high == UINT64_MAX)
+ 44629:             {
+ 44630:                 *result = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
+ 44631:                 return true;
+ 44632:             }
+ 44633:             CIrWideInteger dividend = left_negative ? c_ir_wide_negate(left_wide) : left_wide;
+ 44634:             CIrWideInteger divisor = right_negative ? c_ir_wide_negate(right_wide) : right_wide;
+ 44635:             CIrWideInteger quotient = {0};
+ 44636:             CIrWideInteger remainder = {0};
+ 44637:             c_ir_wide_divide(dividend, divisor, &quotient, &remainder);
+ 44638:             if (left_negative != right_negative) quotient = c_ir_wide_negate(quotient);
+ 44639:             if (left_negative) remainder = c_ir_wide_negate(remainder);
+ 44640:             value = operation == C_CONDITIONAL_DIVIDE ? quotient : remainder;
+ 44641:         }
+ 44642:         break;
+ 44643:         case C_CONDITIONAL_ADD:
+ 44644:             value.low = left_wide.low + right_wide.low;
+ 44645:             value.high = left_wide.high + right_wide.high + (value.low < left_wide.low);
+ 44646:             break;
+ 44647:         case C_CONDITIONAL_SUBTRACT: value = c_ir_wide_subtract(left_wide, right_wide); break;
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 44905 =====
+ 44885:                                                                  const CIrConstantComplexInitializerValue* right,
+ 44886:                                                                  CIrConstantComplexInitializerValue* result)
+ 44887: {
+ 44888:     if (!left->is_complex && !right->is_complex)
+ 44889:     {
+ 44890:         CIrConstantValue scalar = {0};
+ 44891:         if (!c_ir_constant_apply_binary(builder, operation, &left->real, &right->real, &scalar))
+ 44892:         {
+ 44893:             return false;
+ 44894:         }
+ 44895:         *result = (CIrConstantComplexInitializerValue){.real = scalar, .type = scalar.type};
+ 44896:         return true;
+ 44897:     }
+ 44898:     if (operation != C_CONDITIONAL_ADD && operation != C_CONDITIONAL_SUBTRACT &&
+ 44899:         operation != C_CONDITIONAL_MULTIPLY && operation != C_CONDITIONAL_DIVIDE)
+ 44900:     {
+ 44901:         return false;
+ 44902:     }
+ 44903:     IrTypeId left_element = left->is_complex ? left->element_type : left->type;
+ 44904:     IrTypeId right_element = right->is_complex ? right->element_type : right->type;
+ 44905:     IrTypeId element = c_ir_usual_arithmetic_type(builder, left_element, right_element);
+ 44906:     IrType* element_type = ir_type_from_id(&builder->program->types, element);
+ 44907:     if (!element_type || element_type->kind != IR_TYPE_FLOAT)
+ 44908:     {
+ 44909:         return false;
+ 44910:     }
+ 44911:     IrTypeId result_type = c_ir_complex_type_for_element(builder, element);
+ 44912:     CIrConstantValue left_real = {0};
+ 44913:     CIrConstantValue right_real = {0};
+ 44914:     CIrConstantValue left_imaginary = {.type = element, .kind = C_IR_CONSTANT_FLOAT};
+ 44915:     CIrConstantValue right_imaginary = {.type = element, .kind = C_IR_CONSTANT_FLOAT};
+ 44916:     if (!c_ir_constant_cast(builder, &left->real, element, &left_real) ||
+ 44917:         !c_ir_constant_cast(builder, &right->real, element, &right_real) ||
+ 44918:         (left->is_complex && !c_ir_constant_cast(builder, &left->imaginary, element, &left_imaginary)) ||
+ 44919:         (right->is_complex && !c_ir_constant_cast(builder, &right->imaginary, element, &right_imaginary)))
+ 44920:     {
+ 44921:         return false;
+ 44922:     }
+ 44923:     CIrConstantValue real = {0};
+ 44924:     CIrConstantValue imaginary = {0};
+ 44925:     if (operation == C_CONDITIONAL_ADD || operation == C_CONDITIONAL_SUBTRACT)
+ 44926:     {
+ 44927:         if (!c_ir_constant_apply_binary(builder, operation, &left_real, &right_real, &real))
+ 44928:         {
+ 44929:             return false;
+ 44930:         }
+ 44931:         if (left->is_complex && right->is_complex)
+ 44932:         {
+ 44933:             if (!c_ir_constant_apply_binary(builder, operation, &left_imaginary, &right_imaginary, &imaginary))
+ 44934:             {
+ 44935:                 return false;
+ 44936:             }
+ 44937:         }
+ 44938:         else if (left->is_complex)
+ 44939:         {
+ 44940:             imaginary = left_imaginary;
+ 44941:         }
+ 44942:         else
+ 44943:         {
+ 44944:             imaginary = right_imaginary;
+ 44945:             if (operation == C_CONDITIONAL_SUBTRACT &&
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 45492 =====
+ 45472:     {
+ 45473:         IrType* element = ir_type_from_id(&builder->program->types, type->element_type);
+ 45474:         result = (type->is_nullptr || (element && element->kind == IR_TYPE_VOID)) && value->symbol.value == IR_ID_UNDERLYING_INVALID && !value->addend;
+ 45475:     }
+ 45476:     return result;
+ 45477: }
+ 45478: 
+ 45479: BUSTER_C_INTERNAL bool c_ir_constant_apply_operator(CIntegerIrBuilder* builder, CIrConstantOperator operation, CIrConstantValue* values,
+ 45480:                                                        u32* value_count)
+ 45481: {
+ 45482:     bool success = false;
+ 45483:     if (operation.operation == C_CONDITIONAL_SELECT)
+ 45484:     {
+ 45485:         if (*value_count >= 3)
+ 45486:         {
+ 45487:             CIrConstantValue false_value = values[--*value_count];
+ 45488:             CIrConstantValue true_value = values[--*value_count];
+ 45489:             CIrConstantValue condition = values[--*value_count];
+ 45490:             IrTypeId true_type = c_ir_sizeof_operand_decay(builder, true_value.type);
+ 45491:             IrTypeId false_type = c_ir_sizeof_operand_decay(builder, false_value.type);
+ 45492:             IrTypeId common = c_ir_usual_arithmetic_type(builder, true_type, false_type);
+ 45493:             if (common.value == IR_ID_UNDERLYING_INVALID)
+ 45494:             {
+ 45495:                 common = true_type.value == false_type.value
+ 45496:                              ? true_type
+ 45497:                              : c_ir_conditional_pointer_type(builder, true_type, false_type,
+ 45498:                                                               c_ir_constant_is_null_pointer_constant(builder, &true_value),
+ 45499:                                                               c_ir_constant_is_null_pointer_constant(builder, &false_value));
+ 45500:             }
+ 45501:             CIrConstantValue selected = c_ir_constant_truth(builder, &condition) ? true_value : false_value;
+ 45502:             if (condition.kind == C_IR_CONSTANT_UNKNOWN)
+ 45503:             {
+ 45504:                 selected = (CIrConstantValue){.type = common, .kind = C_IR_CONSTANT_UNKNOWN};
+ 45505:                 success = common.value != IR_ID_UNDERLYING_INVALID;
+ 45506:             }
+ 45507:             else if (common.value != IR_ID_UNDERLYING_INVALID)
+ 45508:             {
+ 45509:                 // ?: converts the selected value to the common type before
+ 45510:                 // its consumer runs, even when its condition is constant.
+ 45511:                 success = selected.type.value == common.value || c_ir_constant_cast(builder, &selected, common, &selected);
+ 45512:             }
+ 45513:             if (success)
+ 45514:             {
+ 45515:                 values[(*value_count)++] = selected;
+ 45516:             }
+ 45517:         }
+ 45518:     }
+ 45519:     else if (c_conditional_is_unary(operation.operation))
+ 45520:     {
+ 45521:         success = *value_count && c_ir_constant_apply_unary(builder, operation.operation, operation.cast_type, &values[*value_count - 1]);
+ 45522:     }
+ 45523:     else if (*value_count >= 2)
+ 45524:     {
+ 45525:         CIrConstantValue right = values[--*value_count];
+ 45526:         CIrConstantValue left = values[--*value_count];
+ 45527:         CIrConstantValue result = {0};
+ 45528:         success = c_ir_constant_apply_binary(builder, operation.operation, &left, &right, &result);
+ 45529:         if (success)
+ 45530:         {
+ 45531:             values[(*value_count)++] = result;
+ 45532:         }
+
+===== src/buster/lib/compiler/frontend/c/c_gen.c hit 46244 =====
+ 46224:                     {
+ 46225:                         return false;
+ 46226:                     }
+ 46227:                     u32 bits = 0;
+ 46228:                     memcpy(&bits, &narrowed, sizeof(bits));
+ 46229:                     global->initializer_bits = bits;
+ 46230:                 }
+ 46231:                 else
+ 46232:                 {
+ 46233:                     memcpy(&global->initializer_bits, &converted.floating, sizeof(converted.floating));
+ 46234:                 }
+ 46235:                 global->initializer_kind = IR_GLOBAL_INITIALIZER_FLOAT;
+ 46236:                 if (!global->is_read_only && global->initializer_bits == 0)
+ 46237:                 {
+ 46238:                     global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+ 46239:                 }
+ 46240:                 return true;
+ 46241:             }
+ 46242:             if (c_ir_constant_type_is_integer(type))
+ 46243:             {
+ 46244:                 if (type->kind == IR_TYPE_INTEGER && type->bit_width == 128 && type->layout.size == 16)
+ 46245:                 {
+ 46246:                     u8* bytes = arena_allocate(builder->arena, u8, 16);
+ 46247:                     if (builder->program->data_layout.endianness == TARGET_ENDIAN_LITTLE)
+ 46248:                     {
+ 46249:                         memcpy(bytes, &converted.integer, 8);
+ 46250:                         memcpy(bytes + 8, &converted.integer_high, 8);
+ 46251:                     }
+ 46252:                     else
+ 46253:                     {
+ 46254:                         memcpy(bytes, &converted.integer_high, 8);
+ 46255:                         memcpy(bytes + 8, &converted.integer, 8);
+ 46256:                     }
+ 46257:                     global->bytes = (ByteSlice){.pointer = bytes, .length = 16};
+ 46258:                     global->initializer_kind = IR_GLOBAL_INITIALIZER_BYTES;
+ 46259:                     if (!global->is_read_only && converted.integer == 0 && converted.integer_high == 0)
+ 46260:                     {
+ 46261:                         global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+ 46262:                     }
+ 46263:                     return true;
+ 46264:                 }
+ 46265:                 s64 signed_value = c_ir_integer_signed_value(converted.integer, type);
+ 46266:                 global->initializer_is_negative = type->is_signed && signed_value < 0;
+ 46267:                 global->initializer_bits = global->initializer_is_negative ? (u64)(-(signed_value + 1)) + 1 : converted.integer;
+ 46268:                 global->initializer_kind = IR_GLOBAL_INITIALIZER_INTEGER;
+ 46269:                 if (!global->is_read_only && global->initializer_bits == 0)
+ 46270:                 {
+ 46271:                     global->initializer_kind = IR_GLOBAL_INITIALIZER_ZERO;
+ 46272:                 }
+ 46273:                 return true;
+ 46274:             }
+ 46275:         }
+ 46276:     }
+ 46277: 
+ 46278:     return false;
+ 46279: }
+ 46280: 
+ 46281: BUSTER_C_INTERNAL bool c_ir_global_string_pointer_initializer(CIntegerIrBuilder* builder, IrType* type, u32 start, u32 end, IrGlobal* global)
+ 46282: {
+ 46283:     CPreprocessResult preprocess = builder->preprocess;
+ 46284:     if (!type || type->kind != IR_TYPE_POINTER || start >= end)

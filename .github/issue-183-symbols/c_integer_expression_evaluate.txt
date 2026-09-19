@@ -1,0 +1,28 @@
+===== src/buster/lib/compiler/frontend/c/c_source.c:c_integer_expression_evaluate =====
+  5736:         }
+  5737:     }
+  5738:     return valid;
+  5739: }
+  5740: 
+  5741: // The parse-side entry point: no macro table, so expansion is a pass-through
+  5742: // and nothing ever allocates spelling bytes — the read-only space view over
+  5743: // the finished result is enough, and any allocation attempt fails loudly.
+  5744: BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* spelling_base, CToken* tokens, u32 token_count, u32 expansion_limit,
+  5745:                                                        CPreprocessResult* result, u64* value_out)
+  5746: {
+  5747:     CSpellingSpace view = {
+  5748:         .base = (char8*)spelling_base,
+  5749:     };
+  5750:     CPpToken* wrapped = arena_allocate(arena, CPpToken, token_count);
+  5751:     for (u32 token_index = 0; token_index < token_count; token_index += 1)
+  5752:     {
+  5753:         wrapped[token_index] = (CPpToken){
+  5754:             .token = tokens[token_index],
+  5755:         };
+  5756:     }
+  5757:     return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, result, 0, (String8){0},
+  5758:                                                        (CIncludeSearchOrigin){0}, value_out);
+  5759: }
+  5760: 
+  5761: BUSTER_C_INTERNAL bool c_conditional_evaluate(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro, CPpStampTable* stamps,
+  5762:                                                 CPpToken* tokens, u32 token_count, u32 expansion_limit, CPreprocessResult* result, CPreprocessOptions options,

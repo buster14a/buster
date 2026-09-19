@@ -1,0 +1,264 @@
+===== src/buster/lib/compiler/frontend/c/c_gen.c:c_ir_lower_conditional_value_step =====
+ 31155:     CIrQueryFrame result = {0};
+ 31156:     if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) || !result.success)
+ 31157:     {
+ 31158:         return builder->s32_type;
+ 31159:     }
+ 31160:     return result.result_type;
+ 31161: }
+ 31162: 
+ 31163: BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* builder)
+ 31164: {
+ 31165:     CIrLowerMachine* machine = &builder->lower_machine;
+ 31166:     BUSTER_CHECK(machine->frame_count > machine->root_frame_mark);
+ 31167:     CIrLowerFrame* frame = &machine->frames[machine->frame_count - 1];
+ 31168:     BUSTER_CHECK(frame->kind == C_IR_LOWER_FRAME_CONDITIONAL_VALUE);
+ 31169:     if (frame->stage == C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_ROOT)
+ 31170:     {
+ 31171:         c_ir_lower_frame_finish(builder, machine->child_result.success, machine->child_result.value);
+ 31172:         return;
+ 31173:     }
+ 31174:     if (frame->stage == C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK)
+ 31175:     {
+ 31176:         IrValueId value = machine->child_result.value;
+ 31177:         IrType* task_type = ir_type_from_id(&builder->program->types, frame->as.conditional.type);
+ 31178:         if (!machine->child_result.success || !task_type ||
+ 31179:             (task_type->kind != IR_TYPE_VOID && value.value >= builder->function->value_count))
+ 31180:         {
+ 31181:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31182:             return;
+ 31183:         }
+ 31184:         // A conditional whose branches are void is itself a void expression.
+ 31185:         // There is no result place to materialize or store: the branch effects
+ 31186:         // only need to complete before jumping to the merge.  The final frame
+ 31187:         // returns an integer zero placeholder so discarded void expressions
+ 31188:         // can still travel through the value machinery.
+ 31189:         if (task_type->kind == IR_TYPE_VOID)
+ 31190:         {
+ 31191:             if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame->as.conditional.leaf_continuation, 1,
+ 31192:                                  frame->as.conditional.source))
+ 31193:             {
+ 31194:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31195:                 return;
+ 31196:             }
+ 31197:             frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+ 31198:             return;
+ 31199:         }
+ 31200:         if (task_type->is_nullptr && builder->function->values[value.value].canonical_type.value != frame->as.conditional.type.value)
+ 31201:         {
+ 31202:             u64 branch_constant = 0;
+ 31203:             if (!c_ir_integer_constant_evaluate(builder->temporary_arena, builder, frame->as.conditional.leaf_start,
+ 31204:                                                 frame->as.conditional.leaf_end, &branch_constant) ||
+ 31205:                 branch_constant)
+ 31206:             {
+ 31207:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31208:                 return;
+ 31209:             }
+ 31210:             value = c_ir_emit_integer_to_pointer(builder, value, frame->as.conditional.type, frame->as.conditional.source);
+ 31211:         }
+ 31212:         c_ir_vla_conditional_shape(builder, frame->as.conditional.place, value);
+ 31213:         if (value.value == IR_ID_UNDERLYING_INVALID ||
+ 31214:             !c_ir_emit_store_place(builder, frame->as.conditional.place, frame->as.conditional.type, value, frame->as.conditional.source) ||
+ 31215:             !c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &frame->as.conditional.leaf_continuation, 1,
+ 31216:                             frame->as.conditional.source))
+ 31217:         {
+ 31218:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31219:             return;
+ 31220:         }
+ 31221:         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+ 31222:     }
+ 31223:     else if (frame->stage == C_IR_LOWER_STAGE_CONDITIONAL_CONDITION)
+ 31224:     {
+ 31225:         if (!machine->child_result.success)
+ 31226:         {
+ 31227:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31228:             return;
+ 31229:         }
+ 31230:         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+ 31231:     }
+ 31232:     else if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
+ 31233:     {
+ 31234:         u32 expression_start = 0;
+ 31235:         u32 question = 0;
+ 31236:         u32 colon = 0;
+ 31237:         u32 expression_end = 0;
+ 31238:         u32 start = frame->as.conditional.start;
+ 31239:         u32 end = frame->as.conditional.end;
+ 31240:         if (!c_ir_root_conditional(builder, start, end, &expression_start, &question, &colon, &expression_end))
+ 31241:         {
+ 31242:             frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_ROOT;
+ 31243:             if (!c_ir_lower_logical_value_frame_push(builder, start, end))
+ 31244:             {
+ 31245:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31246:             }
+ 31247:             return;
+ 31248:         }
+ 31249:         IrTypeId true_type = c_ir_predict_expression_type(builder, question + 1, colon);
+ 31250:         IrTypeId false_type = c_ir_predict_expression_type(builder, colon + 1, expression_end);
+ 31251:         IrType* true_type_value = ir_type_from_id(&builder->program->types, true_type);
+ 31252:         IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
+ 31253:         IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
+ 31254:         if (result_type.value == IR_ID_UNDERLYING_INVALID)
+ 31255:         {
+ 31256:             builder->failure_message = string_format(
+ 31257:                 builder->arena, S8("conditional expression predicted incompatible branch types {u32} (kind {u32}) and {u32} (kind {u32})"),
+ 31258:                 true_type.value, true_type_value ? (u32)true_type_value->kind : UINT32_MAX, false_type.value,
+ 31259:                 false_type_value ? (u32)false_type_value->kind : UINT32_MAX);
+ 31260:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31261:             return;
+ 31262:         }
+ 31263:         frame->as.conditional.source =
+ 31264:             c_ir_token_source_range(builder, builder->preprocess.tokens[expression_start]);
+ 31265:         frame->as.conditional.type = result_type;
+ 31266:         IrType* result_type_value = ir_type_from_id(&builder->program->types, result_type);
+ 31267:         bool result_is_void = result_type_value && result_type_value->kind == IR_TYPE_VOID;
+ 31268:         frame->as.conditional.place = result_is_void ? IR_VALUE_ID_INVALID : c_ir_emit_temporary(builder, result_type, frame->as.conditional.source);
+ 31269:         frame->as.conditional.final_block = c_ir_block_create(builder);
+ 31270:         frame->as.conditional.task_capacity = end - start + 1;
+ 31271:         frame->as.conditional.tasks = arena_allocate(builder->temporary_arena, CIrLowerFrame, frame->as.conditional.task_capacity);
+ 31272:         if ((!result_is_void && frame->as.conditional.place.value == IR_ID_UNDERLYING_INVALID) ||
+ 31273:             frame->as.conditional.final_block.value == IR_ID_UNDERLYING_INVALID)
+ 31274:         {
+ 31275:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31276:             return;
+ 31277:         }
+ 31278:         frame->as.conditional.task_count = 1;
+ 31279:         frame->as.conditional.tasks[0] = (CIrLowerFrame){
+ 31280:             .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
+ 31281:             .as.selection =
+ 31282:                 {
+ 31283:                     .start = expression_start,
+ 31284:                     .end = expression_end,
+ 31285:                     .block = builder->current_block,
+ 31286:                     .continuation = frame->as.conditional.final_block,
+ 31287:                     .place = frame->as.conditional.place,
+ 31288:                     .type = result_type,
+ 31289:                     .source = frame->as.conditional.source,
+ 31290:                 },
+ 31291:         };
+ 31292:         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
+ 31293:     }
+ 31294:     while (frame->as.conditional.task_count)
+ 31295:     {
+ 31296:         CIrLowerFrame task = frame->as.conditional.tasks[--frame->as.conditional.task_count];
+ 31297:         if (!c_ir_switch_block(builder, task.as.selection.block))
+ 31298:         {
+ 31299:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31300:             return;
+ 31301:         }
+ 31302:         if (task.kind == C_IR_LOWER_FRAME_SELECTION_CONTINUE)
+ 31303:         {
+ 31304:             if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &task.as.selection.continuation, 1, task.as.selection.source))
+ 31305:             {
+ 31306:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31307:                 return;
+ 31308:             }
+ 31309:             continue;
+ 31310:         }
+ 31311:         u32 nested_start = 0;
+ 31312:         u32 nested_question = 0;
+ 31313:         u32 nested_colon = 0;
+ 31314:         u32 nested_end = 0;
+ 31315:         if (!c_ir_root_conditional(builder, task.as.selection.start, task.as.selection.end, &nested_start, &nested_question, &nested_colon,
+ 31316:                                    &nested_end))
+ 31317:         {
+ 31318:             frame->as.conditional.leaf_start = task.as.selection.start;
+ 31319:             frame->as.conditional.leaf_end = task.as.selection.end;
+ 31320:             frame->as.conditional.leaf_continuation = task.as.selection.continuation;
+ 31321:             frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_LOGICAL_TASK;
+ 31322:             // Assignment leaves need the full expression lowering machine:
+ 31323:             // the logical-value core intentionally accepts only arithmetic
+ 31324:             // operands and therefore reports `=` as unsupported.  Branch
+ 31325:             // ranges may retain redundant outer parentheses, so inspect the
+ 31326:             // unwrapped range while preserving the original range for the
+ 31327:             // expression frame (which performs the same unwrapping).
+ 31328:             u32 leaf_start = task.as.selection.start;
+ 31329:             u32 leaf_end = task.as.selection.end;
+ 31330:             while (leaf_start < leaf_end && c_token_is_punctuator(&builder->preprocess.tokens[leaf_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+ 31331:                    c_ir_matching_delimiter_cached(builder, leaf_start, leaf_end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS) == leaf_end - 1)
+ 31332:             {
+ 31333:                 leaf_start += 1;
+ 31334:                 leaf_end -= 1;
+ 31335:             }
+ 31336:             // A branch may carry an assignment in a comma expression rather
+ 31337:             // than at the leaf's root (Lua's luaV_fastget macro uses exactly
+ 31338:             // `(slot = lookup(...), !isempty(slot))`).  The logical-value
+ 31339:             // core is intentionally assignment-free, so inspect the whole
+ 31340:             // leaf before choosing it; otherwise the call is emitted but the
+ 31341:             // assignment side effect is silently dropped.
+ 31342:             bool assignment_leaf = c_ir_has_assignment_anywhere(builder, leaf_start, leaf_end);
+ 31343:             if (!(assignment_leaf ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
+ 31344:                                                                     .kind = C_IR_LOWER_FRAME_EXPRESSION,
+ 31345:                                                                     .as.expression =
+ 31346:                                                                         {
+ 31347:                                                                             .start = task.as.selection.start,
+ 31348:                                                                             .end = task.as.selection.end,
+ 31349:                                                                         },
+ 31350:                                                                 })
+ 31351:                                   : c_ir_lower_logical_value_frame_push(builder, task.as.selection.start, task.as.selection.end)))
+ 31352:             {
+ 31353:                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31354:             }
+ 31355:             return;
+ 31356:         }
+ 31357:         IrBlockId true_block = c_ir_block_create(builder);
+ 31358:         IrBlockId false_block = c_ir_block_create(builder);
+ 31359:         IrBlockId merge_block = c_ir_block_create(builder);
+ 31360:         if (true_block.value == IR_ID_UNDERLYING_INVALID || false_block.value == IR_ID_UNDERLYING_INVALID ||
+ 31361:             merge_block.value == IR_ID_UNDERLYING_INVALID ||
+ 31362:             frame->as.conditional.task_capacity - frame->as.conditional.task_count < 3)
+ 31363:         {
+ 31364:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31365:             return;
+ 31366:         }
+ 31367:         frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
+ 31368:             .kind = C_IR_LOWER_FRAME_SELECTION_CONTINUE,
+ 31369:             .as.selection = {.block = merge_block, .continuation = task.as.selection.continuation, .source = task.as.selection.source},
+ 31370:         };
+ 31371:         frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
+ 31372:             .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
+ 31373:             .as.selection =
+ 31374:                 {
+ 31375:                     .start = nested_colon + 1,
+ 31376:                     .end = nested_end,
+ 31377:                     .block = false_block,
+ 31378:                     .continuation = merge_block,
+ 31379:                     .place = task.as.selection.place,
+ 31380:                     .type = task.as.selection.type,
+ 31381:                     .source = task.as.selection.source,
+ 31382:                 },
+ 31383:         };
+ 31384:         frame->as.conditional.tasks[frame->as.conditional.task_count++] = (CIrLowerFrame){
+ 31385:             .kind = C_IR_LOWER_FRAME_SELECTION_EXPRESSION,
+ 31386:             .as.selection =
+ 31387:                 {
+ 31388:                     .start = nested_question + 1,
+ 31389:                     .end = nested_colon,
+ 31390:                     .block = true_block,
+ 31391:                     .continuation = merge_block,
+ 31392:                     .place = task.as.selection.place,
+ 31393:                     .type = task.as.selection.type,
+ 31394:                     .source = task.as.selection.source,
+ 31395:                 },
+ 31396:         };
+ 31397:         frame->stage = (u8)C_IR_LOWER_STAGE_CONDITIONAL_CONDITION;
+ 31398:         if (!c_ir_lower_condition_frame_push(builder, nested_start, nested_question, true_block, false_block, task.as.selection.source))
+ 31399:         {
+ 31400:             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31401:         }
+ 31402:         return;
+ 31403:     }
+ 31404:     if (!c_ir_switch_block(builder, frame->as.conditional.final_block))
+ 31405:     {
+ 31406:         c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+ 31407:         return;
+ 31408:     }
+ 31409:     IrType* result_type = ir_type_from_id(&builder->program->types, frame->as.conditional.type);
+ 31410:     IrValueId value = result_type && result_type->kind == IR_TYPE_VOID
+ 31411:                           ? c_ir_emit_integer_value(builder, 0, false, (CToken){0})
+ 31412:                           : c_ir_emit_load_place(builder, frame->as.conditional.place, frame->as.conditional.type, frame->as.conditional.source);
+ 31413:     c_ir_lower_frame_finish(builder, value.value != IR_ID_UNDERLYING_INVALID, value);
+ 31414: }
+ 31415: 
+ 31416: BUSTER_C_INTERNAL bool c_ir_expression_task_push(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrLowerFrame task, u32 token_index)
+ 31417: {

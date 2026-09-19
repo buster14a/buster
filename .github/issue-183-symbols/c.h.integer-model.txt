@@ -1,0 +1,188 @@
+===== src/buster/lib/compiler/frontend/c/c.h hit 679 =====
+   659: BUSTER_CT_CHECK(sizeof(CTypeId) == sizeof(CIdUnderlying));
+   660: BUSTER_CT_CHECK(sizeof(CEntityId) == sizeof(CIdUnderlying));
+   661: BUSTER_CT_CHECK(sizeof(CScopeId) == sizeof(CIdUnderlying));
+   662: 
+   663: typedef enum CTypeKind
+   664: {
+   665:     C_TYPE_INVALID,
+   666:     C_TYPE_VOID,
+   667:     C_TYPE_BOOL,
+   668:     C_TYPE_CHAR,
+   669:     C_TYPE_SIGNED_CHAR,
+   670:     C_TYPE_UNSIGNED_CHAR,
+   671:     C_TYPE_SHORT,
+   672:     C_TYPE_UNSIGNED_SHORT,
+   673:     C_TYPE_INT,
+   674:     C_TYPE_UNSIGNED_INT,
+   675:     C_TYPE_LONG,
+   676:     C_TYPE_UNSIGNED_LONG,
+   677:     C_TYPE_LONG_LONG,
+   678:     C_TYPE_UNSIGNED_LONG_LONG,
+   679:     C_TYPE_INT128,
+   680:     C_TYPE_UNSIGNED_INT128,
+   681:     // IEEE-754 binary16, spelled `_Float16`.  It is a real type, not a
+   682:     // storage-only alias: it has its own two-byte layout, its own rank below
+   683:     // `float` in the usual arithmetic conversions, and its own place in the
+   684:     // vector element ladder.  Clang's `avx512fp16intrin.h` declares
+   685:     // `__m512h` out of it, which is what brought it in.
+   686:     C_TYPE_FLOAT16,
+   687:     C_TYPE_BFLOAT16,
+   688:     C_TYPE_FLOAT,
+   689:     C_TYPE_DOUBLE,
+   690:     C_TYPE_LONG_DOUBLE,
+   691:     // The three C99 complex types and the `_Float16 _Complex` extension
+   692:     // beside them. Each is laid out as two contiguous elements of its
+   693:     // underlying real type -- real part first -- which is both what the
+   694:     // psABIs specify and what lets the IR model them as two-field
+   695:     // aggregates (see c_ir_scalar_type). Clang's `_mm512_set1_pch` takes a
+   696:     // `_Float16 _Complex` parameter, which is what brought the half form in.
+   697:     C_TYPE_FLOAT16_COMPLEX,
+   698:     C_TYPE_FLOAT_COMPLEX,
+   699:     C_TYPE_DOUBLE_COMPLEX,
+   700:     C_TYPE_LONG_DOUBLE_COMPLEX,
+   701:     C_TYPE_VA_LIST,
+   702:     C_TYPE_NULLPTR,
+   703:     C_TYPE_POINTER,
+   704:     C_TYPE_ARRAY,
+   705:     C_TYPE_VECTOR,
+   706:     C_TYPE_FUNCTION,
+   707:     C_TYPE_STRUCT,
+   708:     C_TYPE_UNION,
+   709:     C_TYPE_ENUM,
+   710:     C_TYPE_COUNT,
+   711: } CTypeKind;
+   712: 
+   713: // The complex kinds and their underlying real kind, in both directions. Every
+   714: // complex question in the frontend goes through these three so the mapping
+   715: // lives in one place; `c_type_kind_complex_of` returns C_TYPE_INVALID for a
+   716: // real kind that has no complex counterpart (C only defines the three).
+   717: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_type_kind_is_complex(CTypeKind kind)
+   718: {
+   719:     return kind == C_TYPE_FLOAT16_COMPLEX || kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
+
+===== src/buster/lib/compiler/frontend/c/c.h hit 680 =====
+   660: BUSTER_CT_CHECK(sizeof(CEntityId) == sizeof(CIdUnderlying));
+   661: BUSTER_CT_CHECK(sizeof(CScopeId) == sizeof(CIdUnderlying));
+   662: 
+   663: typedef enum CTypeKind
+   664: {
+   665:     C_TYPE_INVALID,
+   666:     C_TYPE_VOID,
+   667:     C_TYPE_BOOL,
+   668:     C_TYPE_CHAR,
+   669:     C_TYPE_SIGNED_CHAR,
+   670:     C_TYPE_UNSIGNED_CHAR,
+   671:     C_TYPE_SHORT,
+   672:     C_TYPE_UNSIGNED_SHORT,
+   673:     C_TYPE_INT,
+   674:     C_TYPE_UNSIGNED_INT,
+   675:     C_TYPE_LONG,
+   676:     C_TYPE_UNSIGNED_LONG,
+   677:     C_TYPE_LONG_LONG,
+   678:     C_TYPE_UNSIGNED_LONG_LONG,
+   679:     C_TYPE_INT128,
+   680:     C_TYPE_UNSIGNED_INT128,
+   681:     // IEEE-754 binary16, spelled `_Float16`.  It is a real type, not a
+   682:     // storage-only alias: it has its own two-byte layout, its own rank below
+   683:     // `float` in the usual arithmetic conversions, and its own place in the
+   684:     // vector element ladder.  Clang's `avx512fp16intrin.h` declares
+   685:     // `__m512h` out of it, which is what brought it in.
+   686:     C_TYPE_FLOAT16,
+   687:     C_TYPE_BFLOAT16,
+   688:     C_TYPE_FLOAT,
+   689:     C_TYPE_DOUBLE,
+   690:     C_TYPE_LONG_DOUBLE,
+   691:     // The three C99 complex types and the `_Float16 _Complex` extension
+   692:     // beside them. Each is laid out as two contiguous elements of its
+   693:     // underlying real type -- real part first -- which is both what the
+   694:     // psABIs specify and what lets the IR model them as two-field
+   695:     // aggregates (see c_ir_scalar_type). Clang's `_mm512_set1_pch` takes a
+   696:     // `_Float16 _Complex` parameter, which is what brought the half form in.
+   697:     C_TYPE_FLOAT16_COMPLEX,
+   698:     C_TYPE_FLOAT_COMPLEX,
+   699:     C_TYPE_DOUBLE_COMPLEX,
+   700:     C_TYPE_LONG_DOUBLE_COMPLEX,
+   701:     C_TYPE_VA_LIST,
+   702:     C_TYPE_NULLPTR,
+   703:     C_TYPE_POINTER,
+   704:     C_TYPE_ARRAY,
+   705:     C_TYPE_VECTOR,
+   706:     C_TYPE_FUNCTION,
+   707:     C_TYPE_STRUCT,
+   708:     C_TYPE_UNION,
+   709:     C_TYPE_ENUM,
+   710:     C_TYPE_COUNT,
+   711: } CTypeKind;
+   712: 
+   713: // The complex kinds and their underlying real kind, in both directions. Every
+   714: // complex question in the frontend goes through these three so the mapping
+   715: // lives in one place; `c_type_kind_complex_of` returns C_TYPE_INVALID for a
+   716: // real kind that has no complex counterpart (C only defines the three).
+   717: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_type_kind_is_complex(CTypeKind kind)
+   718: {
+   719:     return kind == C_TYPE_FLOAT16_COMPLEX || kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
+   720: }
+
+===== src/buster/lib/compiler/frontend/c/c.h hit 683 =====
+   663: typedef enum CTypeKind
+   664: {
+   665:     C_TYPE_INVALID,
+   666:     C_TYPE_VOID,
+   667:     C_TYPE_BOOL,
+   668:     C_TYPE_CHAR,
+   669:     C_TYPE_SIGNED_CHAR,
+   670:     C_TYPE_UNSIGNED_CHAR,
+   671:     C_TYPE_SHORT,
+   672:     C_TYPE_UNSIGNED_SHORT,
+   673:     C_TYPE_INT,
+   674:     C_TYPE_UNSIGNED_INT,
+   675:     C_TYPE_LONG,
+   676:     C_TYPE_UNSIGNED_LONG,
+   677:     C_TYPE_LONG_LONG,
+   678:     C_TYPE_UNSIGNED_LONG_LONG,
+   679:     C_TYPE_INT128,
+   680:     C_TYPE_UNSIGNED_INT128,
+   681:     // IEEE-754 binary16, spelled `_Float16`.  It is a real type, not a
+   682:     // storage-only alias: it has its own two-byte layout, its own rank below
+   683:     // `float` in the usual arithmetic conversions, and its own place in the
+   684:     // vector element ladder.  Clang's `avx512fp16intrin.h` declares
+   685:     // `__m512h` out of it, which is what brought it in.
+   686:     C_TYPE_FLOAT16,
+   687:     C_TYPE_BFLOAT16,
+   688:     C_TYPE_FLOAT,
+   689:     C_TYPE_DOUBLE,
+   690:     C_TYPE_LONG_DOUBLE,
+   691:     // The three C99 complex types and the `_Float16 _Complex` extension
+   692:     // beside them. Each is laid out as two contiguous elements of its
+   693:     // underlying real type -- real part first -- which is both what the
+   694:     // psABIs specify and what lets the IR model them as two-field
+   695:     // aggregates (see c_ir_scalar_type). Clang's `_mm512_set1_pch` takes a
+   696:     // `_Float16 _Complex` parameter, which is what brought the half form in.
+   697:     C_TYPE_FLOAT16_COMPLEX,
+   698:     C_TYPE_FLOAT_COMPLEX,
+   699:     C_TYPE_DOUBLE_COMPLEX,
+   700:     C_TYPE_LONG_DOUBLE_COMPLEX,
+   701:     C_TYPE_VA_LIST,
+   702:     C_TYPE_NULLPTR,
+   703:     C_TYPE_POINTER,
+   704:     C_TYPE_ARRAY,
+   705:     C_TYPE_VECTOR,
+   706:     C_TYPE_FUNCTION,
+   707:     C_TYPE_STRUCT,
+   708:     C_TYPE_UNION,
+   709:     C_TYPE_ENUM,
+   710:     C_TYPE_COUNT,
+   711: } CTypeKind;
+   712: 
+   713: // The complex kinds and their underlying real kind, in both directions. Every
+   714: // complex question in the frontend goes through these three so the mapping
+   715: // lives in one place; `c_type_kind_complex_of` returns C_TYPE_INVALID for a
+   716: // real kind that has no complex counterpart (C only defines the three).
+   717: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_type_kind_is_complex(CTypeKind kind)
+   718: {
+   719:     return kind == C_TYPE_FLOAT16_COMPLEX || kind == C_TYPE_FLOAT_COMPLEX || kind == C_TYPE_DOUBLE_COMPLEX || kind == C_TYPE_LONG_DOUBLE_COMPLEX;
+   720: }
+   721: 
+   722: BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE CTypeKind c_type_kind_complex_element(CTypeKind kind)
+   723: {

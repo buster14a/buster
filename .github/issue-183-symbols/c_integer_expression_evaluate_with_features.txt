@@ -1,0 +1,231 @@
+===== src/buster/lib/compiler/frontend/c/c_source.c:c_integer_expression_evaluate_with_features =====
+  5527:         node->token.token.offset = supported ? C_SPELLING_ONE : C_SPELLING_ZERO;
+  5528:         node->token.token.length = 1;
+  5529:         node->token.token.symbol = 0;
+  5530:         node->next = close->next;
+  5531:     }
+  5532:     return true;
+  5533: }
+  5534: 
+  5535: BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
+  5536:                                                                      CPpStampTable* stamps, CPpToken* tokens, u32 token_count, u32 expansion_limit,
+  5537:                                                                      CPreprocessResult* result,
+  5538:                                                                      CPreprocessOptions* options, String8 including_path,
+  5539:                                                                      CIncludeSearchOrigin including_origin, u64* value_out)
+  5540: {
+  5541:     bool valid = true;
+  5542:     char8 const* base = space->base;
+  5543:     CPpToken* transformed = arena_allocate(arena, CPpToken, token_count);
+  5544:     u32 transformed_count = 0;
+  5545:     for (u32 token_index = 0; valid && token_index < token_count; token_index += 1)
+  5546:     {
+  5547:         CPpToken token = tokens[token_index];
+  5548:         if (token.token.kind == C_TOKEN_IDENTIFIER && c_token_spelling_equal(base, token.token, S8("defined")))
+  5549:         {
+  5550:             u32 name_index = token_index + 1;
+  5551:             bool parenthesized = name_index < token_count && c_token_is_punctuator(&tokens[name_index].token, C_PUNCTUATOR_LEFT_PARENTHESIS);
+  5552:             name_index += parenthesized;
+  5553:             if (name_index >= token_count || tokens[name_index].token.kind != C_TOKEN_IDENTIFIER)
+  5554:             {
+  5555:                 valid = false;
+  5556:             }
+  5557:             else
+  5558:             {
+  5559:                 CMacro* macro = c_macro_find_token(first_macro, symbols, base, &tokens[name_index].token);
+  5560:                 CPpToken replacement = token;
+  5561:                 replacement.token.kind = C_TOKEN_PREPROCESSING_NUMBER;
+  5562:                 replacement.token.punctuator = C_PUNCTUATOR_NONE;
+  5563:                 replacement.token.offset = macro && macro->definition.defined ? C_SPELLING_ONE : C_SPELLING_ZERO;
+  5564:                 replacement.token.length = 1;
+  5565:                 replacement.token.symbol = 0;
+  5566:                 transformed[transformed_count++] = replacement;
+  5567:                 token_index = name_index;
+  5568:                 if (parenthesized)
+  5569:                 {
+  5570:                     valid = token_index + 1 < token_count && c_token_is_punctuator(&tokens[token_index + 1].token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+  5571:                     token_index += 1;
+  5572:                 }
+  5573:             }
+  5574:         }
+  5575:         else
+  5576:         {
+  5577:             transformed[transformed_count++] = token;
+  5578:         }
+  5579:     }
+  5580:     CPreprocessTokenNode* first_expanded = 0;
+  5581:     CPreprocessTokenNode* last_expanded = 0;
+  5582:     u64 expanded_count = 0;
+  5583:     if (valid)
+  5584:     {
+  5585:         valid = c_preprocess_expand(arena, space, symbols, first_macro, 0, 0, stamps, transformed, transformed_count, &first_expanded,
+  5586:                                     &last_expanded, &expanded_count, expansion_limit, result);
+  5587:     }
+  5588:     if (valid)
+  5589:     {
+  5590:         valid = c_conditional_feature_operators(arena, space, symbols, first_macro, first_expanded, options, including_path, including_origin);
+  5591:     }
+  5592:     if (valid)
+  5593:     {
+  5594:         u64* values = arena_allocate(arena, u64, expanded_count + 1);
+  5595:         u8* value_flags = arena_allocate(arena, u8, expanded_count + 1);
+  5596:         CConditionalOperator* operations = arena_allocate(arena, CConditionalOperator, expanded_count + 1);
+  5597:         u32 value_count = 0;
+  5598:         u32 operation_count = 0;
+  5599:         bool expect_operand = true;
+  5600:         for (CPreprocessTokenNode* node = first_expanded; valid && node; node = node->next)
+  5601:         {
+  5602:             CToken token = node->token.token;
+  5603:             if (token.kind == C_TOKEN_PREPROCESSING_NUMBER)
+  5604:             {
+  5605:                 u64 value = 0;
+  5606:                 String8 number_spelling = c_token_spelling(base, token);
+  5607:                 valid = expect_operand && c_conditional_number(number_spelling, &value);
+  5608:                 if (valid)
+  5609:                 {
+  5610:                     // The literal is uintmax_t when it says so or when its
+  5611:                     // value does not fit intmax_t. Characters and keywords
+  5612:                     // below remain signed regardless of their bit patterns.
+  5613:                     bool literal_unsigned = value > (u64)INT64_MAX;
+  5614:                     for (u64 suffix_index = 0; suffix_index < number_spelling.length; suffix_index += 1)
+  5615:                     {
+  5616:                         literal_unsigned |= number_spelling.pointer[suffix_index] == 'u' || number_spelling.pointer[suffix_index] == 'U';
+  5617:                     }
+  5618:                     value_flags[value_count] = literal_unsigned ? C_CONDITIONAL_VALUE_UNSIGNED : 0;
+  5619:                     values[value_count++] = value;
+  5620:                     expect_operand = false;
+  5621:                 }
+  5622:             }
+  5623:             else if (token.kind == C_TOKEN_CHARACTER_LITERAL)
+  5624:             {
+  5625:                 u64 character = 0;
+  5626:                 CTypeKind character_kind = C_TYPE_INVALID;
+  5627:                 valid = expect_operand && c_ir_decode_character_value(arena, base, token, result->target, &character, &character_kind);
+  5628:                 if (valid)
+  5629:                 {
+  5630:                     value_flags[value_count] = 0;
+  5631:                     values[value_count++] = character;
+  5632:                     expect_operand = false;
+  5633:                 }
+  5634:             }
+  5635:             else if (token.kind == C_TOKEN_IDENTIFIER)
+  5636:             {
+  5637:                 valid = expect_operand;
+  5638:                 if (valid)
+  5639:                 {
+  5640:                     value_flags[value_count] = 0;
+  5641:                     values[value_count++] = c_preprocess_dialect_is_c23(result->dialect) && c_token_spelling_equal(base, token, S8("true"));
+  5642:                     expect_operand = false;
+  5643:                 }
+  5644:             }
+  5645:             else if (token.kind != C_TOKEN_PUNCTUATOR)
+  5646:             {
+  5647:                 valid = false;
+  5648:             }
+  5649:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
+  5650:             {
+  5651:                 valid = expect_operand;
+  5652:                 if (valid)
+  5653:                 {
+  5654:                     operations[operation_count++] = C_CONDITIONAL_OPEN;
+  5655:                 }
+  5656:             }
+  5657:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+  5658:             {
+  5659:                 valid = !expect_operand;
+  5660:                 while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
+  5661:                 {
+  5662:                     valid = c_conditional_apply(operations[--operation_count], values, value_flags, &value_count);
+  5663:                 }
+  5664:                 valid = valid && operation_count != 0;
+  5665:                 if (valid)
+  5666:                 {
+  5667:                     operation_count -= 1;
+  5668:                 }
+  5669:             }
+  5670:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION))
+  5671:             {
+  5672:                 valid = !expect_operand;
+  5673:                 u32 precedence = c_conditional_precedence(C_CONDITIONAL_QUESTION);
+  5674:                 while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN &&
+  5675:                        c_conditional_precedence(operations[operation_count - 1]) > precedence)
+  5676:                 {
+  5677:                     valid = c_conditional_apply(operations[--operation_count], values, value_flags, &value_count);
+  5678:                 }
+  5679:                 if (valid)
+  5680:                 {
+  5681:                     operations[operation_count++] = C_CONDITIONAL_QUESTION;
+  5682:                     expect_operand = true;
+  5683:                 }
+  5684:             }
+  5685:             else if (c_token_is_punctuator(&token, C_PUNCTUATOR_COLON))
+  5686:             {
+  5687:                 valid = !expect_operand;
+  5688:                 while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_QUESTION)
+  5689:                 {
+  5690:                     CConditionalOperator previous = operations[--operation_count];
+  5691:                     valid = previous != C_CONDITIONAL_OPEN && c_conditional_apply(previous, values, value_flags, &value_count);
+  5692:                 }
+  5693:                 valid = valid && operation_count != 0;
+  5694:                 if (valid)
+  5695:                 {
+  5696:                     operations[operation_count - 1] = C_CONDITIONAL_SELECT;
+  5697:                     expect_operand = true;
+  5698:                 }
+  5699:             }
+  5700:             else
+  5701:             {
+  5702:                 CConditionalOperator operation = C_CONDITIONAL_OPERATOR_COUNT;
+  5703:                 valid = c_conditional_operator(token, expect_operand, &operation);
+  5704:                 bool unary = c_conditional_is_unary(operation);
+  5705:                 valid = valid && expect_operand == unary;
+  5706:                 u32 precedence = c_conditional_precedence(operation);
+  5707:                 while (valid && operation_count && operations[operation_count - 1] != C_CONDITIONAL_OPEN)
+  5708:                 {
+  5709:                     CConditionalOperator previous = operations[operation_count - 1];
+  5710:                     u32 previous_precedence = c_conditional_precedence(previous);
+  5711:                     if (previous_precedence < precedence || (unary && previous_precedence == precedence))
+  5712:                     {
+  5713:                         break;
+  5714:                     }
+  5715:                     operation_count -= 1;
+  5716:                     valid = c_conditional_apply(previous, values, value_flags, &value_count);
+  5717:                 }
+  5718:                 if (valid)
+  5719:                 {
+  5720:                     operations[operation_count++] = operation;
+  5721:                     expect_operand = true;
+  5722:                 }
+  5723:             }
+  5724:         }
+  5725:         valid = valid && !expect_operand;
+  5726:         while (valid && operation_count)
+  5727:         {
+  5728:             CConditionalOperator operation = operations[--operation_count];
+  5729:             valid = operation != C_CONDITIONAL_OPEN && operation != C_CONDITIONAL_QUESTION &&
+  5730:                     c_conditional_apply(operation, values, value_flags, &value_count);
+  5731:         }
+  5732:         valid = valid && value_count == 1 && !(value_flags[0] & C_CONDITIONAL_VALUE_FAULT);
+  5733:         if (valid)
+  5734:         {
+  5735:             *value_out = values[0];
+  5736:         }
+  5737:     }
+  5738:     return valid;
+  5739: }
+  5740: 
+  5741: // The parse-side entry point: no macro table, so expansion is a pass-through
+  5742: // and nothing ever allocates spelling bytes — the read-only space view over
+
+===== src/buster/lib/compiler/frontend/c/c_source.c:c_integer_expression_evaluate_with_features =====
+  5749:     };
+  5750:     CPpToken* wrapped = arena_allocate(arena, CPpToken, token_count);
+  5751:     for (u32 token_index = 0; token_index < token_count; token_index += 1)
+  5752:     {
+  5753:         wrapped[token_index] = (CPpToken){
+  5754:             .token = tokens[token_index],
+  5755:         };
+  5756:     }
+  5757:     return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, result, 0, (String8){0},
+  5758:                                                        (CIncludeSearchOrigin){0}, value_out);
+  5759: }
+  5760: 

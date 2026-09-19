@@ -1,0 +1,91 @@
+===== src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_direct_expression_base =====
+  2454:             .kind = C_TYPE_VECTOR,
+  2455:             .vector_byte_size = (u32)shape.lanes * (shape.kind == C_TYPE_FLOAT ? 4u : 2u),
+  2456:             .is_complete = true,
+  2457:         });
+  2458:     }
+  2459:     return type;
+  2460: }
+  2461: 
+  2462: BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
+  2463:                                                          u32 base_start, u32 base_end)
+  2464: {
+  2465:     CTypeId type = C_TYPE_ID_INVALID;
+  2466:     bool call_base = base_end > base_start + 2 && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER &&
+  2467:                      c_token_is_punctuator(&preprocess.tokens[base_start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+  2468:                      c_token_is_punctuator(&preprocess.tokens[base_end - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+  2469:     if ((base_end == base_start + 1 || call_base) && preprocess.tokens[base_start].kind == C_TOKEN_IDENTIFIER)
+  2470:     {
+  2471:         CEntityId entity_id = C_ENTITY_ID_INVALID;
+  2472:         u32 base_use_index = c_parse_identifier_use_index(result, base_start);
+  2473:         if (base_use_index != C_ID_UNDERLYING_INVALID)
+  2474:         {
+  2475:             entity_id = result->identifier_uses[base_use_index].entity;
+  2476:         }
+  2477:         CScopeId lookup_scope = scope;
+  2478:         if (lookup_scope.value == C_ID_UNDERLYING_INVALID && result->scope_count)
+  2479:         {
+  2480:             lookup_scope = (CScopeId){
+  2481:                 .value = 0,
+  2482:             };
+  2483:         }
+  2484:         if (entity_id.value == C_ID_UNDERLYING_INVALID && lookup_scope.value != C_ID_UNDERLYING_INVALID)
+  2485:         {
+  2486:             entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[base_start]);
+  2487:         }
+  2488:         type = entity_id.value < result->entity_count && result->entities[entity_id.value].kind != C_ENTITY_TYPEDEF &&
+  2489:                        result->entities[entity_id.value].kind != C_ENTITY_ENUMERATOR
+  2490:                    ? result->entities[entity_id.value].type
+  2491:                    : C_TYPE_ID_INVALID;
+  2492:         // A call base -- `_PyBaseExceptionObject_cast(self)->context` is what
+  2493:         // CPython's Py_XSETREF callers hand _Py_TYPEOF -- contributes its
+  2494:         // return type, through a function pointer's pointee when the name
+  2495:         // binds to one.
+  2496:         if (call_base && type.value < result->type_count)
+  2497:         {
+  2498:             CType* base_type = &result->types[type.value];
+  2499:             if (base_type->kind == C_TYPE_POINTER && base_type->element_type.value < result->type_count)
+  2500:             {
+  2501:                 base_type = &result->types[base_type->element_type.value];
+  2502:             }
+  2503:             type = base_type->kind == C_TYPE_FUNCTION ? base_type->return_type : C_TYPE_ID_INVALID;
+  2504:         }
+  2505:         else if (call_base && entity_id.value == C_ID_UNDERLYING_INVALID)
+  2506:         {
+  2507:             CBfloat16Builtin const* builtin = c_parse_bfloat16_builtin(c_token_spelling(preprocess.spelling_base, preprocess.tokens[base_start]));
+  2508:             if (builtin)
+  2509:             {
+  2510:                 c_parse_position_index_append(result->arena, &result->bfloat16_builtin_calls, &result->bfloat16_builtin_call_count,
+  2511:                                                &result->bfloat16_builtin_call_capacity, base_start);
+  2512:                 type = c_parse_bfloat16_builtin_result(result, builtin);
+  2513:             }
+  2514:         }
+  2515:     }
+  2516:     else if (base_start < base_end && c_token_is_punctuator(&preprocess.tokens[base_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+  2517:     {
+  2518:         // A cast base: `((propertyobject *) new)->prop_name` is what
+  2519:         // Py_SETREF writes through _Py_TYPEOF, so `__typeof__` over it must
+  2520:         // resolve or the declaration it types declares nothing.  The cast's
+  2521:         // own type is the whole answer -- the operand after it only carries
+  2522:         // the value -- and the machineless resolvers exist exactly for walks
+  2523:         // like this one that may run inside a machine step.
+  2524:         u32 cast_close = c_parse_matching_delimiter_indexed(result, preprocess, base_start);
+  2525:         if (cast_close < base_end && cast_close + 1 < base_end)
+  2526:         {
+  2527:             u32 type_index = base_start + 1;
+  2528:             CTypeId cast_type = c_parse_machineless_base_type(result, preprocess, scope, base_start + 1, cast_close, &type_index);
+  2529:             if (cast_type.value != C_ID_UNDERLYING_INVALID)
+  2530:             {
+  2531:                 cast_type = c_parse_pointer_chain(result, preprocess, cast_type, &type_index, cast_close);
+  2532:                 if (type_index == cast_close)
+  2533:                 {
+  2534:                     type = cast_type;
+  2535:                 }
+  2536:             }
+  2537:         }
+  2538:     }
+  2539:     return type;
+  2540: }
+  2541: 
+  2542: BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+  2543:                                                             CTypeId type, u32 start, u32 end)
