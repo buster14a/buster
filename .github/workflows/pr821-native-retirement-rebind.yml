@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   refresh:
-    if: ${{ github.event.head_commit.message == 'ci: stage PR 821 native retirement rebind' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: github.event.head_commit.message == 'ci stage PR821 native retirement rebind' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
