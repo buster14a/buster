@@ -35,7 +35,6 @@ jobs:
           printf '%s\n' "$?" > /tmp/issue-183-baseline.exit
           exit 0
       - name: Recover and apply candidate
-        id: apply
         shell: bash
         run: |
           set +e
@@ -139,6 +138,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
+          import subprocess
 
           def extract(name: str, path: str, exit_path: str) -> list[str]:
               lines = Path(path).read_text(errors='replace').splitlines() if Path(path).exists() else []
@@ -151,8 +151,9 @@ jobs:
               status = Path(exit_path).read_text().strip() if Path(exit_path).exists() else 'missing'
               return [f'=== {name} exit={status} lines={len(lines)} ===', *chosen]
 
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           out = [
-              f'base={Path(".git/refs/heads/scratch/183-current-progress").read_text().strip() if Path(".git/refs/heads/scratch/183-current-progress").exists() else "checked-out-head"}',
+              f'base={head}',
               f'apply_exit={Path("/tmp/issue-183-apply.exit").read_text().strip()}',
               f'candidate_build_exit={Path("/tmp/issue-183-candidate-build.exit").read_text().strip()}',
               f'targeted_compile_run={Path("/tmp/issue-183-targeted.exit").read_text().strip()}',
@@ -170,7 +171,7 @@ jobs:
           out.append('')
           out.append('=== targeted output ===')
           out.extend(Path('/tmp/issue-183-targeted.log').read_text(errors='replace').splitlines())
-          Path('.github/issue-183-current-comparison.txt').write_text('\n'.join(out) + '\n')
+          Path('/tmp/issue-183-current-comparison.txt').write_text('\n'.join(out) + '\n')
           PY
       - name: Publish comparison
         shell: bash
@@ -178,6 +179,7 @@ jobs:
           set -euo pipefail
           git reset --hard HEAD
           git clean -fd
+          cp /tmp/issue-183-current-comparison.txt .github/issue-183-current-comparison.txt
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add .github/issue-183-current-comparison.txt
