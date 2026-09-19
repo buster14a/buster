@@ -618,8 +618,8 @@
       "source": "src/buster/lib/os.c",
       "provenance": "repo:src/buster/lib/os.c",
       "destination": "dependencies/project-include/buster/lib/os.c",
-      "bytes": 231223,
-      "sha256": "1f842f86df6f6bb40f8b65cb3e88f3658ce3e64679d72f9abe631d0ea9d10754"
+      "bytes": 231574,
+      "sha256": "bf2c8210c018bb651cd15da69c3a962d60d45ec93cb5d4b15ffeb8554a77d384"
     },
     {
       "source": "src/buster/lib/os.h",
