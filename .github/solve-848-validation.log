@@ -1,0 +1,4 @@
+head=2d8dae39125f9a9aa914cf8de5236f1a3aede2cb
+status=failed
+
+error: tcc was not found in PATH
