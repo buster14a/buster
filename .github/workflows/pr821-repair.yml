@@ -1,0 +1,98 @@
+name: PR 821 repair
+
+on:
+  push:
+    branches:
+      - fix/84-transactional-hermetic-spawn
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: fix/84-transactional-hermetic-spawn
+          fetch-depth: 0
+
+      - name: Apply confirmed CI fixes and inspect macOS failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one occurrence, found {count}: {old!r}")
+              file.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/buster/lib/os.c",
+              "BUSTER_GLOBAL_LOCAL bool os_process_spawn_test_should_fail(OsProcessSpawnTestOperation operation)",
+              "BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool os_process_spawn_test_should_fail(OsProcessSpawnTestOperation operation)",
+          )
+
+          differential = Path("tools/differential.c")
+          text = differential.read_text()
+          call = re.compile(
+              r"(os_process_spawn\(args,\s*&\(Os_Process_Options\)\{"
+              r"(?:(?!\}\s*,\s*&output).)*?"
+              r"\.capture_limit\s*=\s*TO_MB\(64\))"
+              r"(\s*\})",
+              re.S,
+          )
+          matches = list(call.finditer(text))
+          if len(matches) != 1:
+              raise SystemExit(f"tools/differential.c: expected one self-test spawn initializer, found {len(matches)}")
+          match = matches[0]
+          body = match.group(0)
+          if ".search_path" in body:
+              raise SystemExit("tools/differential.c: self-test spawn already has search_path")
+          patched = re.sub(
+              r"(\.capture_limit\s*=\s*TO_MB\(64\))",
+              r"\1,\n                                                  .search_path = true",
+              body,
+              count=1,
+          )
+          differential.write_text(text[:match.start()] + patched + text[match.end():])
+
+          needles = ("weird_kind", "no-shell metachar")
+          found = False
+          for file in Path("src").rglob("*.c"):
+              lines = file.read_text(errors="replace").splitlines()
+              hits = [i for i, line in enumerate(lines) if any(needle in line for needle in needles)]
+              for i in hits:
+                  found = True
+                  lo = max(0, i - 24)
+                  hi = min(len(lines), i + 25)
+                  print(f"PR821_MAC_CONTEXT_BEGIN {file}:{i + 1}")
+                  for number in range(lo, hi):
+                      print(f"{number + 1:6}: {lines[number]}")
+                  print("PR821_MAC_CONTEXT_END")
+          if not found:
+              print("PR821_MAC_CONTEXT_NOT_FOUND")
+          PY
+          git diff --check
+          git diff -- src/buster/lib/os.c tools/differential.c
+
+      - name: Commit branch repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/pr821-repair.yml
+          git diff --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/buster/lib/os.c tools/differential.c .github/workflows/pr821-repair.yml
+          git commit -m "ci: fix transactional spawn integration"
+          git push origin HEAD:fix/84-transactional-hermetic-spawn
