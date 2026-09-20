@@ -1,0 +1,59 @@
+name: Materialize native-retirement cutover
+
+on:
+  push:
+    branches:
+      - tmp/864-865-native-retirement-materialize
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-native-retirement-cutover
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: ${{ github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Materialize reviewed files on the target branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: codex/864-865-native-retirement-single-writer
+          EXPECTED_TARGET_SHA: f91ad9f85e7fa2309afd337c6113066c3dd06c51
+          SOURCE_BRANCH: tmp/864-865-native-retirement-materialize
+        shell: bash
+        run: |
+          set -euo pipefail
+          askpass="$RUNNER_TEMP/github-askpass.sh"
+          cat > "$askpass" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *) printf '%s\n' "$GH_TOKEN" ;;
+          esac
+          SH
+          chmod 700 "$askpass"
+          git init work
+          git -C work remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          GIT_ASKPASS="$askpass" git -C work fetch --depth=1 origin "$GITHUB_SHA"
+          git -C work checkout --detach FETCH_HEAD
+          test "$(git -C work rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p work/.github/workflows work/tools
+          gzip -dc work/.bootstrap/native-retirement-integration.yml.gz > work/.github/workflows/native-retirement-integration.yml
+          gzip -dc work/.bootstrap/native_retirement_integration.py.gz > work/tools/native_retirement_integration.py
+          gzip -dc work/.bootstrap/native_retirement_integration_test.py.gz > work/tools/native_retirement_integration_test.py
+          test "$(git -C work hash-object .github/workflows/native-retirement-integration.yml)" = afd9241e2434974febb87d5da433eb30900eeeb6
+          test "$(git -C work hash-object tools/native_retirement_integration.py)" = bdfd914c2d9b4ea60c67d389dca753d37026b033
+          test "$(git -C work hash-object tools/native_retirement_integration_test.py)" = 095ab16731e671e3cb4f53acbf2484aaa415e78b
+          rm -rf work/.bootstrap work/.github/workflows/z-materialize-native-retirement-cutover.yml
+          git -C work add -A
+          git -C work config user.name github-actions[bot]
+          git -C work config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C work commit -m 'bootstrap: materialize native-retirement cutover files'
+          GIT_ASKPASS="$askpass" git -C work push \
+            --force-with-lease="refs/heads/$TARGET_BRANCH:$EXPECTED_TARGET_SHA" \
+            origin "HEAD:refs/heads/$TARGET_BRANCH"
+          GIT_ASKPASS="$askpass" git -C work push origin ":refs/heads/$SOURCE_BRANCH"

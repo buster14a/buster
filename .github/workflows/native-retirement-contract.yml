@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - .github/workflows/native-retirement-contract.yml
+      - .github/workflows/native-retirement-integration.yml
+      - .github/workflows/native-retirement-rebind.yml
       # Android status tests reuse frozen mobile support inputs. Keep their
       # contract validation scheduled even when tests/** itself is unchanged.
       - .github/workflows/ci.yml
@@ -21,14 +23,20 @@ on:
       - docs/native-retirement-supported-gaps-v1.tsv
       - docs/native-retirement-applicability-v1.tsv
       - docs/native-retirement-dependencies-v1.json
+      - docs/native-retirement-repository-sources-v1.json
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
       - tools/native_retirement_contract_test.py
       - tools/native_retirement_archive.py
       - tools/native_retirement_evidence_upload_test.py
+      - tools/native_retirement_dependency_binding.py
+      - tools/native_retirement_dependency_binding.generated.h
+      - tools/native_retirement_integration.py
       - tools/native_retirement_materializer.py
       - tools/native_retirement_materializer_test.py
+      - tools/native_retirement_rebind.py
+      - tools/native_retirement_rebind_contract.py
       - tools/native_retirement_external.py
       - tools/native_retirement_sdks.py
       - tools/native_retirement_sdks_test.py
@@ -79,6 +87,14 @@ jobs:
       - name: Check out exact revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          persist-credentials: false
+      - name: Check out the previously trusted rebinder revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: .native-retirement-trusted
+          fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -136,13 +152,24 @@ jobs:
           path: external/musl
           fetch-depth: 1
           persist-credentials: false
-      - name: Materialize pinned target SDK headers
-        run: python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
+      - name: Materialize pinned target SDK headers with trusted code
+        run: python3 .native-retirement-trusted/tools/native_retirement_sdks.py --source-root "$(pwd)"
       - name: Prepare the pinned external closure
         run: >-
-          python3 tools/native_retirement_external.py prepare
+          python3 .native-retirement-trusted/tools/native_retirement_external.py prepare
           --manifest docs/native-retirement-dependencies-v1.json
           --source-root "$(pwd)"
+      - name: Reconstruct exact candidate binding ephemerally
+        run: |
+          mkdir -p evidence/native-retirement-rebind
+          python3 .native-retirement-trusted/tools/native_retirement_rebind.py refresh \
+            --repo-root "$(pwd)" \
+            | tee evidence/native-retirement-rebind/refresh.json
+          python3 .native-retirement-trusted/tools/native_retirement_rebind.py check \
+            --repo-root "$(pwd)" \
+            | tee evidence/native-retirement-rebind/check.json
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)" \
+            | tee evidence/native-retirement-rebind/candidate-check.json
       - name: Build and validate the manifest producer
         run: |
           clang --version
