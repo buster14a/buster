@@ -30,6 +30,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             IrFunction* function = lowered.program->modules->functions;
             BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
             BUSTER_TEST(arguments, function->operand_total == ir_test_operand_total(function));
+            lowered.program->fast_passes = 0;
+            BUSTER_TEST(arguments, ir_prepare_canonical_module(lowered.program, lowered.program->modules, false).error == IR_VALIDATION_NONE);
+            BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
             ir_function_invalidate_cfg(function);
             BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count);
         }
