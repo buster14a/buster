@@ -1,0 +1,73 @@
+name: Verify issue 909 Windows deadline
+
+on:
+  push:
+    branches:
+      - verify/909-windows-repeat-e7ada
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-release-repeat:
+    name: Windows x86-64 Release repeated
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: e7ada79e63ed8f6c154f15692161861939a21b38
+          persist-credentials: false
+
+      - name: Build and run Release suite twice
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $VsWhere)) { throw "vswhere was not found at $VsWhere" }
+          $VsPaths = @(& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'Visual Studio x86-64 tools were not found' }
+          $VsPath = $VsPaths[0].Trim()
+          & (Join-Path $VsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:PATH = "$env:ProgramFiles\LLVM\bin;$env:PATH"
+
+          clang --version
+          node --version
+          cmake --version
+          ninja --version
+
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          $Driver = Join-Path (Get-Location) 'build\build.exe'
+          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmd /c "`"$Driver`" generate --cc clang --config Release --ci --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF 2>&1" | Tee-Object -FilePath "$env:RUNNER_TEMP\issue-909-generate.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          for ($Attempt = 1; $Attempt -le 2; $Attempt += 1) {
+            $Log = "$env:RUNNER_TEMP\issue-909-release-$Attempt.log"
+            cmd /c "`"$Driver`" build --config Release -t test_all 2>&1" | Tee-Object -FilePath $Log
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $Text = Get-Content -Raw -LiteralPath $Log
+            if ($Text -notmatch 'WASM_NODE_PROCESS oracle=integer mode=default status=success') {
+              throw "attempt $Attempt did not retain a successful integer oracle record"
+            }
+            if ($Text -notmatch 'WASM_NODE_PROCESS oracle=policy mode=summary-then-hang status=summary-before-timeout') {
+              throw "attempt $Attempt did not retain the summary-then-hang deadline control"
+            }
+            if ($Text -notmatch 'WASM_NODE_PROCESS oracle=policy mode=hang status=timeout') {
+              throw "attempt $Attempt did not retain the true-hang deadline control"
+            }
+          }
+
+      - name: Retain exact verification logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue-909-windows-e7ada79e
+          path: |
+            ${{ runner.temp }}/issue-909-*.log
+          if-no-files-found: error
+          retention-days: 7
