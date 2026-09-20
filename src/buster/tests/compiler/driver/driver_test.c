@@ -5218,6 +5218,215 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_i128_float(UnitTestA
     return result;
 }
 
+// Node-backed Wasm oracles remain bounded, but Windows desktop runners need
+// headroom beyond the historical 30-second cliff. A printed summary never
+// substitutes for observing normal process termination.
+BUSTER_GLOBAL_LOCAL u64 compiler_driver_test_wasm_node_deadline_microseconds(void)
+{
+    u64 result = 30000000;
+#if BUSTER_WINDOWS
+    result = 60000000;
+#endif
+    return result;
+}
+
+typedef struct CompilerDriverWasmNodeRun CompilerDriverWasmNodeRun;
+struct CompilerDriverWasmNodeRun
+{
+    ProcessWaitResult wait;
+    u64 deadline_microseconds;
+    u64 elapsed_microseconds;
+    bool spawned;
+    bool terminal_marker;
+};
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_terminal_marker(String8 output, String8 marker)
+{
+    bool result = false;
+    while (output.length && (output.pointer[output.length - 1] == '\n' || output.pointer[output.length - 1] == '\r'))
+    {
+        output.length -= 1;
+    }
+    if (marker.length <= output.length &&
+        memcmp(output.pointer + output.length - marker.length, marker.pointer, marker.length) == 0)
+    {
+        u64 marker_start = output.length - marker.length;
+        result = marker_start == 0 || output.pointer[marker_start - 1] == '\n';
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_wasm_node_succeeded(CompilerDriverWasmNodeRun run)
+{
+    bool result = run.spawned && !run.wait.timed_out && run.wait.result == PROCESS_RESULT_SUCCESS &&
+                  run.wait.streams[STANDARD_STREAM_ERROR].length == 0 && run.terminal_marker;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_wasm_node_status(CompilerDriverWasmNodeRun run)
+{
+    String8 result = S8("success");
+    if (!run.spawned)
+    {
+        result = S8("launch-failure");
+    }
+    else if (run.wait.timed_out && run.terminal_marker)
+    {
+        result = S8("summary-before-timeout");
+    }
+    else if (run.wait.timed_out)
+    {
+        result = S8("timeout");
+    }
+    else if (run.wait.result != PROCESS_RESULT_SUCCESS)
+    {
+        result = S8("nonzero-exit");
+    }
+    else if (run.wait.streams[STANDARD_STREAM_ERROR].length)
+    {
+        result = S8("stderr-output");
+    }
+    else if (!run.terminal_marker)
+    {
+        result = S8("incomplete-output");
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run(UnitTestArguments* arguments, Arena* arena, String8 oracle,
+                                                                                  String8 mode, SliceString8 node_arguments,
+                                                                                  String8 expected_marker, u64 deadline_microseconds)
+{
+    CompilerDriverWasmNodeRun result = {
+        .wait = {.result = PROCESS_RESULT_NOT_EXISTENT},
+        .deadline_microseconds = deadline_microseconds,
+    };
+    u64 start = os_now_microseconds();
+    ProcessSpawnResult spawn = os_process_spawn(node_arguments, (SliceString8){0}, (SliceString8){0},
+                                                (ProcessSpawnOptions){
+                                                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                               ((u64)1 << STANDARD_STREAM_ERROR),
+                                                    .use_process_environment = 1,
+                                                });
+    result.spawned = spawn.handle != 0;
+    if (spawn.handle)
+    {
+        result.wait = os_process_wait_deadline(arena, spawn, deadline_microseconds);
+    }
+    result.elapsed_microseconds = os_now_microseconds() - start;
+    String8 standard_output = BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_OUTPUT]);
+    result.terminal_marker = compiler_driver_test_wasm_node_terminal_marker(standard_output, expected_marker);
+    String8 status = compiler_driver_test_wasm_node_status(result);
+    arguments->show(arguments,
+                    S8("WASM_NODE_PROCESS oracle={S8} mode={S8} status={S8} spawned={u32} result={u32} "
+                       "platform_status={u32:x} timed_out={u32} marker={u32} elapsed_us={u64} deadline_us={u64}\n"
+                       "stdout:\n{S8}stderr:\n{S8}\n"),
+                    oracle, mode, status, (u32)result.spawned, (u32)result.wait.result, result.wait.platform_status,
+                    (u32)result.wait.timed_out, (u32)result.terminal_marker, result.elapsed_microseconds,
+                    result.deadline_microseconds, standard_output,
+                    BYTE_SLICE_TO_STRING(8, result.wait.streams[STANDARD_STREAM_ERROR]));
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_node_policy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 node = executable_resolve_in_path(arguments->arena, S8("node"));
+    if (node.length)
+    {
+        String8 marker = S8("WASM_NODE_POLICY pass");
+        u64 completion_deadline = 5000000;
+        u64 timeout_deadline = 500000;
+        u64 timeout_upper_bound = timeout_deadline + 10000000;
+        {
+            String8 node_arguments[] = {node, S8("-e"), S8("process.stdout.write('WASM_NODE_POLICY pass\\n')")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("policy"), S8("complete"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {
+                node,
+                S8("-e"),
+                S8("process.stdout.write('WASM_NODE_POLICY pass\\n'); setTimeout(() => {}, 100)"),
+            };
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("policy"), S8("summary-then-exit"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {
+                node,
+                S8("-e"),
+                S8("process.stdout.write('WASM_NODE_POLICY pass\\n'); process.exitCode = 7"),
+            };
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("policy"), S8("nonzero"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, !run.wait.timed_out && run.wait.result != PROCESS_RESULT_SUCCESS && run.terminal_marker);
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {node, S8("-e"), S8("process.stdout.write('WASM_NODE_POLICY incomplete\\n')")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("policy"), S8("incomplete"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, !run.wait.timed_out && run.wait.result == PROCESS_RESULT_SUCCESS && !run.terminal_marker);
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {
+                node,
+                S8("-e"),
+                S8("process.stdout.write('WASM_NODE_POLICY pass\\n'); process.stderr.write('unexpected stderr\\n')"),
+            };
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("policy"), S8("stderr"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, !run.wait.timed_out && run.wait.result == PROCESS_RESULT_SUCCESS && run.terminal_marker &&
+                                       run.wait.streams[STANDARD_STREAM_ERROR].length != 0);
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {
+                node,
+                S8("-e"),
+                S8("process.stdout.write('WASM_NODE_POLICY pass\\n'); setInterval(() => {}, 1000)"),
+            };
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("policy"), S8("summary-then-hang"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, timeout_deadline);
+            BUSTER_TEST(arguments, run.wait.timed_out && run.terminal_marker && run.elapsed_microseconds <= timeout_upper_bound);
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {node, S8("-e"), S8("setInterval(() => {}, 1000)")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("policy"), S8("hang"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, timeout_deadline);
+            BUSTER_TEST(arguments, run.wait.timed_out && !run.terminal_marker && run.elapsed_microseconds <= timeout_upper_bound);
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_succeeded(run));
+        }
+        {
+            String8 node_arguments[] = {S8("buster-node-oracle-does-not-exist")};
+            CompilerDriverWasmNodeRun run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("policy"), S8("launch-failure"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), marker, completion_deadline);
+            BUSTER_TEST(arguments, !compiler_driver_test_wasm_node_succeeded(run));
+#if BUSTER_WINDOWS
+            BUSTER_TEST(arguments, !run.spawned);
+#endif
+        }
+    }
+    else
+    {
+        arguments->show(arguments, S8("Wasm Node process policy checks skipped: Node is not installed\n"));
+    }
+    return result;
+}
+
 // Execute scalar operations in Node instead of trusting the emitter's own
 // opcode table. Keep module compilation covered when the engine is absent.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestArguments* arguments)
@@ -5235,20 +5444,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wasm_integers(UnitTestAr
         if (node.length)
         {
             String8 node_arguments[] = {node, S8("tests/wasm_integer_execution.js"), output};
-            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                       (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                                             .use_process_environment = 1});
-            BUSTER_TEST(arguments, spawn.handle != 0);
-            if (spawn.handle)
-            {
-                u64 start = os_now_microseconds();
-                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
-                // A bare success assertion loses the distinction between a deadline, a runtime crash and a failed Wasm check.
-                arguments->show(arguments, S8("WASM_INTEGER_PROCESS result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64} node={S8} module={S8}\nstdout:\n{S8}\nstderr:\n{S8}\n"),
-                                (u32)wait.result, wait.platform_status, (u32)wait.timed_out, os_now_microseconds() - start, node, output,
-                                BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]), BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]));
-                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
-            }
+            CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("integer"), S8("default"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
+                S8("1504 frontend-to-Wasm integer checks passed"), compiler_driver_test_wasm_node_deadline_microseconds());
+            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
         }
         else
         {
@@ -5281,7 +5481,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasm64NodeRun compiler_driver_test_wasm64_stac
     result.spawned = spawn.handle != 0;
     if (spawn.handle)
     {
-        result.wait = os_process_wait_deadline(arena, spawn, 30000000);
+        result.wait = os_process_wait_deadline(arena, spawn, compiler_driver_test_wasm_node_deadline_microseconds());
     }
     arguments->show(arguments,
                     S8("WASM64_STACK_PROCESS mode={S8} spawned={u32} result={u32} platform_status={u32:x} timed_out={u32} elapsed_us={u64}\n"
@@ -7612,6 +7812,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_binary128_transport);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_i128_to_float);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x64_i128_float);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_node_policy);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm_integers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
@@ -7782,14 +7983,11 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (node.length)
         {
             String8 node_arguments[] = {node, S8("tests/wasm_memory_alignment_execution.js"), wasm64_alignment_output};
-            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                       (ProcessSpawnOptions){.use_process_environment = 1});
-            BUSTER_TEST(arguments, spawn.handle != 0);
-            if (spawn.handle)
-            {
-                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
-                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
-            }
+            CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("alignment"), S8("default"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), S8("14/14 frontend-to-Wasm over-aligned scalar checks passed"),
+                compiler_driver_test_wasm_node_deadline_microseconds());
+            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
         }
         else
         {
@@ -7817,14 +8015,13 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             if (node.length)
             {
                 String8 node_arguments[] = {node, S8("tests/wasm_local_aggregate_execution.js"), aggregate_output};
-                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                           (ProcessSpawnOptions){.use_process_environment = 1});
-                BUSTER_TEST(arguments, spawn.handle != 0);
-                if (spawn.handle)
-                {
-                    ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
-                    BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
-                }
+                CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run(
+                    arguments, arguments->arena, S8("local-aggregate"),
+                    ssa ? S8("frontend-ssa") : S8("frontend-memory"),
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
+                    S8("245 independent Wasm local aggregate executions passed"),
+                    compiler_driver_test_wasm_node_deadline_microseconds());
+                BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
             }
             else
             {
@@ -7852,14 +8049,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (node.length)
         {
             String8 node_arguments[] = {node, S8("tests/wasm_integer_opcodes_execution.js"), wasm64_integer_output};
-            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments), (SliceString8){0}, (SliceString8){0},
-                                                       (ProcessSpawnOptions){.use_process_environment = 1});
-            BUSTER_TEST(arguments, spawn.handle != 0);
-            if (spawn.handle)
-            {
-                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
-                BUSTER_TEST(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS);
-            }
+            CompilerDriverWasmNodeRun node_run = compiler_driver_test_wasm_node_run(
+                arguments, arguments->arena, S8("integer-opcodes"), S8("default"),
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(node_arguments),
+                S8("3254/3254 scalar integer Wasm64 engine checks passed"),
+                compiler_driver_test_wasm_node_deadline_microseconds());
+            BUSTER_TEST(arguments, compiler_driver_test_wasm_node_succeeded(node_run));
         }
         else
         {
