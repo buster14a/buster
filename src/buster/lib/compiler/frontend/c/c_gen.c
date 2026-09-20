@@ -91,6 +91,11 @@
 #include "c_internal.h"
 #include <buster/lib/compiler/ir/ir_construction.h>
 
+// C lowering owns fresh, unpublished functions and maintains their instruction
+// storage invariants, so its append sites may use the construction-only path.
+#define ir_function_add_instruction(...) ir_instruction_append_trusted(__VA_ARGS__)
+
+
 BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
 
 // Preprocess file indices are registered as IR sources in table order, so a
@@ -50407,3 +50412,5 @@ CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, CPreprocessResul
 {
     return c_lower_to_ir_with_options(arena, source_path, preprocess, analysis, target, (CIRLowerOptions){0});
 }
+
+#undef ir_function_add_instruction

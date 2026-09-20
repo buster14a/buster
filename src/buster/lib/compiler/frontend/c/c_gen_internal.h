@@ -13,10 +13,6 @@
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir_append.h>
 
-// C lowering owns fresh, unpublished functions and maintains their instruction
-// storage invariants, so its append sites may use the construction-only path.
-#define ir_function_add_instruction(...) ir_instruction_append_trusted(__VA_ARGS__)
-
 #define C_IR_EXT80_BIG_LIMBS 1024
 typedef struct CIrExt80Big CIrExt80Big;
 struct CIrExt80Big
