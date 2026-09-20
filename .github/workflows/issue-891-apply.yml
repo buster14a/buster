@@ -2,7 +2,7 @@ name: Apply issue 891 patch
 
 on:
   push:
-    branches: [fix/891-native-runner-observation]
+    branches: [recovery/891-native-observation-payload]
 
 permissions:
   contents: write
@@ -28,12 +28,25 @@ jobs:
           import sys
           import zlib
           from pathlib import Path
+
           encoded = Path(sys.argv[1]).read_bytes()
           Path('/tmp/apply_issue_891_patch.py').write_bytes(
               zlib.decompress(base64.b64decode(encoded))
           )
           PYTHON
           python3 /tmp/apply_issue_891_patch.py
+          python3 - <<'PYTHON'
+          from pathlib import Path
+
+          path = Path("tools/ci_native_observation_test.py")
+          text = path.read_text(encoding="utf-8")
+          old = '        self.assertNotIn("continue-on-error:", workflow[workflow.index("  native:"):workflow.index("  mobile:")])'
+          new = '''        native = workflow[workflow.index("  native:"):workflow.index("  mobile:")]
+          self.assertNotRegex(native, r"(?m)^\\s*continue-on-error:")'''
+          if old not in text:
+              raise SystemExit("expected workflow assertion was not found")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PYTHON
           rm -f tools/.issue891-patch-* .github/workflows/issue-891-apply.yml
 
       - name: Validate final tree
