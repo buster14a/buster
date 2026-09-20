@@ -21,6 +21,25 @@ jobs:
         with:
           ref: refs/pull/916/merge
           persist-credentials: false
-      - name: Run canonical workflow-tool regression suite
-        shell: bash
+      - name: CI tools
         run: python3 tests/ci_tools_test.py -v
+      - name: Zig installer
+        run: python3 tools/ci_zig_test.py -v
+      - name: Zig cache policy
+        run: python3 tools/ci_zig_cache_test.py -v
+      - name: Android SDK installer
+        run: python3 tools/ci_android_sdk_test.py -v
+      - name: Analyzer selection
+        run: python3 tools/analyzer_selection_test.py -v
+      - name: Coverage manifest
+        run: python3 tools/coverage_manifest_test.py -v
+      - name: Matrix shard
+        run: python3 tools/matrix_shard_test.py -v
+      - name: Differential CI policy
+        run: python3 tools/differential_ci_policy_test.py -v
+      - name: Native producer profile
+        run: python3 tools/native_producer_profile_test.py -v
+      - name: Configure evidence
+        run: python3 tools/ci_configure_evidence_test.py -v
+      - name: Native observation
+        run: python3 tools/ci_native_observation_test.py -v
