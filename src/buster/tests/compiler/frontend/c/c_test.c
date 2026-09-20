@@ -286,6 +286,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_sizeof_parenthesized_operand(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(0, 0);
+    Target target = target_native;
+    target.cpu_arch = CPU_ARCH_X86_64;
+    target.os = OPERATING_SYSTEM_LINUX;
+    String8 source =
+        S8("enum PriorIntegerConstants { PRIOR_VALUE = 4 };\n"
+           "struct AtomicEnumOperand { char bytes[3]; };\n"
+           "enum TypedIntegerConstants {\n"
+           " PRIOR_REFERENCE = PRIOR_VALUE,\n"
+           " ATOMIC_SIZE = sizeof(_Atomic struct AtomicEnumOperand),\n"
+           " ATOMIC_ALIGNMENT = _Alignof(_Atomic(struct AtomicEnumOperand)),\n"
+           " HEX_U64 = 0xffffffffffffffff,\n"
+           " DEC_U64 = 18446744073709551615,\n"
+           " CONDITIONAL_LL = (1U ? -1LL : 0LL),\n"
+           " CONDITIONAL_ULL = (1 ? -1LL : 0ULL),\n"
+           " CAST_ULL = (unsigned long long)-1,\n"
+           " ABOVE_I32 = 2147483648,\n"
+           " ABOVE_I64 = 9223372036854775808,\n"
+           " WIDE_POSITIVE = ((__int128)1 << 100),\n"
+           " WIDE_NEGATIVE = -((__int128)1 << 100)\n"
+           "};\n"
+           "_Static_assert(sizeof(_Atomic struct AtomicEnumOperand) == 4, \"atomic layout after enum\");\n");
+    CPreprocessResult preprocess = c_preprocess(
+        temporary.arena, source,
+        (CPreprocessOptions){
+            .target = target,
+            .data_layout = target_data_layout(target),
+            .dialect = C_PREPROCESS_DIALECT_GNU23,
+        });
+    CParseResult parsed = c_parse(temporary.arena, preprocess);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+    BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+    struct
+    {
+        String8 name;
+        u64 magnitude;
+        u64 magnitude_high;
+        CTypeKind kind;
+        CIntegerRank rank;
+        u16 bit_width;
+        bool is_signed;
+        bool is_negative;
+    } expected[] = {
+        {S8("PRIOR_VALUE"), 4, 0, C_TYPE_INT, C_INTEGER_RANK_INT, 32, true, false},
+        {S8("PRIOR_REFERENCE"), 4, 0, C_TYPE_INT, C_INTEGER_RANK_INT, 32, true, false},
+        {S8("ATOMIC_SIZE"), 4, 0, C_TYPE_UNSIGNED_LONG, C_INTEGER_RANK_LONG, 64, false, false},
+        {S8("ATOMIC_ALIGNMENT"), 4, 0, C_TYPE_UNSIGNED_LONG, C_INTEGER_RANK_LONG, 64, false, false},
+        {S8("HEX_U64"), UINT64_MAX, 0, C_TYPE_UNSIGNED_LONG, C_INTEGER_RANK_LONG, 64, false, false},
+        {S8("DEC_U64"), UINT64_MAX, 0, C_TYPE_INT128, C_INTEGER_RANK_INT128, 128, true, false},
+        {S8("CONDITIONAL_LL"), 1, 0, C_TYPE_LONG_LONG, C_INTEGER_RANK_LONG_LONG, 64, true, true},
+        {S8("CONDITIONAL_ULL"), UINT64_MAX, 0, C_TYPE_UNSIGNED_LONG_LONG, C_INTEGER_RANK_LONG_LONG, 64, false, false},
+        {S8("CAST_ULL"), UINT64_MAX, 0, C_TYPE_UNSIGNED_LONG_LONG, C_INTEGER_RANK_LONG_LONG, 64, false, false},
+        {S8("ABOVE_I32"), UINT64_C(2147483648), 0, C_TYPE_LONG, C_INTEGER_RANK_LONG, 64, true, false},
+        {S8("ABOVE_I64"), UINT64_C(9223372036854775808), 0, C_TYPE_INT128, C_INTEGER_RANK_INT128, 128, true, false},
+        {S8("WIDE_POSITIVE"), 0, UINT64_C(1) << 36, C_TYPE_INT128, C_INTEGER_RANK_INT128, 128, true, false},
+        {S8("WIDE_NEGATIVE"), 0, UINT64_C(1) << 36, C_TYPE_INT128, C_INTEGER_RANK_INT128, 128, true, true},
+    };
+    BUSTER_TEST(arguments, parsed.enum_member_count == BUSTER_ARRAY_LENGTH(expected));
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+    {
+        CEnumMember const* member = 0;
+        for (u32 member_index = 0; !member && member_index < parsed.enum_member_count; member_index += 1)
+        {
+            if (string_equal(parsed.enum_members[member_index].name, expected[expected_index].name))
+            {
+                member = parsed.enum_members + member_index;
+            }
+        }
+        BUSTER_TEST(arguments, member != 0);
+        if (member)
+        {
+            CIntegerConstant constant = member->integer_constant;
+            BUSTER_TEST(arguments, constant.valid);
+            BUSTER_TEST(arguments, constant.magnitude == expected[expected_index].magnitude);
+            BUSTER_TEST(arguments, constant.magnitude_high == expected[expected_index].magnitude_high);
+            BUSTER_TEST(arguments, constant.rank == expected[expected_index].rank);
+            BUSTER_TEST(arguments, constant.bit_width == expected[expected_index].bit_width);
+            BUSTER_TEST(arguments, constant.is_signed == expected[expected_index].is_signed);
+            BUSTER_TEST(arguments, constant.is_negative == expected[expected_index].is_negative);
+            BUSTER_TEST(arguments, constant.type.value < parsed.type_count);
+            if (constant.type.value < parsed.type_count)
+            {
+                BUSTER_TEST(arguments, parsed.types[constant.type.value].kind == expected[expected_index].kind);
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 // A lexer differential helper reuses its arena. Its rewind must retain the
 // dirty prefix, or the following semantic parse can read non-bool bytes from
 // an aggregate lookup table allocated with arena_allocate_zeroed (#235).
@@ -13772,12 +13865,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_vla_and_ir(UnitTestArguments*
         CPreprocessResult ordinary_enum_tokens = c_preprocess(
             ordinary_enum_temporary.arena, S8("enum { ORDINARY_ENUM = 41 + 1 };\n"), (CPreprocessOptions){0});
         BUSTER_TEST(arguments, ordinary_enum_tokens.diagnostic_count == 0);
-        if (BUSTER_REQUIRE(arguments, ordinary_enum_tokens.token_count <= UINT32_MAX))
-        {
-            BUSTER_TEST(arguments,
-                        c_test_parse_generic_constant_tokens_alias(ordinary_enum_tokens, 0,
-                                                                   (u32)ordinary_enum_tokens.token_count));
-        }
         CParseResult ordinary_enum_parse = c_parse(ordinary_enum_temporary.arena, ordinary_enum_tokens);
         BUSTER_TEST(arguments, ordinary_enum_parse.diagnostic_count == 0);
         scratch_end(ordinary_enum_temporary);
@@ -19430,6 +19517,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
+    BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);

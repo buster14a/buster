@@ -63,7 +63,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   an array, a function, `void`, or an already-qualified operand. It refuses
   silently, because the walk has a fallback -- the caller tries the operand as
   an expression next -- and a diagnostic would land in the caller's throwaway
-  copy of the parse result; an enum constant that does not fold reports the way
+  copy of the parse result. The typed enum evaluator retains this machineless
+  sizeof/alignment query while its type machine is active, so probing an atomic
+  operand cannot overwrite an in-progress tag or qualifier state. An enum
+  constant that does not fold reports the way
   every other one does. `_Atomic(_Atomic(int) *)` is legal C, so the nesting
   follows the source and the levels go on an explicit stack
   (`C_PARSE_MACHINELESS_ATOMIC_LEVELS`, eight) rather than on the C call stack;
