@@ -765,6 +765,33 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     }
 #endif
 
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
+    if (fatal_mode.length)
+    {
+        if (string_ends_with_sequence(fatal_mode, S8("closed")))
+        {
+            os_file_close(os_get_standard_stream(STANDARD_STREAM_ERROR));
+        }
+#if BUSTER_LINUX
+        if (string_ends_with_sequence(fatal_mode, S8("full")))
+        {
+            int full = open("/dev/full", O_WRONLY);
+            if (full < 0 || dup2(full, STDERR_FILENO) < 0) { os_exit(7); }
+            close(full);
+        }
+#endif
+        if (string_starts_with_sequence(fatal_mode, S8("raw")))
+        {
+            os_fail_raw(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-37"));
+        }
+        else
+        {
+            os_fail_va(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-{u32}"), (u32)37);
+        }
+    }
+#endif
+
 #if !BUSTER_ANDROID && !BUSTER_IOS
     // Test-owned subprocess modes above must dispatch before this fixture.
     // Otherwise each probe recursively runs the full spawn contract before
@@ -861,30 +888,6 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
-    if (fatal_mode.length)
-    {
-        if (string_ends_with_sequence(fatal_mode, S8("closed")))
-        {
-            os_file_close(os_get_standard_stream(STANDARD_STREAM_ERROR));
-        }
-#if BUSTER_LINUX
-        if (string_ends_with_sequence(fatal_mode, S8("full")))
-        {
-            int full = open("/dev/full", O_WRONLY);
-            if (full < 0 || dup2(full, STDERR_FILENO) < 0) { os_exit(7); }
-            close(full);
-        }
-#endif
-        if (string_starts_with_sequence(fatal_mode, S8("raw")))
-        {
-            os_fail_raw(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-37"));
-        }
-        else
-        {
-            os_fail_va(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-{u32}"), (u32)37);
-        }
-    }
     {
         String8 modes[] = {S8("raw-live"), S8("formatted-live"), S8("raw-closed"), S8("formatted-closed"),
 #if BUSTER_LINUX
