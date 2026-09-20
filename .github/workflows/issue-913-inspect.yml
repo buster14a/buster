@@ -1,4 +1,4 @@
-name: Issue 913 diagnostic inspection
+name: Issue 913 Wine reproduction
 
 on:
   push:
@@ -8,38 +8,147 @@ on:
     paths:
       - '.github/workflows/issue-913-inspect.yml'
       - 'src/buster/tests/compiler/driver/driver_test.c'
-      - 'src/buster/lib/os/**'
+      - 'src/buster/lib/compiler/**'
+      - 'src/buster/lib/os.*'
 
 permissions:
   contents: read
 
 jobs:
-  inspect:
+  reproduce:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 60
+    env:
+      WINEARCH: win64
+      WINEDEBUG: -all
+      WINEPREFIX: ${{ github.workspace }}/build/issue-913-wine
+      BUSTER_TEST_JOBS: 4
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Inspect process and fixture diagnostics
+      - name: Install Wine
         shell: bash
         run: |
           set -euo pipefail
-          driver=src/buster/tests/compiler/driver/driver_test.c
-          echo '=== process-success helper ==='
-          grep -n 'compiler_driver_test_process_success' "$driver" || true
-          while IFS=: read -r line rest; do
-            start=$((line > 80 ? line - 80 : 1))
-            end=$((line + 120))
-            sed -n "${start},${end}p" "$driver"
-          done < <(grep -n 'compiler_driver_test_process_success' "$driver" | head -n 2)
-          echo '=== issue 913 fixture ==='
-          sed -n '13390,13630p' "$driver"
-          echo '=== process types and wait implementation ==='
-          git grep -n -E 'typedef (struct|enum).*Process|ProcessResult|os_process_wait_sync|OS_PROCESS' -- src/buster/lib | head -n 500 || true
-          for file in $(git grep -l -E 'ProcessResult|os_process_wait_sync' -- src/buster/lib | head -n 20); do
-            echo "--- $file ---"
-            grep -n -E 'ProcessResult|os_process_wait_sync|exit|signal|standard_(out|error)|stdout|stderr' "$file" | head -n 250 || true
-          done
-          echo '=== detailed process assertion examples ==='
-          git grep -n -E 'process.*(status|result|exit)|PROCESS_RESULT_|os_process_wait_sync' -- src/buster/tests | head -n 500 || true
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y wine wine64
+          clang --version
+          wine --version
+          mkdir -p "$(dirname "$WINEPREFIX")"
+          wineboot --init
+      - name: Add temporary attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/buster/tests/compiler/driver/driver_test.c')
+          text = path.read_text()
+
+          replacements = {
+          '''                            CompilerDriverResult linked = compiler_driver_execute_invocation(wide_temporary.arena,
+                                  compiler_driver_parse_arguments(wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                              BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+                              if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                              {
+                                  String8 run_command[] = {S8("wine"), executable};
+                                  ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
+                                                                            (SliceString8){0}, wine_options);
+                                  BUSTER_TEST(arguments, run.handle && os_process_wait_sync(wide_temporary.arena, run).result == PROCESS_RESULT_SUCCESS);
+                              }
+          ''': '''                            CompilerDriverResult linked = compiler_driver_execute_invocation(wide_temporary.arena,
+                                  compiler_driver_parse_arguments(wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                              String8 link_description = string_format(wide_temporary.arena,
+                                  S8("issue 913 wide mixed link mode={S8} direction={u32}: {S8}"), wide_modes[mode], direction, linked.diagnostic);
+                              BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, link_description);
+                              if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                              {
+                                  String8 run_command[] = {S8("wine"), executable};
+                                  ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
+                                                                            (SliceString8){0}, wine_options);
+                                  ProcessWaitResult wait = run.handle ? os_process_wait_sync(wide_temporary.arena, run) :
+                                                                       (ProcessWaitResult){.result = PROCESS_RESULT_NOT_EXISTENT};
+                                  String8 run_description = string_format(wide_temporary.arena,
+                                      S8("issue 913 wide mixed run mode={S8} direction={u32} launched={u32} result={u32} platform_status={u32}"),
+                                      wide_modes[mode], direction, run.handle != 0, (u32)wait.result, wait.platform_status);
+                                  BUSTER_TEST_RAW(arguments, run.handle && wait.result == PROCESS_RESULT_SUCCESS, run_description);
+                              }
+          ''',
+          '''                            CompilerDriverResult linked = compiler_driver_execute_invocation(padded_temporary.arena,
+                                  compiler_driver_parse_arguments(padded_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                              BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
+                              if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                              {
+                                  String8 run_command[] = {S8("wine"), executable};
+                                  ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
+                                                                            (SliceString8){0}, wine_options);
+                                  BUSTER_TEST(arguments, run.handle && os_process_wait_sync(padded_temporary.arena, run).result == PROCESS_RESULT_SUCCESS);
+                              }
+          ''': '''                            CompilerDriverResult linked = compiler_driver_execute_invocation(padded_temporary.arena,
+                                  compiler_driver_parse_arguments(padded_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                              String8 link_description = string_format(padded_temporary.arena,
+                                  S8("issue 913 padded mixed link mode={S8} direction={u32}: {S8}"), padded_modes[mode], direction, linked.diagnostic);
+                              BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, link_description);
+                              if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                              {
+                                  String8 run_command[] = {S8("wine"), executable};
+                                  ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
+                                                                            (SliceString8){0}, wine_options);
+                                  ProcessWaitResult wait = run.handle ? os_process_wait_sync(padded_temporary.arena, run) :
+                                                                       (ProcessWaitResult){.result = PROCESS_RESULT_NOT_EXISTENT};
+                                  String8 run_description = string_format(padded_temporary.arena,
+                                      S8("issue 913 padded mixed run mode={S8} direction={u32} launched={u32} result={u32} platform_status={u32}"),
+                                      padded_modes[mode], direction, run.handle != 0, (u32)wait.result, wait.platform_status);
+                                  BUSTER_TEST_RAW(arguments, run.handle && wait.result == PROCESS_RESULT_SUCCESS, run_description);
+                              }
+          ''',
+          '''                    ProcessSpawnResult wine_wide_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_run_arguments),
+                          (SliceString8){0}, (SliceString8){0}, wine_options);
+                      BUSTER_TEST(arguments, wine_wide_run.handle != 0);
+                      if (wine_wide_run.handle)
+                      {
+                          BUSTER_TEST(arguments, os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run).result == PROCESS_RESULT_SUCCESS);
+                      }
+          ''': '''                    ProcessSpawnResult wine_wide_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_run_arguments),
+                          (SliceString8){0}, (SliceString8){0}, wine_options);
+                      ProcessWaitResult wine_wide_wait = wine_wide_run.handle ? os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run) :
+                                                                               (ProcessWaitResult){.result = PROCESS_RESULT_NOT_EXISTENT};
+                      String8 wine_wide_description = string_format(wine_wide_temporary.arena,
+                          S8("issue 913 direct Wine model={S8} fixture={u32} launched={u32} result={u32} platform_status={u32}"),
+                          wine_wide_models[model_index], fixture, wine_wide_run.handle != 0, (u32)wine_wide_wait.result,
+                          wine_wide_wait.platform_status);
+                      BUSTER_TEST_RAW(arguments, wine_wide_run.handle != 0, wine_wide_description);
+                      if (wine_wide_run.handle)
+                      {
+                          BUSTER_TEST_RAW(arguments, wine_wide_wait.result == PROCESS_RESULT_SUCCESS, wine_wide_description);
+                      }
+          ''',
+          }
+
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected one replacement, found {count}')
+              text = text.replace(old, new)
+          path.write_text(text)
+          PY
+          git diff --check
+          git diff -- src/buster/tests/compiler/driver/driver_test.c
+      - name: Build test runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          CC=clang ./build.sh generate
+          CC=clang ./build.sh build --config Release -t ide
+          build/Release/ide test --help || true
+      - name: Run Wine vector coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          build/Release/ide test --verbose=1 --ci=1 2>&1 | tee build/issue-913-test.log
+          status=${PIPESTATUS[0]}
+          echo '=== issue 913 diagnostics ==='
+          grep -n -E 'issue 913|c_simd_baseline_path|compiler_driver_tests' build/issue-913-test.log || true
+          exit "$status"
