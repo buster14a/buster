@@ -10,6 +10,7 @@
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/lib/hash.h>
 #include <buster/lib/time.h>
+#include <buster/lib/system_headers.h>
 #if (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
 #include <poll.h>
 #endif
