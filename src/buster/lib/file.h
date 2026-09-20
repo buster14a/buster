@@ -54,6 +54,43 @@ BUSTER_F_DECL void file_map_unmap(FileMapRead map);
 BUSTER_F_DECL OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OpenPermissions permissions);
 BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 
+// Atomic publication for complete in-memory artifacts. The destination is
+// inspected without following its final link, then an exclusively-created file
+// in the same directory is written, flushed, closed, and atomically renamed.
+// Every result other than FILE_PUBLISH_PUBLISHED leaves an existing destination
+// byte-identical and a missing destination absent. Handled failures remove the
+// staging file; cleanup_error reports a failed close/delete without replacing
+// the primary failure.
+//
+// A directory, link/reparse point, or special destination is refused. Windows
+// also refuses the read-only attribute. A new file is created 0644 or 0755
+// before umask. On POSIX replacement preserves the old 0777 bits except that
+// all execute bits are set for an executable publication and cleared for an
+// ordinary one. Ownership, ACLs, extended attributes, timestamps, Windows
+// attributes/streams, and multi-file transactionality are not preserved.
+// Flushing the staging file catches delayed write failures before publication;
+// the containing directory is not flushed, so power-loss durability is not
+// promised. Staging names are recognizable after an uncatchable process exit.
+typedef enum FilePublishStatus
+{
+    FILE_PUBLISH_FAILED,
+    FILE_PUBLISH_PUBLISHED,
+    FILE_PUBLISH_UNSUPPORTED_DESTINATION,
+    FILE_PUBLISH_INVALID_STAGING,
+} FilePublishStatus;
+
+typedef struct FilePublishResult FilePublishResult;
+struct FilePublishResult
+{
+    FilePublishStatus status;
+    OsError error;
+    OsError cleanup_error;
+};
+
+BUSTER_F_DECL FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions);
+BUSTER_F_DECL bool file_publish(String8 path, ByteSlice content);
+BUSTER_F_DECL bool file_publish_executable(String8 path, ByteSlice content);
+
 typedef struct CopyFileArguments CopyFileArguments;
 struct CopyFileArguments
 {

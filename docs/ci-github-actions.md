@@ -401,3 +401,24 @@ exported decision alone.
 Both modes retain candidate coverage, diagnostics, timing and child RSS evidence,
 and `CI complete` requires the result. See
 [the analyzer contract and reproduction](clang-analyze-shards.md).
+
+## Matched manual Zig cache cohorts
+
+Ordinary `Buster CI` manual dispatches retain the existing input surface and
+cache behavior. A deliberate matched cohort selects its mode through the
+workflow-dispatch ref, so the event contract remains identical to ordinary CI:
+
+- `ci-cohort-prime-<namespace>` restores and, on a verified miss, publishes the
+  exact arm-scoped Zig archive from the lane's `release` shard;
+- `ci-cohort-read-<namespace>` requires that same exact frozen key and never
+  writes it.
+
+The suffix is the explicit cache namespace. It must contain 1–48 lowercase
+alphanumeric words separated by single hyphens. Both refs for one arm must
+point to the same reviewed commit. Any other selected ref is ordinary mode.
+The effective key still binds runner OS and architecture, Zig target, and the
+pinned `.github/zig.json` digest; it adds only the validated namespace.
+
+## Native runner phase observations
+
+Every native matrix lane retains calibrated, process-local phase evidence through its existing artifact. Provider preamble and Actions API clocks are joined only during audit; missing or contradictory identity is retained but cannot enter a performance comparison. See [Native runner observations](native-runner-observations.md).

@@ -153,19 +153,27 @@
   masks and final pin counts use the same list. The global pin-map bridge is
   scratch-owned and is not retained by the returned placement.
 - Shared FAST/QUALITY placement colors frame storage by lifetime instead of
-  giving every spilled value and every stack slot its own bytes. Spill homes
-  take their rows from the allocator's memory edits; selector slots take theirs
-  from a block-level liveness fixed point over covering writes and reads, so a
-  slot written and read inside one iteration does not widen to its loop. Both
-  are assigned by one linear scan in start order with a free-color stack; no
+  giving every spilled value and every stack slot its own bytes. Selector slots
+  close their touched rows through a block-level liveness fixed point over
+  covering writes and upward-exposed reads. Allocator-created spill homes use
+  the same closure on a direct acyclic block chain: a spill covers the previous
+  contents of a home, while a reload before that spill reads the value arriving
+  from a predecessor. Retroactive edge repairs at one machine point have no
+  path order, so the home analysis observes every reload before every spill at
+  that point, conservatively lengthening rather than shortening a range. Dense
+  home IDs keep the CFG bit planes proportional to actually spilled values, not
+  all virtual registers. Branches, joins, loops, indirect edges, and
+  inline-assembly landings retain the conservative per-home lifetime guard until
+  their path-specific repairs have the same proof. Both object classes are
+  assigned by one linear scan in start order with a free-color stack; no
   interference graph is built. Scalar (8-byte) and vector (64-byte, 16-byte
   aligned) homes keep separate pools. Reuse requires a linear block/row tiling
-  and `MachineFunction.returns_twice_absence_certified`, which the selectors
-  publish when no call in the function returns twice: a `longjmp` can re-enter
-  the frame at a row no machine edge reaches. Address-taken, volatile-tainted,
-  inline-assembly, variadic, outgoing-argument and unproven-form objects, homes
-  crossing their defining block, and escaping values all keep storage of their
-  own. Debug records may name slots but never decide layout.
+  and
+  `MachineFunction.returns_twice_absence_certified`, which the selectors publish
+  when no call in the function returns twice: a `longjmp` can re-enter the frame
+  at a row no machine edge reaches. Address-taken, volatile-tainted,
+  inline-assembly, variadic, outgoing-argument and unproven-form objects keep
+  storage of their own. Debug records may name slots but never decide layout.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is
   removed. Calls, side effects and terminators still impose independent
@@ -305,7 +313,10 @@
   arguments use one private, naturally aligned copy. A value wider than the
   model's register width exposes one pointer per register-sized subobject: the
   leading references occupy the remaining argument GPRs and the tail continues
-  in stack eightbytes. Callees capture every pointer before copying exact pieces
+  in stack eightbytes. Scalarized padded-vector lanes and split references are
+  materialized in the same preparation walk before fixed argument registers
+  are published; later address/load temporaries must not overwrite earlier
+  arguments. Callees capture every pointer before copying exact pieces
   into their owned frame image, so exhaustion and a register/stack straddle
   preserve both payload and by-value isolation. The part-width byte fits
   existing padding in the 40-byte signature shape, with no additional
@@ -767,3 +778,10 @@ reserved X16/X17 carry the count and data. CBNZ preserves flags. Pointer operand
 are captured before either cursor is overwritten, and the encoder reserves a
 constant 128-byte capacity for this form. Smaller copies retain inline accesses.
 The same memory effects and source/destination ownership apply in every allocator.
+
+- The x86 selector keeps store counts and next-store state in
+  `MachineX64LocalUse`, indexed only for candidate local places. The hot
+  16-byte `MachineX64ValueUse` carries a one-based local-use index, with zero
+  for nonlocals/disqualified places. Sparse `local_places` sizing and the
+  summary-unknown row fallback feed the same state. Store-free locals stay
+  in frame slots; resetting store ordinals visits only the sparse local rows.

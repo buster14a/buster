@@ -824,6 +824,333 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_copy_aliases(UnitTestArguments* arg
     return result;
 }
 
+
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_contents(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 directory = buster_test_temporary_path(arena, S8("file-publish-contents"), S8(""));
+    if (BUSTER_REQUIRE(arguments, file_test_directory_reset(directory)))
+    {
+        String8 names[] = {S8("artifact.bin"), S8("directory"), S8("linked.bin"), S8("executable.bin")};
+        String8 artifact = file_test_child(arena, directory, names[0]);
+        String8 subdirectory = file_test_child(arena, directory, names[1]);
+        String8 linked = file_test_child(arena, directory, names[2]);
+        String8 executable = file_test_child(arena, directory, names[3]);
+        u8 old_bytes[] = {'o', 'l', 'd', 0, 'a', 'r', 't', 'i', 'f', 'a', 'c', 't'};
+        u8 new_bytes[] = {'n', 'e', 'w', 0, 'a', 'r', 't', 'i', 'f', 'a', 'c', 't', 0xff};
+        ByteSlice old_content = {old_bytes, sizeof(old_bytes)};
+        ByteSlice new_content = {new_bytes, sizeof(new_bytes)};
+        BUSTER_TEST(arguments, file_write(artifact, old_content));
+        FilePublishResult published = file_publish_checked(artifact, new_content, (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, published.status == FILE_PUBLISH_PUBLISHED && !published.error.v && !published.cleanup_error.v);
+        BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, new_content));
+        String8 artifact_only[] = {names[0]};
+        BUSTER_TEST(arguments, file_test_entries_are(arena, directory, artifact_only, 1, 0));
+
+        // A reader opened before replacement keeps the old object; a new
+        // reader sees the complete new object. This makes Windows open-handle
+        // replacement deterministic instead of depending on race timing.
+        OsFileOpenResult held = os_file_open_checked(artifact, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1, .write = 1});
+        if (BUSTER_REQUIRE(arguments, held.file != 0))
+        {
+            BUSTER_TEST(arguments, file_publish(artifact, old_content));
+            BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, old_content));
+            u8 held_bytes[sizeof(new_bytes)];
+            OsFileReadResult held_read = os_file_read_exact(held.file, (ByteSlice){held_bytes, sizeof(held_bytes)});
+            BUSTER_TEST(arguments, held_read.status == OS_FILE_READ_OK && held_read.transferred == sizeof(held_bytes) &&
+                                     memory_compare(held_bytes, new_bytes, sizeof(new_bytes)));
+            BUSTER_TEST(arguments, os_file_close(held.file));
+        }
+
+        // Empty and repeated publications leave one complete destination.
+        BUSTER_TEST(arguments, file_publish(artifact, (ByteSlice){0}));
+        BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, (ByteSlice){0}));
+        for (u32 repeat = 0; repeat < 4; repeat += 1)
+        {
+            BUSTER_TEST(arguments, file_publish(artifact, new_content));
+        }
+        BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, new_content));
+        BUSTER_TEST(arguments, file_test_entries_are(arena, directory, artifact_only, 1, 0));
+
+        // Missing parents fail without creating an alternate path.
+        String8 unreachable = file_test_child(arena, directory, S8("missing/artifact.bin"));
+        FilePublishResult no_parent = file_publish_checked(unreachable, new_content, (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, no_parent.status == FILE_PUBLISH_FAILED && no_parent.error.v != 0);
+        BUSTER_TEST(arguments, file_test_entries_are(arena, directory, artifact_only, 1, 0));
+
+        // Directories and destination links are never followed or replaced.
+        BUSTER_TEST(arguments, os_make_directory_attempt(subdirectory));
+        FilePublishResult into_directory = file_publish_checked(subdirectory, new_content, (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, into_directory.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION && !into_directory.cleanup_error.v);
+        FileTestLink link_status = file_test_link(arguments, true, directory, names[0], names[2]);
+        BUSTER_TEST(arguments, link_status != FILE_TEST_LINK_FAILED);
+        if (link_status == FILE_TEST_LINK_CREATED)
+        {
+            FilePublishResult into_link = file_publish_checked(linked, new_content, (OpenPermissions){.read = 1, .write = 1});
+            BUSTER_TEST(arguments, into_link.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION && !into_link.cleanup_error.v);
+            BUSTER_TEST(arguments, file_test_is_link(arena, linked, names[0]) && file_test_bytes_are(arena, artifact, new_content));
+            BUSTER_TEST(arguments, os_file_delete(linked));
+        }
+        BUSTER_TEST(arguments, os_directory_delete(subdirectory));
+
+#if BUSTER_WINDOWS
+        String16 artifact_w = string16_from_string8(arena, artifact, true);
+        DWORD attributes = GetFileAttributesW(artifact_w.pointer);
+        BUSTER_TEST(arguments, attributes != INVALID_FILE_ATTRIBUTES && SetFileAttributesW(artifact_w.pointer, attributes | FILE_ATTRIBUTE_READONLY));
+        FilePublishResult read_only = file_publish_checked(artifact, old_content, (OpenPermissions){.read = 1, .write = 1});
+        BUSTER_TEST(arguments, read_only.status == FILE_PUBLISH_FAILED && read_only.error.v == (u32)ERROR_ACCESS_DENIED);
+        BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, new_content));
+        BUSTER_TEST(arguments, SetFileAttributesW(artifact_w.pointer, attributes));
+#else
+        // Replacements preserve read/write bits while artifact kind controls
+        // every execute bit, independent of the old inode.
+        BUSTER_TEST(arguments, chmod((const char*)artifact.pointer, 0751) == 0);
+        BUSTER_TEST(arguments, file_publish(artifact, old_content));
+        struct stat stats;
+        BUSTER_TEST(arguments, stat((const char*)artifact.pointer, &stats) == 0 && (stats.st_mode & 0777) == 0640);
+        BUSTER_TEST(arguments, file_publish_executable(artifact, new_content));
+        BUSTER_TEST(arguments, stat((const char*)artifact.pointer, &stats) == 0 && (stats.st_mode & 0777) == 0751);
+#endif
+        BUSTER_TEST(arguments, os_file_delete(executable));
+        BUSTER_TEST(arguments, file_publish_executable(executable, new_content));
+#if !BUSTER_WINDOWS
+        struct stat executable_stats;
+        // A new artifact honors the process umask (Android masks group
+        // and other permissions). Existing-artifact tests above verify that
+        // replacement explicitly restores all execute bits.
+        BUSTER_TEST(arguments, stat((const char*)executable.pointer, &executable_stats) == 0 &&
+                               (executable_stats.st_mode & 0100) == 0100 && (executable_stats.st_mode & 0022) == 0);
+#endif
+        String8 final_names[] = {names[0], names[3]};
+        BUSTER_TEST(arguments, file_test_entries_are(arena, directory, final_names, 2, 0));
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+    }
+    return result;
+}
+
+typedef struct FileTestPublishFault FileTestPublishFault;
+struct FileTestPublishFault
+{
+    OsFileTestStep steps[4];
+    u32 step_count;
+    u32 error;
+    u32 cleanup_error;
+    FilePublishStatus status;
+    bool any_error;
+    bool staging_left;
+    bool posix_replacement;
+};
+
+// Every fallible staging boundary leaves an old destination byte-identical or
+// a new destination absent. A successful interrupted write publishes only the
+// complete bytes, and cleanup failures stay secondary.
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_faults(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_GLOBAL_LOCAL const FileTestPublishFault faults[] = {
+        {.steps = {{OS_FILE_TEST_STATS, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
+        {.steps = {{OS_FILE_TEST_OPEN, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
+        {.posix_replacement = true, .steps = {{OS_FILE_TEST_PERMISSIONS, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
+        {.steps = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
+        {.steps = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ZERO, 0}}, .step_count = 1, .any_error = true},
+        {.steps = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 100}, {OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}}, .step_count = 2, .error = 12345},
+        {.steps = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_INTERRUPT, 0},
+                   {OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 100},
+                   {OS_FILE_TEST_WRITE, OS_FILE_TEST_INTERRUPT, 0},
+                   {OS_FILE_TEST_WRITE, OS_FILE_TEST_LIMIT, 3}},
+         .step_count = 4,
+         .status = FILE_PUBLISH_PUBLISHED},
+        {.steps = {{OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
+        {.steps = {{OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}}, .step_count = 1, .error = 23456},
+        {.steps = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
+         .step_count = 2,
+         .error = 12345,
+         .cleanup_error = 23456},
+        {.steps = {{OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456}},
+         .step_count = 2,
+         .error = 12345,
+         .cleanup_error = 23456},
+        {.steps = {{OS_FILE_TEST_REPLACE, OS_FILE_TEST_ERROR, 12345}}, .step_count = 1, .error = 12345},
+        {.steps = {{OS_FILE_TEST_REPLACE, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, 23456}},
+         .step_count = 2,
+         .error = 12345,
+         .cleanup_error = 23456,
+         .staging_left = true},
+        {.steps = {{OS_FILE_TEST_WRITE, OS_FILE_TEST_ERROR, 12345}, {OS_FILE_TEST_DELETE, OS_FILE_TEST_ERROR, 23456}},
+         .step_count = 2,
+         .error = 12345,
+         .cleanup_error = 23456,
+         .staging_left = true},
+    };
+    Arena* arena = arguments->arena;
+    String8 directory = buster_test_temporary_path(arena, S8("file-publish-faults"), S8(""));
+    if (BUSTER_REQUIRE(arguments, file_test_directory_reset(directory)))
+    {
+        String8 names[] = {S8("old.bin"), S8("fresh.bin")};
+        String8 old_path = file_test_child(arena, directory, names[0]);
+        String8 fresh_path = file_test_child(arena, directory, names[1]);
+        u64 length = BUSTER_KB(128) + 3;
+        u8* data = arena_allocate(arena, u8, length);
+        for (u64 index = 0; index < length; index += 1)
+        {
+            data[index] = (u8)(index * 37 + index / 251);
+        }
+        ByteSlice content = {data, length};
+        u8 old_bytes[] = {'o', 'l', 'd', 0, 'd', 'e', 's', 't', 0xff};
+        ByteSlice old_content = {old_bytes, sizeof(old_bytes)};
+        for (u32 fault_index = 0; fault_index < BUSTER_ARRAY_LENGTH(faults); fault_index += 1)
+        {
+            const FileTestPublishFault* fault = &faults[fault_index];
+            for (u32 existing = 0; existing < 2; existing += 1)
+            {
+#if BUSTER_WINDOWS
+                bool runs = !fault->posix_replacement;
+#else
+                bool runs = existing || !fault->posix_replacement;
+#endif
+                if (runs)
+                {
+                    String8 destination = existing ? old_path : fresh_path;
+                    BUSTER_TEST(arguments, file_write(old_path, old_content) && os_file_delete(fresh_path));
+                    os_file_test_begin(destination, fault->steps, fault->step_count);
+                    FilePublishResult published = file_publish_checked(destination, content, (OpenPermissions){.read = 1, .write = 1});
+                    u32 consumed = os_file_test_end();
+                    bool succeeded = fault->status == FILE_PUBLISH_PUBLISHED;
+                    bool error_matches = fault->any_error ? published.error.v != 0 : published.error.v == fault->error;
+                    bool matches = consumed == fault->step_count && published.status == fault->status && error_matches &&
+                                   published.cleanup_error.v == fault->cleanup_error;
+                    if (!matches)
+                    {
+                        arguments->show(arguments, S8("FILE_PUBLISH_FAULT index={u32} existing={u32} consumed={u32} status={u32} error={u32} cleanup={u32}\n"),
+                                        fault_index, existing, consumed, (u32)published.status, published.error.v, published.cleanup_error.v);
+                    }
+                    BUSTER_TEST(arguments, matches);
+                    if (succeeded)
+                    {
+                        BUSTER_TEST(arguments, file_test_bytes_are(arena, destination, content));
+                    }
+                    else if (existing)
+                    {
+                        BUSTER_TEST(arguments, file_test_bytes_are(arena, destination, old_content));
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, file_test_path_missing(arena, destination));
+                    }
+                    u32 expected_count = succeeded && !existing ? 2 : 1;
+                    u32 staging_count = fault->staging_left ? 1 : 0;
+                    BUSTER_TEST(arguments, file_test_entries_are(arena, directory, names, expected_count, staging_count));
+                    if (fault->staging_left)
+                    {
+                        BUSTER_TEST(arguments, file_test_remove_staging(arena, directory) == 1);
+                    }
+                    if (succeeded && !existing)
+                    {
+                        BUSTER_TEST(arguments, os_file_delete(destination));
+                    }
+                    BUSTER_TEST(arguments, file_test_entries_are(arena, directory, names, 1, 0));
+                }
+            }
+        }
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+    }
+    return result;
+}
+
+#if !BUSTER_SINGLE_THREADED
+typedef struct FileTestPublishReader FileTestPublishReader;
+struct FileTestPublishReader
+{
+    String8 path;
+    ByteSlice first;
+    ByteSlice second;
+    OsBarrierHandle* barrier;
+    AtomicU64 failures;
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType file_test_publish_reader(void* raw)
+{
+    FileTestPublishReader* reader = (FileTestPublishReader*)raw;
+    os_barrier_wait(reader->barrier);
+    u8 bytes[4096];
+    for (u32 iteration = 0; iteration < 256; iteration += 1)
+    {
+        bool valid = false;
+        // Windows readers must permit delete sharing for atomic replacement;
+        // OpenPermissions controls sharing, while OpenFlags controls access.
+        OsFileOpenResult opened = os_file_open_checked(reader->path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1, .write = 1});
+        if (opened.file)
+        {
+            OsFileReadResult content = os_file_read_exact(opened.file, (ByteSlice){bytes, sizeof(bytes)});
+            u8 extra = 0;
+            OsFileReadResult tail = os_file_read_some(opened.file, (ByteSlice){&extra, 1});
+            bool complete = content.status == OS_FILE_READ_OK && content.transferred == sizeof(bytes) &&
+                            tail.status == OS_FILE_READ_EOF && tail.transferred == 0;
+            bool first = complete && memory_compare(bytes, reader->first.pointer, reader->first.length);
+            bool second = complete && memory_compare(bytes, reader->second.pointer, reader->second.length);
+            bool closed = os_file_close(opened.file);
+            valid = (first || second) && closed;
+        }
+        if (!valid)
+        {
+            atomic_u64_increment(&reader->failures);
+        }
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_concurrent_reader(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_SINGLE_THREADED
+    Arena* arena = arguments->arena;
+    String8 directory = buster_test_temporary_path(arena, S8("file-publish-concurrent"), S8(""));
+    if (BUSTER_REQUIRE(arguments, file_test_directory_reset(directory)))
+    {
+        String8 path = file_test_child(arena, directory, S8("artifact.bin"));
+        u8* first = arena_allocate(arena, u8, 4096);
+        u8* second = arena_allocate(arena, u8, 4096);
+        for (u32 index = 0; index < 4096; index += 1)
+        {
+            first[index] = (u8)(index * 17 + 3);
+            second[index] = (u8)(index * 29 + 7);
+        }
+        FileTestPublishReader reader = {
+            .path = path,
+            .first = {first, 4096},
+            .second = {second, 4096},
+            .barrier = os_barrier_create(2),
+        };
+        BUSTER_TEST(arguments, file_publish(path, reader.first));
+        if (BUSTER_REQUIRE(arguments, reader.barrier != 0))
+        {
+            OsThreadHandle* thread = os_thread_create((ThreadCreateOptions){
+                .callback = &file_test_publish_reader,
+                .argument = &reader,
+            });
+            if (BUSTER_REQUIRE(arguments, thread != 0))
+            {
+                os_barrier_wait(reader.barrier);
+                for (u32 publication = 0; publication < 16; publication += 1)
+                {
+                    BUSTER_TEST(arguments, file_publish(path, publication & 1 ? reader.first : reader.second));
+                }
+                BUSTER_TEST(arguments, os_thread_join(thread));
+                BUSTER_TEST(arguments, reader.failures == 0);
+            }
+            os_barrier_destroy(reader.barrier);
+        }
+        String8 expected[] = {S8("artifact.bin")};
+        BUSTER_TEST(arguments, file_test_entries_are(arena, directory, expected, 1, 0));
+        BUSTER_TEST(arguments, os_directory_delete(directory));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 typedef struct FileTestCopyFault FileTestCopyFault;
 struct FileTestCopyFault
 {
@@ -984,6 +1311,9 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, file_test_write_failures);
     BUSTER_TEST_FIXTURE(arguments, file_test_read_failures);
     BUSTER_TEST_FIXTURE(arguments, file_test_read_alignment);
+    BUSTER_TEST_FIXTURE(arguments, file_test_publish_contents);
+    BUSTER_TEST_FIXTURE(arguments, file_test_publish_faults);
+    BUSTER_TEST_FIXTURE(arguments, file_test_publish_concurrent_reader);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_contents);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_aliases);
     BUSTER_TEST_FIXTURE(arguments, file_test_copy_faults);

@@ -33,6 +33,12 @@
 #include <sys/ioctl.h>
 #endif
 
+#if BUSTER_WINDOWS
+// FileRenameInfoEx has ABI value 22. Some MinGW headers hide its enum
+// name behind NTDDI_VERSION even though the API and rename flags are declared.
+#define BUSTER_WINDOWS_FILE_RENAME_INFO_EX ((FILE_INFO_BY_HANDLE_CLASS)22)
+#endif
+
 #if BUSTER_MACOS && BUSTER_CPU_ARCH_AARCH64 && defined(MAP_JIT)
 extern void pthread_jit_write_protect_np(int enabled);
 #endif
@@ -2204,11 +2210,15 @@ OsError os_file_delete_checked(String8 path)
 FileStats os_file_replacement_target_stats(String8 path)
 {
     FileStats result = {0};
+#if BUSTER_INCLUDE_TESTS
+    const OsFileTestStep* step = os_file_test_selects(path) ? os_file_test_take(OS_FILE_TEST_STATS) : 0;
+    if (step && step->action == OS_FILE_TEST_ERROR) result.error.v = (u32)step->value;
+#endif
     if (!path.pointer || !path.length)
     {
         result.error = os_file_invalid_error();
     }
-    else
+    else if (!result.error.v)
     {
 #if defined(__linux__) || defined(__APPLE__)
         BUSTER_VALIDATE(!path.pointer[path.length]);
@@ -2415,12 +2425,39 @@ OsError os_file_replace(String8 path, String8 destination)
 #elif defined(_WIN32)
         TemporalArena scratch = scratch_begin(0, 0);
         String16 path_w = string16_from_string8(scratch.arena, path, true);
-        String16 destination_w = string16_from_string8(scratch.arena, destination, true);
-        // No MOVEFILE_COPY_ALLOWED: a cross-volume copy and delete is neither
-        // atomic nor a rename.
-        if (!MoveFileExW(path_w.pointer, destination_w.pointer, MOVEFILE_REPLACE_EXISTING))
+        String8 absolute_destination = os_path_absolute_lexical(scratch.arena, destination, true);
+        String16 destination_w = string16_from_string8(scratch.arena, absolute_destination, true);
+        u64 rename_bytes = sizeof(FILE_RENAME_INFO) + destination_w.length * sizeof(WindowsChar);
+        if (!absolute_destination.length || rename_bytes > UINT32_MAX)
         {
-            result = os_get_last_error();
+            result = os_file_invalid_error();
+        }
+        else
+        {
+            HANDLE handle = CreateFileW(path_w.pointer, DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        0, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, 0);
+            if (handle == INVALID_HANDLE_VALUE)
+            {
+                result = os_get_last_error();
+            }
+            else
+            {
+                FILE_RENAME_INFO* rename_info = (FILE_RENAME_INFO*)arena_allocate_bytes(scratch.arena, rename_bytes, BUSTER_ALIGN_OF(FILE_RENAME_INFO));
+                memset(rename_info, 0, (size_t)rename_bytes);
+                rename_info->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+                rename_info->FileNameLength = (DWORD)(destination_w.length * sizeof(WindowsChar));
+                memcpy(rename_info->FileName, destination_w.pointer, rename_info->FileNameLength);
+                // Existing readers retain the old object while new opens see
+                // the replacement. MoveFileExW alone cannot provide this when
+                // a destination handle is still open, even with delete sharing.
+                if (!SetFileInformationByHandle(handle, BUSTER_WINDOWS_FILE_RENAME_INFO_EX, rename_info, (DWORD)rename_bytes))
+                {
+                    result = os_get_last_error();
+                }
+                // A completed rename cannot be reported as unpublished because
+                // of closing this private, attribute-free handle.
+                CloseHandle(handle);
+            }
         }
         scratch_end(scratch);
 #else

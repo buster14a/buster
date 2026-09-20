@@ -541,7 +541,8 @@ BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT < 63);
 #define IR_OPCODE_SUMMARY_TRACKED                                                                                                      \
     (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |          \
      IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) |                                       \
-     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY))
+     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY) |                                    \
+     IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH))
 
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 
@@ -721,6 +722,11 @@ struct IrFunction
     u32 extra_count;
     u32 extra_capacity;
     IrFunctionState state;
+    // Compaction already sums operand slots. Reuse that total only while
+    // operand_total_rows matches instruction_count and the summary is known.
+    // Appends change the count; reopening invalidates the cached population.
+    u64 operand_total;
+    u32 operand_total_rows;
     // Which IR_OPCODE_SUMMARY_TRACKED opcodes the builder appended, plus
     // IR_OPCODE_SUMMARY_KNOWN. Consumers ask ir_function_may_contain_opcodes
     // instead of rescanning every row for a handful of rare ones. The summary

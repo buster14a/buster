@@ -403,13 +403,22 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
 {
     statistics->functions += 1;
     statistics->instructions_before += function->instruction_count;
-    u64 operands = 0;
+    u64 operands = function->operand_total;
     bool provenance = function->label_metadata_count != 0;
-    for (u32 index = 0; index < function->instruction_count; index += 1)
+    u64 provenance_opcodes = IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH);
+    if ((function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) && function->operand_total_rows == function->instruction_count)
     {
-        IrInstruction* row = function->instructions + index;
-        if (operands <= IR_FAST_WORK_BUDGET) operands += row->operand_count;
-        provenance |= row->opcode == IR_OPCODE_LABEL_ADDRESS || row->opcode == IR_OPCODE_INDIRECT_BRANCH;
+        provenance |= ir_function_may_contain_opcodes(function, provenance_opcodes);
+    }
+    else
+    {
+        operands = 0;
+        for (u32 index = 0; index < function->instruction_count; index += 1)
+        {
+            IrInstruction* row = function->instructions + index;
+            if (operands <= IR_FAST_WORK_BUDGET) operands += row->operand_count;
+            provenance |= row->opcode == IR_OPCODE_LABEL_ADDRESS || row->opcode == IR_OPCODE_INDIRECT_BRANCH;
+        }
     }
     u64 work = operands + function->instruction_count + function->value_count + function->block_count;
     u64 reopening_bytes = 0;
