@@ -805,16 +805,25 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                     locals[local_index++].value = place.value;
                 }
             }
-            for (u32 index = 1; index < local_index; index += 1)
+            bool ordered = true;
+            for (u32 index = 1; index < local_index && ordered; index += 1)
             {
-                IrPromoteLocal key = locals[index];
-                u32 cursor = index;
-                while (cursor && function->values[locals[cursor - 1].value].definition.value > function->values[key.value].definition.value)
+                ordered = function->values[locals[index - 1].value].definition.value < function->values[locals[index].value].definition.value;
+            }
+            if (!ordered)
+            {
+                // Canonical local IDs need not follow row order. A single
+                // fallback scan preserves deterministic order without a
+                // displacement-dependent insertion sort on reordered input.
+                local_index = 0;
+                for (u32 index = 0; index < function->instruction_count; index += 1)
                 {
-                    locals[cursor] = locals[cursor - 1];
-                    cursor -= 1;
+                    IrInstruction* row = function->instructions + index;
+                    if (row->opcode == IR_OPCODE_LOCAL)
+                    {
+                        locals[local_index++].value = row->result.value;
+                    }
                 }
-                locals[cursor] = key;
             }
             BUSTER_CHECK(local_index == local_count);
             for (u32 index = 0; index < local_index; index += 1)
