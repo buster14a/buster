@@ -157,7 +157,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                                                            (ProcessSpawnOptions){
                                                                .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
                                                                           ((u64)1 << STANDARD_STREAM_ERROR),
-                                                               .use_process_environment = 1,
+                                                               .use_process_environment = 1, .search_path = 1,
                                                            });
         if (BUSTER_REQUIRE(arguments, stdout_child.handle != 0))
         {
@@ -205,7 +205,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                                                                (ProcessSpawnOptions){
                                                                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
                                                                               ((u64)1 << STANDARD_STREAM_ERROR),
-                                                                   .use_process_environment = 1,
+                                                                   .use_process_environment = 1, .search_path = 1,
                                                                });
             if (BUSTER_REQUIRE(arguments, output_child.handle != 0))
             {
@@ -252,7 +252,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
                                                                   (ProcessSpawnOptions){
                                                                       .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
                                                                                  ((u64)1 << STANDARD_STREAM_ERROR),
-                                                                      .use_process_environment = 1,
+                                                                      .use_process_environment = 1, .search_path = 1,
                                                                   });
             if (BUSTER_REQUIRE(arguments, backslash_child.handle != 0))
             {
@@ -945,7 +945,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool compiler_driver_test_process_success
 {
     String8 run_arguments[] = {path};
     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                (ProcessSpawnOptions){.use_process_environment = true});
+                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
     return spawn.handle && os_process_wait_deadline(arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
 }
 
@@ -2525,7 +2525,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #endif
                                     object, S8("-o"), executable};
                                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
-                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                                 bool linked = spawn.handle && os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
                                 BUSTER_TEST(arguments, linked);
                                 if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
@@ -2628,7 +2628,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #endif
                                     object, S8("-o"), executable};
                                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
-                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                                 bool linked = spawn.handle &&
                                     os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
                                 BUSTER_TEST(arguments, linked);
@@ -2723,7 +2723,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
             {
                 String8 probe[] = {hosts[host], S8("--version")};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(probe), (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = true});
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = true, .search_path = true});
                 ProcessWaitResult waited = {0};
                 if (spawn.handle) { waited = os_process_wait_deadline(arguments->arena, spawn, 30000000); }
                 String8 version = {.pointer = (char8*)waited.streams[STANDARD_STREAM_OUTPUT].pointer,
@@ -2744,7 +2744,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
                     String8 host_command[] = {hosts[host], S8("-O0"), S8("-fno-inline"), cpu ? S8("-march=haswell") : S8("-march=x86-64"), S8("-c"),
                         provider ? S8("-DWIDE_ABI_PROVIDER_ONLY=1") : S8("-DWIDE_ABI_CONSUMER_ONLY=1"), sources[1], S8("-o"), host_object};
                     ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command),
-                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     bool host_ok = host_spawn.handle && os_process_wait_deadline(host_temporary.arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
                     BUSTER_TEST(arguments, host_ok);
                     for (u32 mode = 0; host_ok && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -2772,7 +2772,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #endif
                                         object, host_object, S8("-o"), executable};
                                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
-                                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                                     bool linked = spawn.handle && os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
                                     BUSTER_TEST(arguments, linked);
                                     if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
@@ -2806,7 +2806,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
                 String8 host_command[] = {clang, S8("-O0"), S8("-fno-inline"), S8("-fPIC"), host_cpus[cpu], S8("-c"),
                     half_defines[host_provider ? 0u : 1u], padded_input, S8("-o"), host_object};
                 ProcessSpawnResult host_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_command),
-                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 bool host_ok = host_spawn.handle &&
                     os_process_wait_deadline(host_temporary.arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
                 BUSTER_TEST(arguments, host_ok);
@@ -2839,7 +2839,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
 #endif
                                 object, host_object, S8("-o"), executable};
                             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link),
-                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                             bool linked = spawn.handle &&
                                 os_process_wait_deadline(temporary.arena, spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
                             BUSTER_TEST(arguments, linked);
@@ -2925,7 +2925,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         host_command[host_count++] = S8("-o");
         host_command[host_count++] = host_objects[observer];
         ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
-            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+            (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         if (!host_spawn.handle)
         {
             host_observer_available = false;
@@ -3088,7 +3089,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                     link_command[link_count++] = executable;
                                     native_frame_link_count += 1;
                                     ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
-                                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                                     link_ok = linked.handle && os_process_wait_sync(temporary.arena, linked).result == PROCESS_RESULT_SUCCESS;
                                     if (link_ok && retain_object)
                                     {
@@ -3152,7 +3153,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_sseup(UnitTestArgum
     host_command[host_count++] = S8("-o");
     host_command[host_count++] = host_object;
     ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
-        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
     bool host_compiled = host_spawn.handle && os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
     BUSTER_TEST(arguments, host_compiled);
 #endif
@@ -3190,7 +3191,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_sseup(UnitTestArgum
                         link_command[link_count++] = S8("-o");
                         link_command[link_count++] = executable;
                         ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
-                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                         bool link_ok = linked.handle && os_process_wait_sync(temporary.arena, linked).result == PROCESS_RESULT_SUCCESS;
                         BUSTER_TEST(arguments, link_ok);
                         if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
@@ -3224,7 +3225,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_va_list(UnitTestArg
     host_command[host_count++] = S8("-o");
     host_command[host_count++] = host_object;
     ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
-        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
     bool host_compiled = host_spawn.handle && os_process_wait_deadline(arguments->arena, host_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
     BUSTER_TEST(arguments, host_compiled);
 #endif
@@ -3262,7 +3263,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_sysv_va_list(UnitTestArg
                         link_command[link_count++] = S8("-o");
                         link_command[link_count++] = executable;
                         ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
-                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                         bool link_ok = linked.handle && os_process_wait_deadline(temporary.arena, linked, 30000000).result == PROCESS_RESULT_SUCCESS;
                         BUSTER_TEST(arguments, link_ok);
                         if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
@@ -3389,7 +3390,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_windows_arm64_unwind(Uni
             {
                 String8 run[] = {output};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT, .use_process_environment = true});
+                    (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT, .use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -3571,7 +3572,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
         command[count++] = S8("-o");
         command[count++] = host_objects[direction];
         ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count},
-            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         host_compiled[direction] = spawned.handle && os_process_wait_sync(arguments->arena, spawned).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, host_compiled[direction]);
     }
@@ -3718,7 +3719,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_f128(Un
                                     link[count++] = S8("-o");
                                     link[count++] = executable;
                                     ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = link, .length = count},
-                                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                                     bool linked = spawned.handle && os_process_wait_sync(temporary.arena, spawned).result == PROCESS_RESULT_SUCCESS;
                                     BUSTER_TEST(arguments, linked);
                                     if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
@@ -4217,7 +4218,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_many_native_arguments(Un
     host_command[host_count++] = S8("-o");
     host_command[host_count++] = host_object;
     ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
-        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
     bool host_compiled = host_spawn.handle && os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
     BUSTER_TEST(arguments, host_compiled);
 #endif
@@ -4331,7 +4332,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_dynamic_calls(Un
                             link[count++] = S8("-o");
                             link[count++] = executable;
                             ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link, .length = count},
-                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                             bool link_ok = linked.handle && os_process_wait_sync(temporary.arena, linked).result == PROCESS_RESULT_SUCCESS;
                             BUSTER_TEST(arguments, link_ok);
                             if (link_ok) { BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description); }
@@ -4368,7 +4369,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
     host_command[host_count++] = S8("-o");
     host_command[host_count++] = host_object;
     ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
-        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
     bool host_compiled = host_spawn.handle && os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
     BUSTER_TEST(arguments, host_compiled);
 #if BUSTER_WINDOWS
@@ -4377,7 +4378,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
     host_command[host_count - 1] = boundary_object;
     host_command[host_count++] = S8("-DBUSTER_PLATFORM_VA_ABI_PROBE=1");
     ProcessSpawnResult boundary_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
-        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
     bool boundary_compiled = boundary_spawn.handle && os_process_wait_sync(arguments->arena, boundary_spawn).result == PROCESS_RESULT_SUCCESS;
     BUSTER_TEST(arguments, boundary_compiled);
 #endif
@@ -5360,6 +5361,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasmNodeRun compiler_driver_test_wasm_node_run
                                                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
                                                                ((u64)1 << STANDARD_STREAM_ERROR),
                                                     .use_process_environment = keys.length == 0,
+                                                    .search_path = true,
                                                 });
     result.spawned = spawn.handle != 0;
     if (spawn.handle)
@@ -5556,7 +5558,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverWasm64NodeRun compiler_driver_test_wasm64_stac
                                                 (ProcessSpawnOptions){
                                                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
                                                                ((u64)1 << STANDARD_STREAM_ERROR),
-                                                    .use_process_environment = 1,
+                                                    .use_process_environment = 1, .search_path = 1,
                                                 });
     result.spawned = spawn.handle != 0;
     if (spawn.handle)
@@ -5917,7 +5919,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
         host_objects[index] = buster_test_temporary_path(arena, S8("buster-parameter-alignment-host"), string_format(arena, S8("-{u32}.o"), index));
         String8 command[] = {S8(BUSTER_HOST_C_COMPILER), S8("-O2"), S8("-fno-pic"), S8("-g0"), S8("-c"), host_sources[index], S8("-o"), host_objects[index]};
         ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
-            (ProcessSpawnOptions){.use_process_environment = true});
+            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         bool compiled = spawned.handle && os_process_wait_sync(arena, spawned).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, compiled);
         host_compiled &= compiled;
@@ -5942,7 +5944,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_parameter_alignment(Unit
             {
                 String8 command[] = {output};
                 ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.use_process_environment = true});
+                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawned.handle != 0);
                 if (spawned.handle)
                 {
@@ -6155,7 +6157,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_data_scaling(UnitTes
                             file_write(main_source, BUSTER_SLICE_TO_BYTE_SLICE(main_text));
             BUSTER_TEST(arguments, prepared);
             ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                .use_process_environment = true};
+                .use_process_environment = true, .search_path = true};
             for (u32 step = 0; prepared && step < 3; step += 1)
             {
                 String8 command[16] = {0};
@@ -6276,7 +6278,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_elf_link_boundaries(Unit
     os_make_directory(directory);
     ProcessSpawnOptions capture = {
         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-        .use_process_environment = true,
+        .use_process_environment = true, .search_path = true,
     };
     for (u32 hosted = 0; hosted < 2; hosted += 1)
     {
@@ -6454,7 +6456,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_mach_unwind_link(UnitTes
                 link[count++] = S8("-o");
                 link[count++] = executable;
                 ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                               .use_process_environment = true};
+                                               .use_process_environment = true, .search_path = true};
                 ProcessSpawnResult spawned = os_process_spawn((SliceString8){link, count}, (SliceString8){0}, (SliceString8){0}, capture);
                 ProcessWaitResult linked = spawned.handle ? os_process_wait_deadline(arena, spawned, 30000000) : (ProcessWaitResult){0};
                 bool linked_ok = spawned.handle && !linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS;
@@ -6503,7 +6505,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_allocation_lifetimes(UnitTest
         {
             String8 child_arguments[] = {output};
             ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), (SliceString8){0}, (SliceString8){0},
-                                                        (ProcessSpawnOptions){.use_process_environment = true});
+                                                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, child.handle != 0);
             if (child.handle)
             {
@@ -6638,7 +6640,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
             {
                 String8 run[] = {path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                                                           (ProcessSpawnOptions){.use_process_environment = true});
+                                                           (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -6706,7 +6708,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_atomic_pair_contention(U
             link[count++] = S8("-o");
             link[count++] = executable;
             ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                           .use_process_environment = true};
+                                           .use_process_environment = true, .search_path = true};
             ProcessSpawnResult compiler = os_process_spawn((SliceString8){link, count}, (SliceString8){0}, (SliceString8){0}, capture);
             ProcessWaitResult linked = compiler.handle ? os_process_wait_deadline(arena, compiler, 30000000) : (ProcessWaitResult){0};
             bool linked_ok = compiler.handle && !linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS;
@@ -6766,7 +6768,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dwarf5_objects(UnitTestA
             command[count++] = S8("-o");
             command[count++] = object_paths[unit];
             ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = command, .length = count},
-                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             ready = spawn.handle && os_process_wait_sync(temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS;
             BUSTER_TEST(arguments, ready);
             if (ready)
@@ -6867,7 +6869,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_dwarf5_objects(UnitTestA
                 BUSTER_TEST(arguments, checked_offsets != 0);
                 BUSTER_TEST(arguments, !version || checked_addresses != 0);
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8){.pointer = &executable, .length = 1},
-                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle && os_process_wait_sync(temporary.arena, spawn).result == PROCESS_RESULT_SUCCESS);
             }
         }
@@ -7199,7 +7201,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                 String8 version_command[] = {compilers[compiler], S8("--version")};
                 ProcessSpawnResult version_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(version_command),
                     (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT, .use_process_environment = true});
+                    (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT, .use_process_environment = true, .search_path = true});
                 if (BUSTER_REQUIRE(arguments, version_spawn.handle != 0))
                 {
                     ProcessWaitResult version_wait = os_process_wait_deadline(temporary.arena, version_spawn, 30000000);
@@ -7238,7 +7240,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                             String8 command[] = {compilers[compiler], dialects[dialect], S8("-c"), S8("-o"), output, input};
                             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
                                 (SliceString8){0}, (SliceString8){0},
-                                (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR, .use_process_environment = true});
+                                (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR, .use_process_environment = true, .search_path = true});
                             if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
@@ -7268,7 +7270,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
                         {
                             String8 command[] = {compilers[compiler], dialects[dialect], S8("-c"), S8("-o"), output, input};
                             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command),
-                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                             if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                             {
                                 ProcessWaitResult waited = os_process_wait_deadline(arena, spawn, 30000000);
@@ -7456,7 +7458,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_attribute_queries(UnitTe
                 {
                     String8 run[] = {image};
                     ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                                                                  (ProcessSpawnOptions){.use_process_environment = true});
+                                                                  (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
                     {
                         ProcessWaitResult waited = os_process_wait_deadline(arena, spawned, 30000000);
@@ -7802,7 +7804,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
         host_command[host_count++] = S8("-o");
         host_command[host_count++] = host_objects[source_index];
         ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count}, (SliceString8){0},
-                                                       (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                       (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         host_compiled = spawned.handle && os_process_wait_deadline(mixed_arena, spawned, 30000000).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, host_compiled);
     }
@@ -7846,7 +7848,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_float16_codegen(UnitTest
             link_command[link_count++] = S8("-o");
             link_command[link_count++] = executable;
             ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count}, (SliceString8){0},
-                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             bool linked = spawned.handle && os_process_wait_deadline(mixed_arena, spawned, 30000000).result == PROCESS_RESULT_SUCCESS;
             BUSTER_TEST(arguments, linked);
             if (linked)
@@ -7991,7 +7993,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 executable = buster_test_temporary_path(arguments->arena, S8("buster-llvm-integer-constants"), S8(""));
             String8 compile_arguments[] = {clang, S8("-O0"), llvm_integer_output, S8("-o"), executable};
             ProcessSpawnResult compile = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments), (SliceString8){0}, (SliceString8){0},
-                                                         (ProcessSpawnOptions){.use_process_environment = 1});
+                                                         (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
             BUSTER_TEST(arguments, compile.handle != 0);
             if (compile.handle)
             {
@@ -8001,7 +8003,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 {
                     String8 run_arguments[] = {executable};
                     ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                             (ProcessSpawnOptions){.use_process_environment = 1});
+                                                             (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
                     BUSTER_TEST(arguments, run.handle != 0);
                     if (run.handle)
                     {
@@ -9612,7 +9614,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     i128_executable_path,
                 };
                 ProcessSpawnResult i128_link_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(i128_link_arguments), (SliceString8){0},
-                                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, i128_link_spawn.handle != 0);
                 bool i128_linked = false;
                 if (i128_link_spawn.handle)
@@ -9624,7 +9626,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 {
                     String8 i128_run_arguments[] = {qemu_aarch64_executable, i128_executable_path};
                     ProcessSpawnResult i128_run_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(i128_run_arguments), (SliceString8){0},
-                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, i128_run_spawn.handle != 0);
                     if (i128_run_spawn.handle)
                     {
@@ -9774,7 +9776,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (supported)
         {
             no_pic_spawn = os_process_spawn(no_pic_compile_arguments, (SliceString8){0},
-                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                           (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         }
         BUSTER_TEST(arguments, no_pic_spawn.handle != 0);
         bool no_pic_compiled = false;
@@ -9787,7 +9789,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         if (supported)
         {
             pic_spawn = os_process_spawn(pic_compile_arguments, (SliceString8){0},
-                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         }
         BUSTER_TEST(arguments, pic_spawn.handle != 0);
         bool pic_compiled = false;
@@ -9841,7 +9843,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 if (linked[index])
                 {
                     ProcessSpawnResult child = os_process_spawn((SliceString8){.pointer = executable_paths + index, .length = 1}, (SliceString8){0},
-                                                               (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                               (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, child.handle != 0);
                     if (child.handle)
                     {
@@ -9891,7 +9893,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_run_arguments), (SliceString8){0}, (SliceString8){0},
                                                       (ProcessSpawnOptions){
-                                                          .use_process_environment = true,
+                                                          .use_process_environment = true, .search_path = true,
                                                       });
         BUSTER_TEST(arguments, c_spawn.handle != 0);
         if (c_spawn.handle)
@@ -10002,7 +10004,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_static_local_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_local_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_static_local_spawn.handle != 0);
         if (c_static_local_spawn.handle)
@@ -10073,7 +10075,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_static_aggregate_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_aggregate_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_static_aggregate_spawn.handle != 0);
         if (c_static_aggregate_spawn.handle)
@@ -10107,7 +10109,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_auto_type_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_auto_type_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_auto_type_spawn.handle != 0);
         if (c_auto_type_spawn.handle)
@@ -10140,7 +10142,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_cleanup_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_cleanup_run_arguments), (SliceString8){0}, (SliceString8){0},
                                                                (ProcessSpawnOptions){
-                                                                   .use_process_environment = true,
+                                                                   .use_process_environment = true, .search_path = true,
                                                                });
         BUSTER_TEST(arguments, c_cleanup_spawn.handle != 0);
         if (c_cleanup_spawn.handle)
@@ -10174,7 +10176,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_case_range_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_case_range_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_case_range_spawn.handle != 0);
         if (c_case_range_spawn.handle)
@@ -10214,7 +10216,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_switch_case_label_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_switch_case_label_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_switch_case_label_spawn.handle != 0);
         if (c_switch_case_label_spawn.handle)
@@ -10254,7 +10256,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_doom_shapes_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_doom_shapes_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_doom_shapes_spawn.handle != 0);
         if (c_doom_shapes_spawn.handle)
@@ -10290,7 +10292,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_wide_argument_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_wide_argument_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_wide_argument_spawn.handle != 0);
         if (c_wide_argument_spawn.handle)
@@ -10314,7 +10316,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 c_f80_transport_run_arguments[] = {c_f80_transport_path};
             ProcessSpawnResult c_f80_transport_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_f80_transport_run_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, c_f80_transport_spawn.handle != 0);
             if (c_f80_transport_spawn.handle)
             {
@@ -10345,7 +10347,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {c_int128_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -10383,7 +10385,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_wide_vector_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_wide_vector_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_wide_vector_spawn.handle != 0);
         if (c_wide_vector_spawn.handle)
@@ -10422,7 +10424,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_narrow_abi_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_narrow_abi_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_narrow_abi_spawn.handle != 0);
         if (c_narrow_abi_spawn.handle)
@@ -10468,7 +10470,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_sizeof_anonymous_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_sizeof_anonymous_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_sizeof_anonymous_spawn.handle != 0);
         if (c_sizeof_anonymous_spawn.handle)
@@ -10501,7 +10503,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult c_ymm_vector_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_ymm_vector_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, c_ymm_vector_spawn.handle != 0);
             if (c_ymm_vector_spawn.handle)
@@ -10539,7 +10541,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult c_short_vector_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_short_vector_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, c_short_vector_spawn.handle != 0);
             if (c_short_vector_spawn.handle)
@@ -10650,7 +10652,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_infinite_loop_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_infinite_loop_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_infinite_loop_spawn.handle != 0);
         if (c_infinite_loop_spawn.handle)
@@ -10682,7 +10684,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_artifact_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_artifact_run_arguments), (SliceString8){0}, (SliceString8){0},
                                                                 (ProcessSpawnOptions){
-                                                                    .use_process_environment = true,
+                                                                    .use_process_environment = true, .search_path = true,
                                                                 });
         BUSTER_TEST(arguments, c_artifact_spawn.handle != 0);
         if (c_artifact_spawn.handle)
@@ -10936,7 +10938,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_debug_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_debug_run_arguments), (SliceString8){0}, (SliceString8){0},
                                                             (ProcessSpawnOptions){
-                                                                .use_process_environment = true,
+                                                                .use_process_environment = true, .search_path = true,
                                                             });
         BUSTER_TEST(arguments, c_debug_spawn.handle != 0);
         if (c_debug_spawn.handle)
@@ -10970,7 +10972,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult string_concat_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(string_concat_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, string_concat_spawn.handle != 0);
         if (string_concat_spawn.handle)
@@ -11007,7 +11009,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult stringify_spacing_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(stringify_spacing_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, stringify_spacing_spawn.handle != 0);
         if (stringify_spacing_spawn.handle)
@@ -11040,7 +11042,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult nullptr_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(nullptr_run_arguments), (SliceString8){0}, (SliceString8){0},
                                                             (ProcessSpawnOptions){
-                                                                .use_process_environment = true,
+                                                                .use_process_environment = true, .search_path = true,
                                                             });
         BUSTER_TEST(arguments, nullptr_spawn.handle != 0);
         if (nullptr_spawn.handle)
@@ -11074,7 +11076,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult constexpr_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(constexpr_run_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, constexpr_spawn.handle != 0);
             if (constexpr_spawn.handle)
@@ -11106,7 +11108,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
                                                     (ProcessSpawnOptions){
-                                                        .use_process_environment = true,
+                                                        .use_process_environment = true, .search_path = true,
                                                     });
         BUSTER_TEST(arguments, spawn.handle != 0);
         if (spawn.handle)
@@ -11180,7 +11182,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 c_function_pointer_run_arguments[] = {c_function_pointer_path};
         ProcessSpawnResult c_function_pointer_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_function_pointer_run_arguments), (SliceString8){0}, (SliceString8){0},
-                             (ProcessSpawnOptions){.use_process_environment = true});
+                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         BUSTER_TEST(arguments, c_function_pointer_spawn.handle != 0);
         if (c_function_pointer_spawn.handle)
         {
@@ -11262,7 +11264,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             };
             ProcessSpawnResult c_shape_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_shape_arguments), (SliceString8){0}, (SliceString8){0},
                                                                 (ProcessSpawnOptions){
-                                                                    .use_process_environment = true,
+                                                                    .use_process_environment = true, .search_path = true,
                                                                 });
             BUSTER_TEST(arguments, c_shape_spawn.handle != 0);
             if (c_shape_spawn.handle)
@@ -11340,7 +11342,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_float_limits_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_float_limits_arguments), (SliceString8){0},
                                                                    (SliceString8){0},
                                                                    (ProcessSpawnOptions){
-                                                                       .use_process_environment = true,
+                                                                       .use_process_environment = true, .search_path = true,
                                                                    });
         BUSTER_TEST(arguments, c_float_limits_spawn.handle != 0);
         if (c_float_limits_spawn.handle)
@@ -11375,7 +11377,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_typeof_cast_member_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_typeof_cast_member_arguments),
                                                                          (SliceString8){0}, (SliceString8){0},
                                                                          (ProcessSpawnOptions){
-                                                                             .use_process_environment = true,
+                                                                             .use_process_environment = true, .search_path = true,
                                                                          });
         BUSTER_TEST(arguments, c_typeof_cast_member_spawn.handle != 0);
         if (c_typeof_cast_member_spawn.handle)
@@ -11411,7 +11413,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_call_member_call_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_call_member_call_arguments), (SliceString8){0},
                                                                        (SliceString8){0},
                                                                        (ProcessSpawnOptions){
-                                                                           .use_process_environment = true,
+                                                                           .use_process_environment = true, .search_path = true,
                                                                        });
         BUSTER_TEST(arguments, c_call_member_call_spawn.handle != 0);
         if (c_call_member_call_spawn.handle)
@@ -11446,7 +11448,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_function_type_parameter_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_function_type_parameter_arguments),
                                                                               (SliceString8){0}, (SliceString8){0},
                                                                               (ProcessSpawnOptions){
-                                                                                  .use_process_environment = true,
+                                                                                  .use_process_environment = true, .search_path = true,
                                                                               });
         BUSTER_TEST(arguments, c_function_type_parameter_spawn.handle != 0);
         if (c_function_type_parameter_spawn.handle)
@@ -11484,7 +11486,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_block_scope_tag_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_block_scope_tag_arguments), (SliceString8){0},
                                                                       (SliceString8){0},
                                                                       (ProcessSpawnOptions){
-                                                                          .use_process_environment = true,
+                                                                          .use_process_environment = true, .search_path = true,
                                                                       });
         BUSTER_TEST(arguments, c_block_scope_tag_spawn.handle != 0);
         if (c_block_scope_tag_spawn.handle)
@@ -11521,7 +11523,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_local_suffix_attribute_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_local_suffix_attribute_arguments),
                                                                              (SliceString8){0}, (SliceString8){0},
                                                                              (ProcessSpawnOptions){
-                                                                                 .use_process_environment = true,
+                                                                                 .use_process_environment = true, .search_path = true,
                                                                              });
         BUSTER_TEST(arguments, c_local_suffix_attribute_spawn.handle != 0);
         if (c_local_suffix_attribute_spawn.handle)
@@ -11558,7 +11560,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_comma_paste_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_comma_paste_arguments), (SliceString8){0},
                                                                   (SliceString8){0},
                                                                   (ProcessSpawnOptions){
-                                                                      .use_process_environment = true,
+                                                                      .use_process_environment = true, .search_path = true,
                                                                   });
         BUSTER_TEST(arguments, c_comma_paste_spawn.handle != 0);
         if (c_comma_paste_spawn.handle)
@@ -11589,7 +11591,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_atomic_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_atomic_arguments), (SliceString8){0}, (SliceString8){0},
                                                              (ProcessSpawnOptions){
-                                                                 .use_process_environment = true,
+                                                                 .use_process_environment = true, .search_path = true,
                                                              });
         BUSTER_TEST(arguments, c_atomic_spawn.handle != 0);
         if (c_atomic_spawn.handle)
@@ -11639,7 +11641,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 atomic_bitcode_native_arguments[] = {atomic_bitcode_native_path};
         ProcessSpawnResult atomic_bitcode_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_bitcode_native_arguments), (SliceString8){0}, (SliceString8){0},
-                             (ProcessSpawnOptions){.use_process_environment = true});
+                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         BUSTER_TEST(arguments, atomic_bitcode_spawn.handle != 0);
         if (atomic_bitcode_spawn.handle)
         {
@@ -11671,7 +11673,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_stdatomic_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_stdatomic_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_stdatomic_spawn.handle != 0);
         if (c_stdatomic_spawn.handle)
@@ -11704,7 +11706,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_generic_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_generic_arguments), (SliceString8){0}, (SliceString8){0},
                                                               (ProcessSpawnOptions){
-                                                                  .use_process_environment = true,
+                                                                  .use_process_environment = true, .search_path = true,
                                                               });
         BUSTER_TEST(arguments, c_generic_spawn.handle != 0);
         if (c_generic_spawn.handle)
@@ -11736,7 +11738,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_alignas_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_alignas_arguments), (SliceString8){0}, (SliceString8){0},
                                                               (ProcessSpawnOptions){
-                                                                  .use_process_environment = true,
+                                                                  .use_process_environment = true, .search_path = true,
                                                               });
         BUSTER_TEST(arguments, c_alignas_spawn.handle != 0);
         if (c_alignas_spawn.handle)
@@ -11769,7 +11771,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_declarator_list_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_declarator_list_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_declarator_list_spawn.handle != 0);
         if (c_declarator_list_spawn.handle)
@@ -11801,7 +11803,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_vla_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_vla_arguments), (SliceString8){0}, (SliceString8){0},
                                                           (ProcessSpawnOptions){
-                                                              .use_process_environment = true,
+                                                              .use_process_environment = true, .search_path = true,
                                                           });
         BUSTER_TEST(arguments, c_vla_spawn.handle != 0);
         if (c_vla_spawn.handle)
@@ -11862,7 +11864,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_aggregate_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_aggregate_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_aggregate_spawn.handle != 0);
         if (c_aggregate_spawn.handle)
@@ -11899,7 +11901,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_labels_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_labels_arguments), (SliceString8){0}, (SliceString8){0},
                                                              (ProcessSpawnOptions){
-                                                                 .use_process_environment = true,
+                                                                 .use_process_environment = true, .search_path = true,
                                                              });
         BUSTER_TEST(arguments, c_labels_spawn.handle != 0);
         if (c_labels_spawn.handle)
@@ -12470,7 +12472,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_thread_local_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_thread_local_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_thread_local_spawn.handle != 0);
         if (c_thread_local_spawn.handle)
@@ -12606,7 +12608,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_float_abi_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_float_abi_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_float_abi_spawn.handle != 0);
         if (c_float_abi_spawn.handle)
@@ -12645,7 +12647,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_abi_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_abi_arguments), (SliceString8){0}, (SliceString8){0},
                                                           (ProcessSpawnOptions){
-                                                              .use_process_environment = true,
+                                                              .use_process_environment = true, .search_path = true,
                                                           });
         BUSTER_TEST(arguments, c_abi_spawn.handle != 0);
         if (c_abi_spawn.handle)
@@ -12673,7 +12675,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult qemu_probe = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(qemu_probe_arguments), (SliceString8){0}, (SliceString8){0},
                                                          (ProcessSpawnOptions){
                                                              .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                             .use_process_environment = true,
+                                                             .use_process_environment = true, .search_path = true,
                                                          });
         if (qemu_probe.handle)
         {
@@ -12705,7 +12707,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 qemu_arguments[] = {S8("qemu-aarch64"), aarch64_i128_path};
             ProcessSpawnResult qemu_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(qemu_arguments), (SliceString8){0}, (SliceString8){0},
                                                             (ProcessSpawnOptions){
-                                                                .use_process_environment = true,
+                                                                .use_process_environment = true, .search_path = true,
                                                             });
             BUSTER_TEST(arguments, qemu_run.handle != 0);
             if (qemu_run.handle)
@@ -12768,7 +12770,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 SliceString8 run_arguments = native_x64 ? (SliceString8)BUSTER_ARRAY_TO_SLICE(native_arguments)
                                                         : (SliceString8)BUSTER_ARRAY_TO_SLICE(emulated_arguments);
                 ProcessSpawnResult i128_binary_run =
-                    os_process_spawn(run_arguments, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    os_process_spawn(run_arguments, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, i128_binary_run.handle != 0);
                 if (i128_binary_run.handle)
                 {
@@ -12840,7 +12842,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     SliceString8 census_run_arguments = census_native_x64 ? (SliceString8)BUSTER_ARRAY_TO_SLICE(census_native_arguments)
                                                                          : (SliceString8)BUSTER_ARRAY_TO_SLICE(census_emulated_arguments);
                     ProcessSpawnResult census_tail_run = os_process_spawn(census_run_arguments, (SliceString8){0}, (SliceString8){0},
-                                                                          (ProcessSpawnOptions){.use_process_environment = true});
+                                                                          (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, census_tail_run.handle != 0);
                     if (census_tail_run.handle)
                     {
@@ -12896,7 +12898,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult x64_i128_stack_run =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(x64_i128_stack_run_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, x64_i128_stack_run.handle != 0);
             if (x64_i128_stack_run.handle)
@@ -12920,7 +12922,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult clang_probe = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_probe_arguments), (SliceString8){0}, (SliceString8){0},
                                                           (ProcessSpawnOptions){
                                                               .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                              .use_process_environment = true,
+                                                              .use_process_environment = true, .search_path = true,
                                                           });
         if (clang_probe.handle)
         {
@@ -12946,7 +12948,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions clang_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true,
+            .use_process_environment = true, .search_path = true,
         };
         ProcessSpawnResult clang_callee_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_compile_callee), (SliceString8){0}, (SliceString8){0}, clang_options);
@@ -13012,10 +13014,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     String8 clang_caller_buster_callee_arguments[] = {S8("qemu-aarch64"), clang_caller_buster_callee_path};
                     ProcessSpawnResult buster_caller_clang_callee_spawn =
                         os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(buster_caller_clang_callee_arguments), (SliceString8){0}, (SliceString8){0},
-                                         (ProcessSpawnOptions){.use_process_environment = true});
+                                         (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     ProcessSpawnResult clang_caller_buster_callee_spawn =
                         os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_caller_buster_callee_arguments), (SliceString8){0}, (SliceString8){0},
-                                         (ProcessSpawnOptions){.use_process_environment = true});
+                                         (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     bool buster_caller_clang_callee_ran =
                         buster_caller_clang_callee_spawn.handle &&
                         os_process_wait_sync(arguments->arena, buster_caller_clang_callee_spawn).result == PROCESS_RESULT_SUCCESS;
@@ -13103,7 +13105,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_vector_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_vector_arguments), (SliceString8){0}, (SliceString8){0},
                                                              (ProcessSpawnOptions){
-                                                                 .use_process_environment = true,
+                                                                 .use_process_environment = true, .search_path = true,
                                                              });
         BUSTER_TEST(arguments, c_vector_spawn.handle != 0);
         if (c_vector_spawn.handle)
@@ -13216,7 +13218,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_vector_initializer_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_vector_initializer_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_vector_initializer_spawn.handle != 0);
         if (c_vector_initializer_spawn.handle)
@@ -13268,7 +13270,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_extern_incomplete_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_extern_incomplete_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_extern_incomplete_spawn.handle != 0);
         if (c_extern_incomplete_spawn.handle)
@@ -13308,7 +13310,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_static_array_parameter_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_array_parameter_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_static_array_parameter_spawn.handle != 0);
         if (c_static_array_parameter_spawn.handle)
@@ -13341,7 +13343,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 run_arguments[] = {translate_path};
             ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, spawned.handle != 0);
             if (spawned.handle)
             {
@@ -13395,7 +13397,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_simd_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_simd_arguments), (SliceString8){0}, (SliceString8){0},
                                                            (ProcessSpawnOptions){
-                                                               .use_process_environment = true,
+                                                               .use_process_environment = true, .search_path = true,
                                                            });
         BUSTER_TEST(arguments, c_simd_spawn.handle != 0);
         if (c_simd_spawn.handle)
@@ -13458,7 +13460,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     {
         ProcessSpawnOptions wine_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = 1,
+            .use_process_environment = 1, .search_path = 1,
         };
         String8 wine_probe_arguments[] = {
             S8("wine"),
@@ -13937,7 +13939,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_conversions_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_conversions_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_conversions_spawn.handle != 0);
         if (c_conversions_spawn.handle)
@@ -13968,7 +13970,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_conditional_operand_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_conditional_operand_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_conditional_operand_spawn.handle != 0);
         if (c_conditional_operand_spawn.handle)
@@ -14000,7 +14002,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_conditional_assignment_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_conditional_assignment_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_conditional_assignment_spawn.handle != 0);
         if (c_conditional_assignment_spawn.handle)
@@ -14031,7 +14033,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_enum_prototype_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_enum_prototype_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_enum_prototype_spawn.handle != 0);
         if (c_enum_prototype_spawn.handle)
@@ -14063,7 +14065,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_array_arrow_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_arrow_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_array_arrow_spawn.handle != 0);
         if (c_array_arrow_spawn.handle)
@@ -14094,7 +14096,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_array_cast_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_array_cast_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_array_cast_spawn.handle != 0);
         if (c_array_cast_spawn.handle)
@@ -14126,7 +14128,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_prefix_increment_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_prefix_increment_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_prefix_increment_spawn.handle != 0);
         if (c_prefix_increment_spawn.handle)
@@ -14155,7 +14157,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 c_zlib_regressions_arguments[] = {c_zlib_regressions_path};
         ProcessSpawnResult c_zlib_regressions_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_zlib_regressions_arguments), (SliceString8){0}, (SliceString8){0},
-                             (ProcessSpawnOptions){.use_process_environment = true});
+                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         BUSTER_TEST(arguments, c_zlib_regressions_spawn.handle != 0);
         if (c_zlib_regressions_spawn.handle)
         {
@@ -14183,7 +14185,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 c_stb_regressions_arguments[] = {c_stb_regressions_path};
         ProcessSpawnResult c_stb_regressions_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_stb_regressions_arguments), (SliceString8){0}, (SliceString8){0},
-                             (ProcessSpawnOptions){.use_process_environment = true});
+                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         BUSTER_TEST(arguments, c_stb_regressions_spawn.handle != 0);
         if (c_stb_regressions_spawn.handle)
         {
@@ -14212,7 +14214,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_builtin_math_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_builtin_math_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_builtin_math_spawn.handle != 0);
         if (c_builtin_math_spawn.handle)
@@ -14250,7 +14252,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 fixture_arguments[] = {fixture_path};
             ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, fixture_spawn.handle != 0);
             if (fixture_spawn.handle)
             {
@@ -14337,7 +14339,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 fixture_arguments[] = {fixture_path};
                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
                 if (fixture_spawn.handle)
                 {
@@ -14387,7 +14389,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 fixture_arguments[] = {fixture_path};
                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
                 if (fixture_spawn.handle)
                 {
@@ -14423,7 +14425,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 native_arguments[] = {native_path};
                 ProcessSpawnResult native_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(native_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                  (ProcessSpawnOptions){.use_process_environment = true});
+                                                                  (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, native_spawn.handle != 0);
                 if (native_spawn.handle)
                 {
@@ -14479,7 +14481,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 (SliceString8){.pointer = host_stack_command, .length = host_stack_command_count}, (SliceString8){0}, (SliceString8){0},
                 (ProcessSpawnOptions){
                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                    .use_process_environment = true,
+                    .use_process_environment = true, .search_path = true,
                 });
             bool compiled = host_stack_spawn.handle && os_process_wait_sync(stack_pair_arena, host_stack_spawn).result == PROCESS_RESULT_SUCCESS;
             BUSTER_TEST(arguments, compiled);
@@ -14526,7 +14528,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 {
                     String8 stack_arguments[] = {stack_mixed_path};
                     ProcessSpawnResult stack_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(stack_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                     (ProcessSpawnOptions){.use_process_environment = true});
+                                                                     (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, stack_spawn.handle != 0);
                     if (stack_spawn.handle)
                     {
@@ -14647,7 +14649,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 fixture_arguments[] = {fixture_path};
                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
                 if (fixture_spawn.handle)
                 {
@@ -14682,7 +14684,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 fixture_arguments[] = {fixture_path};
                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
                 if (fixture_spawn.handle)
                 {
@@ -14863,7 +14865,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 constructor_arguments[] = {constructor_path};
             ProcessSpawnResult constructor_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(constructor_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, constructor_spawn.handle != 0);
             if (constructor_spawn.handle)
             {
@@ -14906,7 +14908,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 String8 constructor_image_arguments[] = {constructor_image_path};
                 ProcessSpawnResult constructor_image_spawn =
                     os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(constructor_image_arguments), (SliceString8){0}, (SliceString8){0},
-                                     (ProcessSpawnOptions){.use_process_environment = true});
+                                     (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, constructor_image_spawn.handle != 0);
                 if (constructor_image_spawn.handle)
                 {
@@ -14953,7 +14955,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 destructor_arguments[] = {destructor_path};
             ProcessSpawnResult destructor_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(destructor_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, destructor_spawn.handle != 0);
             if (destructor_spawn.handle)
             {
@@ -14986,7 +14988,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 order_source_arguments[] = {order_source_image_path};
             ProcessSpawnResult order_source_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(order_source_arguments), (SliceString8){0},
-                                                                     (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                     (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, order_source_spawn.handle != 0);
             if (order_source_spawn.handle)
             {
@@ -15033,7 +15035,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 order_image_arguments[] = {order_image_path};
                 ProcessSpawnResult order_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(order_image_arguments), (SliceString8){0},
-                                                                  (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                  (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, order_spawn.handle != 0);
                 if (order_spawn.handle)
                 {
@@ -15061,7 +15063,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions host_order_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true,
+            .use_process_environment = true, .search_path = true,
         };
         ProcessSpawnResult host_first_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_first_command), (SliceString8){0}, (SliceString8){0}, host_order_options);
@@ -15083,7 +15085,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 host_image_arguments[] = {host_image_path};
                 ProcessSpawnResult host_image_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_image_arguments), (SliceString8){0},
-                                                                       (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                       (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, host_image_spawn.handle != 0);
                 if (host_image_spawn.handle)
                 {
@@ -15117,7 +15119,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 flush_arguments[] = {flush_path};
             ProcessSpawnResult flush_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(flush_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT, .use_process_environment = true});
+                                 (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_OUTPUT, .use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, flush_spawn.handle != 0);
             if (flush_spawn.handle)
             {
@@ -15163,7 +15165,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 long_double_arguments[] = {long_double_path};
             ProcessSpawnResult long_double_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(long_double_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, long_double_spawn.handle != 0);
             if (long_double_spawn.handle)
             {
@@ -15191,7 +15193,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 f80_arguments[] = {path};
                 ProcessSpawnResult process = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(f80_arguments), (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.use_process_environment = true});
+                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, process.handle != 0);
                 if (process.handle)
                 {
@@ -15235,7 +15237,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 static_initializer_arguments[] = {static_initializer_path};
             ProcessSpawnResult static_initializer_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(static_initializer_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, static_initializer_spawn.handle != 0);
             if (static_initializer_spawn.handle)
             {
@@ -15272,7 +15274,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 static_special_arguments[] = {static_special_path};
             ProcessSpawnResult static_special_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(static_special_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, static_special_spawn.handle != 0);
             if (static_special_spawn.handle)
             {
@@ -15312,7 +15314,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 aggregate_arguments[] = {aggregate_path};
             ProcessSpawnResult aggregate_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(aggregate_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, aggregate_spawn.handle != 0);
             if (aggregate_spawn.handle)
             {
@@ -15351,7 +15353,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 va_arg_arguments[] = {va_arg_path};
             ProcessSpawnResult va_arg_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(va_arg_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, va_arg_spawn.handle != 0);
             if (va_arg_spawn.handle)
             {
@@ -15386,7 +15388,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions host_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true,
+            .use_process_environment = true, .search_path = true,
         };
         ProcessSpawnResult host_callee_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_callee_command), (SliceString8){0}, (SliceString8){0}, host_options);
@@ -15437,7 +15439,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 String8 mixed_arguments[] = {mixed_path};
                 ProcessSpawnResult mixed_spawn =
                     os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(mixed_arguments), (SliceString8){0}, (SliceString8){0},
-                                     (ProcessSpawnOptions){.use_process_environment = true});
+                                     (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, mixed_spawn.handle != 0);
                 if (mixed_spawn.handle)
                 {
@@ -15480,7 +15482,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 complex_arguments[] = {complex_path};
             ProcessSpawnResult complex_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(complex_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, complex_spawn.handle != 0);
             if (complex_spawn.handle)
             {
@@ -15520,7 +15522,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions host_complex_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true,
+            .use_process_environment = true, .search_path = true,
         };
         ProcessSpawnResult host_complex_callee_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(host_complex_callee_command),
                                                                        (SliceString8){0}, (SliceString8){0}, host_complex_options);
@@ -15578,7 +15580,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 String8 complex_mixed_arguments[] = {complex_mixed_path};
                 ProcessSpawnResult complex_mixed_spawn =
                     os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(complex_mixed_arguments), (SliceString8){0}, (SliceString8){0},
-                                     (ProcessSpawnOptions){.use_process_environment = true});
+                                     (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, complex_mixed_spawn.handle != 0);
                 if (complex_mixed_spawn.handle)
                 {
@@ -15620,7 +15622,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 atomic_aggregate_arguments[] = {atomic_aggregate_path};
             ProcessSpawnResult atomic_aggregate_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_aggregate_arguments), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, atomic_aggregate_spawn.handle != 0);
             if (atomic_aggregate_spawn.handle)
             {
@@ -15657,7 +15659,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 atomic_abi_arguments[] = {atomic_abi_path};
             ProcessSpawnResult atomic_abi_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_abi_arguments), (SliceString8){0},
-                                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, atomic_abi_spawn.handle != 0);
             if (atomic_abi_spawn.handle)
             {
@@ -15682,7 +15684,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_abi_gcc_probe_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
                                  .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         if (atomic_abi_gcc_probe.handle)
         {
@@ -15712,7 +15714,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions gcc_atomic_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true,
+            .use_process_environment = true, .search_path = true,
         };
         ProcessSpawnResult gcc_atomic_callee_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(gcc_atomic_callee_command), (SliceString8){0}, (SliceString8){0}, gcc_atomic_options);
@@ -15766,7 +15768,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 }
                 String8 atomic_mixed_arguments[] = {atomic_mixed_path};
                 ProcessSpawnResult atomic_mixed_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_mixed_arguments), (SliceString8){0},
-                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, atomic_mixed_spawn.handle != 0);
                 if (atomic_mixed_spawn.handle)
                 {
@@ -15808,7 +15810,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions clang_atomic_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true,
+            .use_process_environment = true, .search_path = true,
         };
         ProcessSpawnResult clang_atomic_callee_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_atomic_callee_command), (SliceString8){0}, (SliceString8){0}, clang_atomic_options);
@@ -15865,7 +15867,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     }
                     String8 atomic_a64_run_arguments[] = {S8("qemu-aarch64"), atomic_a64_image_path};
                     ProcessSpawnResult atomic_a64_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_a64_run_arguments), (SliceString8){0},
-                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                          (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, atomic_a64_run.handle != 0);
                     if (atomic_a64_run.handle)
                     {
@@ -15907,7 +15909,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 atomic_a64_aggregate_run[] = {S8("qemu-aarch64"), atomic_a64_aggregate_path};
             ProcessSpawnResult atomic_a64_aggregate_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_a64_aggregate_run), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = true});
+                                 (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, atomic_a64_aggregate_spawn.handle != 0);
             if (atomic_a64_aggregate_spawn.handle)
             {
@@ -15945,7 +15947,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 int128_a64_run[] = {S8("qemu-aarch64"), int128_a64_path};
             ProcessSpawnResult int128_a64_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(int128_a64_run), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, int128_a64_spawn.handle != 0);
             if (int128_a64_spawn.handle)
             {
@@ -15983,7 +15985,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 packed_arguments[] = {packed_path};
             ProcessSpawnResult packed_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(packed_arguments), (SliceString8){0}, (SliceString8){0},
-                                                               (ProcessSpawnOptions){.use_process_environment = true});
+                                                               (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, packed_spawn.handle != 0);
             if (packed_spawn.handle)
             {
@@ -16029,7 +16031,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(host_version_command)), (SliceString8){0}, (SliceString8){0},
                                                                      (ProcessSpawnOptions){
                                                                          .capture = ((u64)1 << STANDARD_STREAM_OUTPUT),
-                                                                         .use_process_environment = true,
+                                                                         .use_process_environment = true, .search_path = true,
                                                                      });
             if (host_version_spawn.handle)
             {
@@ -16060,7 +16062,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         String8 host_abi_compile[] = {S8("-O0"), S8("-fno-lto"), S8("tests/host_sysv_unnamed_bitfields.c"), S8("-o"), host_abi_probe};
         ProcessSpawnOptions host_abi_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true,
+            .use_process_environment = true, .search_path = true,
         };
         ProcessSpawnResult host_abi_build = os_process_spawn(compiler_driver_test_host_command(packed_pair_arena,
             (SliceString8)BUSTER_ARRAY_TO_SLICE(host_abi_compile)), (SliceString8){0}, (SliceString8){0}, host_abi_options);
@@ -16107,7 +16109,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions host_packed_options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = true,
+            .use_process_environment = true, .search_path = true,
         };
         ProcessSpawnResult host_packed_callee_spawn = os_process_spawn(compiler_driver_test_host_command(packed_pair_arena,
                                                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(host_packed_callee_command)), (SliceString8){0},
@@ -16187,7 +16189,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 }
                 String8 packed_mixed_arguments[] = {packed_mixed_path};
                 ProcessSpawnResult packed_mixed_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(packed_mixed_arguments), (SliceString8){0},
-                                                                         (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                         (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, packed_mixed_spawn.handle != 0);
                 if (packed_mixed_spawn.handle)
                 {
@@ -16307,7 +16309,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 fixture_arguments[] = {fixture_path};
                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
                 if (fixture_spawn.handle)
                 {
@@ -16351,7 +16353,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 fixture_arguments[] = {fixture_path};
                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
                 if (fixture_spawn.handle)
                 {
@@ -16378,7 +16380,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 fixture_arguments[] = {fixture_path};
             ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, fixture_spawn.handle != 0);
             if (fixture_spawn.handle)
             {
@@ -16442,7 +16444,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 atomic_byte_arguments[] = {atomic_byte_path};
             ProcessSpawnResult atomic_byte_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_byte_arguments), (SliceString8){0},
-                                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, atomic_byte_spawn.handle != 0);
             if (atomic_byte_spawn.handle)
             {
@@ -16551,7 +16553,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 fixture_arguments[] = {fixture_path};
                 ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, fixture_spawn.handle != 0);
                 if (fixture_spawn.handle)
                 {
@@ -16649,7 +16651,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_float_literal_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_float_literal_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_float_literal_spawn.handle != 0);
         if (c_float_literal_spawn.handle)
@@ -16682,7 +16684,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_static_float_literal_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_static_float_literal_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_static_float_literal_spawn.handle != 0);
         if (c_static_float_literal_spawn.handle)
@@ -16712,7 +16714,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_void_assignment_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_void_assignment_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_void_assignment_spawn.handle != 0);
         if (c_void_assignment_spawn.handle)
@@ -16758,7 +16760,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult c_statement_expression_value_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_statement_expression_value_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, c_statement_expression_value_spawn.handle != 0);
             if (c_statement_expression_value_spawn.handle)
@@ -16817,7 +16819,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult c_runtime_fixture_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_runtime_fixture_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, c_runtime_fixture_spawn.handle != 0);
             if (c_runtime_fixture_spawn.handle)
@@ -16852,7 +16854,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_sbase_canonical_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_sbase_canonical_run_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_sbase_canonical_spawn.handle != 0);
         if (c_sbase_canonical_spawn.handle)
@@ -16941,7 +16943,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ProcessSpawnResult c_musl_shape_spawn =
                     os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_musl_shape_arguments), (SliceString8){0}, (SliceString8){0},
                                      (ProcessSpawnOptions){
-                                         .use_process_environment = true,
+                                         .use_process_environment = true, .search_path = true,
                                      });
                 BUSTER_TEST(arguments, c_musl_shape_spawn.handle != 0);
                 if (c_musl_shape_spawn.handle)
@@ -16992,7 +16994,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult c_statement_expression_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_statement_expression_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, c_statement_expression_spawn.handle != 0);
             if (c_statement_expression_spawn.handle)
@@ -17028,7 +17030,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_negative_constant_widening_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_negative_constant_widening_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_negative_constant_widening_spawn.handle != 0);
         if (c_negative_constant_widening_spawn.handle)
@@ -17061,7 +17063,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_call_abi_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_call_abi_arguments), (SliceString8){0}, (SliceString8){0},
                                                                (ProcessSpawnOptions){
-                                                                   .use_process_environment = true,
+                                                                   .use_process_environment = true, .search_path = true,
                                                                });
         BUSTER_TEST(arguments, c_call_abi_spawn.handle != 0);
         if (c_call_abi_spawn.handle)
@@ -17097,7 +17099,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         ProcessSpawnResult c_unprototyped_spawn =
             os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_unprototyped_arguments), (SliceString8){0}, (SliceString8){0},
                              (ProcessSpawnOptions){
-                                 .use_process_environment = true,
+                                 .use_process_environment = true, .search_path = true,
                              });
         BUSTER_TEST(arguments, c_unprototyped_spawn.handle != 0);
         if (c_unprototyped_spawn.handle)
@@ -17505,7 +17507,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_asm_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_asm_arguments), (SliceString8){0}, (SliceString8){0},
                                                           (ProcessSpawnOptions){
-                                                              .use_process_environment = true,
+                                                              .use_process_environment = true, .search_path = true,
                                                           });
         BUSTER_TEST(arguments, c_asm_spawn.handle != 0);
         if (c_asm_spawn.handle)
@@ -17528,7 +17530,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         {
             String8 run_arguments[] = {default_path};
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                        (ProcessSpawnOptions){.use_process_environment = true});
+                                                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
             {
@@ -17551,7 +17553,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {dialect_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -17596,7 +17598,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 {
                     String8 run_arguments[] = {libc_shape_path};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, spawn.handle != 0);
                     if (spawn.handle)
                     {
@@ -17662,7 +17664,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {weak_alias_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -17722,7 +17724,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {register_variable_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -17764,7 +17766,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {integer_to_pointer_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -17807,7 +17809,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {main_implicit_return_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -17851,7 +17853,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {pointer_to_array_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -17893,7 +17895,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {lazy_operand_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -18039,7 +18041,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 {
                     String8 run_arguments[] = {thread_local_run_path};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                (ProcessSpawnOptions){.use_process_environment = true});
+                                                                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                     BUSTER_TEST(arguments, spawn.handle != 0);
                     if (spawn.handle)
                     {
@@ -18086,7 +18088,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {type_generic_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -18129,7 +18131,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {gnu_specifier_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -18175,7 +18177,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {member_chain_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -18220,7 +18222,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {void_size_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -18265,7 +18267,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {volatile_aggregate_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                            (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -18358,7 +18360,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 entry_arguments[] = {entry_path};
             ProcessSpawnResult entry_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(entry_arguments), (SliceString8){0}, (SliceString8){0},
                                                               (ProcessSpawnOptions){
-                                                                  .use_process_environment = true,
+                                                                  .use_process_environment = true, .search_path = true,
                                                               });
             BUSTER_TEST(arguments, entry_spawn.handle != 0);
             if (entry_spawn.handle)
@@ -18443,7 +18445,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ProcessSpawnResult weak_link_spawn =
                     os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(weak_link_arguments), (SliceString8){0}, (SliceString8){0},
                                      (ProcessSpawnOptions){
-                                         .use_process_environment = true,
+                                         .use_process_environment = true, .search_path = true,
                                      });
                 BUSTER_TEST(arguments, weak_link_spawn.handle != 0);
                 if (weak_link_spawn.handle)
@@ -18511,7 +18513,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ProcessSpawnResult inline_symbol_spawn =
                     os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(inline_symbol_run_arguments), (SliceString8){0}, (SliceString8){0},
                                      (ProcessSpawnOptions){
-                                         .use_process_environment = true,
+                                         .use_process_environment = true, .search_path = true,
                                      });
                 BUSTER_TEST(arguments, inline_symbol_spawn.handle != 0);
                 if (inline_symbol_spawn.handle)
@@ -18567,7 +18569,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     ProcessSpawnResult sse_operand_spawn =
                         os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(sse_operand_arguments), (SliceString8){0}, (SliceString8){0},
                                          (ProcessSpawnOptions){
-                                             .use_process_environment = true,
+                                             .use_process_environment = true, .search_path = true,
                                          });
                     BUSTER_TEST(arguments, sse_operand_spawn.handle != 0);
                     if (sse_operand_spawn.handle)
@@ -18602,7 +18604,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {windows_sse_run_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0},
-                                                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                                                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
                 BUSTER_TEST(arguments, spawn.handle != 0);
                 if (spawn.handle)
                 {
@@ -18660,7 +18662,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 ProcessSpawnResult weak_undefined_spawn =
                     os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(weak_undefined_arguments), (SliceString8){0}, (SliceString8){0},
                                      (ProcessSpawnOptions){
-                                         .use_process_environment = true,
+                                         .use_process_environment = true, .search_path = true,
                                      });
                 BUSTER_TEST(arguments, weak_undefined_spawn.handle != 0);
                 if (weak_undefined_spawn.handle)
@@ -18777,7 +18779,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult asm_unit_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(asm_unit_program_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, asm_unit_spawn.handle != 0);
             if (asm_unit_spawn.handle)
@@ -18802,7 +18804,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult asm_unit_mixed_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(asm_unit_mixed_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, asm_unit_mixed_spawn.handle != 0);
             if (asm_unit_mixed_spawn.handle)
@@ -18827,7 +18829,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult abs32_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(abs32_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, abs32_spawn.handle != 0);
             if (abs32_spawn.handle)
@@ -18851,7 +18853,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             ProcessSpawnResult export_dynamic_spawn =
                 os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(export_dynamic_arguments), (SliceString8){0}, (SliceString8){0},
                                  (ProcessSpawnOptions){
-                                     .use_process_environment = true,
+                                     .use_process_environment = true, .search_path = true,
                                  });
             BUSTER_TEST(arguments, export_dynamic_spawn.handle != 0);
             if (export_dynamic_spawn.handle)
@@ -18955,7 +18957,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_multi_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_multi_arguments), (SliceString8){0}, (SliceString8){0},
                                                             (ProcessSpawnOptions){
-                                                                .use_process_environment = true,
+                                                                .use_process_environment = true, .search_path = true,
                                                             });
         BUSTER_TEST(arguments, c_multi_spawn.handle != 0);
         if (c_multi_spawn.handle)
@@ -19001,7 +19003,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_mixed_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_mixed_arguments), (SliceString8){0}, (SliceString8){0},
                                                             (ProcessSpawnOptions){
-                                                                .use_process_environment = true,
+                                                                .use_process_environment = true, .search_path = true,
                                                             });
         BUSTER_TEST(arguments, c_mixed_spawn.handle != 0);
         if (c_mixed_spawn.handle)
@@ -19087,7 +19089,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnResult c_archive_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(c_archive_arguments), (SliceString8){0}, (SliceString8){0},
                                                               (ProcessSpawnOptions){
-                                                                  .use_process_environment = true,
+                                                                  .use_process_environment = true, .search_path = true,
                                                               });
         BUSTER_TEST(arguments, c_archive_spawn.handle != 0);
         if (c_archive_spawn.handle)

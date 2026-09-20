@@ -76,6 +76,26 @@ struct OsPrefaultTestCounters
 BUSTER_F_DECL void os_prefault_test_force_next(OsPrefaultResult result);
 BUSTER_F_DECL OsPrefaultTestCounters os_prefault_test_counters(void);
 
+#if BUSTER_INCLUDE_TESTS
+typedef enum OsProcessSpawnTestOperation
+{
+    OS_PROCESS_SPAWN_TEST_FILE_ACTIONS_INIT,
+    OS_PROCESS_SPAWN_TEST_ATTRIBUTES_INIT,
+    OS_PROCESS_SPAWN_TEST_PIPE,
+    OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION,
+    OS_PROCESS_SPAWN_TEST_FILE_ACTION,
+    OS_PROCESS_SPAWN_TEST_ATTRIBUTE,
+    OS_PROCESS_SPAWN_TEST_HANDLE_DUPLICATION,
+    OS_PROCESS_SPAWN_TEST_HANDLE_LIST,
+    OS_PROCESS_SPAWN_TEST_SPAWN,
+    OS_PROCESS_SPAWN_TEST_OPERATION_COUNT,
+} OsProcessSpawnTestOperation;
+
+BUSTER_F_DECL void os_process_spawn_test_fail_on_call(OsProcessSpawnTestOperation operation, u64 call_index);
+BUSTER_F_DECL bool os_process_spawn_test_end(void);
+BUSTER_F_DECL u64 os_process_spawn_test_resource_count(void);
+#endif
+
 typedef enum OsResourceTestOperation
 {
     OS_RESOURCE_TEST_BARRIER_CREATE,
