@@ -228,8 +228,16 @@ def prepare(manifest_path, source_root=None):
     root = _descriptor_source_root(manifest_path, manifest, source_root)
     if manifest.get("schema") == dependency_authority.POLICY_SCHEMA:
         policy = dependency_authority.parse_policy(raw)
-        snapshot_raw = _read_no_follow(root / PurePosixPath(dependency_authority.SNAPSHOT_PATH),
-                                       "repository-source snapshot")
+        # External preparation precedes the trusted rebinder. An ordinary
+        # source change therefore still has the previous generated snapshot.
+        # Resolve only policy-declared repo identities from the current tree
+        # in memory; pinned external/SDK identities remain policy-owned. The
+        # complete record verification below still checks every resolved byte.
+        def repository_identity(source):
+            data = _read_no_follow(_source_path(root, source), "repository project source")
+            return len(data), hashlib.sha256(data).hexdigest()
+
+        snapshot_raw, _records = dependency_authority.render_snapshot(raw, policy, repository_identity)
         snapshot = dependency_authority.parse_snapshot(snapshot_raw, raw, policy)
         legacy_raw = _read_no_follow(root / PurePosixPath(dependency_authority.LEGACY_DESCRIPTOR_PATH),
                                      "legacy dependency descriptor")

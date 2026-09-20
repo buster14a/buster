@@ -48,6 +48,13 @@ Ordinary feature PRs must not commit its two outputs. The read-only
 against an ephemeral exact candidate/merge checkout, then runs consumers
 against that temporary result.
 
+External-input preparation runs before that reconstruction. For split policy,
+it resolves admitted repository-source identities in memory from the exact
+candidate, then verifies the complete resolved closure. It does not write the
+snapshot/header or refresh external/SDK pins. The trusted rebinder subsequently
+publishes the temporary generated pair and checks it independently. The legacy
+monolithic descriptor retains exact byte verification against its frozen pins.
+
 ## Ordinary feature PR ownership
 
 An ordinary feature PR changes substantive source, tests, and documentation
