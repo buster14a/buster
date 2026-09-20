@@ -61,3 +61,9 @@ paths. `compiler_driver_test_has_builtin_targets` checks non-native output;
 strict verification and all native allocator modes. New tracked fixtures also
 need an explicit, reviewed identity in `docs/native-retirement-support-v1.tsv`;
 do not bypass its unreviewed-input rejection to make a query test pass.
+
+`__builtin_ffs` converts its single evaluated argument to `int`, returns an
+`int` one-based least-significant-set-bit index, and returns zero for zero.
+Lowering uses canonical CTZ with a nonzero operand even for the zero case.
+The capability query admits exactly this spelling; `ffsl`/`ffsll` are separate
+operations and are not advertised by this implementation.

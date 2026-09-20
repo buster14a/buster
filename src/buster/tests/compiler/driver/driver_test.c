@@ -16175,6 +16175,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // atomic-float loop has to terminate -- none of which a compile alone
     // proves.
     String8 c_differential_regression_paths[] = {
+        S8("tests/basic_c_has_builtin.c"),
+        S8("tests/basic_c_has_builtin.c"),
         S8("tests/basic_c_anonymous_bit_field_initializer.c"),
         S8("tests/basic_c_attributed_struct_typedef_alignment.c"),
         S8("tests/basic_c_statement_expression_condition.c"),
@@ -16189,6 +16191,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_frontend_ssa.c"),
     };
     String8 c_differential_regression_names[] = {
+        S8("buster-c-ffs"),
+        S8("buster-c-ffs-reference"),
         S8("buster-c-anonymous-bit-field-initializer"),
         S8("buster-c-attributed-struct-typedef-alignment"),
         S8("buster-c-statement-expression-condition"),
@@ -16218,7 +16222,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             bool frontend_ssa = string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_frontend_ssa.c"));
             fixture_invocation.disable_target_local_promotion = frontend_ssa ||
                 string_equal(c_differential_regression_paths[fixture_index], S8("tests/basic_c_local_promotion.c"));
-            fixture_invocation.disable_direct_ssa = string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference"));
+            fixture_invocation.disable_direct_ssa = string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference")) ||
+                string_equal(c_differential_regression_names[fixture_index], S8("buster-c-ffs-reference"));
             CompilerDriverResult fixture = compiler_driver_execute_invocation(differential_temporary.arena, fixture_invocation);
             BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
             if (frontend_ssa && fixture.error == COMPILER_DRIVER_ERROR_NONE)

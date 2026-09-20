@@ -17904,7 +17904,8 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         String8 builtin_math_link_name = builtin_kind == C_SYMBOL_BUILTIN_MATH ? c_ir_math_builtin_link_name(c_token_spelling(builder->preprocess.spelling_base, token)) : (String8){0};
         CIrMemoryBuiltin builtin_memory = builtin_kind == C_SYMBOL_BUILTIN_MEMORY ? c_ir_memory_builtin(c_token_spelling(builder->preprocess.spelling_base, token)) : C_IR_MEMORY_BUILTIN_COUNT;
         IrUnaryOperation builtin_unary = builtin_kind == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS      ? IR_UNARY_INTEGER_COUNT_LEADING_ZEROS
-                                         : builtin_kind == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS  ? IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS
+                                         : (builtin_kind == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ||
+                                            builtin_kind == C_SYMBOL_BUILTIN_FIND_FIRST_SET) ? IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS
                                          : builtin_kind == C_SYMBOL_BUILTIN_POPULATION_COUNT       ? IR_UNARY_INTEGER_POPULATION_COUNT
                                                                                                   : IR_UNARY_COUNT;
         CTypeId indirect_function_type = C_TYPE_ID_INVALID;
@@ -18301,6 +18302,32 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_population_count(CIntegerIrBuilder* builde
     IrValueId gathered = c_ir_emit_binary_value(builder, value, ones, type, IR_BINARY_INTEGER_MULTIPLY, source);
     IrValueId top = c_ir_emit_integer_value_typed(builder, width - 8, false, token, type);
     return c_ir_emit_binary_value(builder, gathered, top, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
+}
+
+// Apply the builtin's int parameter conversion once. Replacing zero with one
+// before CTZ avoids an undefined input; adding (x != 0) gives one-based indices.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_find_first_set(CIntegerIrBuilder* builder, IrValueId operand, CToken token, IrSourceRange source)
+{
+    IrTypeId type = builder->scalar_types[C_TYPE_UNSIGNED_INT];
+    IrValueId result = IR_VALUE_ID_INVALID;
+    operand = c_ir_emit_cast(builder, operand, builder->s32_type, source);
+    if (operand.value != IR_ID_UNDERLYING_INVALID)
+    {
+        operand = c_ir_emit_cast(builder, operand, type, source);
+    }
+    if (operand.value != IR_ID_UNDERLYING_INVALID)
+    {
+        IrValueId zero = c_ir_emit_integer_value_typed(builder, 0, false, token, type);
+        IrValueId one = c_ir_emit_integer_value_typed(builder, 1, false, token, type);
+        IrValueId is_zero = c_ir_emit_binary_value(builder, operand, zero, builder->bool_type, IR_BINARY_INTEGER_EQUAL, source);
+        IrValueId zero_bit = c_ir_emit_cast(builder, is_zero, type, source);
+        IrValueId safe_operand = c_ir_emit_binary_value(builder, operand, zero_bit, type, IR_BINARY_INTEGER_BITWISE_OR, source);
+        IrValueId trailing = c_ir_emit_unary_value(builder, safe_operand, type, IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS, source);
+        IrValueId nonzero = c_ir_emit_binary_value(builder, one, zero_bit, type, IR_BINARY_INTEGER_SUBTRACT, source);
+        IrValueId indexed = c_ir_emit_binary_value(builder, trailing, nonzero, type, IR_BINARY_INTEGER_ADD, source);
+        result = c_ir_emit_cast(builder, indexed, builder->s32_type, source);
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL IrTypeId c_ir_simd_vector_type(CIntegerIrBuilder* builder)
@@ -19875,13 +19902,18 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             IrTypeId type = builder->function->values[operand.value].canonical_type;
             IrType* type_value = ir_type_from_id(&builder->program->types, type);
-            if (!type_value || type_value->kind != IR_TYPE_INTEGER)
+            bool find_first_set = c_ir_token_builtin_kind(builder, token) == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
+            if (!type_value || (!find_first_set && type_value->kind != IR_TYPE_INTEGER))
             {
                 return false;
             }
             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
             IrValueId result = IR_VALUE_ID_INVALID;
-            if (selected->builtin_unary == IR_UNARY_INTEGER_POPULATION_COUNT)
+            if (find_first_set)
+            {
+                result = c_ir_emit_find_first_set(builder, operand, token, instruction_source);
+            }
+            else if (selected->builtin_unary == IR_UNARY_INTEGER_POPULATION_COUNT)
             {
                 result = c_ir_emit_population_count(builder, operand, type, token, instruction_source);
                 if (result.value == IR_ID_UNDERLYING_INVALID)
