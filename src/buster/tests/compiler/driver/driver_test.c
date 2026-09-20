@@ -16225,7 +16225,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             fixture_invocation.disable_direct_ssa = string_equal(c_differential_regression_names[fixture_index], S8("buster-c-frontend-ssa-reference")) ||
                 string_equal(c_differential_regression_names[fixture_index], S8("buster-c-ffs-reference"));
             CompilerDriverResult fixture = compiler_driver_execute_invocation(differential_temporary.arena, fixture_invocation);
-            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            BUSTER_TEST_RAW(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE, fixture.diagnostic);
             if (frontend_ssa && fixture.error == COMPILER_DRIVER_ERROR_NONE)
             {
                 BUSTER_TEST(arguments, (fixture.direct_ssa.locals != 0) == !fixture_invocation.disable_direct_ssa);
