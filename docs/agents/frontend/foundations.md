@@ -643,3 +643,9 @@ helper is introduced. Small or qualified aggregates retain typed construction.
 The large-frame fixture checks zeroed nested storage, explicit values, copies
 and odd byte tails under both frontend lowering modes. This prevents initializer
 expansion from exceeding Windows ARM64's unwind function-size limit.
+
+- C lowering records every named and temporary local in the canonical
+  `IrFunction.local_places` projection at creation. The frontend-private
+  capacity grows monotonically; unused capacity is never read. Frontend SSA
+  and canonical compaction remap or invalidate its place IDs before later
+  promotion and selection consume it. No frontend entity IDs enter the map.

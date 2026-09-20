@@ -8,6 +8,8 @@
 // (c_ir_build_delimiter_index).
 // c_ir_parameter_value_type and c_ir_emit_parameter keep callable values
 // separate from the declared qualification of parameter objects.
+// c_ir_record_local_place publishes canonical owner/place identities for
+// named and temporary locals; final SSA compaction remaps those identities.
 //
 // Source-dependent recursion is forbidden (AGENTS.md), so anything that
 // would recurse runs on an explicit machine owned by CIntegerIrBuilder:
@@ -2658,6 +2660,7 @@ struct CIntegerIrBuilder
     u32* local_entity_slots;
     u32 local_entity_slot_mask;
     u32 local_count;
+    u64 local_place_capacity;
     u32 local_capacity;
     IrBlockId* label_metadata_store_blocks;
     bool* label_metadata_store_valid;
@@ -6073,6 +6076,25 @@ BUSTER_C_INTERNAL void c_ir_mark_local_read_only(CIntegerIrBuilder* builder, CIn
     }
 }
 
+// Publish canonical local-to-place identity at creation, including temporary
+// locals absent from the source-name table. Frontend SSA and shared compaction
+// already remap this projection when values are removed or renumbered.
+BUSTER_GLOBAL_LOCAL void c_ir_record_local_place(CIntegerIrBuilder* builder, IrLocalId local, IrValueId place)
+{
+    if (local.value >= builder->local_place_capacity)
+    {
+        u64 capacity = builder->local_place_capacity ? builder->local_place_capacity * 2 : 16;
+        IrValueId* places = arena_allocate(builder->arena, IrValueId, capacity);
+        if (local.value)
+        {
+            memcpy(places, builder->function->local_places, sizeof(*places) * local.value);
+        }
+        builder->function->local_places = places;
+        builder->local_place_capacity = capacity;
+    }
+    builder->function->local_places[local.value] = place;
+}
+
 BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken name, IrTypeId type, CEntityId entity, u32 alignment)
 {
     if (builder->local_count >= builder->local_capacity || c_ir_find_local_by_entity(builder, entity))
@@ -6099,6 +6121,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_local(CIntegerIrBuilder* builder, CToken n
                                                 .points_to_read_only = entity.value < builder->parse.entity_count &&
                                                                        c_ir_c_type_points_to_read_only(builder, builder->parse.entities[entity.value].type),
                                             });
+    c_ir_record_local_place(builder, local_id, place);
     bool direct_ssa = c_ir_ssa_local_eligible(builder, entity, type) && !builder->function->values[place.value].is_volatile;
     if (direct_ssa)
     {
@@ -6280,6 +6303,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_temporary(CIntegerIrBuilder* builder, IrTy
                                                 .definition = IR_INSTRUCTION_ID_INVALID,
                                                 .category = IR_VALUE_PLACE,
                                             });
+    c_ir_record_local_place(builder, local_id, place);
     if (builder->direct_ssa_enabled && ir_local_type_promotable(builder->program, type))
     {
         c_ir_ssa_add_local(builder, place, type, local_id, source, true);
