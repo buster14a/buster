@@ -952,6 +952,20 @@ class WorkflowPolicyTests(unittest.TestCase):
                 "        required: false",
                 "        default: false",
                 "        type: boolean",
+                "      zig_cache_mode:",
+                "        description: Exact Zig archive cache behavior for a matched manual cohort",
+                "        required: true",
+                "        default: ordinary",
+                "        type: choice",
+                "        options:",
+                "          - ordinary",
+                "          - prime",
+                "          - read",
+                "      zig_cache_namespace:",
+                "        description: Lowercase arm namespace for prime/read (1-48 characters)",
+                "        required: false",
+                "        default: ''",
+                "        type: string",
             ),
             "self-host-audit.yml": common + ("  workflow_dispatch:",),
         }
@@ -969,6 +983,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("inputs.cmake_profile", ci)
         self.assertIn("inputs.analyzer_comparison", ci)
+        self.assertIn("inputs.zig_cache_mode", ci)
+        self.assertIn("inputs.zig_cache_namespace", ci)
         self.assertNotIn("vars.BUSTER_CMAKE_PROFILE", ci)
 
     def test_bootstrap_cancellation_is_isolated_by_workflow_and_event(self):

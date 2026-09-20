@@ -25,6 +25,20 @@ on:
         required: false
         default: false
         type: boolean
+      zig_cache_mode:
+        description: Exact Zig archive cache behavior for a matched manual cohort
+        required: true
+        default: ordinary
+        type: choice
+        options:
+          - ordinary
+          - prime
+          - read
+      zig_cache_namespace:
+        description: Lowercase arm namespace for prime/read (1-48 characters)
+        required: false
+        default: ''
+        type: string
 
 # Supersede only the same PR/merge-group. Main, tags and deliberate manual
 # measurements get unique groups, so neither active nor pending runs are lost.
@@ -116,6 +130,10 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
+      # Non-dispatch events cannot select cohort behavior. The default manual
+      # interface is ordinary and therefore retains the pre-existing key/write policy.
+      BUSTER_ZIG_CACHE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.zig_cache_mode || 'ordinary' }}
+      BUSTER_ZIG_CACHE_NAMESPACE: ${{ github.event_name == 'workflow_dispatch' && inputs.zig_cache_namespace || '' }}
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: ${{ matrix.name }} ${{ matrix.shard }}
     timeout-minutes: 300
@@ -181,9 +199,42 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve exact Zig cache policy
+        id: zig_cache_policy
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        env:
+          ZIG_CACHE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ZIG_CACHE_MANIFEST_HASH: ${{ hashFiles('.github/zig.json') }}
+          ZIG_CACHE_RUNNER_ARCH: ${{ runner.arch }}
+          ZIG_CACHE_RUNNER_OS: ${{ runner.os }}
+          ZIG_CACHE_TARGET: ${{ matrix.zig_target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/buster-ci"
+          "$BUSTER_CI_PYTHON" tools/ci_zig_cache.py resolve \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --ref "$GITHUB_REF" \
+            --default-branch "$ZIG_CACHE_DEFAULT_BRANCH" \
+            --mode "$BUSTER_ZIG_CACHE_MODE" \
+            --namespace "$BUSTER_ZIG_CACHE_NAMESPACE" \
+            --runner-label "${{ matrix.runner }}" \
+            --runner-os "$ZIG_CACHE_RUNNER_OS" \
+            --runner-arch "$ZIG_CACHE_RUNNER_ARCH" \
+            --target "$ZIG_CACHE_TARGET" \
+            --manifest .github/zig.json \
+            --manifest-hash "$ZIG_CACHE_MANIFEST_HASH" \
+            --shard "$BUSTER_MATRIX_SHARD" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$GITHUB_OUTPUT" \
+            --evidence "$RUNNER_TEMP/buster-ci/zig-cache.json"
+
       - name: Workflow tool regression tests
         id: workflow_tools
-        if: ${{ matrix.shard == 'release' }}
+        if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
         timeout-minutes: 2
         shell: bash
         run: |
@@ -191,6 +242,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
           "$BUSTER_CI_PYTHON" tools/ci_zig_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-installer-test.log"
+          "$BUSTER_CI_PYTHON" tools/ci_zig_cache_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-cache-policy-test.log"
           "$BUSTER_CI_PYTHON" tools/ci_android_sdk_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/android-sdk-installer-test.log"
           "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
           "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
@@ -203,7 +255,7 @@ jobs:
       # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
       - name: Bootstrap wrapper regression tests
         id: bootstrap_wrappers
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
         timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}
         shell: bash
         run: |
@@ -219,7 +271,7 @@ jobs:
 
       - name: Install mold
         id: mold
-        if: ${{ !cancelled() && matrix.os == 'linux' && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.os == 'linux' && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -230,15 +282,32 @@ jobs:
       # files, extracted compilers, credentials, or previous test verdicts.
       - name: Restore Zig archive
         id: zig_cache
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.zig_cache_policy.outcome == 'success' }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/zig-archive/archive
-          key: zig-archive-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.zig_target }}-${{ hashFiles('.github/zig.json') }}
+          key: ${{ steps.zig_cache_policy.outputs.key }}
+
+      - name: Validate exact Zig cache restore
+        id: zig_cache_gate
+        if: ${{ !cancelled() && steps.zig_cache_policy.outcome == 'success' && steps.zig_cache.outcome == 'success' }}
+        shell: bash
+        env:
+          ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
+          ZIG_CACHE_MATCHED_KEY: ${{ steps.zig_cache.outputs.cache-matched-key }}
+          ZIG_CACHE_PRIMARY_KEY: ${{ steps.zig_cache.outputs.cache-primary-key }}
+        run: |
+          set -euo pipefail
+          "$BUSTER_CI_PYTHON" tools/ci_zig_cache.py check-restore \
+            --mode "${{ steps.zig_cache_policy.outputs.mode }}" \
+            --expected-key "${{ steps.zig_cache_policy.outputs.key }}" \
+            --cache-hit "$ZIG_CACHE_HIT" \
+            --primary-key "$ZIG_CACHE_PRIMARY_KEY" \
+            --matched-key "$ZIG_CACHE_MATCHED_KEY"
 
       - name: Install verified Zig
         id: zig
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.zig_cache_gate.outcome == 'success' }}
         timeout-minutes: 10
         shell: bash
         env:
@@ -249,18 +318,66 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"
 
-      # Publish immediately after verification, before compiler build/tests.
-      # A corrupt hit is a hard failure and is never silently republished.
+      # Ordinary mode retains the previous main-push write policy. Prime mode
+      # grants the Release shard the sole write attempt for its lane's shared
+      # exact key. Read mode never authorizes this step.
       - name: Save verified Zig archive
-        if: ${{ !cancelled() && steps.zig.outcome == 'success' && steps.zig_cache.outputs.cache-hit != 'true' && steps.zig_cache.outputs.cache-primary-key != '' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        id: zig_cache_save
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' && steps.zig_cache.outputs.cache-hit != 'true' && steps.zig_cache_policy.outputs.save == 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/zig-archive/archive
-          key: ${{ steps.zig_cache.outputs.cache-primary-key }}
+          key: ${{ steps.zig_cache_policy.outputs.key }}
+
+      # actions/cache/save reports upload failures as warnings. A prime miss is
+      # therefore usable only after deleting the local copy and restoring the
+      # immutable exact key again. The evidence step rechecks the pinned digest.
+      - name: Prepare Zig cache publication proof
+        id: zig_cache_proof_prepare
+        if: ${{ !cancelled() && steps.zig.outcome == 'success' && steps.zig_cache.outputs.cache-hit != 'true' && steps.zig_cache_policy.outputs.publication_proof_required == 'true' && steps.zig_cache_save.outcome == 'success' }}
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/zig-archive/archive"
+
+      - name: Restore published Zig archive for proof
+        id: zig_cache_publication
+        if: ${{ !cancelled() && steps.zig_cache_proof_prepare.outcome == 'success' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/zig-archive/archive
+          key: ${{ steps.zig_cache_policy.outputs.key }}
+
+      - name: Retain exact Zig cache evidence
+        id: zig_cache_evidence
+        if: ${{ always() && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
+        shell: bash
+        env:
+          ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
+          ZIG_CACHE_MATCHED_KEY: ${{ steps.zig_cache.outputs.cache-matched-key }}
+          ZIG_CACHE_PRIMARY_KEY: ${{ steps.zig_cache.outputs.cache-primary-key }}
+          ZIG_CACHE_PROOF_HIT: ${{ steps.zig_cache_publication.outputs.cache-hit }}
+          ZIG_CACHE_PROOF_MATCHED_KEY: ${{ steps.zig_cache_publication.outputs.cache-matched-key }}
+          ZIG_CACHE_PROOF_PRIMARY_KEY: ${{ steps.zig_cache_publication.outputs.cache-primary-key }}
+        run: |
+          set -euo pipefail
+          "$BUSTER_CI_PYTHON" tools/ci_zig_cache.py record \
+            --evidence "$RUNNER_TEMP/buster-ci/zig-cache.json" \
+            --manifest .github/zig.json \
+            --cache-directory "$RUNNER_TEMP/zig-archive" \
+            --restore-outcome "${{ steps.zig_cache.outcome }}" \
+            --cache-hit "$ZIG_CACHE_HIT" \
+            --primary-key "$ZIG_CACHE_PRIMARY_KEY" \
+            --matched-key "$ZIG_CACHE_MATCHED_KEY" \
+            --install-outcome "${{ steps.zig.outcome }}" \
+            --save-outcome "${{ steps.zig_cache_save.outcome }}" \
+            --proof-restore-outcome "${{ steps.zig_cache_publication.outcome }}" \
+            --proof-cache-hit "$ZIG_CACHE_PROOF_HIT" \
+            --proof-primary-key "$ZIG_CACHE_PROOF_PRIMARY_KEY" \
+            --proof-matched-key "$ZIG_CACHE_PROOF_MATCHED_KEY" \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Application compilers
         id: tools_unix
-        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.platform == 'unix' && steps.zig_cache_evidence.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -282,7 +399,7 @@ jobs:
 
       - name: Combination matrix (Windows)
         id: combinations_windows
-        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' }}
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
@@ -347,7 +464,7 @@ jobs:
         env:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'workflow_tools bootstrap_wrappers zig combinations_unix' || 'workflow_tools bootstrap_wrappers zig combinations_windows') || (matrix.platform == 'unix' && 'zig combinations_unix' || 'zig combinations_windows') }}
+          BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_windows') || (matrix.platform == 'unix' && 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_windows') }}
           BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=${{ matrix.shard }} and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
           BUSTER_CI_ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
           BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json

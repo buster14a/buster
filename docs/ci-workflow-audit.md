@@ -52,14 +52,78 @@ outer deadline without a broader runtime distribution would be speculative.
 
 ## Cache and artifact trust boundaries
 
-Only Zig's **upstream compressed archive** is cached. The exact key includes a
-schema version, runner OS/architecture, Zig target, and the hash of `.github/zig.json` (version and all SHA-256 pins). There
-are no fallback restore keys and no cached build trees or compiler outputs.
-Every restore, including an exact hit, is SHA-256 checked before extraction and
-PATH publication. Only successful default-branch push setup writes a cache,
-and it writes immediately after verification, before repository tests run.
-Other branches and manual runs are read-only cache consumers. A corrupt
-archive fails setup rather than executing unverified bytes.
+Only Zig's **upstream compressed archive** is cached. The ordinary exact key
+includes a schema version, runner OS/architecture, Zig target, and the hash of
+`.github/zig.json` (version and all SHA-256 pins). There are no fallback
+restore keys and no cached build trees, extracted compilers, object files,
+credentials, test verdicts, or candidate-produced evidence. Every restore,
+including an exact hit, must report the declared primary/matched key and is
+SHA-256 checked before extraction and PATH publication. A corrupt or
+unexpectedly substituted archive fails setup rather than executing unverified
+bytes.
+
+The default `workflow_dispatch` mode is `ordinary`. It keeps the ordinary key
+and the pre-existing write policy exactly: only a verified default-branch push
+may attempt to save a miss. Two explicit manual-only modes add a suffix of
+`-cohort-<namespace>` to that same complete key:
+
+- `prime` restores the exact scoped key. On a miss, only the lane's `release`
+  shard may save the verified archive. The workflow then deletes its local
+  archive, restores that exact immutable key again, and rechecks the pinned
+  digest; a successful `actions/cache/save` step by itself is not publication
+  proof.
+- `read` requires an exact hit and never authorizes a save. A miss, partial
+  match, substituted key, or failed verification is a hard failure.
+
+A cohort namespace must match `[a-z0-9]+(?:-[a-z0-9]+)*` and contain at most
+48 characters. It is mandatory in `prime`/`read` and forbidden in `ordinary`,
+so malformed or absent values cannot alias an ordinary population. Prime and
+read are rejected outside `workflow_dispatch`. Each desktop artifact retains
+`zig-cache.json`; the step log and job summary also report the mode, namespace,
+exact key, hit/miss result, save-step outcome, publication state, and whether
+the population is usable.
+
+### #709 matched-cohort dispatch sequence
+
+Use this sequence only after this infrastructure is merged, the candidate is
+rebased onto that exact merged commit, and the control/candidate SHAs or refs
+are frozen. No acceptance run starts while the two arms contain different
+versions of this infrastructure.
+
+1. Predeclare one distinct namespace per arm, for example
+   `issue709-control-v1` and `issue709-candidate-v1`. Do not reuse a namespace
+   for a different frozen ref or candidate.
+2. Dispatch `Buster CI` once at each frozen ref with `zig_cache_mode=prime`,
+   its arm namespace, `cmake_profile=false`, and the same analyzer setting
+   (normally `analyzer_comparison=false`). Retain both priming run IDs and every
+   queued, failed, cancelled, incomplete, or retried attempt. Priming attempts
+   are setup evidence, not members of the measured 3+3 cohort.
+3. After both prime runs finish, inspect every
+   `desktop-<os>-<arch>-<shard>-<run>-<attempt>/zig-cache.json`. Compare
+   `runner`, `zig`, and `key_components`; the arm namespace and the matching
+   suffix in `effective_key` must be the only cache-identity difference.
+   Every release-shard key must be either `existing-hit-verified` or
+   `published-and-verified` with `usable_population=true`. A checks shard may
+   truthfully record `non-owner-miss-not-published` during the first prime;
+   its release peer owns publication of the shared lane key.
+4. Dispatch the frozen refs in interleaved control/candidate order with
+   `zig_cache_mode=read`, the corresponding namespace,
+   `cmake_profile=false`, and identical other inputs. Each measured desktop
+   artifact must report `existing-hit-verified`, its exact `effective_key`, and
+   `usable_population=true`; a miss fails before compiler work and cannot
+   mutate the population.
+5. Collect at least three complete successful control runs and at least three
+   complete successful candidate runs. Keep every other attempt in the ledger
+   rather than replacing it. If a priming namespace is abandoned, version and
+   reprime **both** arm namespaces; never silently replace only one arm.
+
+The retained evidence records `event`/source identity, `mode`, `namespace`,
+`effective_key`, all `key_components`, runner identity, the pinned Zig target,
+version/archive digest/size, initial restore outcome and exact matched key,
+installer verification, save authorization/attempt outcome, publication-proof
+restore and matched key, publication state, and `usable_population`. These
+fields prove equivalent pinned archives and isolated cache identities; they do
+not by themselves establish a performance result.
 
 Mutable Android SDK packages, AVD state, and Homebrew prefixes are deliberately not cached. Their present installation commands
 do not provide immutable per-package revisions/checksums suitable for portable

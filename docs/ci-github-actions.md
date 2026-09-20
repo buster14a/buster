@@ -170,8 +170,13 @@ The images provide all of those except Zig, so every desktop runner installs a
 **pinned, checksummed** Zig from `ziglang.org` — version and per-target
 SHA-256 both live in `.github/zig.json`, so a rerun of an old commit cannot pick up
 a different toolchain. Only the upstream archive is cached, and every cache
-hit is checked again before extraction. Only default-branch push setup saves
-verified archives; no generated compiler or build tree is cached.
+hit is checked again before extraction. Ordinary runs retain the original
+policy: only default-branch push setup saves verified misses. Deliberate manual
+cohorts may instead select the bounded `prime`/`read` interface documented in
+[the workflow audit](ci-workflow-audit.md#709-matched-cohort-dispatch-sequence):
+its strict arm namespace extends the same exact key, prime proves a publication
+by exact re-restore plus digest verification, and read can never save. No
+generated compiler or build tree is cached.
 Three more image gaps are filled in place:
 
 - **mold.** On Linux `build.c` defaults every non-Zig tree to `CMAKE_LINKER_TYPE=MOLD`
@@ -269,10 +274,13 @@ diagnostics become fatal with `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`
 The same environment applies to the compiler matrix; no sanitizer is suppressed.
 
 `tools/ci_zig.py` owns download, checksum verification, staging, version checking,
-and PATH publication. The exact archive cache key includes the manifest hash;
-only main pushes save verified archives, before compiler tests run. SDK setup
-for unused Vulkan rendering/shader support is removed; those options are off
-in these configurations. Android and iOS SDK setup and test commands remain.
+and PATH publication. `tools/ci_zig_cache.py` owns the exact key, strict
+manual namespace, event/write policy, restore-key checks, publication proof and
+retained `zig-cache.json` record. The ordinary key includes the manifest hash
+and only main pushes save verified misses; `prime` and read-only `read` are the
+manual-only matched-cohort exceptions. SDK setup for unused Vulkan
+rendering/shader support is removed; those options are off in these
+configurations. Android and iOS SDK setup and test commands remain.
 
 Desktop, native and mobile summaries use `tools/ci_summary.py`, explicitly requiring each
 applicable suite. Missing, skipped, cancelled or failed work fails the summary.
