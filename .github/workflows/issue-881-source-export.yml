@@ -1,0 +1,37 @@
+name: Issue 881 source export
+
+on:
+  push:
+    branches:
+      - codex/issue-881-native-retirement-recipe
+    paths:
+      - .github/workflows/issue-881-source-export.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact branch head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Pack tracked source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-files -z | tar --null --files-from=- -czf issue-881-source.tar.gz
+          sha256sum issue-881-source.tar.gz > issue-881-source.tar.gz.sha256
+      - name: Upload tracked source
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: issue-881-source-${{ github.sha }}
+          path: |
+            issue-881-source.tar.gz
+            issue-881-source.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
