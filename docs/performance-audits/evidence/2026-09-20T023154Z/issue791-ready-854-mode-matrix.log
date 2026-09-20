@@ -1,0 +1,28 @@
+MACHINE_INFO arch=x86_64 cpu="AMD Ryzen 7 9700X 8-Core Processor" model=znver5 cores=16 ram_mib=63901
+ninja: no work to do.
+MODE_MATRIX_HARNESS ide=/home/david/bench/issue791-ready-854/build/Release/ide targets=6 modes=4 fixtures=6 qemu=0 wine=0 oracle=1
+MODE_MATRIX leg=x86_64-linux/none avenue=native status=pass fixtures=6 elapsed_us=201324
+MODE_MATRIX leg=x86_64-linux/mir-stack avenue=native status=pass fixtures=6 elapsed_us=156517
+MODE_MATRIX leg=x86_64-linux/fast avenue=native status=pass fixtures=6 elapsed_us=164418
+MODE_MATRIX leg=x86_64-linux/quality avenue=native status=pass fixtures=6 elapsed_us=153510
+MODE_MATRIX leg=aarch64-linux/none avenue=oracle status=pass fixtures=6 elapsed_us=116135
+MODE_MATRIX leg=aarch64-linux/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=138123
+MODE_MATRIX leg=aarch64-linux/fast avenue=oracle status=pass fixtures=6 elapsed_us=140625
+MODE_MATRIX leg=aarch64-linux/quality avenue=oracle status=pass fixtures=6 elapsed_us=145707
+MODE_MATRIX leg=x86_64-windows/none avenue=oracle status=pass fixtures=6 elapsed_us=221247
+MODE_MATRIX leg=x86_64-windows/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=207449
+MODE_MATRIX leg=x86_64-windows/fast avenue=oracle status=pass fixtures=6 elapsed_us=200922
+MODE_MATRIX leg=x86_64-windows/quality avenue=oracle status=pass fixtures=6 elapsed_us=201855
+MODE_MATRIX leg=aarch64-windows/none avenue=oracle status=pass fixtures=6 elapsed_us=136532
+MODE_MATRIX leg=aarch64-windows/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=169889
+MODE_MATRIX leg=aarch64-windows/fast avenue=oracle status=pass fixtures=6 elapsed_us=182121
+MODE_MATRIX leg=aarch64-windows/quality avenue=oracle status=pass fixtures=6 elapsed_us=177913
+MODE_MATRIX leg=x86_64-macos/none avenue=oracle status=pass fixtures=6 elapsed_us=194297
+MODE_MATRIX leg=x86_64-macos/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=185741
+MODE_MATRIX leg=x86_64-macos/fast avenue=oracle status=pass fixtures=6 elapsed_us=186324
+MODE_MATRIX leg=x86_64-macos/quality avenue=oracle status=pass fixtures=6 elapsed_us=176464
+MODE_MATRIX leg=aarch64-macos/none avenue=oracle status=pass fixtures=6 elapsed_us=137795
+MODE_MATRIX leg=aarch64-macos/mir-stack avenue=oracle status=pass fixtures=6 elapsed_us=145671
+MODE_MATRIX leg=aarch64-macos/fast avenue=oracle status=pass fixtures=6 elapsed_us=121822
+MODE_MATRIX leg=aarch64-macos/quality avenue=oracle status=pass fixtures=6 elapsed_us=126083
+MODE_MATRIX_RESULT legs=24 executed=4 oracle_checked=20 expected_failures=0 failures=0 elapsed_us=3989018 status=pass
