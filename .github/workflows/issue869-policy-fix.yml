@@ -1,0 +1,100 @@
+name: Patch issue 869 workflow policy test
+
+on:
+  push:
+    branches:
+      - tmp/869-policy-fix
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the exact PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/869-merge-conflict-preflight
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Patch, validate, and publish the policy regression
+        env:
+          EXPECTED_HEAD: 24afc62a3adac9ad551baa78dffbbfa7097b3175
+          TARGET_BRANCH: codex/869-merge-conflict-preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/ci_tools_test.py")
+          text = path.read_text()
+
+          old_guard = '                self.assertNotIn("pull_request_target", text)\n'
+          new_guard = '''                if path.name == "merge-conflict-preflight.yml":
+                      self.assertEqual(text.count("pull_request_target:"), 1)
+                  else:
+                      self.assertNotIn("pull_request_target", text)
+          '''
+          if text.count(old_guard) != 1:
+              raise SystemExit("expected exactly one blanket pull_request_target guard")
+          text = text.replace(old_guard, new_guard)
+
+          marker = '        self.assertNotIn("ENV{UBSAN_OPTIONS}", cmake)\n'
+          method = '''
+
+              def test_merge_conflict_preflight_is_the_only_trusted_pr_workflow(self):
+                  workflows = {
+                      path.name: path.read_text()
+                      for path in (ROOT / ".github/workflows").glob("*.yml")
+                  }
+                  trusted = sorted(
+                      name for name, text in workflows.items()
+                      if "pull_request_target" in text
+                  )
+                  self.assertEqual(trusted, ["merge-conflict-preflight.yml"])
+                  text = workflows[trusted[0]]
+                  header = text.split("\\njobs:\\n", 1)[0]
+                  regression = text.split("\\n  regression:\\n", 1)[1].split("\\n  preflight:\\n", 1)[0]
+                  preflight = text.split("\\n  preflight:\\n", 1)[1]
+
+                  self.assertIn("permissions:\\n  contents: read\\n", header)
+                  self.assertNotRegex(header, r"(?m)^\\s+[A-Za-z][\\w-]*: write$")
+                  self.assertIn("github.event_name == 'pull_request'", regression)
+                  self.assertIn("permissions:\\n      contents: read\\n", regression)
+                  self.assertNotRegex(regression, r"(?m)^\\s+[A-Za-z][\\w-]*: write$")
+                  self.assertNotIn("statuses: write", regression)
+
+                  self.assertIn("github.event_name != 'pull_request'", preflight)
+                  self.assertIn(
+                      "permissions:\\n      contents: read\\n      pull-requests: read\\n      statuses: write\\n",
+                      preflight,
+                  )
+                  self.assertIn("ref: $" + "{{ github.event.repository.default_branch }}", preflight)
+                  self.assertIn("persist-credentials: false", preflight)
+                  self.assertIn("tools/merge_conflict_preflight.py github-event", preflight)
+                  self.assertNotIn("tools/merge_conflict_preflight_test.py", preflight)
+                  self.assertNotIn("github.event.pull_request.head.", preflight)
+                  self.assertNotIn("secrets.", text)
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit("expected exactly one workflow security policy insertion point")
+          text = text.replace(marker, marker + method)
+          path.write_text(text)
+          PY
+
+          test "$(git diff --name-only)" = "tests/ci_tools_test.py"
+          python3 tests/ci_tools_test.py -v
+          python3 -B tools/merge_conflict_preflight_test.py -v
+          python3 -m py_compile tests/ci_tools_test.py
+          git diff --check
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/ci_tools_test.py
+          git commit -m 'test: constrain trusted merge preflight workflow'
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+          git push origin --delete tmp/869-policy-fix
