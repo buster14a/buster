@@ -2436,7 +2436,7 @@ OsError os_file_replace(String8 path, String8 destination)
             }
             else
             {
-                FILE_RENAME_INFO* rename_info = (FILE_RENAME_INFO*)arena_allocate(scratch.arena, u8, rename_bytes);
+                FILE_RENAME_INFO* rename_info = (FILE_RENAME_INFO*)arena_allocate_bytes(scratch.arena, rename_bytes, BUSTER_ALIGN_OF(FILE_RENAME_INFO));
                 memset(rename_info, 0, (size_t)rename_bytes);
                 rename_info->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
                 rename_info->FileNameLength = (DWORD)(destination_w.length * sizeof(WindowsChar));
