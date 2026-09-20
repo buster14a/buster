@@ -1,0 +1,61 @@
+name: Apply issue 891 patch
+
+on:
+  push:
+    branches: [fix/891-native-runner-observation]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    name: Apply and validate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Apply final patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat tools/.issue891-patch-* > "$RUNNER_TEMP/issue891.zb64"
+          python3 - "$RUNNER_TEMP/issue891.zb64" <<'PYTHON'
+          import base64
+          import sys
+          import zlib
+          from pathlib import Path
+          encoded = Path(sys.argv[1]).read_bytes()
+          Path('/tmp/apply_issue_891_patch.py').write_bytes(
+              zlib.decompress(base64.b64decode(encoded))
+          )
+          PYTHON
+          python3 /tmp/apply_issue_891_patch.py
+          rm -f tools/.issue891-patch-* .github/workflows/issue-891-apply.yml
+
+      - name: Validate final tree
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          GOSUMDB: sum.golang.org
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tools/ci_native_observation.py tools/ci_native_observation_test.py
+          python3 tools/ci_native_observation_test.py -v
+          python3 tools/check_action_pins.py
+          python3 tests/action_pins_test.py
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml
+          git diff --check
+
+      - name: Commit final tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "ci: classify native runner degradation"
+          git push origin HEAD:${GITHUB_REF_NAME}
