@@ -8793,7 +8793,9 @@ BUSTER_C_INTERNAL bool c_semantic_integer_literal_fits(Target target, u64 const*
         bool sign = false;
         if (c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) && width)
         {
-            limit = width >= 64 ? sign ? (u64)INT64_MAX : UINT64_MAX : (UINT64_C(1) << (width - (sign ? 1u : 0u))) - 1;
+            limit = width > 64 ? UINT64_MAX
+                    : width == 64 ? sign ? (u64)INT64_MAX : UINT64_MAX
+                                  : (UINT64_C(1) << (width - (sign ? 1u : 0u))) - 1;
         }
     }
     return limit && value <= limit;
@@ -8844,15 +8846,21 @@ BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 con
             index += count;
         }
     }
-    CTypeKind candidates[6] = {0};
+    CTypeKind candidates[8] = {0};
     u32 candidate_count = 0;
 #define C_INTEGER_LITERAL_CANDIDATE(kind) candidates[candidate_count++] = (kind)
     if (suffix_valid)
     {
-        if (msvc_width && msvc_width < 64)
+        if (msvc_width)
         {
-            CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR : msvc_width == 16 ? C_TYPE_SHORT : C_TYPE_INT;
-            CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT : C_TYPE_UNSIGNED_INT;
+            CTypeKind signed_kind = msvc_width == 8 ? C_TYPE_SIGNED_CHAR
+                                      : msvc_width == 16 ? C_TYPE_SHORT
+                                      : msvc_width == 32 ? C_TYPE_INT
+                                                         : C_TYPE_LONG_LONG;
+            CTypeKind unsigned_kind = msvc_width == 8 ? C_TYPE_UNSIGNED_CHAR
+                                        : msvc_width == 16 ? C_TYPE_UNSIGNED_SHORT
+                                        : msvc_width == 32 ? C_TYPE_UNSIGNED_INT
+                                                           : C_TYPE_UNSIGNED_LONG_LONG;
             C_INTEGER_LITERAL_CANDIDATE(is_unsigned ? unsigned_kind : signed_kind);
         }
         else if (!long_count && !is_unsigned)
@@ -8872,12 +8880,18 @@ BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 con
             {
                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
             }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT128);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT128);
+            }
         }
         else if (!long_count)
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT);
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT128);
         }
         else if (long_count == 1 && !is_unsigned)
         {
@@ -8891,11 +8905,17 @@ BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 con
             {
                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
             }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT128);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT128);
+            }
         }
         else if (long_count == 1)
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG);
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT128);
         }
         else if (!is_unsigned)
         {
@@ -8904,10 +8924,16 @@ BUSTER_C_SHARED CTypeKind c_semantic_integer_literal_kind(Target target, u64 con
             {
                 C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
             }
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_INT128);
+            if (!decimal)
+            {
+                C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT128);
+            }
         }
         else
         {
             C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_LONG_LONG);
+            C_INTEGER_LITERAL_CANDIDATE(C_TYPE_UNSIGNED_INT128);
         }
     }
 #undef C_INTEGER_LITERAL_CANDIDATE

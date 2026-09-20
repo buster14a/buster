@@ -871,11 +871,16 @@ struct CTypeParseMachine
     u32 mutation_type_limit;
     u32 expression_task_count;
     u32 expression_task_capacity;
+    // The enum currently evaluating an explicit initializer. Earlier members
+    // are visible before ordinary entity publication; the start bounds lookup
+    // to this definition so an unrelated enum cannot satisfy an identifier.
+    u32 enum_constant_member_start;
     bool result_valid;
     bool failed;
     bool semantic_constant_queries;
     bool validate_expression_constraints;
     bool runtime_expression_constraints;
+    bool enum_constant_members_active;
     String8 expression_constraint;
     u32 expression_constraint_token;
 };

@@ -870,6 +870,41 @@ struct CTypeAlignment
     u32 alignment_count;
 };
 
+// Integer constant-expression facts retained before enum compatible-type
+// selection. `magnitude_high:magnitude` is an unsigned 128-bit mathematical
+// magnitude; `is_negative` supplies its sign independently of the expression's
+// C type. `type`, `rank`, `bit_width`, and `is_signed` describe the resolved
+// semantic integer type after literal typing, casts, promotions, and the usual
+// arithmetic conversions. An implicit enumerator has no initializer ICE yet;
+// #901 supplies that operation and will populate the same representation.
+typedef enum CIntegerRank
+{
+    C_INTEGER_RANK_INVALID,
+    C_INTEGER_RANK_BOOL,
+    C_INTEGER_RANK_CHAR,
+    C_INTEGER_RANK_SHORT,
+    C_INTEGER_RANK_INT,
+    C_INTEGER_RANK_LONG,
+    C_INTEGER_RANK_LONG_LONG,
+    C_INTEGER_RANK_INT128,
+    C_INTEGER_RANK_COUNT,
+} CIntegerRank;
+
+typedef struct CIntegerConstant CIntegerConstant;
+struct CIntegerConstant
+{
+    u64 magnitude;
+    u64 magnitude_high;
+    CTypeId type;
+    CIntegerRank rank;
+    u16 bit_width;
+    bool is_signed;
+    bool is_negative;
+    bool valid;
+    u8 reserved[3];
+};
+BUSTER_CT_CHECK(sizeof(CIntegerConstant) == 32);
+
 typedef struct CEnumMember CEnumMember;
 struct CEnumMember
 {
@@ -880,11 +915,12 @@ struct CEnumMember
     // parse ran without a symbol table.  It sits in the alignment hole
     // ahead of `value`, so the record's size is unchanged.
     u32 symbol;
+    CIntegerConstant integer_constant;
     u64 value;
     bool is_negative;
     u8 reserved[7];
 };
-BUSTER_CT_CHECK(sizeof(CEnumMember) == 56);
+BUSTER_CT_CHECK(sizeof(CEnumMember) == 88);
 
 typedef struct CParameter CParameter;
 struct CParameter
