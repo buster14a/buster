@@ -103,6 +103,10 @@ class WorkflowLayoutTests(unittest.TestCase):
         first_external = text.index("Check out pinned cJSON closure")
         self.assertLess(guard, first_external)
         self.assertIn("path: candidate/external/cjson", text)
+        self.assertIn(
+            '"$GITHUB_WORKSPACE/trusted/tools/native_retirement_rebind.py" refresh',
+            text,
+        )
 
     def test_security_workflow_is_read_only_and_cross_platform(self):
         root = Path(__file__).resolve().parents[1]
