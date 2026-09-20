@@ -59,3 +59,5 @@ jobs:
           git add -A
           git commit -m "ci: classify native runner degradation"
           git push origin HEAD:${GITHUB_REF_NAME}
+
+# Trigger the bounded patch application after branch creation.
