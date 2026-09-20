@@ -51,8 +51,17 @@ jobs:
 
           workflow_path = Path(".github/workflows/ci.yml")
           workflow = workflow_path.read_text(encoding="utf-8")
-          old_root = '      BUSTER_CI_OBSERVATION_ROOT: ${{ runner.temp }}/buster-ci/native-observation'
-          new_root = '      BUSTER_CI_OBSERVATION_ROOT: ${{ github.workspace }}/.ci-native-observation'
+          expression = "$" + "{{"
+          old_root = (
+              "      BUSTER_CI_OBSERVATION_ROOT: "
+              + expression
+              + " runner.temp }}/buster-ci/native-observation"
+          )
+          new_root = (
+              "      BUSTER_CI_OBSERVATION_ROOT: "
+              + expression
+              + " github.workspace }}/.ci-native-observation"
+          )
           if old_root not in workflow:
               raise SystemExit("expected native observation root was not found")
           workflow_path.write_text(workflow.replace(old_root, new_root), encoding="utf-8")
