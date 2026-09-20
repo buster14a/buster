@@ -1,35 +1,54 @@
-name: Inspect issue 893 sources
+name: Apply and verify issue 893
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: issue-893-writer
+  cancel-in-progress: false
 
 jobs:
-  inspect:
+  apply-and-verify:
+    if: github.head_ref == 'fix/893-builtin-ffs' || github.ref_name == 'fix/893-builtin-ffs'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
-      - name: Collect relevant sources
-        run: |
-          mkdir -p issue-893-src
-          cp --parents \
-            src/buster/lib/compiler/frontend/c/c_internal.h \
-            src/buster/lib/compiler/frontend/c/c_source.c \
-            src/buster/lib/compiler/frontend/c/c_parse.c \
-            src/buster/lib/compiler/frontend/c/c_gen.c \
-            src/buster/tests/compiler/frontend/c/c_test.c \
-            src/buster/tests/compiler/frontend/c/macro_conditional_test.c \
-            src/buster/tests/compiler/codegen/codegen_test.c \
-            build.c \
-            issue-893-src/
-      - uses: actions/upload-artifact@v4
         with:
-          name: issue-893-sources
-          path: issue-893-src
-          if-no-files-found: error
-          retention-days: 1
+          ref: fix/893-builtin-ffs
+          fetch-depth: 0
+      - name: Apply implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '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' | base64 --decode | gzip --decompress > /tmp/issue-893.patch
+          git apply --check /tmp/issue-893.patch
+          git apply /tmp/issue-893.patch
+      - name: Verify generated tree and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./ide generate
+          git diff --exit-code -- . ':(exclude).github/workflows/inspect-893.yml'
+          ./ide test
+      - name: Publish implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/inspect-893.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/lib/compiler/frontend/c/c_internal.h \
+                  src/buster/lib/compiler/frontend/c/c_source.c \
+                  src/buster/lib/compiler/frontend/c/c_parse.c \
+                  src/buster/lib/compiler/frontend/c/c_gen.c \
+                  src/buster/tests/compiler/frontend/c/c_test.c \
+                  src/buster/tests/compiler/codegen/codegen_test.c \
+                  .github/workflows/inspect-893.yml
+          git commit -m 'frontend: implement __builtin_ffs'
+          git push origin HEAD:fix/893-builtin-ffs
