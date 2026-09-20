@@ -5127,16 +5127,22 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         }
     }
 
+    String8 invalid_ffs_sources[] = {
+        S8("int f(void) { return __builtin_ffs(); }"),
+        S8("int f(void) { return __builtin_ffs(1, 2); }"),
+        S8("int f(void) { return __builtin_ffs((struct Bad { int x; }){0}); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_ffs_sources); index += 1)
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        String8 source = S8("int invalid_ffs(void) { return __builtin_ffs((struct Bad { int x; }){0}); }\n");
-        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = targets[0]});
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_ffs_sources[index], (CPreprocessOptions){.target = targets[0]});
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count != 0);
         scratch_end(temporary);
     }
+
     // Calling a fence in a single-threaded executable cannot prove that it
     // survived lowering. Require all five advertised spellings to emit their
     // actual canonical fence, including the thread/signal distinction.

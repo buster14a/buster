@@ -175,6 +175,7 @@ static int check_ffs(void)
     valid &= __builtin_ffs(1u) == 1;
     valid &= __builtin_ffs(-1) == 1;
     valid &= __builtin_ffs(-128.75) == 8;
+    valid &= __builtin_ffs(__builtin_complex(-128.75, 16.0)) == 8;
     valid &= __builtin_ffs(0x1000u) == 13;
     valid &= __builtin_ffs((-2147483647 - 1)) == 32;
     valid &= __builtin_ffs(narrow) == 8;

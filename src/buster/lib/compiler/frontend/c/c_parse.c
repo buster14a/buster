@@ -20398,9 +20398,10 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
             bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
                                                        starts[0], ends[0], &type);
             if (!typed || type.value >= result->type_count ||
-                !c_parse_expression_real_kind(result->types[type.value].kind))
+                (!c_parse_expression_real_kind(result->types[type.value].kind) &&
+                 !c_type_kind_is_complex(result->types[type.value].kind)))
             {
-                message = S8("__builtin_ffs requires one real scalar argument");
+                message = S8("__builtin_ffs requires one arithmetic scalar argument");
                 location = starts[0];
             }
         }
