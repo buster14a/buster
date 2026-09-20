@@ -1,0 +1,20 @@
+{
+  "base": {
+    "checkout_head": "b7346b3e2674a48e11b70f6bc85cce0b0bb66dc9",
+    "equivalent_source_commit": "b7346b3e2674a48e11b70f6bc85cce0b0bb66dc9",
+    "source_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "compiler_sha256": "6592b8a9900239c242141d2212e171146a56a4adbe99bf8a038985f359ad7c07"
+  },
+  "854": {
+    "checkout_head": "b7346b3e2674a48e11b70f6bc85cce0b0bb66dc9",
+    "equivalent_source_commit": "d6f5671c2391fd4302abe85612bbee4148c99824",
+    "source_patch_sha256": "13a370b79005fe41358010d207d88c18b558f1513b8df24699facf7da36079e4",
+    "compiler_sha256": "67f50c0bcd62facfa13185788d2c05f68c193327ddf53b917d95b38906bb9a62"
+  },
+  "856": {
+    "checkout_head": "b7346b3e2674a48e11b70f6bc85cce0b0bb66dc9",
+    "equivalent_source_commit": "18bc123cef9ea9c8d6633404cfc6aa966d7cb9e8",
+    "source_patch_sha256": "bfe675398876c154dcf9ac9159eb921f33113a49523caffac18dd2b7e2f4689f",
+    "compiler_sha256": "19d08d78fba75b2185e011ddb4171c4c54246c1de51bf0e2f5af713d1c0c17cc"
+  }
+}
