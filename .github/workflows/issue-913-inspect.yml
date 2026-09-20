@@ -1,4 +1,4 @@
-name: Issue 913 source inspection
+name: Issue 913 diagnostic inspection
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
     paths:
       - '.github/workflows/issue-913-inspect.yml'
       - 'src/buster/tests/compiler/driver/driver_test.c'
-      - 'src/buster/lib/compiler/**'
+      - 'src/buster/lib/os/**'
 
 permissions:
   contents: read
@@ -21,20 +21,25 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Inspect padded-vector transport details
+      - name: Inspect process and fixture diagnostics
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== complete generated source tail ==='
-          sed -n '2210,2455p' src/buster/tests/compiler/driver/driver_test.c
-          echo '=== canonical lane helpers ==='
-          sed -n '8735,8880p' src/buster/lib/compiler/codegen/codegen.c
-          echo '=== canonical callee argument placement ==='
-          sed -n '13335,13640p' src/buster/lib/compiler/codegen/codegen.c
-          echo '=== canonical caller scalar-lane placement ==='
-          sed -n '16840,17205p' src/buster/lib/compiler/codegen/codegen.c
-          echo '=== canonical padded result transport ==='
-          sed -n '17420,17530p' src/buster/lib/compiler/codegen/codegen.c
-          sed -n '20010,20120p' src/buster/lib/compiler/codegen/codegen.c
-          echo '=== MIR scalar-lane use sites ==='
-          grep -n -E 'windows_scalar_lane_size|windows_scalar_float' src/buster/lib/compiler/codegen/machine_x86_64.c
+          driver=src/buster/tests/compiler/driver/driver_test.c
+          echo '=== process-success helper ==='
+          grep -n 'compiler_driver_test_process_success' "$driver" || true
+          while IFS=: read -r line rest; do
+            start=$((line > 80 ? line - 80 : 1))
+            end=$((line + 120))
+            sed -n "${start},${end}p" "$driver"
+          done < <(grep -n 'compiler_driver_test_process_success' "$driver" | head -n 2)
+          echo '=== issue 913 fixture ==='
+          sed -n '13390,13630p' "$driver"
+          echo '=== process types and wait implementation ==='
+          git grep -n -E 'typedef (struct|enum).*Process|ProcessResult|os_process_wait_sync|OS_PROCESS' -- src/buster/lib | head -n 500 || true
+          for file in $(git grep -l -E 'ProcessResult|os_process_wait_sync' -- src/buster/lib | head -n 20); do
+            echo "--- $file ---"
+            grep -n -E 'ProcessResult|os_process_wait_sync|exit|signal|standard_(out|error)|stdout|stderr' "$file" | head -n 250 || true
+          done
+          echo '=== detailed process assertion examples ==='
+          git grep -n -E 'process.*(status|result|exit)|PROCESS_RESULT_|os_process_wait_sync' -- src/buster/tests | head -n 500 || true
