@@ -1,4 +1,5 @@
-# Admission policy and trust roots require designated review.
+# Ownership and review routing for admission policy and trust roots.
+# Advisory under the solo-maintainer policy; approval is not mandatory.
 # Owners must have write access; authors cannot approve their own PRs.
 /.github/ @davidgmbb
 /.forgejo/ @davidgmbb
