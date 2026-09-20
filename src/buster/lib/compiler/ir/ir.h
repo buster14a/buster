@@ -722,10 +722,11 @@ struct IrFunction
     u32 extra_count;
     u32 extra_capacity;
     IrFunctionState state;
-    // Exact sum of instruction operand counts while the opcode summary is
-    // known. Appends maintain it and compaction rebuilds it; summary-unknown
-    // hand-built IR keeps the conservative row scan.
+    // Compaction already sums operand slots. Reuse that total only while
+    // operand_total_rows matches instruction_count and the summary is known.
+    // Appends change the count; reopening invalidates the cached population.
     u64 operand_total;
+    u32 operand_total_rows;
     // Which IR_OPCODE_SUMMARY_TRACKED opcodes the builder appended, plus
     // IR_OPCODE_SUMMARY_KNOWN. Consumers ask ir_function_may_contain_opcodes
     // instead of rescanning every row for a handful of rare ones. The summary

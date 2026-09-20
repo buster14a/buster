@@ -4382,7 +4382,6 @@ IrInstructionId ir_function_add_instruction(Arena* arena, IrFunction* function, 
             .value = function->instruction_count++,
         };
         function->instructions[id.value] = instruction;
-        function->operand_total += instruction.operand_count;
         if ((IR_OPCODE_SUMMARY_TRACKED >> instruction.opcode) & 1)
         {
             function->opcode_summary |= IR_OPCODE_BIT(instruction.opcode);

@@ -8,6 +8,10 @@
 
 void ir_function_invalidate_cfg(IrFunction* function)
 {
+    if (function)
+    {
+        function->operand_total_rows = UINT32_MAX;
+    }
     if (function && function->published_cfg)
     {
         // Re-entering construction explicitly restores mutable chains. The
