@@ -607,6 +607,7 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
         spawn = os_process_spawn(command, environment_keys, environment_values,
             (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                   .use_process_environment = false,
+                                  .search_path = true,
                                   .new_process_group = !BUSTER_WINDOWS});
 #if BUSTER_LINUX || BUSTER_MACOS
         if (spawn.handle)

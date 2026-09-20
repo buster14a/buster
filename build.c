@@ -4073,6 +4073,7 @@ BUSTER_GLOBAL_LOCAL String8 self_host_macos_sdk_path(Arena* arena)
                                                  (ProcessSpawnOptions){
                                                      .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                                      .use_process_environment = 1,
+                                                     .search_path = 1,
                                                  });
     if (!spawn.handle)
     {

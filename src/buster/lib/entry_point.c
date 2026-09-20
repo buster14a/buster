@@ -244,24 +244,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult buster_entry_point(StringOsList argv, StringOs
     environments_raw = slice_string_from_posix_string_list(os_state.arena, envp);
 #endif
 
-    SliceString8 environment_keys = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length};
-    SliceString8 environment_values = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length), .length = environments_raw.length};
+    SliceString8 environment_keys = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length)};
+    SliceString8 environment_values = {.pointer = arena_allocate(os_state.arena, String8, environments_raw.length)};
 
     for (u64 i = 0; i < environments_raw.length; i += 1)
     {
         String8 environment_raw = environments_raw.pointer[i];
         u64 equal_index = string_first_code_unit(environment_raw, '=');
-        if (equal_index != BUSTER_STRING_NO_MATCH)
+        if (equal_index != BUSTER_STRING_NO_MATCH && equal_index != 0)
         {
+            u64 environment_index = environment_keys.length;
             String8 key = string_slice(environment_raw, 0, equal_index);
             String8 value = string_slice(environment_raw, equal_index + 1, environment_raw.length);
-            environment_keys.pointer[i] = key;
-            environment_values.pointer[i] = value;
-        }
-        else
-        {
-            environment_keys.pointer[i] = (String8){0};
-            environment_values.pointer[i] = (String8){0};
+            environment_keys.pointer[environment_index] = key;
+            environment_values.pointer[environment_index] = value;
+            environment_keys.length += 1;
+            environment_values.length += 1;
         }
     }
 

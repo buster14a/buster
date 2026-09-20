@@ -160,6 +160,84 @@ BUSTER_GLOBAL_LOCAL String8 production_profile_argv_text(Arena* arena, SliceStri
     return string_join_arena(arena, string8_list_to_slice(arena, lines), false);
 }
 
+BUSTER_GLOBAL_LOCAL bool production_profile_environment_key_equal(String8 left, String8 right)
+{
+    bool result = left.length == right.length;
+    for (u64 index = 0; result && index < left.length; index += 1)
+    {
+        char8 left_byte = left.pointer[index];
+        char8 right_byte = right.pointer[index];
+#if BUSTER_WINDOWS
+        if (left_byte >= 'A' && left_byte <= 'Z')
+        {
+            left_byte = (char8)(left_byte + ('a' - 'A'));
+        }
+        if (right_byte >= 'A' && right_byte <= 'Z')
+        {
+            right_byte = (char8)(right_byte + ('a' - 'A'));
+        }
+#endif
+        result = left_byte == right_byte;
+    }
+    return result;
+}
+
+// os_process_spawn intentionally treats an explicit key/value list as the
+// complete child environment. Materialize the captured parent environment,
+// remove entries replaced by the caller, and append the caller's values.
+BUSTER_GLOBAL_LOCAL bool production_profile_environment_merge(
+    Arena* arena,
+    SliceString8 inherited_keys, SliceString8 inherited_values,
+    SliceString8 override_keys, SliceString8 override_values,
+    SliceString8* result_keys, SliceString8* result_values)
+{
+    bool result = inherited_keys.length == inherited_values.length &&
+                  override_keys.length == override_values.length &&
+                  (!inherited_keys.length || (inherited_keys.pointer && inherited_values.pointer)) &&
+                  (!override_keys.length || (override_keys.pointer && override_values.pointer)) &&
+                  inherited_keys.length <= UINT64_MAX - override_keys.length;
+    if (!result)
+    {
+        return false;
+    }
+
+    u64 capacity = inherited_keys.length + override_keys.length;
+    String8* keys = capacity ? arena_allocate(arena, String8, capacity) : 0;
+    String8* values = capacity ? arena_allocate(arena, String8, capacity) : 0;
+    u64 count = 0;
+
+    for (u64 inherited_index = 0; inherited_index < inherited_keys.length; inherited_index += 1)
+    {
+        bool replaced = false;
+        for (u64 override_index = 0; override_index < override_keys.length; override_index += 1)
+        {
+            if (production_profile_environment_key_equal(
+                    inherited_keys.pointer[inherited_index], override_keys.pointer[override_index]))
+            {
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced)
+        {
+            keys[count] = inherited_keys.pointer[inherited_index];
+            values[count] = inherited_values.pointer[inherited_index];
+            count += 1;
+        }
+    }
+
+    for (u64 override_index = 0; override_index < override_keys.length; override_index += 1)
+    {
+        keys[count] = override_keys.pointer[override_index];
+        values[count] = override_values.pointer[override_index];
+        count += 1;
+    }
+
+    *result_keys = (SliceString8){.pointer = keys, .length = count};
+    *result_values = (SliceString8){.pointer = values, .length = count};
+    return true;
+}
+
 BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
     Arena* arena, SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values,
     String8 evidence, String8 label, u64 timeout_seconds, bool capture)
@@ -175,10 +253,25 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
         }
     }
 
+    bool use_process_environment = !environment_keys.length && !environment_values.length;
+    SliceString8 child_environment_keys = environment_keys;
+    SliceString8 child_environment_values = environment_values;
+    if (!use_process_environment &&
+        !production_profile_environment_merge(
+            arena,
+            program_state->input.environment_keys, program_state->input.environment_values,
+            environment_keys, environment_values,
+            &child_environment_keys, &child_environment_values))
+    {
+        fprintf(stderr, "error: invalid production-profile environment override\n");
+        return result;
+    }
+
     command_print(arguments);
     u64 capture_mask = capture ? (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR) : 0;
-    ProcessSpawnResult spawn = os_process_spawn(arguments, environment_keys, environment_values,
-        (ProcessSpawnOptions){.capture = capture_mask, .use_process_environment = 1, .new_process_group = 1});
+    ProcessSpawnResult spawn = os_process_spawn(arguments, child_environment_keys, child_environment_values,
+        (ProcessSpawnOptions){.capture = capture_mask, .use_process_environment = use_process_environment,
+                              .search_path = 1, .new_process_group = 1});
     if (spawn.handle)
     {
         result.wait = os_process_wait_deadline(arena, spawn, timeout_seconds ? timeout_seconds * 1000000ull : 0);
@@ -201,8 +294,10 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
     if (evidence.length)
     {
         String8 status_path = path_join(arena, evidence, string_format(arena, S8("{S8}.status.txt"), label));
-        String8 status = string_format(arena, S8("result={u32}\nplatform_status={u32}\ntimed_out={u32}\nsuccess={u32}\n"),
-            (u32)result.wait.result, result.wait.platform_status, (u32)result.wait.timed_out, (u32)result.success);
+        String8 status = string_format(arena, S8("result={u32}\nplatform_status={u32}\ntimed_out={u32}\nsuccess={u32}\n"
+            "spawn_failure={u32}\nspawn_error={u32}\n"),
+            (u32)result.wait.result, result.wait.platform_status, (u32)result.wait.timed_out, (u32)result.success,
+            (u32)spawn.failure, spawn.error.v);
         bool wrote = production_profile_write(status_path, status);
         if (capture)
         {
@@ -950,6 +1045,35 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_self_test(Arena* arena)
     failures += !production_profile_path_components_safe(S8("/checkout/build/profile"));
     failures += production_profile_path_components_safe(S8("/checkout/build/../src"));
     failures += production_profile_path_components_safe(S8("/checkout/build/./profile"));
+
+    failures += production_profile_environment_key_equal(S8("PATH"), S8("HOME"));
+#if BUSTER_WINDOWS
+    failures += !production_profile_environment_key_equal(S8("Path"), S8("PATH"));
+#else
+    failures += production_profile_environment_key_equal(S8("Path"), S8("PATH"));
+#endif
+
+    String8 inherited_keys[] = {S8("PATH"), S8("LLVM_PROFILE_FILE"), S8("HOME")};
+    String8 inherited_values[] = {S8("/bin"), S8("old.profraw"), S8("/home/runner")};
+    String8 override_keys[] = {S8("LLVM_PROFILE_FILE"), S8("EMPTY")};
+    String8 override_values[] = {S8("new-%p.profraw"), (String8){0}};
+    SliceString8 merged_keys = {0};
+    SliceString8 merged_values = {0};
+    bool merged = production_profile_environment_merge(
+        arena,
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(inherited_keys),
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(inherited_values),
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(override_keys),
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(override_values),
+        &merged_keys, &merged_values);
+    failures += !merged || merged_keys.length != 4 || merged_values.length != 4;
+    if (merged && merged_keys.length == 4 && merged_values.length == 4)
+    {
+        failures += !string_equal(merged_keys.pointer[0], S8("PATH")) || !string_equal(merged_values.pointer[0], S8("/bin"));
+        failures += !string_equal(merged_keys.pointer[1], S8("HOME")) || !string_equal(merged_values.pointer[1], S8("/home/runner"));
+        failures += !string_equal(merged_keys.pointer[2], S8("LLVM_PROFILE_FILE")) || !string_equal(merged_values.pointer[2], S8("new-%p.profraw"));
+        failures += !string_equal(merged_keys.pointer[3], S8("EMPTY")) || merged_values.pointer[3].length != 0;
+    }
 
     ProductionProfileOptions options = {0};
     String8 valid_arguments[] = {

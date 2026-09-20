@@ -1641,6 +1641,7 @@ PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString
 
 WindowsStringList windows_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values)
 {
+    BUSTER_VALIDATE(keys.length == values.length);
     // Always return a valid, non-NULL environment block, even for zero keys: passing a NULL
     // lpEnvironment to CreateProcessW means "inherit the caller's full environment", which is
     // the opposite of an explicitly empty environment.
@@ -1657,6 +1658,10 @@ WindowsStringList windows_environment_from_keys_and_values(Arena* arena, SliceSt
         *arena_allocate(arena, char16, 1) = 0;
     }
 
+    if (!keys.length)
+    {
+        *arena_allocate(arena, char16, 1) = 0;
+    }
     *arena_allocate(arena, char16, 1) = 0;
 
     return result;
@@ -1921,6 +1926,10 @@ WindowsStringList windows_environment_block_from_slice_string(Arena* arena, Slic
         *arena_allocate(arena, char16, 1) = 0;
     }
 
+    if (!environment.length)
+    {
+        *arena_allocate(arena, char16, 1) = 0;
+    }
     *arena_allocate(arena, char16, 1) = 0;
     return result;
 }
