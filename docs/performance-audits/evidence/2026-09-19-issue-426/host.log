@@ -1,0 +1,246 @@
++ git rev-parse HEAD 'HEAD^{tree}'
+9ce76c32cd8a0e897aab951e7ca826451b8bb032
+50422a5e1b2dfc9b284b508e6908a6ce799748f3
++ uname -a
+Linux benchpress 6.18.50-2-lts #1 SMP PREEMPT_DYNAMIC Tue, 08 Sep 2026 10:48:06 +0000 x86_64 GNU/Linux
++ id
+uid=968(buster-github-runner) gid=968(buster-github-runner) groups=968(buster-github-runner)
++ nproc
+16
++ lscpu
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           48 bits physical, 48 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  16
+On-line CPU(s) list:                     0-15
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD Ryzen 7 9700X 8-Core Processor
+CPU family:                              26
+Model:                                   68
+Thread(s) per core:                      2
+Core(s) per socket:                      8
+Socket(s):                               1
+Stepping:                                0
+Microcode version:                       0xb404038
+Frequency boost:                         enabled
+CPU(s) scaling MHz:                      46%
+CPU max MHz:                             5582.3008
+CPU min MHz:                             605.3100
+BogoMIPS:                                7588.30
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good amd_lbr_v2 nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpuid_fault cpb cat_l3 cdp_l3 hw_pstate ssbd mba perfmon_v2 ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk avx_vnni avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif x2avic v_spec_ctrl vnmi avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid bus_lock_detect movdiri movdir64b overflow_recov succor smca fsrm avx512_vp2intersect flush_l1d amd_lbr_pmc_freeze
+Virtualization:                          AMD-V
+L1d cache:                               384 KiB (8 instances)
+L1i cache:                               256 KiB (8 instances)
+L2 cache:                                8 MiB (8 instances)
+L3 cache:                                32 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-15
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Mitigation; IBPB on VMEXIT only
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; STIBP always-on; PBRSB-eIBRS Not affected; BHI Not affected
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Mitigation; IBPB on VMEXIT
++ lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE,MAXMHZ,MINMHZ
+CPU CORE SOCKET NODE ONLINE    MAXMHZ   MINMHZ
+  0    0      0    0    yes 5582.3008 605.3100
+  1    1      0    0    yes 5582.3008 605.3100
+  2    2      0    0    yes 5582.3008 605.3100
+  3    3      0    0    yes 5582.3008 605.3100
+  4    4      0    0    yes 5582.3008 605.3100
+  5    5      0    0    yes 5582.3008 605.3100
+  6    6      0    0    yes 5582.3008 605.3100
+  7    7      0    0    yes 5582.3008 605.3100
+  8    0      0    0    yes 5582.3008 605.3100
+  9    1      0    0    yes 5582.3008 605.3100
+ 10    2      0    0    yes 5582.3008 605.3100
+ 11    3      0    0    yes 5582.3008 605.3100
+ 12    4      0    0    yes 5582.3008 605.3100
+ 13    5      0    0    yes 5582.3008 605.3100
+ 14    6      0    0    yes 5582.3008 605.3100
+ 15    7      0    0    yes 5582.3008 605.3100
++ free -b
+               total        used        free      shared  buff/cache   available
+Mem:     67005931520 12018454528 47575126016 10256125952 18412826624 54987476992
+Swap:     8589930496   186109952  8403820544
++ df -h . /var/lib/buster-github-runner/actions-runner/_work/_temp
+Filesystem             Size  Used Avail Use% Mounted on
+/dev/mapper/cryptroot  475G  6.3G  467G   2% /var/lib/buster-github-runner
+/dev/mapper/cryptroot  475G  6.3G  467G   2% /var/lib/buster-github-runner
++ cat /proc/sys/kernel/perf_event_paranoid
+2
++ cat /proc/sys/kernel/kptr_restrict
+0
++ cat /sys/devices/system/cpu/smt/active
+1
++ cat /sys/devices/system/cpu/cpufreq/boost
+1
++ cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor
+powersave
++ cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_driver
+amd-pstate-epp
++ cat /sys/devices/system/cpu/cpu2/cpufreq/energy_performance_preference
+balance_performance
++ cat /sys/kernel/mm/transparent_hugepage/enabled
+[always] madvise never
++ grep -m1 microcode /proc/cpuinfo
+microcode	: 0xb404038
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v clang
+++ command -v clang
++ printf 'TOOL %s %s\n' clang /usr/bin/clang
+TOOL clang /usr/bin/clang
++ clang --version
++ head -2
+clang version 22.1.8
+Target: x86_64-pc-linux-gnu
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v gcc
+++ command -v gcc
++ printf 'TOOL %s %s\n' gcc /usr/bin/gcc
+TOOL gcc /usr/bin/gcc
++ gcc --version
++ head -2
+gcc (GCC) 16.2.1 20260810
+Copyright (C) 2026 Free Software Foundation, Inc.
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v cc
+++ command -v cc
++ printf 'TOOL %s %s\n' cc /usr/bin/cc
+TOOL cc /usr/bin/cc
++ cc --version
++ head -2
+cc (GCC) 16.2.1 20260810
+Copyright (C) 2026 Free Software Foundation, Inc.
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v cmake
+++ command -v cmake
++ printf 'TOOL %s %s\n' cmake /usr/bin/cmake
+TOOL cmake /usr/bin/cmake
++ cmake --version
++ head -2
+cmake version 4.4.3
+
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v ninja
+++ command -v ninja
++ printf 'TOOL %s %s\n' ninja /usr/bin/ninja
+TOOL ninja /usr/bin/ninja
++ ninja --version
++ head -2
+1.13.2
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v tcc
+++ command -v tcc
++ printf 'TOOL %s %s\n' tcc /usr/bin/tcc
+TOOL tcc /usr/bin/tcc
++ tcc --version
++ head -2
+tcc version 0.9.28rc 2026-01-17 makepkg@b39cbc70 (x86_64 Linux)
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v perf
+++ command -v perf
++ printf 'TOOL %s %s\n' perf /usr/bin/perf
+TOOL perf /usr/bin/perf
++ perf --version
++ head -2
+perf version 7.2.4-1
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v valgrind
++ printf 'TOOL %s missing\n' valgrind
+TOOL valgrind missing
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v python3
+++ command -v python3
++ printf 'TOOL %s %s\n' python3 /usr/bin/python3
+TOOL python3 /usr/bin/python3
++ python3 --version
++ head -2
+Python 3.14.7
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v llvm-symbolizer
+++ command -v llvm-symbolizer
++ printf 'TOOL %s %s\n' llvm-symbolizer /usr/bin/llvm-symbolizer
+TOOL llvm-symbolizer /usr/bin/llvm-symbolizer
++ llvm-symbolizer --version
++ head -2
+llvm-symbolizer
+LLVM (http://llvm.org/):
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v readelf
+++ command -v readelf
++ printf 'TOOL %s %s\n' readelf /usr/bin/readelf
+TOOL readelf /usr/bin/readelf
++ readelf --version
++ head -2
+GNU readelf (GNU Binutils) 2.47
+Copyright (C) 2026 Free Software Foundation, Inc.
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v objdump
+++ command -v objdump
++ printf 'TOOL %s %s\n' objdump /usr/bin/objdump
+TOOL objdump /usr/bin/objdump
++ objdump --version
++ head -2
+GNU objdump (GNU Binutils) 2.47
+Copyright (C) 2026 Free Software Foundation, Inc.
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v mold
+++ command -v mold
++ printf 'TOOL %s %s\n' mold /usr/bin/mold
+TOOL mold /usr/bin/mold
++ mold --version
++ head -2
+mold 2.42.1 (9b376bc6a9899d4a16b41777de1f013989459fbc; compatible with GNU ld)
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v ld
+++ command -v ld
++ printf 'TOOL %s %s\n' ld /usr/bin/ld
+TOOL ld /usr/bin/ld
++ ld --version
++ head -2
+GNU ld (GNU Binutils) 2.47
+Copyright (C) 2026 Free Software Foundation, Inc.
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v taskset
+++ command -v taskset
++ printf 'TOOL %s %s\n' taskset /usr/bin/taskset
+TOOL taskset /usr/bin/taskset
++ taskset --version
++ head -2
+taskset from util-linux 2.42.3
++ for tool in clang gcc cc cmake ninja tcc perf valgrind python3 llvm-symbolizer readelf objdump mold ld taskset zstd
++ command -v zstd
+++ command -v zstd
++ printf 'TOOL %s %s\n' zstd /usr/bin/zstd
+TOOL zstd /usr/bin/zstd
++ zstd --version
++ head -2
+*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***
++ perf stat -e instructions:u,cycles:u -- true
+
+ Performance counter stats for 'true':
+
+            154813      instructions:u                                                        
+            275320      cycles:u                                                              
+
+       0.000756665 seconds time elapsed
+
+       0.000764000 seconds user
+       0.000000000 seconds sys
+
+

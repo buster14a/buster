@@ -36,11 +36,14 @@ python3 tools/native_retirement_materializer.py materialize \
     --output /absolute/private-workspace/new-dependencies
 ```
 
-The descriptor uses schema `buster-native-retirement-dependencies-v1`, version
-1, and explicit local source/destination, size and SHA-256 records. The module
-header gives its shape. This extraction does not replace the live descriptor
-in `docs/native-retirement-dependencies-v1.json` or promise that every historical
-or current descriptor is compatible with this standalone boundary.
+Standalone and archived descriptors continue to use schema
+`buster-native-retirement-dependencies-v1`, version 1, with explicit local
+source/destination, size and SHA-256 records. The live repository entry path is
+the reviewed policy in `docs/native-retirement-dependencies-v1.json` plus the
+generated repository-source snapshot. `materialize_file` resolves those two
+authorities to the same validated v1 shape and publishes copies of the policy,
+snapshot, and resolved descriptor with the dependency tree. The low-level
+`parse_manifest` and `materialize` APIs retain their v1 compatibility contract.
 
 Operate in an exclusively owned source/output workspace with no concurrent
 publisher. The output must be absent. Authenticated copies are staged in a

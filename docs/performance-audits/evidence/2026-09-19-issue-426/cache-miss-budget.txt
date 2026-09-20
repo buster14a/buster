@@ -1,0 +1,13 @@
+L1-dcache-load-misses=209016820
+L1-dcache-loads=7436416467
+cycles=5689016537
+instructions=15807105383
+l1-icache-load-misses=33427379
+l2_cache_req_stat.dc_access_in_l2=201813925
+l2_cache_req_stat.ls_rd_blk_c=16845332
+ls_any_fills_from_sys.all=211266272
+ls_any_fills_from_sys.dram_io_all=13493637
+ls_any_fills_from_sys.local_l2=184764139
+ls_l1_d_tlb_miss.all=330814
+ls_l1_d_tlb_miss.all_l2_miss=26772
+page-faults=2815

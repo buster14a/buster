@@ -209,6 +209,40 @@ BUSTER_C_EXTERN bool c_parse_validate_constexpr_initializer(CTypeParseMachine* m
                                                             u32 initializer_start, u32 initializer_end);
 BUSTER_C_EXTERN void c_parse_infer_file_array_bounds(CTypeParseMachine* machine, Arena* arena,
                                                        CPreprocessResult preprocess, CParseResult* result);
+typedef struct CIrWideInteger CIrWideInteger;
+struct CIrWideInteger
+{
+    u64 low;
+    u64 high;
+};
+
+BUSTER_C_EXTERN CIrWideInteger c_ir_wide_negate(CIrWideInteger value);
+BUSTER_C_EXTERN bool c_ir_wide_less(CIrWideInteger left, CIrWideInteger right);
+BUSTER_C_EXTERN CIrWideInteger c_ir_wide_subtract(CIrWideInteger left, CIrWideInteger right);
+BUSTER_C_EXTERN CIrWideInteger c_ir_wide_multiply(CIrWideInteger left, CIrWideInteger right);
+BUSTER_C_EXTERN void c_ir_wide_divide(CIrWideInteger dividend, CIrWideInteger divisor, CIrWideInteger* quotient_out, CIrWideInteger* remainder_out);
+
+typedef struct CDeclarationBinding CDeclarationBinding;
+struct CDeclarationBinding
+{
+    String8 alias_target;
+    // IR_INITIALIZER_PRIORITY_NONE when the attribute named no priority; the
+    // written value otherwise. Meaningful only while the matching flag is set,
+    // because zero is a priority a program may write.
+    u32 constructor_priority;
+    u32 destructor_priority;
+    bool is_weak;
+    bool is_constructor;
+    bool is_destructor;
+    u8 reserved[5];
+};
+
+BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
+
+BUSTER_C_EXTERN bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out);
+
+BUSTER_C_EXTERN CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration);
+
 BUSTER_C_EXTERN void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena,
                                                   CPreprocessResult preprocess, CParseResult* result,
                                                   CDeclaration declaration, CScopeId scope);
@@ -313,7 +347,14 @@ struct CSpellingSpace
     Arena* arena;
 };
 BUSTER_C_EXTERN CSpellingSpace c_space_local(Arena* arena, u64 capacity);
-BUSTER_C_EXTERN bool c_token_is_punctuator(const CToken* token, CPunctuator punctuator);
+// One compare, and deliberately no kind test: only a C_TOKEN_PUNCTUATOR token
+// ever carries a punctuator id, so the id alone answers the question.  Every
+// site that retypes a token must keep that invariant.
+BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE bool c_token_is_punctuator(const CToken* token, CPunctuator punctuator)
+{
+    return token->punctuator == punctuator;
+}
+
 // Punctuator sets the frontend asks about repeatedly (see c_punctuator_in_set
 // in c.h). The parenthesis pair is what the two backward scans that look for
 // a control-statement head classify on; the statement-boundary set is the
@@ -367,6 +408,7 @@ typedef enum CSymbolBuiltin
     C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS,
     C_SYMBOL_BUILTIN_POPULATION_COUNT,
     C_SYMBOL_BUILTIN_SIMD,
+    C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT,
     C_SYMBOL_BUILTIN_FRAME_ADDRESS,
     C_SYMBOL_BUILTIN_ALLOCA,
     C_SYMBOL_BUILTIN_COMPLEX,
@@ -784,8 +826,30 @@ struct CTypeLayoutCache
     CToken const* tokens;
 };
 
+// Successful expression facts are reused only after all bindings are final,
+// within one function. Scope, token end and checking mode are part of the key;
+// failed/speculative queries and queries over copied models are never stored.
+#define C_PARSE_EXPRESSION_QUERY_VALID 1u
+#define C_PARSE_EXPRESSION_QUERY_CHECKED 2u
+#define C_PARSE_EXPRESSION_QUERY_RUNTIME 4u
+#define C_PARSE_EXPRESSION_QUERY_CONSTANT 8u
+
+typedef struct CParseExpressionQuery CParseExpressionQuery;
+struct CParseExpressionQuery
+{
+    u32 end;
+    CScopeId scope;
+    CTypeId type;
+    u32 flags;
+};
+
 struct CTypeParseMachine
 {
+    CParseExpressionQuery* expression_queries;
+    CParseResult* expression_query_result;
+    CToken const* expression_query_tokens;
+    u32 expression_query_start;
+    u32 expression_query_end;
     CTypeParseFrame* frames;
     CTypeMutation* mutations;
     CParseExpressionTypeTask* expression_tasks;
@@ -808,7 +872,11 @@ struct CTypeParseMachine
     u32 expression_task_capacity;
     bool result_valid;
     bool failed;
-    u8 reserved[2];
+    bool semantic_constant_queries;
+    bool validate_expression_constraints;
+    bool runtime_expression_constraints;
+    String8 expression_constraint;
+    u32 expression_constraint_token;
 };
 
 struct CParsePromotedMemberWork
@@ -817,3 +885,150 @@ struct CParsePromotedMemberWork
     u32 root_field;
     u32 depth;
 };
+
+BUSTER_C_EXTERN bool c_semantic_asm_clobber_valid(Target target, String8 clobber);
+BUSTER_C_EXTERN bool c_semantic_asm_clobber_matches_constraint(Target target, String8 clobber, u64 constraint);
+
+BUSTER_C_EXTERN void c_parse_index_declarations(CParseResult* result, Arena* arena);
+
+typedef enum CIrConstantValueKind
+{
+    C_IR_CONSTANT_INVALID,
+    C_IR_CONSTANT_UNKNOWN,
+    C_IR_CONSTANT_INTEGER,
+    C_IR_CONSTANT_FLOAT,
+    C_IR_CONSTANT_POINTER,
+    C_IR_CONSTANT_LVALUE,
+} CIrConstantValueKind;
+
+typedef struct CIrConstantValue CIrConstantValue;
+struct CIrConstantValue
+{
+    IrTypeId type;
+    IrSymbolId symbol;
+    s64 addend;
+    // Integer values, or the target raw image of a wide floating constant.
+    // Narrow floating constants alone use the f64 carrier below.
+    u64 integer;
+    u64 integer_high;
+    f64 floating;
+    CIrConstantValueKind kind;
+};
+
+BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
+BUSTER_C_EXTERN bool c_ir_constant_wide_float_cast(CIrConstantValue const* source, IrType* source_type,
+                                                     IrType const* target, CIrConstantValue* result);
+BUSTER_C_EXTERN bool c_ir_constant_wide_float_to_integer(CIrConstantValue const* source, IrType const* source_type,
+                                                           IrType const* target, CIrWideInteger* result);
+BUSTER_C_EXTERN void c_ir_constant_wide_float_sign(CIrConstantValue* value, IrType const* type, bool negative);
+BUSTER_C_EXTERN bool c_ir_constant_float_to_integer(f64 floating, IrType* target, CIrWideInteger* result);
+BUSTER_C_EXTERN f64 c_ir_float16_round(f64 value);
+BUSTER_C_EXTERN f64 c_ir_bfloat16_round(f64 value);
+BUSTER_C_EXTERN bool c_ir_constant_float_literal_for_type(IrType const* type, String8 spelling, CIrConstantValue* result);
+BUSTER_C_EXTERN bool c_ir_constant_wide_float_binary(IrTypeId integer_type, CConditionalOperator operation, CIrConstantValue left, CIrConstantValue right, IrType const* type, CIrConstantValue* result);
+
+typedef enum CIrAtomicBuiltin
+{
+    C_IR_ATOMIC_BUILTIN_LOAD,
+    C_IR_ATOMIC_BUILTIN_STORE,
+    C_IR_ATOMIC_BUILTIN_INIT,
+    C_IR_ATOMIC_BUILTIN_FETCH_ADD,
+    C_IR_ATOMIC_BUILTIN_FETCH_SUBTRACT,
+    C_IR_ATOMIC_BUILTIN_FETCH_AND,
+    C_IR_ATOMIC_BUILTIN_FETCH_OR,
+    C_IR_ATOMIC_BUILTIN_FETCH_XOR,
+    C_IR_ATOMIC_BUILTIN_FETCH_NAND,
+    C_IR_ATOMIC_BUILTIN_EXCHANGE,
+    C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_STRONG,
+    C_IR_ATOMIC_BUILTIN_COMPARE_EXCHANGE_WEAK,
+    C_IR_ATOMIC_BUILTIN_THREAD_FENCE,
+    C_IR_ATOMIC_BUILTIN_SIGNAL_FENCE,
+    // GCC's legacy full barrier, which takes no ordering argument because it
+    // is always sequentially consistent.
+    C_IR_ATOMIC_BUILTIN_SYNC_SYNCHRONIZE,
+    C_IR_ATOMIC_BUILTIN_IS_LOCK_FREE,
+    // GNU-only: an exchange of one into a byte-sized flag reported as a
+    // boolean, and the store of zero that releases it again.
+    C_IR_ATOMIC_BUILTIN_TEST_AND_SET,
+    C_IR_ATOMIC_BUILTIN_CLEAR,
+    C_IR_ATOMIC_BUILTIN_COUNT,
+} CIrAtomicBuiltin;
+
+
+typedef struct CIrAtomicBuiltinSpelling CIrAtomicBuiltinSpelling;
+struct CIrAtomicBuiltinSpelling
+{
+    CIrAtomicBuiltin builtin;
+    bool gnu;
+    bool new_value;
+    bool generic;
+    bool sequential;
+};
+
+BUSTER_C_EXTERN CIrAtomicBuiltinSpelling c_ir_atomic_builtin_spelling(String8 name);
+BUSTER_C_EXTERN u32 c_semantic_atomic_builtin_arity(CIrAtomicBuiltinSpelling spelling);
+BUSTER_C_EXTERN CTypeKind c_semantic_integer_literal_kind(Target target, u64 const* limits, String8 spelling, u64 value);
+BUSTER_C_EXTERN bool c_semantic_ext80_fold_initializer(Arena* arena, CPreprocessResult preprocess, u32 start, u32 end, u64* significand_out, u16* exponent_sign_out, String8* message, u32* location);
+
+BUSTER_C_EXTERN u32 c_semantic_asm_type_class(IrType* type);
+
+BUSTER_C_EXTERN bool c_semantic_asm_vector_operand(IrType* type);
+
+BUSTER_C_EXTERN bool c_semantic_asm_x87_operand(IrType* type);
+
+BUSTER_C_EXTERN bool c_semantic_asm_decimal_reference(String8 bytes, u32* index_out);
+
+BUSTER_C_EXTERN u64 c_semantic_asm_bound_register(Target target, String8 label);
+
+BUSTER_C_EXTERN bool c_semantic_asm_fixed_operands_conflict(u64 const* constraints, u32 count);
+
+BUSTER_C_EXTERN String8 c_semantic_asm_x87_operands_message(u64 const* constraints, u32 count, bool stack_clobber);
+
+BUSTER_C_EXTERN String8 c_ir_math_builtin_link_name(String8 name);
+
+typedef enum CIrSimdArgument
+{
+    C_IR_SIMD_ARGUMENT_ADDRESS,
+    C_IR_SIMD_ARGUMENT_MASK,
+    C_IR_SIMD_ARGUMENT_VECTOR,
+    C_IR_SIMD_ARGUMENT_BYTE,
+    C_IR_SIMD_ARGUMENT_WORD,
+    C_IR_SIMD_ARGUMENT_IMMEDIATE,
+} CIrSimdArgument;
+
+typedef struct CIrSimdBuiltin CIrSimdBuiltin;
+struct CIrSimdBuiltin
+{
+    String8 name;
+    u8 operation;
+    u8 arguments[4];
+    u32 immediate_limit;
+};
+
+// The whole vocabulary, in one table. An immediate is always last, so lowering
+// walks the operands in order and evaluates the tail constant afterwards.
+
+BUSTER_C_EXTERN bool c_semantic_simd_builtin(String8 name, CIrSimdBuiltin* entry);
+
+typedef struct CSemanticAsmOperand CSemanticAsmOperand;
+struct CSemanticAsmOperand
+{
+    String8 name;
+    u64 size;
+    u32 type_class;
+};
+
+BUSTER_C_EXTERN String8 c_semantic_asm_special_operands_message(Target target, String8 assembly, u64 const* constraints,
+    CSemanticAsmOperand const* operands, u32 operand_count, u32 output_count, bool rbx_clobber);
+
+typedef struct CIrSse2ImmediateShiftBuiltin CIrSse2ImmediateShiftBuiltin;
+struct CIrSse2ImmediateShiftBuiltin
+{
+    String8 name;
+    IrBinaryOperation operation;
+    u8 lane_width;
+    u8 lane_count;
+    u8 reserved[2];
+};
+
+BUSTER_C_EXTERN bool c_semantic_sse2_immediate_shift_builtin(String8 name, CIrSse2ImmediateShiftBuiltin* entry);
