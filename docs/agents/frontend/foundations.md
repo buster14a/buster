@@ -105,14 +105,10 @@ resolves aliases and compacts values/operand slices. Debug-local names, types,
 IDs, scopes and source ranges are preserved; frontend entity IDs do not escape.
 The existing conservative opcode summary also tracks `LOCAL`, so shared
 promotion skips its discovery scan for certified functions with no memory
-locals. Summary-known functions discover remaining live definitions through
-`local_places`, retaining definition-row order for deterministic promotion.
-If canonical owner IDs are out of definition order, one bounded row scan
-restores the order instead of sorting by repeated displacement.
-Tracked barrier opcodes avoid further inspection when absent. The required
-operand/event walk qualifies indirect/returns-twice calls before any promotion,
-so ordinary calls do not require a separate discovery scan. Unknown summaries
-keep the row scan and the shared algorithm stays independent.
+locals. Unknown summaries still scan and the shared algorithm stays independent.
+The existing discovery scan also checks whether any local has a promotable type.
+Aggregate-only functions bypass value maps and event collection; candidate and
+barrier statistics remain unchanged, including indirect/returns-twice calls.
 
 `c_lower_to_ir_with_options` and `c_analyze_with_options` expose the memory-form
 reference through `CIRLowerOptions.disable_direct_ssa`. `ide cc
@@ -657,13 +653,6 @@ helper is introduced. Small or qualified aggregates retain typed construction.
 The large-frame fixture checks zeroed nested storage, explicit values, copies
 and odd byte tails under both frontend lowering modes. This prevents initializer
 expansion from exceeding Windows ARM64's unwind function-size limit.
-
-- Sparse shared-promotion discovery checks whether any live local has an
-  eligible scalar/vector type before allocating value maps and collecting
-  operand events. Functions containing only ineligible locals retain the
-  same candidate/barrier statistics; conditional calls still receive their
-  returns-twice/indirect-call check. The summary-unknown row path remains the
-  differential oracle in `ir_promotion_tests`.
 
 - C lowering records every named and temporary local in the canonical
   `IrFunction.local_places` projection at creation. The frontend-private

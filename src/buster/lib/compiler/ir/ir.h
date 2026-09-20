@@ -539,11 +539,10 @@ BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT < 63);
 // An opcode absent from this list must never be queried: add it here in the
 // same change that adds the query. Unknown summaries remain conservative.
 #define IR_OPCODE_SUMMARY_TRACKED                                                                                                      \
-    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_SAVE) |                   \
-     IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) |            \
-     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) |                            \
-     IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY) | IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH) |     \
-     IR_OPCODE_BIT(IR_OPCODE_CALL))
+    (IR_OPCODE_BIT(IR_OPCODE_LOCAL) | IR_OPCODE_BIT(IR_OPCODE_STACK_ALLOCATE) | IR_OPCODE_BIT(IR_OPCODE_STACK_RESTORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) |          \
+     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) |                                       \
+     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY) |                                    \
+     IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH))
 
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 

@@ -208,33 +208,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
             BUSTER_TEST(arguments, function != 0);
             if (function)
             {
-                BUSTER_TEST(arguments, !function->local_count || function->local_places != 0);
-                if (input_certified && function->local_places)
-                {
-                    // Reverse canonical owner IDs without changing place
-                    // identities. Sparse discovery must recover row order.
-                    BUSTER_TEST(arguments, !function->local_uses_memory);
-                    for (u32 local = 0; local < function->local_count / 2; local += 1)
-                    {
-                        u32 other = function->local_count - local - 1;
-                        IrValueId place = function->local_places[local];
-                        function->local_places[local] = function->local_places[other];
-                        function->local_places[other] = place;
-                    }
-                    for (u32 local = 0; local < function->debug_local_count; local += 1)
-                    {
-                        IrLocalId* id = &function->debug_locals[local].id;
-                        if (id->value < function->local_count) id->value = function->local_count - id->value - 1;
-                    }
-                    for (u32 row = 0; row < function->instruction_count; row += 1)
-                    {
-                        IrLocalId* local = &function->instructions[row].canonical_local;
-                        if (local->value < function->local_count)
-                        {
-                            local->value = function->local_count - local->value - 1;
-                        }
-                    }
-                }
                 u32 old_instructions = function->instruction_count;
                 u32 old_values = function->value_count;
                 u32 old_locals = ir_test_opcode_count(function, IR_OPCODE_LOCAL);
@@ -300,40 +273,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                     BUSTER_TEST(arguments, module->local_promotion.removed_parameters > 0);
                 }
                 IrLocalPromotionStatistics stats = module->local_promotion;
-                // Clear only the producer summary on an independent lowering
-                // to exercise the old full-row discovery path as an oracle.
-                // Barriers, ordinary calls and joins must keep identical
-                // promotion decisions and published instruction order.
-                CIRLowerResult reference = ir_promotion_lower(arguments->arena, fixture.source, target_native);
-                BUSTER_TEST(arguments, reference.program && !reference.diagnostic_count);
-                if (reference.program && !reference.diagnostic_count)
-                {
-                    IrModule* reference_module = reference.program->modules;
-                    for (u32 fi = 0; fi < reference_module->function_count; fi += 1)
-                    {
-                        reference_module->functions[fi].opcode_summary = 0;
-                    }
-                    IrValidationResult reference_valid = ir_prepare_canonical_module(reference.program, reference_module, input_certified);
-                    BUSTER_TEST(arguments, reference_valid.error == IR_VALIDATION_NONE);
-                    BUSTER_TEST(arguments, memory_compare(&stats, &reference_module->local_promotion, sizeof(stats)));
-                    IrFunction* reference_function = reference_module->functions + function->id.value;
-                    BUSTER_TEST(arguments, function->instruction_count == reference_function->instruction_count);
-                    BUSTER_TEST(arguments, function->value_count == reference_function->value_count);
-                    if (function->instruction_count == reference_function->instruction_count)
-                    {
-                        for (u32 row_index = 0; row_index < function->instruction_count; row_index += 1)
-                        {
-                            IrInstruction* row = function->instructions + row_index;
-                            IrInstruction* expected = reference_function->instructions + row_index;
-                            BUSTER_TEST(arguments, row->opcode == expected->opcode && row->result.value == expected->result.value);
-                            BUSTER_TEST(arguments, row->operand_count == expected->operand_count);
-                            if (row->operand_count == expected->operand_count && row->operand_count)
-                            {
-                                BUSTER_TEST(arguments, memory_compare(row->operands, expected->operands, sizeof(*row->operands) * row->operand_count));
-                            }
-                        }
-                    }
-                }
                 BUSTER_TEST(arguments, stats.instructions_before - stats.instructions_after == stats.promoted_locals + stats.removed_loads + stats.removed_stores);
                 // Each fixture has one lowered function. The declaration-only
                 // callees contribute no sweeps, and promotion preserves blocks.
