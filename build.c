@@ -933,30 +933,356 @@ BUSTER_GLOBAL_LOCAL bool build_compiler_identity_is_gcc(String8 identity)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool build_compiler_query(Arena* arena, SliceString8 arguments, String8* output)
+#define BUILD_COMPILER_QUERY_TIMEOUT_MICROSECONDS (30ull * 1000000ull)
+#define BUILD_COMPILER_QUERY_CAPTURE_BYTES BUSTER_KB(64)
+#define BUILD_COMPILER_QUERY_LOG_BYTES BUSTER_KB(4)
+#define BUILD_COMPILER_QUERY_ATTEMPT_COUNT 2
+
+typedef enum BuildCompilerQueryDisposition
 {
-    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1});
-    bool result = spawn.handle != 0;
-    if (result)
+    BUILD_COMPILER_QUERY_SUCCESS,
+    BUILD_COMPILER_QUERY_LAUNCH_FAILED,
+    BUILD_COMPILER_QUERY_TIMEOUT,
+    BUILD_COMPILER_QUERY_WAIT_FAILED,
+    BUILD_COMPILER_QUERY_CRASH,
+    BUILD_COMPILER_QUERY_NONZERO_EXIT,
+    BUILD_COMPILER_QUERY_CAPTURE_FAILED,
+    BUILD_COMPILER_QUERY_INVALID_OUTPUT,
+    BUILD_COMPILER_QUERY_DISPOSITION_COUNT,
+} BuildCompilerQueryDisposition;
+
+typedef struct BuildCompilerQueryAttempt BuildCompilerQueryAttempt;
+struct BuildCompilerQueryAttempt
+{
+    String8 output;
+    String8 standard_output;
+    String8 standard_error;
+    u64 elapsed_microseconds;
+    u64 timeout_microseconds;
+    u64 observed_output_bytes;
+    u64 captured_output_bytes;
+    u64 observed_error_bytes;
+    u64 captured_error_bytes;
+    u32 platform_status;
+    ProcessResult process_result;
+    BuildCompilerQueryDisposition disposition;
+    bool output_truncated;
+    bool cleanup_failed;
+};
+
+typedef BuildCompilerQueryAttempt BuildCompilerQueryRunner(Arena* arena, SliceString8 arguments, u64 timeout_microseconds, void* context);
+
+BUSTER_GLOBAL_LOCAL String8 build_compiler_query_disposition_name(BuildCompilerQueryDisposition disposition)
+{
+    String8 names[BUILD_COMPILER_QUERY_DISPOSITION_COUNT] = {
+        [BUILD_COMPILER_QUERY_SUCCESS] = S8("success"),
+        [BUILD_COMPILER_QUERY_LAUNCH_FAILED] = S8("launch-failed"),
+        [BUILD_COMPILER_QUERY_TIMEOUT] = S8("timeout"),
+        [BUILD_COMPILER_QUERY_WAIT_FAILED] = S8("wait-failed"),
+        [BUILD_COMPILER_QUERY_CRASH] = S8("crash"),
+        [BUILD_COMPILER_QUERY_NONZERO_EXIT] = S8("nonzero-exit"),
+        [BUILD_COMPILER_QUERY_CAPTURE_FAILED] = S8("capture-failed"),
+        [BUILD_COMPILER_QUERY_INVALID_OUTPUT] = S8("invalid-output"),
+    };
+    String8 result = disposition < BUILD_COMPILER_QUERY_DISPOSITION_COUNT ? names[disposition] : S8("unknown");
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 build_compiler_query_process_result_name(ProcessResult process_result)
+{
+    String8 names[PROCESS_RESULT_COUNT] = {
+        [PROCESS_RESULT_SUCCESS] = S8("success"),
+        [PROCESS_RESULT_FAILED] = S8("failed"),
+        [PROCESS_RESULT_FAILED_TRY_AGAIN] = S8("failed-try-again"),
+        [PROCESS_RESULT_CRASH] = S8("crash"),
+        [PROCESS_RESULT_NOT_EXISTENT] = S8("not-existent"),
+        [PROCESS_RESULT_RUNNING] = S8("running"),
+        [PROCESS_RESULT_UNKNOWN] = S8("unknown"),
+    };
+    String8 result = process_result < PROCESS_RESULT_COUNT ? names[process_result] : S8("unknown");
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query_cleanup_failed(ProcessWaitResult wait)
+{
+    bool result = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BuildCompilerQueryDisposition build_compiler_query_classify(bool launched, ProcessWaitResult wait, String8 output)
+{
+    BuildCompilerQueryDisposition result = BUILD_COMPILER_QUERY_SUCCESS;
+    if (!launched)
     {
-        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30 * 1000000);
-        result = wait.result == PROCESS_RESULT_SUCCESS;
-        if (result)
-        {
-            *output = build_compiler_output_trim(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
-            result = output->length != 0;
-        }
-        else if (wait.streams[STANDARD_STREAM_ERROR].length)
-        {
-            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), wait.streams[STANDARD_STREAM_ERROR]);
-        }
+        result = BUILD_COMPILER_QUERY_LAUNCH_FAILED;
     }
-    if (!result)
+    else if (wait.timed_out)
     {
-        string_print(S8("error: compiler discovery query failed: {[]S8}\n"), arguments);
+        result = BUILD_COMPILER_QUERY_TIMEOUT;
+    }
+    else if (build_compiler_query_cleanup_failed(wait))
+    {
+        result = BUILD_COMPILER_QUERY_WAIT_FAILED;
+    }
+    else if (wait.capture_failed || wait.capture_limit_exceeded || wait.output_truncated)
+    {
+        result = BUILD_COMPILER_QUERY_CAPTURE_FAILED;
+    }
+    else if (wait.result == PROCESS_RESULT_CRASH)
+    {
+        result = BUILD_COMPILER_QUERY_CRASH;
+    }
+    else if (wait.result != PROCESS_RESULT_SUCCESS)
+    {
+        // ProcessResult values are also child exit codes. In particular, an
+        // ordinary compiler exit code 2 appears as FAILED_TRY_AGAIN, so the
+        // native status must win over the enum spelling and must not be retried.
+        result = wait.platform_status ? BUILD_COMPILER_QUERY_NONZERO_EXIT : BUILD_COMPILER_QUERY_WAIT_FAILED;
+    }
+    else if (!output.length)
+    {
+        result = BUILD_COMPILER_QUERY_INVALID_OUTPUT;
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query_retryable(BuildCompilerQueryAttempt attempt)
+{
+    // Only a deadline failure with a proven-empty process tree is safe to
+    // repeat. Launch errors, wait uncertainty, compiler exits and semantic
+    // output failures remain single-attempt, fail-closed results.
+    bool result = attempt.disposition == BUILD_COMPILER_QUERY_TIMEOUT && !attempt.cleanup_failed;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BuildCompilerQueryAttempt build_compiler_query_process(Arena* arena, SliceString8 arguments,
+                                                                            u64 timeout_microseconds, void* context)
+{
+    BUSTER_UNUSED(context);
+    u64 start = os_now_microseconds();
+    ProcessSpawnOptions spawn_options = {
+        .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+        .use_process_environment = 1,
+        // GCC can launch cc1. A timed-out probe may be retried only after the
+        // complete first process tree has been terminated and observed empty.
+        .new_process_group = 1,
+        .capture_limits =
+            {
+                .per_stream =
+                    {
+                        [STANDARD_STREAM_OUTPUT] = BUILD_COMPILER_QUERY_CAPTURE_BYTES,
+                        [STANDARD_STREAM_ERROR] = BUILD_COMPILER_QUERY_CAPTURE_BYTES,
+                    },
+                .total = 2 * BUILD_COMPILER_QUERY_CAPTURE_BYTES,
+            },
+        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
+    };
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0}, spawn_options);
+    bool launched = spawn.handle != 0;
+    ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
+    if (launched)
+    {
+        wait = os_process_wait_deadline(arena, spawn, timeout_microseconds);
+    }
+
+    String8 standard_output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+    String8 output = build_compiler_output_trim(standard_output);
+    BuildCompilerQueryAttempt result = {
+        .output = output,
+        .standard_output = standard_output,
+        .standard_error = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]),
+        .elapsed_microseconds = os_now_microseconds() - start,
+        .timeout_microseconds = timeout_microseconds,
+        .observed_output_bytes = wait.observed_bytes[STANDARD_STREAM_OUTPUT],
+        .captured_output_bytes = wait.captured_bytes[STANDARD_STREAM_OUTPUT],
+        .observed_error_bytes = wait.observed_bytes[STANDARD_STREAM_ERROR],
+        .captured_error_bytes = wait.captured_bytes[STANDARD_STREAM_ERROR],
+        .platform_status = wait.platform_status,
+        .process_result = wait.result,
+        .disposition = build_compiler_query_classify(launched, wait, output),
+        .output_truncated = wait.output_truncated,
+        .cleanup_failed = build_compiler_query_cleanup_failed(wait),
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void build_compiler_query_log_stream(String8 stream_name, u32 attempt, String8 stream,
+                                                          u64 observed_bytes)
+{
+    if (stream.length)
+    {
+        u64 logged_length = stream.length < BUILD_COMPILER_QUERY_LOG_BYTES ? stream.length : BUILD_COMPILER_QUERY_LOG_BYTES;
+        String8 logged = string_slice(stream, 0, logged_length);
+        bool truncated = observed_bytes > logged_length || stream.length > logged_length;
+        string_print(S8("COMPILER_DISCOVERY_QUERY_{S8} attempt={u32} captured={u64} observed={u64} log_truncated={u32}\n{S8}\n"),
+                     stream_name, attempt, stream.length, observed_bytes, (u32)truncated, logged);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void build_compiler_query_log_attempt(SliceString8 arguments, u32 attempt,
+                                                           BuildCompilerQueryAttempt query)
+{
+    bool retryable = build_compiler_query_retryable(query);
+    string_print(S8("COMPILER_DISCOVERY_QUERY attempt={u32}/{u32} result={S8} retryable={u32} elapsed_us={u64} "
+                    "deadline_us={u64} process_result={S8} platform_status={u32} stdout_observed={u64} "
+                    "stdout_captured={u64} stderr_observed={u64} stderr_captured={u64} output_truncated={u32} "
+                    "cleanup_failed={u32} argv={[]S8}\n"),
+                 attempt, (u32)BUILD_COMPILER_QUERY_ATTEMPT_COUNT, build_compiler_query_disposition_name(query.disposition),
+                 (u32)retryable, query.elapsed_microseconds, query.timeout_microseconds,
+                 build_compiler_query_process_result_name(query.process_result), query.platform_status,
+                 query.observed_output_bytes, query.captured_output_bytes, query.observed_error_bytes,
+                 query.captured_error_bytes, (u32)query.output_truncated, (u32)query.cleanup_failed, arguments);
+    if (query.disposition != BUILD_COMPILER_QUERY_SUCCESS || query.standard_error.length)
+    {
+        build_compiler_query_log_stream(S8("STDOUT"), attempt, query.standard_output, query.observed_output_bytes);
+        build_compiler_query_log_stream(S8("STDERR"), attempt, query.standard_error, query.observed_error_bytes);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query_with_runner(Arena* arena, SliceString8 arguments, String8* output,
+                                                           BuildCompilerQueryRunner* runner, void* context,
+                                                           bool emit_diagnostics)
+{
+    *output = (String8){0};
+    BuildCompilerQueryDisposition final_disposition = BUILD_COMPILER_QUERY_LAUNCH_FAILED;
+    for (u32 attempt = 1; attempt <= BUILD_COMPILER_QUERY_ATTEMPT_COUNT; attempt += 1)
+    {
+        BuildCompilerQueryAttempt query = runner(arena, arguments, BUILD_COMPILER_QUERY_TIMEOUT_MICROSECONDS, context);
+        final_disposition = query.disposition;
+        if (emit_diagnostics)
+        {
+            build_compiler_query_log_attempt(arguments, attempt, query);
+        }
+        if (query.disposition == BUILD_COMPILER_QUERY_SUCCESS)
+        {
+            *output = query.output;
+            return true;
+        }
+        if (!build_compiler_query_retryable(query))
+        {
+            break;
+        }
+    }
+    if (emit_diagnostics)
+    {
+        string_print(S8("error: compiler discovery query failed result={S8}: {[]S8}\n"),
+                     build_compiler_query_disposition_name(final_disposition), arguments);
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query(Arena* arena, SliceString8 arguments, String8* output)
+{
+    bool result = build_compiler_query_with_runner(arena, arguments, output, build_compiler_query_process, 0, true);
+    return result;
+}
+
+typedef struct BuildCompilerQueryTestSequence BuildCompilerQueryTestSequence;
+struct BuildCompilerQueryTestSequence
+{
+    BuildCompilerQueryAttempt attempts[BUILD_COMPILER_QUERY_ATTEMPT_COUNT];
+    u32 count;
+    u32 calls;
+};
+
+BUSTER_GLOBAL_LOCAL BuildCompilerQueryAttempt build_compiler_query_test_runner(Arena* arena, SliceString8 arguments,
+                                                                                u64 timeout_microseconds, void* context)
+{
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(arguments);
+    BuildCompilerQueryTestSequence* sequence = context;
+    BuildCompilerQueryAttempt result = {.timeout_microseconds = timeout_microseconds,
+                                        .process_result = PROCESS_RESULT_UNKNOWN,
+                                        .disposition = BUILD_COMPILER_QUERY_WAIT_FAILED};
+    if (sequence->calls < sequence->count)
+    {
+        result = sequence->attempts[sequence->calls];
+        result.timeout_microseconds = timeout_microseconds;
+    }
+    sequence->calls += 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query_policy_self_test(Arena* arena)
+{
+    ProcessWaitResult success_wait = {.result = PROCESS_RESULT_SUCCESS};
+    ProcessWaitResult timeout_wait = {.result = PROCESS_RESULT_FAILED, .timed_out = 1};
+    ProcessWaitResult cleanup_wait = {.result = PROCESS_RESULT_FAILED, .timed_out = 1, .process_tree_cleanup_failed = 1};
+    ProcessWaitResult capture_wait = {.result = PROCESS_RESULT_SUCCESS, .capture_limit_exceeded = 1, .output_truncated = 1};
+    ProcessWaitResult crash_wait = {.result = PROCESS_RESULT_CRASH, .platform_status = 0xc0000005u};
+    ProcessWaitResult exit_wait = {.result = PROCESS_RESULT_FAILED_TRY_AGAIN, .platform_status = 2};
+    ProcessWaitResult wait_failed = {.result = PROCESS_RESULT_FAILED};
+    bool success = build_compiler_query_classify(false, (ProcessWaitResult){0}, (String8){0}) == BUILD_COMPILER_QUERY_LAUNCH_FAILED &&
+                   build_compiler_query_classify(true, timeout_wait, (String8){0}) == BUILD_COMPILER_QUERY_TIMEOUT &&
+                   build_compiler_query_classify(true, cleanup_wait, (String8){0}) == BUILD_COMPILER_QUERY_TIMEOUT &&
+                   build_compiler_query_classify(true, capture_wait, S8("identity")) == BUILD_COMPILER_QUERY_CAPTURE_FAILED &&
+                   build_compiler_query_classify(true, crash_wait, (String8){0}) == BUILD_COMPILER_QUERY_CRASH &&
+                   build_compiler_query_classify(true, exit_wait, (String8){0}) == BUILD_COMPILER_QUERY_NONZERO_EXIT &&
+                   build_compiler_query_classify(true, wait_failed, (String8){0}) == BUILD_COMPILER_QUERY_WAIT_FAILED &&
+                   build_compiler_query_classify(true, success_wait, (String8){0}) == BUILD_COMPILER_QUERY_INVALID_OUTPUT &&
+                   build_compiler_query_classify(true, success_wait, S8("identity")) == BUILD_COMPILER_QUERY_SUCCESS;
+
+    String8 timeout_tool = get_resolved_path(arena, &cmake_path, S8("cmake"));
+    String8 timeout_arguments_array[] = {timeout_tool, S8("-E"), S8("sleep"), S8("1")};
+    BuildCompilerQueryAttempt timeout_attempt = build_compiler_query_process(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(timeout_arguments_array), 10 * 1000, 0);
+    success = timeout_tool.length && timeout_attempt.disposition == BUILD_COMPILER_QUERY_TIMEOUT &&
+              build_compiler_query_retryable(timeout_attempt) && !timeout_attempt.cleanup_failed && success;
+
+    String8 arguments_array[] = {S8("compiler-query-fixture")};
+    SliceString8 arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments_array);
+    String8 output = {0};
+    BuildCompilerQueryTestSequence sequence = {
+        .attempts = {
+            {.process_result = PROCESS_RESULT_FAILED, .disposition = BUILD_COMPILER_QUERY_TIMEOUT},
+            {.output = S8("recovered"), .process_result = PROCESS_RESULT_SUCCESS, .disposition = BUILD_COMPILER_QUERY_SUCCESS},
+        },
+        .count = 2,
+    };
+    success = build_compiler_query_with_runner(arena, arguments, &output, build_compiler_query_test_runner, &sequence, false) &&
+              sequence.calls == 2 && string_equal(output, S8("recovered")) && success;
+
+    sequence = (BuildCompilerQueryTestSequence){
+        .attempts = {
+            {.process_result = PROCESS_RESULT_FAILED, .disposition = BUILD_COMPILER_QUERY_TIMEOUT},
+            {.process_result = PROCESS_RESULT_FAILED, .disposition = BUILD_COMPILER_QUERY_TIMEOUT},
+        },
+        .count = 2,
+    };
+    success = !build_compiler_query_with_runner(arena, arguments, &output, build_compiler_query_test_runner, &sequence, false) &&
+              sequence.calls == 2 && success;
+
+    BuildCompilerQueryDisposition no_retry_dispositions[] = {
+        BUILD_COMPILER_QUERY_LAUNCH_FAILED,
+        BUILD_COMPILER_QUERY_WAIT_FAILED,
+        BUILD_COMPILER_QUERY_CRASH,
+        BUILD_COMPILER_QUERY_NONZERO_EXIT,
+        BUILD_COMPILER_QUERY_CAPTURE_FAILED,
+        BUILD_COMPILER_QUERY_INVALID_OUTPUT,
+    };
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(no_retry_dispositions); i += 1)
+    {
+        sequence = (BuildCompilerQueryTestSequence){
+            .attempts = {
+                {.process_result = PROCESS_RESULT_FAILED, .disposition = no_retry_dispositions[i]},
+                {.output = S8("must-not-run"), .process_result = PROCESS_RESULT_SUCCESS, .disposition = BUILD_COMPILER_QUERY_SUCCESS},
+            },
+            .count = 2,
+        };
+        success = !build_compiler_query_with_runner(arena, arguments, &output, build_compiler_query_test_runner, &sequence, false) &&
+                  sequence.calls == 1 && success;
+    }
+
+    sequence = (BuildCompilerQueryTestSequence){
+        .attempts = {
+            {.process_result = PROCESS_RESULT_FAILED, .disposition = BUILD_COMPILER_QUERY_TIMEOUT, .cleanup_failed = true},
+            {.output = S8("must-not-run"), .process_result = PROCESS_RESULT_SUCCESS, .disposition = BUILD_COMPILER_QUERY_SUCCESS},
+        },
+        .count = 2,
+    };
+    success = !build_compiler_query_with_runner(arena, arguments, &output, build_compiler_query_test_runner, &sequence, false) &&
+              sequence.calls == 1 && success;
+    return success;
 }
 
 BUSTER_GLOBAL_LOCAL bool build_compiler_inspect(Arena* arena, String8 executable, BuildCompilerIdentity* info)
@@ -1290,7 +1616,8 @@ BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, S
 
 BUSTER_GLOBAL_LOCAL ProcessResult build_compiler_discovery_self_test(Arena* arena)
 {
-    bool success = build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_GNU\n")) &&
+    bool success = build_compiler_query_policy_self_test(arena) &&
+                   build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_GNU\n")) &&
                    build_compiler_identity_is_gcc(S8(" \r\nBUSTER_BUILD_COMPILER_GNU\r\n")) &&
                    !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_CLANG\n")) &&
                    !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_UNKNOWN\n")) &&
