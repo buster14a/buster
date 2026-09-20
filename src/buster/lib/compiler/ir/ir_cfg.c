@@ -208,6 +208,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunc
         cfg->allocated_bytes += operands_contiguous ? 0 : cfg->operand_count * sizeof(*operands);
         cfg->allocated_bytes += targets_contiguous ? 0 : cfg->target_count * sizeof(*targets);
         cfg->allocated_bytes += immediates_contiguous ? 0 : cfg->immediate_count * sizeof(*immediates);
+        if (!operands_contiguous || !targets_contiguous || !immediates_contiguous)
         {
             u64 operand_cursor = 0;
             u64 target_cursor = 0;
@@ -215,9 +216,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_pool_operands(Arena* arena, IrFunc
             for (u32 index = 0; index < function->instruction_count; index += 1)
             {
                 IrInstruction* row = function->instructions + index;
-                // Ownership and pool validation have both succeeded. Retire
-                // builder links alongside the operand-pointer publication.
-                row->next = IR_INSTRUCTION_ID_INVALID;
                 if (!operands_contiguous && row->operand_count)
                 {
                     memcpy(operands + operand_cursor, row->operands, sizeof(*operands) * row->operand_count);

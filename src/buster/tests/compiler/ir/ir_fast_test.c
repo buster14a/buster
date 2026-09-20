@@ -48,7 +48,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_identity_tests(UnitTestArgumen
                 }
                 // Publication proves ownership itself even when preparation
                 // receives a producer-certified module.
-                IrValidationResult prepared = ir_prepare_canonical_module(program, module, variant == 1);
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, variant == 1 || variant == 3);
                 BUSTER_TEST(arguments, prepared.error == (variant == 3 ? IR_VALIDATION_INSTRUCTION_OWNERSHIP : IR_VALIDATION_NONE));
                 if (variant == 3)
                 {
@@ -63,7 +63,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_identity_tests(UnitTestArgumen
                     {
                         IrInstruction* row = function->instructions + index;
                         BUSTER_TEST(arguments, row->opcode == original[index].opcode && row->result.value == original[index].result.value);
-                        BUSTER_TEST(arguments, row->next.value == IR_ID_UNDERLYING_INVALID);
+                        // Dead construction metadata must not influence a
+                        // published walk or the strict canonical validator.
+                        row->next.value = UINT32_MAX - 1;
+                        IrInstructionId published_next = ir_block_next_instruction(function, block, (IrInstructionId){.value = index});
+                        BUSTER_TEST(arguments, published_next.value == (index + 1 < count ? index + 1 : UINT32_MAX));
                     }
                     BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
                     ir_function_invalidate_cfg(function);
