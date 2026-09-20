@@ -8,13 +8,25 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def observed_payload(line: str) -> str:
+    """Return the command owned by the differential gate, unwrapping telemetry."""
+    command = " ".join(line.strip().split())
+    observer = '"$BUSTER_CI_PYTHON" tools/ci_native_observation.py run '
+    if command.startswith(observer):
+        separator = " -- "
+        if separator not in command:
+            raise AssertionError("native observation wrapper has no command separator")
+        command = command.split(separator, 1)[1]
+    return command
+
+
 class DifferentialCIPolicyTests(unittest.TestCase):
     def test_native_full_corpus_requests_four_bounded_workers(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         native = workflow.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
         step = native.split("      - name: Native configuration differential matrix", 1)[1]
         step = step.split("\n      - name:", 1)[0]
-        commands = [line.strip() for line in step.splitlines()
+        commands = [observed_payload(line) for line in step.splitlines()
                     if '"$driver" test_differential' in line]
 
         self.assertEqual(commands, [
