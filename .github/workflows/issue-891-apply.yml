@@ -48,6 +48,14 @@ jobs:
           if old not in text:
               raise SystemExit("expected workflow assertion was not found")
           path.write_text(text.replace(old, new), encoding="utf-8")
+
+          workflow_path = Path(".github/workflows/ci.yml")
+          workflow = workflow_path.read_text(encoding="utf-8")
+          old_root = '      BUSTER_CI_OBSERVATION_ROOT: ${{ runner.temp }}/buster-ci/native-observation'
+          new_root = '      BUSTER_CI_OBSERVATION_ROOT: ${{ github.workspace }}/.ci-native-observation'
+          if old_root not in workflow:
+              raise SystemExit("expected native observation root was not found")
+          workflow_path.write_text(workflow.replace(old_root, new_root), encoding="utf-8")
           PYTHON
           rm -f tools/.issue891-patch-* .github/workflows/issue-891-apply.yml
 
