@@ -1,0 +1,5 @@
+Current-main revision comparison, benchpress CPU 2, trusted Clang binaries.
+Native standard full profile: six workloads, FAST, 2 warmups, 2 rounds x 40 pairs per candidate. Four candidate comparisons plus A/A. All samples retained. Identical artifacts required.
+Frozen current-main unity: A/A then 853,854,856,857, 2 warmups, 2 rounds x 20 pairs; adjacent two-pair AB/BA blocks, seed791. Every output and compiler summary must match.
+Native analysis: median of 20 AB/BA block geometric mean ratios per round. Two-sided order-statistic interval uses third and eighteenth sorted block ratios; per-row failure bound 2*(1+20+190)/2^20. Across60 workload-round rows, union-bound coverage>=97.585%. Unity uses all10 blocks' min/max, family coverage>=98.046875% across10rows. Combined coverage>=95.63% assuming independent blocks. No claim that this corrects host drift.
+Positive changes are slower. Improvement requires interval below zero in both rounds on a useful compile workload; identify every other workload, regression and inconclusive result. No proxy-only acceptance and no rerun-until-green.

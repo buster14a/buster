@@ -1,0 +1,4 @@
+IR_FAST functions=5017 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=2141840 retained_bound=16224572 compact_ns=0 instructions_before=1377101 instructions_after=1221495
+IR_LOCAL_PROMOTION candidates=28381 promoted=193 loads_removed=592 stores_removed=350 parameters_inserted=1374 parameters_removed=1236 uninitialized=0 barriers=8 instructions_before=1378236 instructions_after=1377101 values_before=1186991 values_after=1186344
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=14 block_visits=3824 parameter_visits=2538 incoming_visits=5795
+CODEGEN cpu=znver5 vector_bits=512 functions=5017 instructions=1221495 values=1030738 stack_value_bytes=4969912 stack_frame_bytes=4969912 max_stack_frame_bytes=670328 code_bytes=18366995 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=104 allocator=fast fallback_functions=0

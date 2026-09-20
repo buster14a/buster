@@ -775,3 +775,10 @@ reserved X16/X17 carry the count and data. CBNZ preserves flags. Pointer operand
 are captured before either cursor is overwritten, and the encoder reserves a
 constant 128-byte capacity for this form. Smaller copies retain inline accesses.
 The same memory effects and source/destination ownership apply in every allocator.
+
+- The x86 selector keeps store counts and next-store state in
+  `MachineX64LocalUse`, indexed only for candidate local places. The hot
+  16-byte `MachineX64ValueUse` carries a one-based local-use index, with zero
+  for nonlocals/disqualified places. Sparse `local_places` sizing and the
+  summary-unknown row fallback feed the same state. Store-free locals stay
+  in frame slots; resetting store ordinals visits only the sparse local rows.
