@@ -28,28 +28,56 @@ jobs:
           git switch --force-create pr824-work refs/remotes/origin/pr824
           echo "original=$(git rev-parse HEAD)"
           echo "main=$(git rev-parse refs/remotes/origin/main)"
+
           set +e
           GIT_EDITOR=true git rebase refs/remotes/origin/main
           status=$?
           set -e
-          if [ "$status" -ne 0 ]; then
-            echo "::group::rebase state"
-            if [ -f .git/rebase-merge/stopped-sha ]; then
-              echo "stopped_sha=$(cat .git/rebase-merge/stopped-sha)"
-            fi
+          while [ "$status" -ne 0 ]; do
+            stopped="$(cat .git/rebase-merge/stopped-sha 2>/dev/null || true)"
+            echo "::group::rebase stop $stopped"
             if git rev-parse --verify REBASE_HEAD >/dev/null 2>&1; then
               git show --no-patch --format=fuller REBASE_HEAD
             fi
             git status --short
             git diff --name-only --diff-filter=U
-            echo "::endgroup::"
             while IFS= read -r path; do
               [ -n "$path" ] || continue
-              echo "::group::conflict $path"
+              echo "--- conflict: $path"
               git diff --cc -- "$path" || true
-              echo "::endgroup::"
             done < <(git diff --name-only --diff-filter=U)
-            exit "$status"
-          fi
+            echo "::endgroup::"
+
+            if [ "$stopped" = "73d38dca6a88cd45ddb3c8f988baa284ad179caf" ]; then
+              expected="$(git diff --name-only --diff-filter=U | sort)"
+              wanted="$(printf '%s\n' \
+                tools/bench_service/profiles/native-retirement-performance-v1.blocked \
+                tools/bench_service/queue.c \
+                tools/native_retirement_contract.py \
+                tools/native_retirement_materializer.py \
+                tools/native_retirement_performance_binding.py | sort)"
+              if [ "$expected" != "$wanted" ]; then
+                echo "unexpected conflict set" >&2
+                exit 1
+              fi
+              # The support declaration auto-merged, so neither historical hash
+              # set is final. Keep current-main bindings temporarily and refresh
+              # every derived hash after the complete rebase.
+              while IFS= read -r path; do
+                git checkout --ours -- "$path"
+                git add "$path"
+              done <<< "$wanted"
+            else
+              echo "unhandled rebase stop: $stopped" >&2
+              exit 1
+            fi
+
+            set +e
+            GIT_EDITOR=true git rebase --continue
+            status=$?
+            set -e
+          done
+
           git log --oneline --decorate --max-count=30
-          git push origin HEAD:refs/heads/recovery/824-rebased-4b2041c4
+          git diff --check refs/remotes/origin/main...HEAD
+          git push --force origin HEAD:refs/heads/recovery/824-rebased-4b2041c4
