@@ -9,6 +9,8 @@
 // sources, extras and builder side data. Label-bearing functions are skipped.
 // ir_prepare_canonical_module owns the input/output validation boundaries;
 // a producer certificate never certifies rows mutated by this pass.
+// ir_promote_function discovers live local places and bypasses value/event
+// scratch for functions whose locals all have ineligible types.
 
 #define IR_PROMOTE_NONE UINT32_MAX
 
@@ -703,6 +705,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     bool barrier = function->label_metadata_count != 0;
     bool summary_known = (function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) != 0;
     bool sparse_locals = summary_known && function->local_places;
+    bool has_eligible_type = !sparse_locals;
     if (sparse_locals && ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_LOCAL)))
     {
         for (u32 local = 0; local < function->local_count; local += 1)
@@ -714,8 +717,13 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                 if (definition.value < function->instruction_count)
                 {
                     IrInstruction* row = function->instructions + definition.value;
-                    local_count += row->opcode == IR_OPCODE_LOCAL && row->result.value == place.value &&
-                                   row->canonical_local.value == local;
+                    if (row->opcode == IR_OPCODE_LOCAL && row->result.value == place.value && row->canonical_local.value == local)
+                    {
+                        local_count += 1;
+                        IrValue* value = function->values + place.value;
+                        has_eligible_type |= !has_eligible_type && value->category == IR_VALUE_PLACE && !value->is_volatile &&
+                                             !row->volatile_access && row->operand_count == 0 && ir_local_type_promotable(program, row->canonical_type);
+                    }
                 }
             }
         }
@@ -737,11 +745,27 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                       (row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(program, row));
         }
     }
+    if (local_count && !barrier && !has_eligible_type)
+    {
+        // Aggregate-only/volatile-only locals cannot enter promotion. Preserve
+        // the conditional-call barrier statistics without allocating value maps
+        // or collecting operand events that no candidate could consume.
+        bool inspect_calls = ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_CALL));
+        for (u32 index = 0; inspect_calls && index < function->instruction_count && !barrier; index += 1)
+        {
+            IrInstruction* row = function->instructions + index;
+            barrier = row->opcode == IR_OPCODE_CALL && ir_local_promotion_call_barrier(program, row);
+        }
+        if (!barrier)
+        {
+            statistics->candidate_locals += local_count;
+        }
+    }
     if (barrier)
     {
         statistics->barrier_functions += 1;
     }
-    if (local_count && !barrier)
+    if (local_count && !barrier && has_eligible_type)
     {
         TemporalArena scratch = scratch_begin(&program->arena, 1);
         Arena* arena = scratch.arena;

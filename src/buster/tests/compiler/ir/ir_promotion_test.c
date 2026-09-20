@@ -176,6 +176,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
         {S8("int test(int n,int c){int v=1;if(c)goto b;a:v+=2;if(--n>0)goto b;return v;b:v+=3;if(--n>0)goto a;return v;}"), true, true, false, false, false},
         {S8("void side(int*);int test(void){int v=3;side(&v);return v;}"), false, false, false, false, false},
         {S8("int test(void){volatile int v=3;v=4;return v;}"), false, false, false, false, false},
+        {S8("struct A{int x[4];};int test(void){struct A a={{3,4,5,6}};return a.x[2];}"), false, false, false, false, false},
+        {S8("struct A{int x[4];};void side(struct A*);int test(void){struct A a={{3,4,5,6}};side(&a);return a.x[2];}"), false, false, false, false, false},
+        {S8("struct A{int x[4];};int setjmp(void*);int test(void){struct A a={{3,4,5,6}};setjmp(&a);return a.x[2];}"), false, false, false, true, false},
         {S8("int test(void){_Atomic int v=3;v+=4;return v;}"), false, false, false, false, false},
         {S8("int test(int c){int v;if(c)v=1;return v;}"), false, false, true, false, false},
         {S8("int test(void){int v;int x=v;v=2;return x;}"), false, false, true, false, false},
@@ -205,6 +208,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
             BUSTER_TEST(arguments, function != 0);
             if (function)
             {
+                BUSTER_TEST(arguments, !function->local_count || function->local_places != 0);
                 u32 old_instructions = function->instruction_count;
                 u32 old_values = function->value_count;
                 u32 old_locals = ir_test_opcode_count(function, IR_OPCODE_LOCAL);

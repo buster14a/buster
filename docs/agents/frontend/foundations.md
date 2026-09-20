@@ -648,3 +648,16 @@ helper is introduced. Small or qualified aggregates retain typed construction.
 The large-frame fixture checks zeroed nested storage, explicit values, copies
 and odd byte tails under both frontend lowering modes. This prevents initializer
 expansion from exceeding Windows ARM64's unwind function-size limit.
+
+- Sparse shared-promotion discovery checks whether any live local has an
+  eligible scalar/vector type before allocating value maps and collecting
+  operand events. Functions containing only ineligible locals retain the
+  same candidate/barrier statistics; conditional calls still receive their
+  returns-twice/indirect-call check. The summary-unknown row path remains the
+  differential oracle in `ir_promotion_tests`.
+
+- C lowering records every named and temporary local in the canonical
+  `IrFunction.local_places` projection at creation. The frontend-private
+  capacity grows monotonically; unused capacity is never read. Frontend SSA
+  and canonical compaction remap or invalidate its place IDs before later
+  promotion and selection consume it. No frontend entity IDs enter the map.

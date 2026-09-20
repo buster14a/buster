@@ -341,7 +341,7 @@ struct OsFileStagingResult
 // os_file_open.
 BUSTER_F_DECL OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions);
 // Renames `path` over `destination` on one filesystem: rename(2), or
-// MoveFileExW(MOVEFILE_REPLACE_EXISTING) without a copy fallback. An existing
+// FileRenameInfoEx with replace/POSIX semantics, without a copy fallback. An existing
 // destination entry, including a link, is replaced, never followed or deleted
 // first. The namespace change is atomic where the filesystem provides it;
 // nothing is flushed, so it is not a crash-durability promise.
