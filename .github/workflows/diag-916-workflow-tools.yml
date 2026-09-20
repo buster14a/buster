@@ -1,25 +1,25 @@
-name: Diagnose PR 916 workflow tools on ARM
+name: Validate PR 916 differential policy repair
 
 on:
   push:
     branches: [audit/916-workflow-tools]
 
 concurrency:
-  group: diagnose-pr-916-workflow-tools-arm
+  group: validate-pr-916-differential-policy
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  diagnose:
+  validate:
     runs-on: ubuntu-26.04-arm
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Checkout exact PR merge ref
+      - name: Checkout exact repaired candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: refs/pull/916/merge
+          ref: audit/916-differential-policy-fix
           persist-credentials: false
       - name: CI tools
         run: python3 tests/ci_tools_test.py -v
@@ -43,3 +43,12 @@ jobs:
         run: python3 tools/ci_configure_evidence_test.py -v
       - name: Native observation
         run: python3 tools/ci_native_observation_test.py -v
+      - name: Action references
+        run: |
+          python3 tools/check_action_pins.py
+          python3 tests/action_pins_test.py
+      - name: Workflow lint
+        env:
+          GOTOOLCHAIN: local
+          GOSUMDB: sum.golang.org
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml
