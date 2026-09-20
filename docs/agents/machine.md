@@ -313,7 +313,10 @@
   arguments use one private, naturally aligned copy. A value wider than the
   model's register width exposes one pointer per register-sized subobject: the
   leading references occupy the remaining argument GPRs and the tail continues
-  in stack eightbytes. Callees capture every pointer before copying exact pieces
+  in stack eightbytes. Scalarized padded-vector lanes and split references are
+  materialized in the same preparation walk before fixed argument registers
+  are published; later address/load temporaries must not overwrite earlier
+  arguments. Callees capture every pointer before copying exact pieces
   into their owned frame image, so exhaustion and a register/stack straddle
   preserve both payload and by-value isolation. The part-width byte fits
   existing padding in the 40-byte signature shape, with no additional
