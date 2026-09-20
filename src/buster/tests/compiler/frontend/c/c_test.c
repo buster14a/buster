@@ -9754,6 +9754,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestAr
     return result;
 }
 
+// Member names live in their aggregate's namespace. They must not bind to
+// an unrelated ordinary function during the named-call arity prepass; the
+// type-driven member-call path remains responsible for their diagnostics.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_member_call_arity_ownership(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 message;
+    } cases[] = {
+        {S8("int cb(void); struct S { int (*cb)(int); }; int g(struct S value) { return value.cb(1); }"), {0}},
+        {S8("int cb(void); struct S { int (*cb)(int); }; int g(struct S *value) { return value->cb(1); }"), {0}},
+        {S8("int cb(void); struct S { int (*cb)(int); }; int g(struct S value) { return value.cb(); }"),
+         S8("in function 'g': too few arguments in the call to '<function pointer>': it declares 1 parameter")},
+        {S8("int cb(void); struct S { int (*cb)(int); }; int g(struct S *value) { return value->cb(); }"),
+         S8("in function 'g': too few arguments in the call to '<function pointer>': it declares 1 parameter")},
+        {S8("int cb(void); struct S { int (*cb)(int); }; int g(struct S value) { return sizeof(value.cb(1)); }"), {0}},
+        {S8("int cb(void); struct S { int (*cb)(int); }; int g(struct S *value) { return sizeof(value->cb(1)); }"), {0}},
+        {S8("int cb(void); struct S { int (*cb)(int); }; int g(struct S value) { return sizeof(value.cb()); }"),
+         S8("in function 'g': too few arguments in the call to '<function pointer>': it declares 1 parameter")},
+        {S8("int cb(void); struct S { int (*cb)(int); }; int g(struct S *value) { return sizeof(value->cb()); }"),
+         S8("in function 'g': too few arguments in the call to '<function pointer>': it declares 1 parameter")},
+    };
+    Target targets[] = {
+        target_native,
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                        (CPreprocessOptions){
+                                                            .target = targets[target_index],
+                                                            .data_layout = target_data_layout(targets[target_index]),
+                                                            .dialect = C_PREPROCESS_DIALECT_C23,
+                                                        });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+                BUSTER_TEST(arguments, analysis.diagnostic_count == (cases[case_index].message.length ? 1u : 0u));
+                if (cases[case_index].message.length && analysis.diagnostic_count == 1)
+                {
+                    BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[case_index].message);
+                }
+                scratch_end(temporary);
+            }
+            for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[case_index].source,
+                                                        (CPreprocessOptions){
+                                                            .target = targets[target_index],
+                                                            .data_layout = target_data_layout(targets[target_index]),
+                                                            .dialect = C_PREPROCESS_DIALECT_C23,
+                                                        });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CIRLowerResult checked = c_analyze_with_options(temporary.arena, S8("member-call-arity.c"), tokens, syntax,
+                                                                targets[target_index],
+                                                                (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                BUSTER_TEST(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+                BUSTER_TEST(arguments, checked.diagnostic_count == (cases[case_index].message.length ? 1u : 0u));
+                if (cases[case_index].message.length)
+                {
+                    if (BUSTER_REQUIRE(arguments, checked.diagnostic_count == 1))
+                    {
+                        CDiagnostic diagnostic = checked.diagnostics[0];
+                        BUSTER_STRING_TEST(arguments, diagnostic.message, cases[case_index].message);
+                        BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS);
+                        BUSTER_TEST(arguments, diagnostic.severity == C_DIAGNOSTIC_ERROR);
+                    }
+                }
+                else
+                {
+                    BUSTER_TEST(arguments, checked.program != 0 && checked.canonical_ir_certified);
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 /* Function-body sizeof over an expression operand must fold through the resolved
    operand types with the usual arithmetic conversions, never through the
    type-prediction guess: narrow operands promote to int, shifts keep the promoted
@@ -19282,6 +19369,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
+    BUSTER_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
     BUSTER_TEST_FIXTURE(arguments, c_test_direct_ssa);

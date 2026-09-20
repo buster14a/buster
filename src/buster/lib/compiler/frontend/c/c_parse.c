@@ -2357,7 +2357,10 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
     for (u32 index = start; index + 1 < end && !result.message.length; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if ((skipped && skipped[index - start]) || token.kind != C_TOKEN_IDENTIFIER ||
+        bool is_member_call =
+            index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                      c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+        if ((skipped && skipped[index - start]) || token.kind != C_TOKEN_IDENTIFIER || is_member_call ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             continue;
