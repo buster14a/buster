@@ -21,26 +21,24 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Inspect Win64 padded vector contracts
+      - name: Inspect issue 913 fixture and Win64 lowering
         shell: bash
         run: |
           set -euo pipefail
-          driver=src/buster/tests/compiler/driver/driver_test.c
-          echo '=== all fixture references ==='
-          git grep -n -E 'padded.*(one|vec3)|vec3.*padded|vector_size *\( *(1|2|3|5|6|7)|non.power.*vector|wide_vector_boundaries|c_abi' -- src tests 2>/dev/null | head -n 1000 || true
-          echo '=== Windows mixed padded fixture region ==='
-          sed -n '12720,13280p' "$driver"
-          echo '=== ABI classifier ==='
-          sed -n '3120,3235p' src/buster/lib/compiler/ir/ir.c
-          sed -n '3500,3715p' src/buster/lib/compiler/ir/ir.c
-          echo '=== canonical Win64 vector helpers ==='
-          sed -n '3750,4275p' src/buster/lib/compiler/codegen/codegen.c
-          echo '=== canonical call placement ==='
-          sed -n '4620,4840p' src/buster/lib/compiler/codegen/codegen.c
-          echo '=== canonical entry placement ==='
-          sed -n '13280,13740p' src/buster/lib/compiler/codegen/codegen.c
-          echo '=== MIR Win64 padded-vector helpers and placement ==='
-          sed -n '520,820p' src/buster/lib/compiler/codegen/machine_x86_64.c
-          sed -n '1880,2050p' src/buster/lib/compiler/codegen/machine_x86_64.c
-          echo '=== relevant recent history ==='
-          git log --oneline --all -- src/buster/lib/compiler/ir/ir.c src/buster/lib/compiler/codegen/codegen.c src/buster/lib/compiler/codegen/machine_x86_64.c "$driver" | grep -i -E 'padded|vector|win64' | head -n 100 || true
+          echo '=== generated padded-vector source ==='
+          sed -n '2110,2215p' src/buster/tests/compiler/driver/driver_test.c
+          echo '=== native padded-vector matrix ==='
+          sed -n '2430,2815p' src/buster/tests/compiler/driver/driver_test.c
+          echo '=== Wine padded-vector matrix ==='
+          sed -n '13470,13635p' src/buster/tests/compiler/driver/driver_test.c
+          echo '=== Win64 IR classification ==='
+          sed -n '3540,3655p' src/buster/lib/compiler/ir/ir.c
+          echo '=== canonical padded-vector result/call helpers ==='
+          sed -n '4100,4255p' src/buster/lib/compiler/codegen/codegen.c
+          sed -n '4680,4760p' src/buster/lib/compiler/codegen/codegen.c
+          echo '=== canonical scalar-lane loads/stores ==='
+          grep -n -E 'windows_scalar_(lane|vector)|load_lane_gpr|store_lane_gpr|non_power_vector' src/buster/lib/compiler/codegen/codegen.c | head -n 250
+          echo '=== MIR padded-vector classification ==='
+          sed -n '560,810p' src/buster/lib/compiler/codegen/machine_x86_64.c
+          echo '=== IR/codegen tests mentioning padded scalar lanes ==='
+          git grep -n -E 'padded_one|padded_vec3|windows_scalar_lane|non_power_vector' -- src/buster/tests tests | head -n 400 || true
