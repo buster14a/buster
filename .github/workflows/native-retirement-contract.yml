@@ -5,17 +5,51 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/native-retirement-*.yml
+      - .github/workflows/native-retirement-contract.yml
+      - .github/workflows/native-retirement-integration-security.yml
+      - .github/workflows/native-retirement-integration.yml
+      - .github/workflows/native-retirement-rebind.yml
+      # Android status tests reuse frozen mobile support inputs. Keep their
+      # contract validation scheduled even when tests/** itself is unchanged.
       - .github/workflows/ci.yml
       - .github/workflows/ios-monitor-tests.yml
       - android/**
+      - .github/workflows/native-retirement-evidence.yml
+      - AGENTS.md
       - build.c
       - docs/agents/build.md
       - docs/agents/benchmarking.md
-      - docs/native-retirement-*
+      - docs/agents/workflow.md
+      - docs/native-retirement-census.md
+      - docs/native-retirement-performance-contract.md
+      - docs/native-retirement-support-v1.tsv
+      - docs/native-retirement-supported-gaps-v1.tsv
+      - docs/native-retirement-applicability-v1.tsv
+      - docs/native-retirement-dependencies-v1.json
+      - docs/native-retirement-rebinding.md
       - tools/differential.c
-      - tools/native_retirement_*
+      - tools/native_retirement_census.c
+      - tools/native_retirement_contract.py
+      - tools/native_retirement_contract_test.py
+      - tools/native_retirement_archive.py
+      - tools/native_retirement_evidence_upload_test.py
+      - tools/native_retirement_materializer.py
+      - tools/native_retirement_materializer_test.py
+      - tools/native_retirement_external.py
+      - tools/native_retirement_sdks.py
+      - tools/native_retirement_sdks_test.py
+      - tools/native_retirement_reference.py
+      - tools/native_retirement_integration.py
+      - tools/native_retirement_integration_security_test.py
+      - tools/native_retirement_integration_test.py
       - tools/native-retirement-mingw/**
+      - docs/native-retirement-sdks-v1.json
+      - tools/native_retirement_external_test.py
+      - tools/native_retirement_result_input.py
+      - tools/native_retirement_result_input_test.py
+      - tools/native_retirement_performance_binding.py
+      - tools/native_retirement_performance_binding_test.py
+      - tools/native_retirement_performance_identity_test.py
       - tools/throughput/**
       - src/buster/lib/arena.c
       - src/buster/lib/arena.h
