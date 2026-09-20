@@ -1,0 +1,35 @@
+name: Inspect issue 893 sources
+
+on:
+  push:
+    branches:
+      - fix/893-builtin-ffs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Collect relevant sources
+        run: |
+          mkdir -p issue-893-src
+          cp --parents \
+            src/buster/lib/compiler/frontend/c/c_internal.h \
+            src/buster/lib/compiler/frontend/c/c_source.c \
+            src/buster/lib/compiler/frontend/c/c_parse.c \
+            src/buster/lib/compiler/frontend/c/c_gen.c \
+            src/buster/tests/compiler/frontend/c/c_test.c \
+            src/buster/tests/compiler/frontend/c/macro_conditional_test.c \
+            src/buster/tests/compiler/codegen/codegen_test.c \
+            build.c \
+            issue-893-src/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-893-sources
+          path: issue-893-src
+          if-no-files-found: error
+          retention-days: 1
