@@ -203,15 +203,45 @@ emulator_pid_is_running() {
     local process_state
     local running=1
     if kill -0 "$pid" >/dev/null 2>&1; then
-        running=0
         # kill -0 also succeeds for a terminated child awaiting reaping. Such
-        # a PID cannot handle adb or signals and must not fail cleanup. Query
-        # only the recorded owned PID; an unavailable ps result stays live.
+        # a PID cannot handle adb or signals and must not fail cleanup. If ps
+        # loses the process after kill -0 observed it, reconcile with one more
+        # liveness probe: disappearance is stopped, persistent ambiguity stays
+        # fail-closed as running.
         if process_state=$(ps -o stat= -p "$pid" 2>/dev/null); then
             process_state=${process_state//[[:space:]]/}
-            if [[ $process_state == Z* || $process_state == X* ]]; then
-                running=1
+            if [[ $process_state != Z* && $process_state != X* ]]; then
+                running=0
             fi
+        elif kill -0 "$pid" >/dev/null 2>&1; then
+            running=0
+        fi
+    fi
+    return "$running"
+}
+
+wait_for_owned_emulator_stop() {
+    local pid=$1
+    local timeout_seconds=$2
+    local deadline=$((SECONDS + timeout_seconds))
+    local running=1
+
+    # A stopped observation is terminal for this ownership check. Do not
+    # immediately re-probe the numeric PID: the owned process can be reaped
+    # between adjacent probes, and a later ambiguous query must not turn a
+    # proven terminal state back into "running".
+    while [[ $running -ne 0 ]] && (( SECONDS < deadline )); do
+        if emulator_pid_is_running "$pid"; then
+            sleep 1
+        else
+            running=0
+        fi
+    done
+    if [[ $running -ne 0 ]]; then
+        if emulator_pid_is_running "$pid"; then
+            running=1
+        else
+            running=0
         fi
     fi
     return "$running"
@@ -221,7 +251,6 @@ stop_owned_emulator() {
     local status=0
     local pid=
     local fallback_pid=${emulator_pid:-}
-    local stop_deadline
 
     if read_emulator_pid; then
         pid=$emulator_pid
@@ -241,19 +270,23 @@ stop_owned_emulator() {
             status=1
         fi
 
-        stop_deadline=$((SECONDS + cleanup_timeout_seconds))
-        while emulator_pid_is_running "$pid" && (( SECONDS < stop_deadline )); do
-            sleep 1
-        done
-        if emulator_pid_is_running "$pid"; then
+        if wait_for_owned_emulator_stop "$pid" "$cleanup_timeout_seconds"; then
+            :
+        else
             echo "warning: Android emulator PID $pid did not exit; sending SIGTERM" >&2
             kill "$pid" >/dev/null 2>&1 || true
-            sleep 1
-        fi
-        if emulator_pid_is_running "$pid"; then
-            echo "warning: Android emulator PID $pid still exists; sending SIGKILL" >&2
-            kill -KILL "$pid" >/dev/null 2>&1 || true
-            status=1
+            if wait_for_owned_emulator_stop "$pid" 1; then
+                :
+            else
+                echo "warning: Android emulator PID $pid still exists; sending SIGKILL" >&2
+                kill -KILL "$pid" >/dev/null 2>&1 || true
+                if wait_for_owned_emulator_stop "$pid" 1; then
+                    :
+                else
+                    echo "warning: Android emulator PID $pid survived SIGKILL" >&2
+                    status=1
+                fi
+            fi
         fi
     elif [[ -n $pid ]]; then
         echo "Android emulator PID $pid is no longer running"
