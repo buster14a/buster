@@ -1,0 +1,31 @@
+name: Codex 892 source export
+
+on:
+  push:
+    branches:
+      - codex/892-tree-phase-evidence
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Pack source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude=.git -C "$GITHUB_WORKSPACE" -czf "$RUNNER_TEMP/source-export.tar.gz" .
+      - name: Upload source
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-892-current-main-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source-export.tar.gz
+          if-no-files-found: error
+          retention-days: 1
