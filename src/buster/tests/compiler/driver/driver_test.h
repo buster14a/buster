@@ -11,5 +11,6 @@
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
 
 BUSTER_F_DECL void compiler_driver_test_append_environment_includes(Arena* arena, CompilerDriverInvocation* invocation, String8 includes);
+BUSTER_F_DECL void compiler_driver_test_wasm_node_child_run(void);
 BUSTER_F_DECL UnitTestResult compiler_driver_tests(UnitTestArguments* arguments);
 #endif
