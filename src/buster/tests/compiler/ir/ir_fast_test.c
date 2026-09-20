@@ -27,14 +27,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
         if (lowered.program && !lowered.diagnostic_count)
         {
-            IrFunction* function = lowered.program->modules->functions;
-            BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
-            BUSTER_TEST(arguments, function->operand_total == ir_test_operand_total(function));
-            lowered.program->fast_passes = 0;
-            BUSTER_TEST(arguments, ir_prepare_canonical_module(lowered.program, lowered.program->modules, false).error == IR_VALIDATION_NONE);
-            BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
-            ir_function_invalidate_cfg(function);
-            BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count);
+            IrModule* module = lowered.program->modules;
+            IrFunction* function = 0;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                if (string_equal(module->functions[index].name, S8("test"))) function = module->functions + index;
+            }
+            if (BUSTER_REQUIRE(arguments, function && function->instruction_count))
+            {
+                BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
+                BUSTER_TEST(arguments, function->operand_total == ir_test_operand_total(function));
+                lowered.program->fast_passes = 0;
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(lowered.program, module, false).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
+                BUSTER_TEST(arguments, function->published_cfg != 0);
+                ir_function_invalidate_cfg(function);
+                BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count);
+            }
         }
         scratch_end(temporary);
     }
