@@ -18304,13 +18304,18 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_population_count(CIntegerIrBuilder* builde
     return c_ir_emit_binary_value(builder, gathered, top, type, IR_BINARY_UNSIGNED_SHIFT_RIGHT, source);
 }
 
-// Apply the builtin's int parameter conversion once. Replacing zero with one
+// Apply the builtin's int/long/long long parameter conversion once. Replacing zero with one
 // before CTZ avoids an undefined input; adding (x != 0) gives one-based indices.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_find_first_set(CIntegerIrBuilder* builder, IrValueId operand, CToken token, IrSourceRange source)
 {
-    IrTypeId type = builder->scalar_types[C_TYPE_UNSIGNED_INT];
+    String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
+    CTypeKind kind = string_equal(name, S8("__builtin_ffsll")) ? C_TYPE_LONG_LONG :
+                     string_equal(name, S8("__builtin_ffsl")) ? C_TYPE_LONG : C_TYPE_INT;
+    CTypeKind unsigned_kind = kind == C_TYPE_LONG_LONG ? C_TYPE_UNSIGNED_LONG_LONG :
+                              kind == C_TYPE_LONG ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+    IrTypeId type = builder->scalar_types[unsigned_kind];
     IrValueId result = IR_VALUE_ID_INVALID;
-    operand = c_ir_emit_cast(builder, operand, builder->s32_type, source);
+    operand = c_ir_emit_cast(builder, operand, builder->scalar_types[kind], source);
     if (operand.value != IR_ID_UNDERLYING_INVALID)
     {
         operand = c_ir_emit_cast(builder, operand, type, source);

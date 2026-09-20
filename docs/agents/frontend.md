@@ -62,8 +62,9 @@ strict verification and all native allocator modes. New tracked fixtures also
 need an explicit, reviewed identity in `docs/native-retirement-support-v1.tsv`;
 do not bypass its unreviewed-input rejection to make a query test pass.
 
-`__builtin_ffs` converts its single evaluated argument to `int`, returns an
-`int` one-based least-significant-set-bit index, and returns zero for zero.
+`__builtin_ffs`, `__builtin_ffsl`, and `__builtin_ffsll` convert their single
+evaluated argument to `int`, `long`, and `long long` respectively, return an
+`int` one-based least-significant-set-bit index, and return zero for zero.
 Lowering uses canonical CTZ with a nonzero operand even for the zero case.
-The capability query admits exactly this spelling; `ffsl`/`ffsll` are separate
-operations and are not advertised by this implementation.
+The capability query admits all three implemented spellings. The `long`
+conversion follows the target data model, including 32-bit `long` on Windows.

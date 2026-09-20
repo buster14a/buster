@@ -181,9 +181,25 @@ static int check_ffs(void)
     valid &= __builtin_ffs(narrow) == 8;
     valid &= __builtin_ffs(wide_zero) == 0;
     valid &= __builtin_ffs(wide_low) == 3;
+    valid &= __builtin_ffsl(0) == 0;
+    valid &= __builtin_ffsll(0) == 0;
+    valid &= __builtin_ffsl(-1) == 1;
+    valid &= __builtin_ffsll(-1) == 1;
+    valid &= __builtin_ffsl(wide_zero) == (sizeof(long) == 8 ? 41 : 0);
+    valid &= __builtin_ffsl(1ull << 63) == (sizeof(long) == 8 ? 64 : 0);
+    valid &= __builtin_ffsll(1ull << 63) == 64;
+    valid &= __builtin_ffsll(wide_zero) == 41;
+    valid &= __builtin_ffsl(wide_low) == 3;
+    valid &= __builtin_ffsll(wide_low) == 3;
+    valid &= __builtin_ffsl(-128.75) == 8;
+    valid &= __builtin_ffsll(__builtin_complex(-128.75, 16.0)) == 8;
     ffs_calls = 0;
     valid &= __builtin_ffs(ffs_next()) == 9;
     valid &= ffs_calls == 1;
+    valid &= __builtin_ffsl(ffs_next()) == 9;
+    valid &= ffs_calls == 2;
+    valid &= __builtin_ffsll(ffs_next()) == 9;
+    valid &= ffs_calls == 3;
     return valid;
 }
 static int check_gnu_atomics(void)

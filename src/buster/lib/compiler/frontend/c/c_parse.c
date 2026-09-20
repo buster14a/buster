@@ -20401,7 +20401,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
                 !c_parse_expression_real_kind(result->types[type.value].kind) &&
                 !c_type_kind_is_complex(result->types[type.value].kind))
             {
-                message = S8("__builtin_ffs requires one arithmetic scalar argument");
+                message = string_format(result->arena, S8("{S8} requires one arithmetic scalar argument"), name);
                 location = starts[0];
             }
         }

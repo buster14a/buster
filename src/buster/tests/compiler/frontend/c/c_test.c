@@ -5026,6 +5026,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_expect"), all_targets},
         {S8("__builtin_memcpy"), all_targets},
         {S8("__builtin_ffs"), all_targets},
+        {S8("__builtin_ffsl"), all_targets},
+        {S8("__builtin_ffsll"), all_targets},
         {S8("__is_target_arch"), all_targets},
         {S8("not_a_builtin"), 0},
         {S8("__atomic_"), 0},
@@ -5082,7 +5084,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
             scratch_end(temporary);
         }
     }
-    // __builtin_ffs is an int-width operation with an int result. Lower it
+    // The ffs family converts to int/long/long long and returns int. Lower it
     // through canonical integer operations on both frontend SSA paths rather
     // than leaving an unresolved helper call for Android headers.
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
@@ -5092,11 +5094,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             Target target = targets[target_index];
             String8 source = S8(
-                "#if !__has_builtin(__builtin_ffs)\n"
+                "#if !__has_builtin(__builtin_ffs) || !__has_builtin(__builtin_ffsl) || !__has_builtin(__builtin_ffsll)\n"
                 "#error hidden ffs\n"
                 "#endif\n"
                 "_Static_assert(sizeof(__builtin_ffs(1ULL)) == sizeof(int), \"ffs result type\");\n"
-                "int query_ffs(unsigned long long value) { return __builtin_ffs(value); }\n");
+                "_Static_assert(sizeof(__builtin_ffsl(1ULL)) == sizeof(int), \"ffsl result type\");\n"
+                "_Static_assert(sizeof(__builtin_ffsll(1ULL)) == sizeof(int), \"ffsll result type\");\n"
+                "int query_ffs(unsigned long long value) { return __builtin_ffs(value) + __builtin_ffsl(value) + __builtin_ffsll(value); }\n");
             CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
             CParseResult parse = c_parse(temporary.arena, preprocess);
             BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
@@ -5118,7 +5122,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
                             trailing_zero_counts += instruction->opcode == IR_OPCODE_UNARY &&
                                                     instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS;
                         }
-                        BUSTER_TEST(arguments, trailing_zero_counts == 1);
+                        BUSTER_TEST(arguments, trailing_zero_counts == 3);
                         BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
                     }
                 }
@@ -5130,6 +5134,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
     String8 invalid_ffs_sources[] = {
         S8("int f(void) { return __builtin_ffs(); }"),
         S8("int f(void) { return __builtin_ffs(1, 2); }"),
+        S8("int f(void) { return __builtin_ffsl(); }"),
+        S8("int f(void) { return __builtin_ffsll(1, 2); }"),
+        S8("int f(void) { return __builtin_ffsl((int*)0); }"),
         S8("int f(void) { return __builtin_ffs((struct Bad { int x; }){0}); }"),
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_ffs_sources); index += 1)
