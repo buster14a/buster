@@ -504,12 +504,6 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
     }
     else
     {
-        TemporalArena ownership_scope = scratch_begin(&program->arena, 1);
-        u8* linear_orders = module->function_count ? arena_allocate(ownership_scope.arena, u8, module->function_count) : 0;
-        if (linear_orders)
-        {
-            memset(linear_orders, 0, module->function_count);
-        }
         // True while the strict canonical validator has passed over the
         // module in exactly its current state. Every scan that succeeds sets
         // it and every mutation clears it, so the FAST input guard below --
@@ -519,7 +513,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
         if (!input_certified)
         {
             IR_CONSTRUCTION_RECORD(PREPARATION_INPUT_VALIDATIONS, 1);
-            result = ir_validate_canonical_module_record_linear(program, module, linear_orders);
+            result = ir_validate_canonical_module(program, module);
             result.boundary = IR_VALIDATION_BOUNDARY_CANONICAL_INPUT;
             validated = result.error == IR_VALIDATION_NONE;
         }
@@ -532,12 +526,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 if (function->state == IR_FUNCTION_LOWERED)
                 {
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_FUNCTIONS, 1);
-                    u64 promoted_before = module->local_promotion.promoted_locals;
                     ir_promote_function(program, function, &module->local_promotion);
-                    if (linear_orders && module->local_promotion.promoted_locals != promoted_before)
-                    {
-                        linear_orders[index] = false;
-                    }
                 }
             }
             if (module->local_promotion.promoted_locals)
@@ -550,7 +539,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 if (checked)
                 {
                     IR_CONSTRUCTION_RECORD(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, 1);
-                    result = ir_validate_canonical_module_record_linear(program, module, linear_orders);
+                    result = ir_validate_canonical_module(program, module);
                     result.boundary = IR_VALIDATION_BOUNDARY_LOCAL_PROMOTION_OUTPUT;
                 }
                 validated = checked && result.error == IR_VALIDATION_NONE;
@@ -569,7 +558,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             if (!validated)
             {
                 IR_CONSTRUCTION_RECORD(PREPARATION_FAST_INPUT_VALIDATIONS, 1);
-                IrValidationResult fast_input = ir_validate_canonical_module_record_linear(program, module, linear_orders);
+                IrValidationResult fast_input = ir_validate_canonical_module(program, module);
                 fast_input_valid = fast_input.error == IR_VALIDATION_NONE;
             }
             if (!fast_input_valid)
@@ -584,21 +573,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                     if (function->state == IR_FUNCTION_LOWERED)
                     {
                         IR_CONSTRUCTION_RECORD(PREPARATION_FAST_FUNCTIONS, 1);
-                        u64 changes_before = 0;
-                        for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
-                        {
-                            changes_before += module->fast.passes[pass].changes;
-                        }
                         ir_fast_function(program, function, &module->fast);
-                        u64 changes_after = 0;
-                        for (u32 pass = 0; pass < IR_FAST_PASS_COUNT; pass += 1)
-                        {
-                            changes_after += module->fast.passes[pass].changes;
-                        }
-                        if (linear_orders && changes_after != changes_before)
-                        {
-                            linear_orders[index] = false;
-                        }
                     }
                 }
                 u64 changes = 0;
@@ -606,7 +581,7 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
                 if (changes && (!input_certified || BUSTER_IR_TRANSFORM_CHECKS))
                 {
                     IR_CONSTRUCTION_RECORD(PREPARATION_FAST_OUTPUT_VALIDATIONS, 1);
-                    result = ir_validate_canonical_module_record_linear(program, module, linear_orders);
+                    result = ir_validate_canonical_module(program, module);
                     result.boundary = IR_VALIDATION_BOUNDARY_FAST_OUTPUT;
                 }
             }
@@ -618,15 +593,13 @@ IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* mod
             if (function->state == IR_FUNCTION_LOWERED)
             {
                 IR_CONSTRUCTION_RECORD(PREPARATION_PUBLICATION_FUNCTIONS, 1);
-                IrValidationResult published = ir_function_publish_cfg_validated_linear(
-                    program->arena, function, linear_orders && linear_orders[index]);
+                IrValidationResult published = ir_function_publish_cfg(program->arena, function);
                 if (published.error != IR_VALIDATION_NONE)
                 {
                     result = published;
                 }
             }
         }
-        scratch_end(ownership_scope);
     }
     return result;
 }

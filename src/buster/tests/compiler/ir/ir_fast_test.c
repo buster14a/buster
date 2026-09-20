@@ -1,7 +1,7 @@
 // Included by ir_test.c. These inspect shared canonical rows before any target
 // can hide a missing transformation; executable differential uses the fixture
 // tests/basic_c_canonical_fast.c with all pass/allocator combinations.
-BUSTER_GLOBAL_LOCAL UnitTestResult ir_ownership_handoff_tests(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_identity_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     for (u32 variant = 0; variant < 4; variant += 1)
@@ -27,7 +27,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_ownership_handoff_tests(UnitTestArguments*
                 if (variant == 2)
                 {
                     // Reverse physical row IDs while preserving the linked
-                    // program. Validation must not certify an identity order.
+                    // program. Publication must build the explicit permutation.
                     for (u32 index = 0; index < count; index += 1)
                     {
                         IrInstruction row = original[index];
@@ -46,8 +46,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_ownership_handoff_tests(UnitTestArguments*
                 {
                     function->instructions[0].next.value = 0;
                 }
-                // Without a strict validation in this call, the producer's
-                // input certificate alone cannot authorize the handoff.
+                // Publication proves ownership itself even when preparation
+                // receives a producer-certified module.
                 IrValidationResult prepared = ir_prepare_canonical_module(program, module, variant == 1);
                 BUSTER_TEST(arguments, prepared.error == (variant == 3 ? IR_VALIDATION_INSTRUCTION_OWNERSHIP : IR_VALIDATION_NONE));
                 if (variant == 3)
@@ -63,7 +63,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_ownership_handoff_tests(UnitTestArguments*
                     {
                         IrInstruction* row = function->instructions + index;
                         BUSTER_TEST(arguments, row->opcode == original[index].opcode && row->result.value == original[index].result.value);
-                        BUSTER_TEST(arguments, row->next.value == (variant == 0 ? original[index].next.value : IR_ID_UNDERLYING_INVALID));
+                        BUSTER_TEST(arguments, row->next.value == IR_ID_UNDERLYING_INVALID);
                     }
                     BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
                     ir_function_invalidate_cfg(function);
@@ -83,7 +83,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_ownership_handoff_tests(UnitTestArguments*
 
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = ir_ownership_handoff_tests(arguments);
+    UnitTestResult result = ir_publication_identity_tests(arguments);
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");

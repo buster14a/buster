@@ -4408,12 +4408,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validation_error(IrValidationError err
     };
 }
 
-BUSTER_GLOBAL_LOCAL IrInstructionOwnership ir_function_instruction_owners_record_linear(IrFunction* function, IrBlockId* owners, bool* linear_order)
+IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners)
 {
-    if (linear_order)
-    {
-        *linear_order = false;
-    }
     IrInstructionOwnership result = {
         .error = IR_VALIDATION_NONE,
         .block = IR_BLOCK_ID_INVALID,
@@ -4427,20 +4423,12 @@ BUSTER_GLOBAL_LOCAL IrInstructionOwnership ir_function_instruction_owners_record
     // IR_ID_UNDERLYING_INVALID is UINT32_MAX, so the unowned marker is a byte
     // fill; the walk below is the only part that costs a pass.
     memset(owners, 0xff, sizeof(*owners) * function->instruction_count);
-    if (linear_order)
-    {
-        *linear_order = true;
-    }
     u32 owned_count = 0;
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
         IrInstructionId tail = IR_INSTRUCTION_ID_INVALID;
         IrInstructionId id = block->first_instruction;
-        if (linear_order && id.value == IR_ID_UNDERLYING_INVALID)
-        {
-            *linear_order = false;
-        }
         while (id.value != IR_ID_UNDERLYING_INVALID)
         {
             if (id.value >= function->instruction_count)
@@ -4462,10 +4450,6 @@ BUSTER_GLOBAL_LOCAL IrInstructionOwnership ir_function_instruction_owners_record
                 result.block = block->id;
                 result.instruction = id;
                 return result;
-            }
-            if (linear_order && id.value != owned_count)
-            {
-                *linear_order = false;
             }
             owners[id.value] = block->id;
             owned_count += 1;
@@ -4500,21 +4484,12 @@ BUSTER_GLOBAL_LOCAL IrInstructionOwnership ir_function_instruction_owners_record
     return result;
 }
 
-IrInstructionOwnership ir_function_instruction_owners(IrFunction* function, IrBlockId* owners)
-{
-    return ir_function_instruction_owners_record_linear(function, owners, 0);
-}
-
 // Runs the ownership proof over every lowered function ahead of the
 // per-instruction checks, so those can walk `next` without a cycle guard and
 // can trust that block->last_instruction really terminates its chain. One
 // scratch array sized to the largest function serves the whole module.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* module, u8* linear_orders)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* module)
 {
-    if (linear_orders)
-    {
-        memset(linear_orders, 0, module->function_count);
-    }
     IrValidationResult result = {
         .function = IR_FUNCTION_ID_INVALID,
         .block = IR_BLOCK_ID_INVALID,
@@ -4560,12 +4535,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_module_ownership(IrModule* mo
             IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, function->block_count);
             IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, function->instruction_count);
             IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, sizeof(*owners) * function->instruction_count);
-            bool linear_order = false;
-            IrInstructionOwnership ownership = ir_function_instruction_owners_record_linear(function, owners, &linear_order);
-            if (ownership.error == IR_VALIDATION_NONE && linear_orders)
-            {
-                linear_orders[function_index] = linear_order;
-            }
+            IrInstructionOwnership ownership = ir_function_instruction_owners(function, owners);
             if (ownership.error != IR_VALIDATION_NONE)
             {
                 result = ir_validation_error(ownership.error, function, ownership.block, ownership.instruction);
@@ -5764,7 +5734,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_initializer(IrProgram* program
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_module_record_linear(IrProgram* program, IrModule* module, u8* linear_orders)
+IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
 {
     IrValidationResult result = ir_validation_ok();
     IR_CONSTRUCTION_RECORD(VALIDATION_CALLS, 1);
@@ -5777,7 +5747,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_module_record_linea
     }
     else
     {
-        result = ir_validate_module_ownership(module, linear_orders);
+        result = ir_validate_module_ownership(module);
         for (u32 global_index = 0; global_index < module->global_count && result.error == IR_VALIDATION_NONE; global_index += 1)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_GLOBALS, 1);
@@ -5818,16 +5788,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_module_record_linea
             }
         }
     }
-    if (result.error != IR_VALIDATION_NONE && linear_orders && module)
-    {
-        memset(linear_orders, 0, module->function_count);
-    }
     return result;
-}
-
-IrValidationResult ir_validate_canonical_module(IrProgram* program, IrModule* module)
-{
-    return ir_validate_canonical_module_record_linear(program, module, 0);
 }
 
 #include <buster/lib/compiler/ir/ir_cfg.c>
