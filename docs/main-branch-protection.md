@@ -1,9 +1,9 @@
 # Main admission policy
 
-Settings verified 2026-09-20 UTC against main `b7346b3e` for #556.
+Settings rechecked 2026-09-20 UTC against main `d63af3bf` for #556.
 The active repository ruleset 22537199 explicitly includes `refs/heads/main`,
 excludes nothing, and has no bypass actors. The adjacent JSON files preserve
-before/after settings and the effective branch-rules response; they contain no
+the earlier before/after settings and effective branch-rules response; they contain no
 credentials. Repository rules, rather than legacy branch protection, enforce it.
 
 ## Required review and checks
@@ -23,8 +23,7 @@ revisiting this policy. The initial one-approval setting was corrected for
 solo development; `ruleset-before-solo.json` preserves that intermediate state.
 
 All six checks below are bound to the observed GitHub Actions app ID 15368.
-Strict checks require the PR branch to be current with main. Deletion and
-non-fast-forward updates remain forbidden.
+The live ruleset permits a PR branch behind main (`strict_required_status_checks_policy: false`); all six required checks must still pass. The adjacent snapshots retain the earlier strict setting. Deletion and non-fast-forward updates remain forbidden.
 
 | Required context | Workflow |
 | --- | --- |
@@ -62,10 +61,13 @@ broaden private-runner access.
   code-owner/latest-push approval after the solo-maintainer correction. PR #898
   no longer reports `REVIEW_REQUIRED`. No production merge/push rejection
   was attempted.
-- `python3 tests/ci_tools_test.py -v`: 63 tests pass, including the executable
-  aggregate outcome fixture (625 combinations plus independent UEFI/analyzer
-  failures) and enabled/disabled/missing-variable guards for all independent
-  required jobs. These are offline policy tests, not a live cancellation race.
+- `tests/ci_tools_test.py` retains the executable aggregate outcome fixture
+  (625 combinations plus independent UEFI/analyzer failures). The enabled,
+  disabled, missing and invalid-value guards for all independent required jobs
+  run in `python3 tools/ci_admission_test.py -v`, including absolute Git Bash
+  selection on Windows. Keeping the admission tests outside the frozen corpus
+  preserves its reviewed bytes. These are offline policy tests; live
+  cancellation-race validation remains separate.
 - Pinned actionlint passes across `.github/workflows/*.yml`.
 - All six workflows have unfiltered pull_request and merge_group triggers;
   fork and same-repository PRs use hosted runners for required validation.
