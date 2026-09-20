@@ -17,7 +17,23 @@ on:
       - tools/native_retirement_*
       - tools/native-retirement-mingw/**
       - tools/throughput/**
-      - src/buster/lib/**
+      - src/buster/lib/arena.c
+      - src/buster/lib/arena.h
+      - src/buster/lib/base.h
+      - src/buster/lib/file.c
+      - src/buster/lib/file.h
+      - src/buster/lib/hash.c
+      - src/buster/lib/hash.h
+      - src/buster/lib/integer.c
+      - src/buster/lib/integer.h
+      - src/buster/lib/os.c
+      - src/buster/lib/os.h
+      - src/buster/lib/os_internal.h
+      - src/buster/lib/string.c
+      - src/buster/lib/string.h
+      - src/buster/lib/system_headers.h
+      - src/buster/lib/time.c
+      - src/buster/lib/time.h
       - tests/**
   workflow_dispatch:
 
