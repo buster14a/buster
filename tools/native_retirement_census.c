@@ -1760,7 +1760,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult native_retirement_census_main(Arena* arena, Sl
             settings.dependency_project_sha256, settings.dependency_ledger_sha256, archived_input_sha256,
             archived_fixture_map_sha256, archived_row_sha256, sysroot, system_include, input_count, subject_count,
             groups * BUSTER_ARRAY_LENGTH(nrc_allocators), profile, 192,
-            S8("0f531b1cf7c7922ea891e15703971bcb2ddf95f398f628e0b2681831d7cbf81e"),
+            S8("d777a7686b563e627845c347ec135a7f0be892a7eae962b46c5c0584d0ffca4f"),
             settings.fixture_filter, settings.target_filter,
             settings.shard_index, settings.shard_count, (u32)settings.manifest_only, settings.child.timeout_seconds,
             source_dependencies, environment_state, dependency_state, flags);

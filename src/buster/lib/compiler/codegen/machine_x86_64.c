@@ -6426,19 +6426,28 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
             }
         }
     }
-    // Materialize every register-bound split reference before populating any
-    // fixed argument register. A derived piece is ordinary virtual-register
+    // Materialize scalar lanes and register-bound split references before
+    // populating any fixed argument register. Each is ordinary virtual-register
     // work and may bind to RCX/RDX/R8/R9; emitting it after an earlier scalar
     // or pointer was placed there would silently clobber that argument before
     // the call. Keeping all bases and derived pointers live through this
     // preparation lets every allocator resolve the later fixed copies safely.
-    u32 windows_piece_registers[BUSTER_ARRAY_LENGTH(machine_x64_windows_arguments)] = {0};
+    u32 windows_argument_parts[BUSTER_ARRAY_LENGTH(machine_x64_windows_arguments)] = {0};
     if (plan->windows_call)
     {
         for (u32 argument_index = 0; argument_index < plan->argument_count; argument_index += 1)
         {
             MachineX64ValueShape const* shape = plan->argument_shapes + argument_index;
             MachineX64ArgumentPlacement const* placement = plan->argument_placements + argument_index;
+            if (shape->windows_scalar_lane_size)
+            {
+                for (u32 lane = 0; lane < placement->register_part_count; lane += 1)
+                {
+                    windows_argument_parts[(u32)placement->first_integer + lane] = machine_x64_select_frame_scalar_load(
+                        selector, plan->argument_slots[argument_index], lane * shape->windows_scalar_lane_size,
+                        shape->windows_scalar_lane_size);
+                }
+            }
             if (!shape->indirect || !shape->vector_part_bytes)
             {
                 continue;
@@ -6456,7 +6465,7 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                         .opcode = MACHINE_X64_LEA_OFFSET,
                     });
                 }
-                windows_piece_registers[(u32)placement->first_integer + part] = pointer;
+                windows_argument_parts[(u32)placement->first_integer + part] = pointer;
             }
         }
     }
@@ -6559,10 +6568,8 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                 {
                     for (u32 lane = 0; lane < placement->register_part_count; lane += 1)
                     {
-                        u32 lane_value = machine_x64_select_frame_scalar_load(selector, plan->argument_slots[argument_index],
-                                                                              lane * shape->windows_scalar_lane_size,
-                                                                              shape->windows_scalar_lane_size);
                         u32 slot = (u32)placement->first_integer + lane;
+                        u32 lane_value = windows_argument_parts[slot];
                         if (lane_float && stage_registers)
                         {
                             machine_x64_select_row(selector, (MachineInstruction){
@@ -6592,7 +6599,7 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                     u32 register_parts = shape->vector_part_bytes ? placement->register_part_count : 1u;
                     for (u32 part = 0; part < register_parts; part += 1)
                     {
-                        u32 pointer = shape->vector_part_bytes ? windows_piece_registers[next_integer + part]
+                        u32 pointer = shape->vector_part_bytes ? windows_argument_parts[next_integer + part]
                                                                : plan->argument_registers[argument_index];
                         machine_x64_select_row(selector, (MachineInstruction){
                             .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER,

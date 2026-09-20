@@ -1,0 +1,442 @@
+name: Native retirement trusted integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Open pull request number to integrate
+        required: true
+        type: string
+      expected_head:
+        description: Exact reviewed 40-hex pull-request head SHA
+        required: true
+        type: string
+      transition_kind:
+        description: Candidate trust class; must match the trusted classifier
+        required: true
+        default: ordinary
+        type: choice
+        options: [ordinary, bootstrap, policy]
+
+permissions: {}
+
+concurrency:
+  group: native-retirement-integration-writer
+  cancel-in-progress: false
+
+env:
+  PR_NUMBER: ${{ inputs.pull_request }}
+  EXPECTED_HEAD: ${{ inputs.expected_head }}
+  TRANSITION_KIND: ${{ inputs.transition_kind }}
+
+jobs:
+  prepare:
+    if: >-
+      ${{ github.server_url == 'https://github.com' &&
+          github.ref == 'refs/heads/main' &&
+          vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Prepare trusted combined tree
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      base: ${{ steps.identities.outputs.base }}
+      head: ${{ steps.identities.outputs.head }}
+      final_tree: ${{ steps.evidence.outputs.final_tree }}
+      evidence_sha256: ${{ steps.evidence.outputs.evidence_sha256 }}
+      classification: ${{ steps.evidence.outputs.classification }}
+    steps:
+      - name: Check out current trusted main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: main
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve and authorize the immutable candidate
+        id: identities
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          base=$(git -C trusted rev-parse HEAD)
+          git -C trusted fetch --no-tags origin \
+            "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/native-retirement-candidate"
+          head=$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)
+          test "$head" = "$EXPECTED_HEAD"
+          python3 trusted/tools/native_retirement_integration.py authorize \
+            --pull-request "$PR_NUMBER" \
+            --expected-head "$head" \
+            --transition-kind "$TRANSITION_KIND"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+      - name: Construct exact current-main plus candidate tree
+        run: |
+          python3 trusted/tools/native_retirement_integration.py stage \
+            --repo-root trusted \
+            --worktree "$GITHUB_WORKSPACE/integration" \
+            --base '${{ steps.identities.outputs.base }}' \
+            --head '${{ steps.identities.outputs.head }}' \
+            --transition-kind "$TRANSITION_KIND" \
+            --authorized \
+            --output "$RUNNER_TEMP/native-retirement/staged.json"
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: integration/external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: integration/external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: integration/external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: integration/external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: integration/external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: integration/external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: integration/external/musl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prepare pinned closure with trusted main tools
+        run: |
+          python3 trusted/tools/native_retirement_sdks.py \
+            --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_external.py prepare \
+            --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
+            --source-root "$GITHUB_WORKSPACE/integration"
+      - name: Reconstruct exact generated state and record evidence
+        id: evidence
+        run: |
+          python3 trusted/tools/native_retirement_integration.py finalize \
+            --repo-root trusted \
+            --worktree "$GITHUB_WORKSPACE/integration" \
+            --trusted-root trusted \
+            --trusted-revision '${{ steps.identities.outputs.base }}' \
+            --staged "$RUNNER_TEMP/native-retirement/staged.json" \
+            --output "$RUNNER_TEMP/native-retirement/evidence.json"
+          python3 - "$RUNNER_TEMP/native-retirement/evidence.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import hashlib, json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          raw = path.read_bytes()
+          data = json.loads(raw)
+          print("evidence_sha256=" + hashlib.sha256(raw).hexdigest())
+          print("final_tree=" + data["final_tree"])
+          print("classification=" + data["classification"]["kind"])
+          PY
+      - name: Retain prepared machine-readable evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-retirement-integration-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-retirement/evidence.json
+          if-no-files-found: error
+          retention-days: 7
+
+  validate:
+    needs: prepare
+    name: Validate exact final candidate without write authority
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the immutable trusted rebinder revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.prepare.outputs.base }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch and stage the immutable candidate
+        run: |
+          set -euo pipefail
+          git -C trusted fetch --no-tags origin \
+            "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/native-retirement-candidate"
+          test "$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)" = "$EXPECTED_HEAD"
+          python3 trusted/tools/native_retirement_integration.py stage \
+            --repo-root trusted \
+            --worktree "$GITHUB_WORKSPACE/integration" \
+            --base '${{ needs.prepare.outputs.base }}' \
+            --head '${{ needs.prepare.outputs.head }}' \
+            --transition-kind "$TRANSITION_KIND" \
+            --authorized \
+            --output "$RUNNER_TEMP/native-retirement/staged.json"
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: integration/external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: integration/external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: integration/external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: integration/external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: integration/external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: integration/external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: integration/external/musl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reconstruct independently with trusted tools
+        run: |
+          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_external.py prepare \
+            --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
+            --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_integration.py finalize \
+            --repo-root trusted \
+            --worktree "$GITHUB_WORKSPACE/integration" \
+            --trusted-root trusted \
+            --trusted-revision '${{ needs.prepare.outputs.base }}' \
+            --staged "$RUNNER_TEMP/native-retirement/staged.json" \
+            --output "$RUNNER_TEMP/native-retirement/evidence.json"
+          actual=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
+          test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
+          test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
+      - name: Prove the candidate authority accepts the trusted final state
+        working-directory: integration
+        run: |
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)" \
+            | tee "$RUNNER_TEMP/native-retirement-candidate-check.json"
+      - name: Run all affected tool and workflow self-tests on the exact final tree
+        working-directory: integration
+        run: |
+          python3 tools/native_retirement_dependency_binding_test.py -v
+          python3 tools/native_retirement_integration_test.py -v
+          python3 tools/native_retirement_rebind_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tests/ci_tools_test.py
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c \
+            -o "$RUNNER_TEMP/native-retirement-build"
+          "$RUNNER_TEMP/native-retirement-build" native_retirement_census --self-test
+
+  publish:
+    needs: [prepare, validate]
+    name: Publish one lease-guarded integration commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    environment: native-retirement-integration
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Check out the immutable trusted rebinder revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.prepare.outputs.base }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch and stage the immutable candidate without executing it
+        run: |
+          set -euo pipefail
+          git -C trusted fetch --no-tags origin \
+            "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/native-retirement-candidate"
+          test "$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)" = "$EXPECTED_HEAD"
+          python3 trusted/tools/native_retirement_integration.py stage \
+            --repo-root trusted \
+            --worktree "$GITHUB_WORKSPACE/integration" \
+            --base '${{ needs.prepare.outputs.base }}' \
+            --head '${{ needs.prepare.outputs.head }}' \
+            --transition-kind "$TRANSITION_KIND" \
+            --authorized \
+            --output "$RUNNER_TEMP/native-retirement/staged.json"
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: integration/external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: integration/external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: integration/external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: integration/external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: integration/external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: integration/external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: integration/external/musl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reconstruct and compare without running candidate code
+        run: |
+          python3 trusted/tools/native_retirement_sdks.py --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_external.py prepare \
+            --manifest "$GITHUB_WORKSPACE/integration/docs/native-retirement-dependencies-v1.json" \
+            --source-root "$GITHUB_WORKSPACE/integration"
+          python3 trusted/tools/native_retirement_integration.py finalize \
+            --repo-root trusted \
+            --worktree "$GITHUB_WORKSPACE/integration" \
+            --trusted-root trusted \
+            --trusted-revision '${{ needs.prepare.outputs.base }}' \
+            --staged "$RUNNER_TEMP/native-retirement/staged.json" \
+            --output "$RUNNER_TEMP/native-retirement/evidence.json"
+          actual=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
+          test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
+          test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
+      - name: Reauthorize immediately before the only mutation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 trusted/tools/native_retirement_integration.py authorize \
+            --pull-request "$PR_NUMBER" \
+            --expected-head "$EXPECTED_HEAD" \
+            --transition-kind "$TRANSITION_KIND"
+      - name: Atomically publish or fail closed on stale main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          askpass="$RUNNER_TEMP/native-retirement-askpass.sh"
+          cat > "$askpass" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *) printf '%s\n' "$GITHUB_TOKEN" ;;
+          esac
+          SH
+          chmod 700 "$askpass"
+          trap 'rm -f "$askpass"' EXIT
+          GIT_ASKPASS="$askpass" python3 trusted/tools/native_retirement_integration.py publish \
+            --repo-root trusted \
+            --pull-request "$PR_NUMBER" \
+            --evidence "$RUNNER_TEMP/native-retirement/evidence.json" \
+            --message "Integrate pull request #$PR_NUMBER with native-retirement binding" \
+            | tee "$RUNNER_TEMP/native-retirement/publication.json"
+      - name: Retain publication evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-retirement-integration-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-retirement/evidence.json
+            ${{ runner.temp }}/native-retirement/publication.json
+          if-no-files-found: error
+          retention-days: 7
