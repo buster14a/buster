@@ -7,6 +7,7 @@ sample through the production replay reader. No performance result is claimed.
 Run after `bench_throughput self-test`, with its output directory as argument.
 """
 import copy
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -107,7 +108,7 @@ class NativeExecutionTests(unittest.TestCase):
                 "boot_id": "boot-123", "bound_at_ns": 1000,
                 "completed_at_ns": events[-1]["finished_ns"] + 1, "invocations": 1220,
                 "shards": [self.shard]})
-            with sqlite3.connect(":memory:") as db:
+            with closing(sqlite3.connect(":memory:")) as db:
                 db.execute("CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
                            "metric TEXT, baseline TEXT, candidate TEXT, PRIMARY KEY(row_id, round_id, pair_id, metric))")
                 samples = {}

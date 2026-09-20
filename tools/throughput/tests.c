@@ -1694,6 +1694,9 @@ static void test_retirement_records(char const* root)
     TpRetirementExecution state;
     CHECK(tp_retirement_execution_init(&state, 1, 3, runtime_rows, 2, 60, workspace, 12));
     TpRetirementInvocation invocation;
+    TpRetirementTranscript transcript;
+    CHECK(tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 1000));
+    CHECK(tp_retirement_transcript_begin_shard(&transcript, file));
     char executable[65], command[65], output[65], code[65];
     memset(executable, 'a', 64); executable[64] = 0;
     memset(command, 'b', 64); command[64] = 0;
@@ -1715,11 +1718,18 @@ static void test_retirement_records(char const* root)
         size_t count = tp_retirement_execution_record(line, sizeof(line), &invocation, &observed,
             &process, &identities, "job-1", 2, "boot-123", 2);
         CHECK(count > 0 && count < sizeof(line) && line[count - 1] == '\n');
-        CHECK(count && fwrite(line, 1, count, file) == count);
-        CHECK(tp_retirement_execution_commit(&state, count != 0));
+        CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
     }
     CHECK(tp_retirement_execution_complete(&state));
+    TpRetirementShard shard;
+    CHECK(tp_retirement_transcript_end_shard(&transcript, &shard));
+    CHECK(tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
+    CHECK(shard.records == 1220 && shard.bytes > 0 && transcript.total_records == 1220);
     if (file) CHECK(fclose(file) == 0);
+    char digest[65];
+    uint64_t size = 0, lines = 0;
+    CHECK(tp_hash_file(path, digest, &size, &lines) && size == shard.bytes &&
+        lines == shard.records && !strcmp(digest, shard.sha256));
 
     /* Every missing required observation and every failed child is invalid. */
     CHECK(tp_retirement_execution_init(&state, 1, 3, runtime_rows, 2, 60, workspace, 12));
@@ -1775,6 +1785,121 @@ static void test_retirement_records(char const* root)
         CHECK(fprintf(file, "%" PRIu64 "\t%s\n", interval, seconds) > 0);
     }
     if (file) CHECK(fclose(file) == 0);
+
+    /* A partial final shard, overlap, duplicate append, poisoned child or
+     * failed flush must never produce a descriptor or complete collection. */
+    for (unsigned failure = 0; failure < 6; ++failure)
+    {
+        CHECK(tp_retirement_execution_init(&state, 1, 3, runtime_rows, 2, 60, workspace, 12));
+        CHECK(tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 1000));
+        CHECK(tp_path(path, root, "retirement-partial.jsonl"));
+        file = fopen(path, "wb");
+        CHECK(file && tp_retirement_transcript_begin_shard(&transcript, file));
+        observed = (TpProcessObservation){.valid = 1, .pid = 4321, .start_token = 987654,
+            .started_ns = 1001, .finished_ns = 1001001};
+        process = (TpProcess){.wall_seconds = .001, .peak_rss_bytes = 4096};
+        identities = (TpRetirementOutput){executable, command, output, code, 32};
+        if (failure == 0) CHECK(!tp_retirement_transcript_finish(&transcript, 2000000));
+        if (failure == 1) observed.started_ns = 1000;
+        if (failure == 2) process.signal_number = 9;
+        if (failure == 3) transcript.bytes = TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES;
+        if (failure == 4)
+        {
+            CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+            CHECK(!tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+        }
+        else if (failure == 5)
+            CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+        else CHECK(!tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+        CHECK(!tp_retirement_transcript_end_shard(&transcript, &shard));
+        CHECK(!shard.bytes && !shard.records && !shard.sha256[0]);
+        CHECK(!tp_retirement_transcript_finish(&transcript, 2000000));
+        CHECK(transcript.failed && !tp_retirement_execution_complete(&state));
+        if (file) CHECK(fclose(file) == 0);
+    }
+    CHECK(tp_retirement_execution_init(&state, 1, 3, runtime_rows, 2, 60, workspace, 12));
+    CHECK(!tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 0));
+    CHECK(!tp_retirement_transcript_init(&transcript, &state, "job-1", 0, "boot-123", 2, 1000));
+    CHECK(!tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", -1, 1000));
+#ifndef _WIN32
+    /* An actual write error must poison the cursor as well as the stream. */
+    CHECK(tp_path(path, root, "retirement-readonly.jsonl"));
+    CHECK(test_text(root, "retirement-readonly.jsonl", ""));
+    file = fopen(path, "rb");
+    CHECK(file && tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 1000));
+    CHECK(tp_retirement_transcript_begin_shard(&transcript, file));
+    CHECK(!tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+    CHECK(!tp_retirement_transcript_finish(&transcript, 2000000));
+    if (file) CHECK(fclose(file) == 0);
+#endif
+}
+
+static void test_retirement_shards(char const* root)
+{
+    unsigned workspace[544];
+    TpRetirementExecution execution;
+    TpRetirementTranscript transcript;
+    CHECK(tp_retirement_execution_init(&execution, 1, 136, NULL, 0, 60, workspace, 544));
+    CHECK(tp_retirement_transcript_init(&transcript, &execution, "job-1", 2, "boot-123", 2, 1000));
+    char digest[65];
+    memset(digest, 'a', 64); digest[64] = 0;
+    TpRetirementOutput output = {digest, digest, digest, digest, 32};
+    TpProcess process = {.wall_seconds = 1.0, .peak_rss_bytes = 4096};
+    TpProcessObservation observed = {.valid = 1, .start_token = 1234, .finished_ns = 1000};
+    for (unsigned part = 0; part < 2; ++part)
+    {
+        char path[TP_PATH_CAP], leaf[64];
+        snprintf(leaf, sizeof(leaf), "retirement-shard-%u.jsonl", part);
+        CHECK(tp_path(path, root, leaf));
+        FILE* file = fopen(path, "wb");
+        CHECK(file && tp_retirement_transcript_begin_shard(&transcript, file));
+        unsigned count = part ? 416 : 32768;
+        for (unsigned i = 0; file && i < count; ++i)
+        {
+            observed.pid = execution.sequence + 4321;
+            observed.started_ns = observed.finished_ns + 1;
+            observed.finished_ns = observed.started_ns + 1000000000;
+            CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &output));
+        }
+        TpRetirementShard shard;
+        CHECK(tp_retirement_transcript_end_shard(&transcript, &shard) && shard.records == count);
+        if (file) CHECK(fclose(file) == 0);
+        char hash[65];
+        uint64_t bytes = 0, lines = 0;
+        CHECK(tp_hash_file(path, hash, &bytes, &lines) && lines == count &&
+            bytes == shard.bytes && !strcmp(hash, shard.sha256));
+    }
+    CHECK(tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
+    CHECK(transcript.shards == 2 && transcript.total_records == 33184 && transcript.finished);
+    CHECK(!tp_retirement_transcript_finish(&transcript, observed.finished_ns + 2));
+
+#ifdef __linux__
+    /* /dev/full fails only on flush here: the caller-supplied buffer holds the
+     * complete 244-invocation campaign. Successful fwrite is not a seal. */
+    CHECK(tp_retirement_execution_init(&execution, 1, 1, NULL, 0, 60, workspace, 4));
+    CHECK(tp_retirement_transcript_init(&transcript, &execution, "job-1", 2, "boot-123", 2, 1000));
+    FILE* file = fopen("/dev/full", "wb");
+    size_t capacity = 1024 * 1024;
+    char* buffer = (char*)malloc(capacity);
+    CHECK(file && buffer && setvbuf(file, buffer, _IOFBF, capacity) == 0);
+    CHECK(tp_retirement_transcript_begin_shard(&transcript, file));
+    observed.finished_ns = 1000;
+    for (unsigned i = 0; file && buffer && i < 244; ++i)
+    {
+        observed.pid = i + 4321;
+        observed.started_ns = observed.finished_ns + 1;
+        observed.finished_ns = observed.started_ns + 1000000000;
+        CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &output));
+    }
+    CHECK(tp_retirement_execution_complete(&execution));
+    TpRetirementShard shard;
+    CHECK(!tp_retirement_transcript_end_shard(&transcript, &shard));
+    CHECK(!shard.bytes && !shard.records && !shard.sha256[0]);
+    CHECK(transcript.failed && !tp_retirement_execution_complete(&execution));
+    CHECK(!tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
+    if (file) (void)fclose(file);
+    free(buffer);
+#endif
 }
 
 #ifdef __linux__
@@ -1884,6 +2009,7 @@ int main(int argc, char** argv)
         test_retirement_statistics();
         test_retirement_execution();
         test_retirement_records(root);
+        test_retirement_shards(root);
 #ifdef __linux__
         test_process_observations(executable, root);
 #endif

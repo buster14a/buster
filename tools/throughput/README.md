@@ -667,6 +667,15 @@ python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py 
 python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests-sanitized
 ```
 
+`TpRetirementTranscript` couples a successful checked write to advancement of
+that cursor. Shards contain 32,768 records, except for the last shard, and are
+bounded to 64 MiB each and 4,096 shards overall. A shortened intermediate shard,
+overlapping interval, duplicate observation, write/flush error, or premature
+completion permanently invalidates the transcript. A descriptor is returned
+only after the shard's stream flush succeeds. The caller owns file creation,
+fsync, no-replace publication and final immutable revalidation; a returned
+SHA-256 descriptor establishes local byte integrity, not receipt authority.
+
 These primitives are not an admitted service recipe or an authenticated receipt.
 The service must still own the immutable plan, launch isolation, independent
 output checks, shard publication, lifecycle and receipt authority. The

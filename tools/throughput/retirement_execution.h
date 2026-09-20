@@ -1,6 +1,8 @@
 /* Native producer side of #568's execution transcript for #881.
  * The cursor uses the reviewed #619 block schedule and retains only O(rows)
  * state. peek/commit makes a failed or unwritten invocation non-resumable.
+ * tp_retirement_transcript_append couples checked bytes and cursor advancement;
+ * tp_retirement_transcript_finish checks complete collection and flushed output.
  * These are collection primitives, not service admission or a verdict. The
  * supervisor must own the plan, process launcher, output and receipt authority.
  */
@@ -343,5 +345,145 @@ static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
     }
     if (!result && bytes && capacity) bytes[0] = 0;
     return result;
+}
+
+#define TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS 32768u
+#define TP_RETIREMENT_TRANSCRIPT_SHARDS 4096u
+#define TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES UINT64_C(67108864)
+
+typedef struct TpRetirementShard
+{
+    uint64_t bytes, records;
+    char sha256[65];
+} TpRetirementShard;
+
+typedef struct TpRetirementTranscript
+{
+    TpRetirementExecution* execution;
+    FILE* stream;
+    Sha256 hash;
+    uint64_t bytes, records, total_records, last_end, attempt;
+    unsigned shards;
+    int cpu, failed, finished;
+    char job[129], boot[129];
+} TpRetirementTranscript;
+
+/* The caller owns exclusive service-created streams and their durable/no-replace
+ * publication. A local shard digest is only an integrity descriptor, never the
+ * independently authenticated execution receipt. No stream is closed here. */
+static int tp_retirement_transcript_init(TpRetirementTranscript* transcript,
+    TpRetirementExecution* execution, char const* job, uint64_t attempt,
+    char const* boot, int cpu, uint64_t bound_at_ns)
+{
+    int ok = transcript && execution && execution->rows && !execution->failed &&
+        !execution->pending && !execution->sequence && execution->expected &&
+        execution->expected <= (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS * TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
+        tp_retirement_token(job) && tp_retirement_token(boot) && attempt && cpu >= 0 && bound_at_ns;
+    if (transcript)
+    {
+        *transcript = (TpRetirementTranscript){.failed = !ok};
+        if (ok)
+        {
+            transcript->execution = execution;
+            transcript->attempt = attempt;
+            transcript->cpu = cpu;
+            transcript->last_end = bound_at_ns;
+            strcpy(transcript->job, job);
+            strcpy(transcript->boot, boot);
+        }
+    }
+    return ok;
+}
+
+static int tp_retirement_transcript_begin_shard(TpRetirementTranscript* transcript, FILE* stream)
+{
+    int ok = transcript && !transcript->failed && !transcript->finished && !transcript->stream &&
+        transcript->execution && !transcript->execution->failed &&
+        transcript->total_records == transcript->execution->sequence &&
+        transcript->total_records < transcript->execution->expected &&
+        transcript->shards < TP_RETIREMENT_TRANSCRIPT_SHARDS && stream;
+    if (ok)
+    {
+        transcript->stream = stream;
+        transcript->bytes = transcript->records = 0;
+        sha256_init(&transcript->hash);
+    }
+    else if (transcript)
+    {
+        transcript->failed = 1;
+        if (transcript->execution) transcript->execution->failed = 1;
+    }
+    return ok;
+}
+
+static int tp_retirement_transcript_append(TpRetirementTranscript* transcript,
+    TpProcessObservation const* observed, TpProcess const* process, TpRetirementOutput const* output)
+{
+    char bytes[TP_RETIREMENT_EXECUTION_LINE_CAP];
+    TpRetirementInvocation invocation;
+    int ok = transcript && !transcript->failed && !transcript->finished && transcript->stream &&
+        transcript->execution && transcript->total_records == transcript->execution->sequence &&
+        transcript->records < TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS && observed &&
+        observed->started_ns > transcript->last_end &&
+        tp_retirement_execution_peek(transcript->execution, &invocation) == TP_RETIREMENT_NEXT_READY;
+    size_t count = ok ? tp_retirement_execution_record(bytes, sizeof(bytes), &invocation, observed,
+        process, output, transcript->job, transcript->attempt, transcript->boot, transcript->cpu) : 0;
+    ok = ok && count && transcript->bytes <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES &&
+        count <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES - transcript->bytes;
+    if (ok) ok = fwrite(bytes, 1, count, transcript->stream) == count && !ferror(transcript->stream);
+    if (ok)
+    {
+        sha256_add(&transcript->hash, bytes, (u64)count);
+        transcript->bytes += count;
+        ++transcript->records;
+        ++transcript->total_records;
+        transcript->last_end = observed->finished_ns;
+        ok = tp_retirement_execution_commit(transcript->execution, 1);
+    }
+    if (transcript && !ok)
+    {
+        transcript->failed = 1;
+        if (transcript->execution) transcript->execution->failed = 1;
+    }
+    return ok;
+}
+
+static int tp_retirement_transcript_end_shard(TpRetirementTranscript* transcript, TpRetirementShard* shard)
+{
+    int ok = transcript && !transcript->failed && !transcript->finished && transcript->stream &&
+        transcript->records && shard && transcript->execution && !transcript->execution->failed &&
+        transcript->total_records == transcript->execution->sequence &&
+        (transcript->records == TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS ||
+         tp_retirement_execution_complete(transcript->execution));
+    if (shard) *shard = (TpRetirementShard){0};
+    if (ok) ok = fflush(transcript->stream) == 0 && !ferror(transcript->stream);
+    if (ok)
+    {
+        shard->bytes = transcript->bytes;
+        shard->records = transcript->records;
+        sha256_finish_hex(&transcript->hash, shard->sha256);
+        transcript->stream = NULL;
+        ++transcript->shards;
+    }
+    else if (transcript)
+    {
+        transcript->failed = 1;
+        if (transcript->execution) transcript->execution->failed = 1;
+    }
+    return ok;
+}
+
+static int tp_retirement_transcript_finish(TpRetirementTranscript* transcript, uint64_t completed_at_ns)
+{
+    int ok = transcript && !transcript->failed && !transcript->finished && !transcript->stream &&
+        transcript->shards && completed_at_ns > transcript->last_end &&
+        tp_retirement_execution_complete(transcript->execution) &&
+        transcript->total_records == transcript->execution->expected;
+    if (transcript)
+    {
+        transcript->finished = ok;
+        if (!ok) transcript->failed = 1;
+    }
+    return ok;
 }
 #endif
