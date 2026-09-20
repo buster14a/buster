@@ -35,14 +35,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             }
             if (BUSTER_REQUIRE(arguments, function && function->instruction_count))
             {
-                BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
-                BUSTER_TEST(arguments, function->operand_total == ir_test_operand_total(function));
+                BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_OPERANDS_KNOWN) != 0);
+                BUSTER_TEST(arguments, function->fast_operand_count == BUSTER_MIN(ir_test_operand_total(function), IR_FAST_WORK_BUDGET + 1));
                 lowered.program->fast_passes = 0;
                 BUSTER_TEST(arguments, ir_prepare_canonical_module(lowered.program, module, false).error == IR_VALIDATION_NONE);
-                BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
+                BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_OPERANDS_KNOWN) != 0);
                 BUSTER_TEST(arguments, function->published_cfg != 0);
                 ir_function_invalidate_cfg(function);
-                BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count);
+                BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_OPERANDS_KNOWN) == 0);
             }
         }
         scratch_end(temporary);
@@ -59,7 +59,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             for (u32 index = 0; index < module->function_count; index += 1)
             {
                 IrFunction* function = module->functions + index;
-                BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count || function->operand_total == ir_test_operand_total(function));
+                BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_OPERANDS_KNOWN) == 0 || function->fast_operand_count == BUSTER_MIN(ir_test_operand_total(function), IR_FAST_WORK_BUDGET + 1));
             }
             IrValidationResult before = ir_prepare_canonical_module(program, module, false);
             BUSTER_TEST(arguments, before.error == IR_VALIDATION_NONE);
@@ -81,7 +81,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             for (u32 index = 0; index < module->function_count; index += 1)
             {
                 IrFunction* function = module->functions + index;
-                BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count || function->operand_total == ir_test_operand_total(function));
+                BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_OPERANDS_KNOWN) == 0 || function->fast_operand_count == BUSTER_MIN(ir_test_operand_total(function), IR_FAST_WORK_BUDGET + 1));
                 after_calls += ir_test_opcode_count(function, IR_OPCODE_CALL);
                 after_stores += ir_test_opcode_count(function, IR_OPCODE_STORE);
                 after_loads += ir_test_opcode_count(function, IR_OPCODE_LOAD);
@@ -272,13 +272,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
     // no value storage. The guard must decline before allocating or touching
     // the advertised value population. This is not a valid-IR certification test.
     // Known summaries must admit from the producer's facts, before touching
-    // row storage. Unknown summaries and stale row populations scan the row.
+    // row storage. Unknown summaries and missing operand facts scan the row.
     for (u32 known = 0; known < 3; known += 1)
     {
         IrInstruction row = {.opcode = IR_OPCODE_LABEL_ADDRESS, .operand_count = 1};
         IrFunction probe = {.state = IR_FUNCTION_LOWERED, .instructions = known == 1 ? 0 : &row,
-            .instruction_count = 1, .operand_total_rows = known == 2 ? 0 : 1, .operand_total = IR_FAST_WORK_BUDGET + 1,
-            .opcode_summary = known ? IR_OPCODE_SUMMARY_KNOWN : 0};
+            .instruction_count = 1, .fast_operand_count = (u32)IR_FAST_WORK_BUDGET + 1,
+            .opcode_summary = (known ? IR_OPCODE_SUMMARY_KNOWN : 0) | (known != 2 ? IR_OPCODE_SUMMARY_OPERANDS_KNOWN : 0)};
         IrProgram probe_program = {.arena = arguments->arena, .fast_passes = IR_FAST_ALL};
         IrFastStatistics probe_statistics = ir_test_fast_function(&probe_program, &probe);
         BUSTER_TEST(arguments, probe_statistics.budget_skips == (known == 1));
@@ -287,7 +287,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         if (known == 1)
         {
             probe.opcode_summary |= IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH);
-            probe.operand_total = 0;
+            probe.fast_operand_count = 0;
             probe_statistics = ir_test_fast_function(&probe_program, &probe);
             BUSTER_TEST(arguments, probe_statistics.provenance_skips == 1 && probe_statistics.budget_skips == 0);
             BUSTER_TEST(arguments, probe_statistics.scratch_peak_bytes == 0);

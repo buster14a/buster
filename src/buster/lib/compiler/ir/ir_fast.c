@@ -403,10 +403,11 @@ BUSTER_GLOBAL_LOCAL void ir_fast_function(IrProgram* program, IrFunction* functi
 {
     statistics->functions += 1;
     statistics->instructions_before += function->instruction_count;
-    u64 operands = function->operand_total;
+    u64 operands = function->fast_operand_count;
     bool provenance = function->label_metadata_count != 0;
     u64 provenance_opcodes = IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS) | IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH);
-    if ((function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) && function->operand_total_rows == function->instruction_count)
+    if ((function->opcode_summary & (IR_OPCODE_SUMMARY_KNOWN | IR_OPCODE_SUMMARY_OPERANDS_KNOWN)) ==
+        (IR_OPCODE_SUMMARY_KNOWN | IR_OPCODE_SUMMARY_OPERANDS_KNOWN))
     {
         provenance |= ir_function_may_contain_opcodes(function, provenance_opcodes);
     }

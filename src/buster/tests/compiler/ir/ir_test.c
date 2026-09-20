@@ -1511,8 +1511,9 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, summary_function != 0);
     if (summary_function)
     {
-        BUSTER_TEST(arguments, summary_function->operand_total == 0);
+        BUSTER_TEST(arguments, summary_function->fast_operand_count == 0);
         BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
+        summary_function->opcode_summary |= IR_OPCODE_SUMMARY_OPERANDS_KNOWN;
         ir_function_add_instruction(arguments->arena, summary_function,
                                     (IrInstruction){
                                         .result = IR_VALUE_ID_INVALID,
@@ -1521,9 +1522,10 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                                         .next = IR_INSTRUCTION_ID_INVALID,
                                     },
                                     (IrSourceRange){0});
-        BUSTER_TEST(arguments, summary_function->operand_total_rows != summary_function->instruction_count);
+        BUSTER_TEST(arguments, (summary_function->opcode_summary & IR_OPCODE_SUMMARY_OPERANDS_KNOWN) == 0);
         BUSTER_TEST(arguments, ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
         BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD)));
+        summary_function->opcode_summary |= IR_OPCODE_SUMMARY_OPERANDS_KNOWN;
         ir_function_add_instruction(arguments->arena, summary_function,
                                     (IrInstruction){
                                         .result = IR_VALUE_ID_INVALID,
@@ -1532,7 +1534,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                                         .next = IR_INSTRUCTION_ID_INVALID,
                                     },
                                     (IrSourceRange){0});
-        BUSTER_TEST(arguments, summary_function->operand_total_rows != summary_function->instruction_count);
+        BUSTER_TEST(arguments, (summary_function->opcode_summary & IR_OPCODE_SUMMARY_OPERANDS_KNOWN) == 0);
         BUSTER_TEST(arguments, ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS)));
         BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH)));
     }

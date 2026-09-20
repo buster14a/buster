@@ -5941,8 +5941,8 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
         }
         // Some canonical rows share operand slices. Write a fresh dense pool
         // so each old ID is remapped exactly once, never through an updated ID.
-        function->operand_total = operand_count;
-        function->operand_total_rows = function->instruction_count;
+        function->fast_operand_count = (u32)BUSTER_MIN(operand_count, IR_FAST_WORK_BUDGET + 1);
+        function->opcode_summary |= IR_OPCODE_SUMMARY_OPERANDS_KNOWN;
         IrValueId* operands = arena_allocate(builder->arena, IrValueId, operand_count);
         u64 operand_cursor = 0;
         IR_CONSTRUCTION_RECORD(SSA_REMAP_OPERAND_SLOTS, operand_count);

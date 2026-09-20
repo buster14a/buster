@@ -400,12 +400,15 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `ir_function_add_instruction`; IR whose rows were written straight into
   `instructions` reads as unknown and every consumer keeps a scan for it.
   Frontend SSA and shared compaction already sum operand slots for their dense
-  pools. They publish `operand_total` with `operand_total_rows`; FAST reuses
-  the total only when that population still equals `instruction_count` and the
-  opcode summary is known. Appends change the population and reopening a
-  published CFG clears it. Construction retracts rows before frontend SSA publishes this fact.
-  Missing/stale totals and unknown summaries retain the conservative row scan.
-  There is no per-append operand accounting.
+  pools. They publish `fast_operand_count`, saturated at one above the FAST
+  work budget, with `IR_OPCODE_SUMMARY_OPERANDS_KNOWN` in reserved summary bit
+  62. The count is exact below the budget; saturation always declines admission.
+  Both summary and operand facts must be known before FAST can reuse it.
+  General checked appends and reopening a published CFG clear the operand fact.
+  Trusted C construction completes all appends/retractions before frontend SSA
+  publishes the count; it needs no per-append accounting. Missing facts keep
+  the conservative row scan. The u32 count occupies existing 64-bit-host padding
+  between function state and the summary instead of enlarging every function.
 - Source diagnostics in shared layers use canonical `IrSourceRange` and
   `IrSourcePosition`. Do not reintroduce parser-specific source-range APIs into
   codegen, debug information, object writing, or the linker.

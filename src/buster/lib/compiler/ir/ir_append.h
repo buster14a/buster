@@ -31,6 +31,9 @@ static IR_APPEND_UNUSED BUSTER_INLINE IrInstructionId ir_instruction_append_trus
                                                                                     IrInstruction instruction,
                                                                                     IrSourceRange canonical_source)
 {
+    // Trusted C construction finishes all appends/retractions before SSA
+    // compaction publishes the bounded operand count. General checked appends
+    // invalidate that fact explicitly; this producer path needs no accounting.
     u32 instruction_count = function->instruction_count;
     IrInstructionId result;
     if (BUSTER_UNLIKELY(instruction_count >= function->instruction_capacity))

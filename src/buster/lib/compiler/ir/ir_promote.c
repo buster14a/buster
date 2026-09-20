@@ -567,9 +567,8 @@ BUSTER_GLOBAL_LOCAL void ir_rewrite_compact(Arena* arena, IrProgram* program, Ir
         replacements[value] = value_map[replacements[value]];
     }
     u64 operand_cursor = 0;
-    function->operand_total = operand_count;
-    function->operand_total_rows = instruction_count;
-    function->opcode_summary = IR_OPCODE_SUMMARY_KNOWN;
+    function->fast_operand_count = (u32)BUSTER_MIN(operand_count, IR_FAST_WORK_BUDGET + 1);
+    function->opcode_summary = IR_OPCODE_SUMMARY_KNOWN | IR_OPCODE_SUMMARY_OPERANDS_KNOWN;
     for (u32 index = 0; index < function->instruction_count; index += 1)
     {
         if (!removed[index])

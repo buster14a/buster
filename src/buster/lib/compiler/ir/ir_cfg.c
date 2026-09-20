@@ -10,7 +10,7 @@ void ir_function_invalidate_cfg(IrFunction* function)
 {
     if (function && function->published_cfg)
     {
-        function->operand_total_rows = UINT32_MAX;
+        function->opcode_summary &= ~IR_OPCODE_SUMMARY_OPERANDS_KNOWN;
         // Re-entering construction explicitly restores mutable chains. The
         // published representation itself retains no per-row next links.
         IrPublishedCfg const* cfg = function->published_cfg;

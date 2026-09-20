@@ -532,6 +532,8 @@ BUSTER_CT_CHECK((u32)IR_ATOMIC_OPERATION_COUNT <= UINT8_MAX);
 // bit there would claim an absence nobody established.
 #define IR_OPCODE_BIT(opcode) ((u64)1 << (u32)(opcode))
 #define IR_OPCODE_SUMMARY_KNOWN ((u64)1 << 63)
+// Bit 62 certifies the bounded operand count published by compaction.
+#define IR_OPCODE_SUMMARY_OPERANDS_KNOWN ((u64)1 << 62)
 BUSTER_CT_CHECK((u32)IR_OPCODE_COUNT < 63);
 // Record the opcodes queried by canonical consumers. LOCAL lets the shared
 // promotion oracle skip its discovery scan for frontend-built SSA functions;
@@ -722,13 +724,13 @@ struct IrFunction
     u32 extra_count;
     u32 extra_capacity;
     IrFunctionState state;
-    // Compaction already sums operand slots. Reuse that total only while
-    // operand_total_rows matches instruction_count and the summary is known.
-    // Appends change the count; reopening invalidates the cached population.
-    u64 operand_total;
-    u32 operand_total_rows;
+    // Compaction publishes min(total operands, IR_FAST_WORK_BUDGET + 1).
+    // This u32 occupies existing padding on 64-bit hosts. The summary word
+    // certifies it; checked appends and published-CFG reopening invalidate it.
+    u32 fast_operand_count;
     // Which IR_OPCODE_SUMMARY_TRACKED opcodes the builder appended, plus
-    // IR_OPCODE_SUMMARY_KNOWN. Consumers ask ir_function_may_contain_opcodes
+    // IR_OPCODE_SUMMARY_KNOWN and the optional operand-count certificate.
+    // Consumers ask ir_function_may_contain_opcodes
     // instead of rescanning every row for a handful of rare ones. The summary
     // only ever over-approximates: popping a lowered row leaves its bit set.
     u64 opcode_summary;
@@ -811,6 +813,7 @@ typedef enum IrFastPass
 #define IR_FAST_RETAINED_BUDGET ((u64)8 * 1024 * 1024)
 #define IR_FAST_PARAMETER_SWEEPS 4u
 #define IR_FAST_WORK_BUDGET ((u64)4 * 1024 * 1024)
+BUSTER_CT_CHECK(IR_FAST_WORK_BUDGET < UINT32_MAX);
 
 typedef struct IrFastPassStatistics IrFastPassStatistics;
 struct IrFastPassStatistics
