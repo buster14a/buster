@@ -165,7 +165,13 @@
   raise the deadline; `docs/ci-github-actions.md` records the #685 occurrence.
   The lifecycle helper treats an owned terminated zombie as already stopped,
   not as a signalable emulator; the harness holds a child unreaped to cover
-  this path deterministically. Unknown process-state queries remain fail-closed.
+  this path deterministically. A process-state query that loses the PID after
+  an initial `kill -0` is reconciled with one more liveness probe: confirmed
+  disappearance is stopped while persistent ambiguity remains fail-closed.
+  Once teardown observes a terminal state it is monotonic for that ownership
+  check and is not immediately re-probed. SIGTERM and SIGKILL are followed by
+  bounded stop verification; sending SIGKILL alone is not a failure, but an
+  owned process that remains live after it is.
 
 The private OS flood and process-tree child modes dispatch at the start of
 `library_tests`, before compiler prewarming and other test modules. They must
