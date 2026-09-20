@@ -21,21 +21,26 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Inspect vector conformance fixture and lowering
+      - name: Inspect Win64 padded vector contracts
         shell: bash
         run: |
           set -euo pipefail
-          file=src/buster/tests/compiler/driver/driver_test.c
-          echo '=== fixture symbols ==='
-          grep -n -E 'c_vec_conformance_source|padded_one|windows_padded_vec3_lane0_zero' "$file" || true
-          echo '=== fixture context ==='
-          while IFS=: read -r line rest; do
-            start=$((line > 100 ? line - 100 : 1))
-            end=$((line + 180))
-            echo "--- $file:$start-$end (match at $line: $rest) ---"
-            sed -n "${start},${end}p" "$file"
-          done < <(grep -n -E 'c_vec_conformance_source|windows_padded_vec3_lane0_zero' "$file" | head -n 4)
-          echo '=== implementation symbols ==='
-          grep -R -n -E 'map_logical_lanes_to_storage|is_padded_vector_type|element_count == 1|WINDOWS.*VECTOR|windows.*vector' src/buster/lib/compiler src/buster/compiler 2>/dev/null | head -n 500 || true
-          echo '=== padded-vector commit descendants ==='
-          git log --oneline --all -- src/buster/lib/compiler src/buster/tests/compiler/driver/driver_test.c | grep -i -E 'padded|vector|win64' | head -n 100 || true
+          driver=src/buster/tests/compiler/driver/driver_test.c
+          echo '=== all fixture references ==='
+          git grep -n -E 'padded.*(one|vec3)|vec3.*padded|vector_size *\( *(1|2|3|5|6|7)|non.power.*vector|wide_vector_boundaries|c_abi' -- src tests 2>/dev/null | head -n 1000 || true
+          echo '=== Windows mixed padded fixture region ==='
+          sed -n '12720,13280p' "$driver"
+          echo '=== ABI classifier ==='
+          sed -n '3120,3235p' src/buster/lib/compiler/ir/ir.c
+          sed -n '3500,3715p' src/buster/lib/compiler/ir/ir.c
+          echo '=== canonical Win64 vector helpers ==='
+          sed -n '3750,4275p' src/buster/lib/compiler/codegen/codegen.c
+          echo '=== canonical call placement ==='
+          sed -n '4620,4840p' src/buster/lib/compiler/codegen/codegen.c
+          echo '=== canonical entry placement ==='
+          sed -n '13280,13740p' src/buster/lib/compiler/codegen/codegen.c
+          echo '=== MIR Win64 padded-vector helpers and placement ==='
+          sed -n '520,820p' src/buster/lib/compiler/codegen/machine_x86_64.c
+          sed -n '1880,2050p' src/buster/lib/compiler/codegen/machine_x86_64.c
+          echo '=== relevant recent history ==='
+          git log --oneline --all -- src/buster/lib/compiler/ir/ir.c src/buster/lib/compiler/codegen/codegen.c src/buster/lib/compiler/codegen/machine_x86_64.c "$driver" | grep -i -E 'padded|vector|win64' | head -n 100 || true
