@@ -14694,6 +14694,145 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    String8 c_flat_initializer_source = S8(
+        "struct Pair\n"
+        "{\n"
+        "    int first;\n"
+        "    int second;\n"
+        "};\n"
+        "\n"
+        "struct NamedOuter\n"
+        "{\n"
+        "    struct Pair pair;\n"
+        "    int tail;\n"
+        "};\n"
+        "\n"
+        "struct AnonymousOuter\n"
+        "{\n"
+        "    struct\n"
+        "    {\n"
+        "        int first;\n"
+        "        volatile int second;\n"
+        "    };\n"
+        "    int tail;\n"
+        "};\n"
+        "\n"
+        "struct ArrayOuter\n"
+        "{\n"
+        "    int rows[2][2];\n"
+        "    int tail;\n"
+        "};\n"
+        "\n"
+        "struct UnionOuter\n"
+        "{\n"
+        "    union\n"
+        "    {\n"
+        "        struct\n"
+        "        {\n"
+        "            int first;\n"
+        "            int second;\n"
+        "        };\n"
+        "        long alternative;\n"
+        "    };\n"
+        "    int tail;\n"
+        "};\n"
+        "\n"
+        "static int order;\n"
+        "\n"
+        "static int ordered_value(int expected, int value)\n"
+        "{\n"
+        "    int result = value;\n"
+        "    if (order != expected)\n"
+        "    {\n"
+        "        result = -1000;\n"
+        "    }\n"
+        "    order += 1;\n"
+        "    return result;\n"
+        "}\n"
+        "\n"
+        "static struct Pair pair_value(int first, int second)\n"
+        "{\n"
+        "    struct Pair result = {first, second};\n"
+        "    return result;\n"
+        "}\n"
+        "\n"
+        "static int named_local(void)\n"
+        "{\n"
+        "    order = 0;\n"
+        "    struct NamedOuter value = {\n"
+        "        ordered_value(0, 11),\n"
+        "        ordered_value(1, 13),\n"
+        "        ordered_value(2, 17),\n"
+        "    };\n"
+        "    return value.pair.first != 11 || value.pair.second != 13 || value.tail != 17 || order != 3;\n"
+        "}\n"
+        "\n"
+        "static int named_literal(void)\n"
+        "{\n"
+        "    struct NamedOuter value = (struct NamedOuter){19, 23, 29};\n"
+        "    return value.pair.first != 19 || value.pair.second != 23 || value.tail != 29;\n"
+        "}\n"
+        "\n"
+        "static int anonymous_local(void)\n"
+        "{\n"
+        "    struct AnonymousOuter value = {31, 37, 41};\n"
+        "    return value.first != 31 || value.second != 37 || value.tail != 41;\n"
+        "}\n"
+        "\n"
+        "static int array_local(void)\n"
+        "{\n"
+        "    struct ArrayOuter value = {43, 47, 53, 59, 61};\n"
+        "    return value.rows[0][0] != 43 || value.rows[0][1] != 47 || value.rows[1][0] != 53 || value.rows[1][1] != 59 || value.tail != 61;\n"
+        "}\n"
+        "\n"
+        "static int union_local(void)\n"
+        "{\n"
+        "    struct UnionOuter value = {67, 71, 73};\n"
+        "    return value.first != 67 || value.second != 71 || value.tail != 73;\n"
+        "}\n"
+        "\n"
+        "static int aggregate_expression(void)\n"
+        "{\n"
+        "    struct NamedOuter direct = {pair_value(79, 83), 89};\n"
+        "    struct NamedOuter parenthesized = {(pair_value(97, 101)), 103};\n"
+        "    return direct.pair.first != 79 || direct.pair.second != 83 || direct.tail != 89 || parenthesized.pair.first != 97 ||\n"
+        "           parenthesized.pair.second != 101 || parenthesized.tail != 103;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    return named_local() || named_literal() || anonymous_local() || array_local() || union_local() || aggregate_expression();\n"
+        "}\n");
+    String8 c_flat_initializer_frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u64 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
+    {
+        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+            String8 fixture_path = buster_test_temporary_path(fixture_temporary.arena, S8("buster-c-flat-aggregate-initializers"), S8(""));
+            String8 source_path = string_format(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+            BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_flat_initializer_source)));
+            String8 fixture_command_line[] = {
+                c_flat_initializer_frontends[frontend_index], c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path,
+                source_path,
+            };
+            CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 fixture_arguments[] = {fixture_path};
+                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                    (ProcessSpawnOptions){.use_process_environment = true});
+                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                if (fixture_spawn.handle)
+                {
+                    BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(fixture_temporary);
+        }
+    }
     // #792: on a PE target that fixture used to be unlinkable.  `atexit` and
     // `at_quick_exit` are not ucrtbase.dll exports -- UCRT keeps them in its
     // import library as one call apiece to `_crt_atexit` and
