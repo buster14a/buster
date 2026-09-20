@@ -4,7 +4,11 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - '.github/workflows/native-retirement-contract.yml'
+      - '.github/workflows/native-retirement-integration.yml'
       - '.github/workflows/native-retirement-rebind.yml'
+      - 'AGENTS.md'
+      - 'docs/agents/workflow.md'
       - 'docs/native-retirement-rebinding.md'
       - 'docs/native-retirement-census.md'
       - 'docs/native-retirement-materializer.md'
@@ -12,9 +16,12 @@ on:
       - 'docs/native-retirement-dependencies-legacy-v1.json'
       - 'docs/native-retirement-repository-sources-v1.json'
       - 'docs/native-retirement-sdks-v1.json'
+      - 'tests/ci_tools_test.py'
       - 'tools/native_retirement_dependency_binding.py'
       - 'tools/native_retirement_dependency_binding.generated.h'
       - 'tools/native_retirement_dependency_binding_test.py'
+      - 'tools/native_retirement_integration.py'
+      - 'tools/native_retirement_integration_test.py'
       - 'tools/native_retirement_rebind.py'
       - 'tools/native_retirement_rebind_contract.py'
       - 'tools/native_retirement_rebind_test.py'
@@ -30,27 +37,25 @@ on:
   push:
     branches: [main]
     paths:
+      - '.github/workflows/native-retirement-contract.yml'
+      - '.github/workflows/native-retirement-integration.yml'
       - '.github/workflows/native-retirement-rebind.yml'
       - 'docs/native-retirement-rebinding.md'
-      - 'docs/native-retirement-census.md'
-      - 'docs/native-retirement-materializer.md'
       - 'docs/native-retirement-dependencies-v1.json'
       - 'docs/native-retirement-dependencies-legacy-v1.json'
       - 'docs/native-retirement-repository-sources-v1.json'
       - 'docs/native-retirement-sdks-v1.json'
       - 'tools/native_retirement_dependency_binding.py'
       - 'tools/native_retirement_dependency_binding.generated.h'
-      - 'tools/native_retirement_dependency_binding_test.py'
+      - 'tools/native_retirement_integration.py'
+      - 'tools/native_retirement_integration_test.py'
       - 'tools/native_retirement_rebind.py'
       - 'tools/native_retirement_rebind_contract.py'
-      - 'tools/native_retirement_rebind_test.py'
       - 'tools/native_retirement_materializer.py'
-      - 'tools/native_retirement_materializer_test.py'
       - 'tools/native_retirement_external.py'
       - 'tools/native_retirement_sdks.py'
       - 'tools/native_retirement_census.c'
       - 'tools/native_retirement_contract.py'
-      - 'tools/native_retirement_contract_test.py'
       - 'tools/native-retirement-mingw/**'
       - 'src/buster/lib/**'
   merge_group:
@@ -73,36 +78,65 @@ jobs:
       matrix:
         runner: [ubuntu-26.04, macos-26]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Exercise deterministic reconstruction and failure controls
+      - name: Exercise deterministic reconstruction and ownership controls
         run: |
           python3 --version
           python3 tools/native_retirement_dependency_binding_test.py -v
+          python3 tools/native_retirement_integration_test.py -v
           python3 tools/native_retirement_rebind_test.py -v
           python3 tools/native_retirement_materializer.py self-test
           python3 tools/native_retirement_materializer_test.py -v
 
   repository:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    name: Rebind complete pinned closure
+    name: Reconstruct candidate closure ephemerally
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 25
+    env:
+      TRUSTED_REF: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+      CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
     steps:
-      - name: Check out exact candidate
+      - name: Check out exact candidate or merge revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          path: candidate
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check out the previously trusted rebinder revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.TRUSTED_REF }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reject feature-owned generated state and classify trust transitions
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+        run: |
+          set -euo pipefail
+          tool="$GITHUB_WORKSPACE/trusted/tools/native_retirement_integration.py"
+          if [[ ! -f "$tool" ]]; then
+            # One-time read-only bootstrap for the PR introducing the writer.
+            # No privileged job ever has this fallback.
+            tool="$GITHUB_WORKSPACE/candidate/tools/native_retirement_integration.py"
+          fi
+          python3 "$tool" classify \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            --base "$TRUSTED_REF" \
+            --head "$CANDIDATE_HEAD" \
+            | tee "$RUNNER_TEMP/native-retirement-classification.json"
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: DaveGamble/cJSON
           ref: c859b25da02955fef659d658b8f324b5cde87be3
-          path: external/cjson
+          path: candidate/external/cjson
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned DoomGeneric closure
@@ -110,7 +144,7 @@ jobs:
         with:
           repository: ozkl/doomgeneric
           ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
-          path: external/doom
+          path: candidate/external/doom
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned LZ4 closure
@@ -118,7 +152,7 @@ jobs:
         with:
           repository: lz4/lz4
           ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
-          path: external/lz4
+          path: candidate/external/lz4
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned yyjson closure
@@ -126,7 +160,7 @@ jobs:
         with:
           repository: ibireme/yyjson
           ref: 8b4a38dc994a110abaec8a400615567bd996105f
-          path: external/yyjson
+          path: candidate/external/yyjson
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned stb closure
@@ -134,7 +168,7 @@ jobs:
         with:
           repository: nothings/stb
           ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
-          path: external/stb
+          path: candidate/external/stb
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned zlib closure
@@ -142,7 +176,7 @@ jobs:
         with:
           repository: madler/zlib
           ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
-          path: external/zlib
+          path: candidate/external/zlib
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned musl closure
@@ -150,34 +184,54 @@ jobs:
         with:
           repository: ifduyue/musl
           ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
-          path: external/musl
+          path: candidate/external/musl
           fetch-depth: 1
           persist-credentials: false
-      - name: Prepare pinned SDK and external inputs
+      - name: Prepare pinned SDK and external inputs with trusted code
         run: |
-          python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
-          python3 tools/native_retirement_external.py prepare \
-            --manifest docs/native-retirement-dependencies-v1.json \
-            --source-root "$(pwd)"
-      - name: Check exact combined repository bindings
+          python3 trusted/tools/native_retirement_sdks.py \
+            --source-root "$GITHUB_WORKSPACE/candidate"
+          python3 trusted/tools/native_retirement_external.py prepare \
+            --manifest "$GITHUB_WORKSPACE/candidate/docs/native-retirement-dependencies-v1.json" \
+            --source-root "$GITHUB_WORKSPACE/candidate"
+      - name: Reconstruct feature state ephemerally or check published main
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/native-retirement-rebind"
-          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)" \
-            | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"
-          git diff --exit-code -- \
-            docs/native-retirement-dependencies-v1.json \
-            docs/native-retirement-dependencies-legacy-v1.json \
-            docs/native-retirement-repository-sources-v1.json \
-            tools/native_retirement_dependency_binding.generated.h
-      - name: Run independent contract suite
+          if [[ '${{ github.event_name }}' == push || '${{ github.event_name }}' == workflow_dispatch ]]; then
+            python3 trusted/tools/native_retirement_rebind.py check \
+              --repo-root "$GITHUB_WORKSPACE/candidate" \
+              | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"
+            git -C candidate diff --exit-code -- \
+              docs/native-retirement-repository-sources-v1.json \
+              tools/native_retirement_dependency_binding.generated.h
+          else
+            python3 trusted/tools/native_retirement_rebind.py refresh \
+              --repo-root "$GITHUB_WORKSPACE/candidate" \
+              | tee "$RUNNER_TEMP/native-retirement-rebind/refresh.json"
+            python3 trusted/tools/native_retirement_rebind.py check \
+              --repo-root "$GITHUB_WORKSPACE/candidate" \
+              | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"
+            python3 candidate/tools/native_retirement_rebind.py check \
+              --repo-root "$GITHUB_WORKSPACE/candidate" \
+              | tee "$RUNNER_TEMP/native-retirement-rebind/candidate-check.json"
+            unexpected=$(git -C candidate diff --name-only -- . \
+              ':(exclude)docs/native-retirement-repository-sources-v1.json' \
+              ':(exclude)tools/native_retirement_dependency_binding.generated.h')
+            test -z "$unexpected"
+          fi
+      - name: Run independent contract suite against the ephemeral binding
+        working-directory: candidate
         run: |
           python3 tools/native_retirement_contract.py self-test
           python3 tools/native_retirement_contract_test.py -v
-      - name: Retain rebind diagnostics
+      - name: Retain read-only reconstruction diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-retirement-rebind-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/native-retirement-rebind
-          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/native-retirement-classification.json
+            ${{ runner.temp }}/native-retirement-rebind
+          if-no-files-found: warn
           retention-days: 7
