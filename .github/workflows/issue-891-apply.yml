@@ -2,7 +2,7 @@ name: Apply issue 891 patch
 
 on:
   push:
-    branches: [fix/891-native-runner-observation]
+    branches: [disabled-issue-891-patch]
 
 permissions:
   contents: write
