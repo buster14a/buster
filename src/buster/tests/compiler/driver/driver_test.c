@@ -2255,6 +2255,17 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_write_non_power_vector_source(Arena* ar
             "}\n"
             "#endif\n"
             "\n"
+            "#if defined(NON_POWER_VECTOR_FREESTANDING_RUNTIME) && !defined(NON_POWER_VECTOR_PROVIDER_ONLY)\n"
+            "// Clang may emit memset for aggregate initialization in freestanding code.\n"
+            "void* memset(void* destination, int value, unsigned long long count)\n"
+            "{\n"
+            "    unsigned char* bytes = (unsigned char*)destination;\n"
+            "    for (unsigned long long index = 0; index < count; index += 1)\n"
+            "        bytes[index] = (unsigned char)value;\n"
+            "    return destination;\n"
+            "}\n"
+            "#endif\n"
+            "\n"
             "#if !defined(NON_POWER_VECTOR_PROVIDER_ONLY)\n"
             "int main(void)\n"
             "{\n"
@@ -13478,13 +13489,28 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                      buster_object, wide_clang_objects[direction]};
                             CompilerDriverResult linked = compiler_driver_execute_invocation(wide_temporary.arena,
                                 compiler_driver_parse_arguments(wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                            if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                arguments->show(arguments, S8("WIN64_VECTOR wide_mixed mode={u32} direction={u32} link_error={u32} diagnostic={S8}\n"), mode, direction, (u32)linked.error, linked.diagnostic);
+                            }
                             BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
                             if (linked.error == COMPILER_DRIVER_ERROR_NONE)
                             {
                                 String8 run_command[] = {S8("wine"), executable};
                                 ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
                                                                           (SliceString8){0}, wine_options);
-                                BUSTER_TEST(arguments, run.handle && os_process_wait_sync(wide_temporary.arena, run).result == PROCESS_RESULT_SUCCESS);
+                                ProcessWaitResult vector_wide_mixed_wait = {.result = PROCESS_RESULT_NOT_EXISTENT};
+                                if (run.handle)
+                                {
+                                    vector_wide_mixed_wait = os_process_wait_sync(wide_temporary.arena, run);
+                                }
+                                if (vector_wide_mixed_wait.result != PROCESS_RESULT_SUCCESS)
+                                {
+                                    arguments->show(arguments, S8("WIN64_VECTOR wide_mixed mode={u32} direction={u32} launched={u32} result={u32} platform_status={u32:x} stdout={S8} stderr={S8}\n"), mode, direction, run.handle != 0, (u32)vector_wide_mixed_wait.result, vector_wide_mixed_wait.platform_status,
+                                        (String8){.pointer = (char8*)vector_wide_mixed_wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = vector_wide_mixed_wait.streams[STANDARD_STREAM_OUTPUT].length},
+                                        (String8){.pointer = (char8*)vector_wide_mixed_wait.streams[STANDARD_STREAM_ERROR].pointer, .length = vector_wide_mixed_wait.streams[STANDARD_STREAM_ERROR].length});
+                                }
+                                BUSTER_TEST(arguments, run.handle && vector_wide_mixed_wait.result == PROCESS_RESULT_SUCCESS);
                             }
                         }
                         scratch_end(wide_temporary);
@@ -13505,6 +13531,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                         wine_mixed_arena, S8("buster-win64-padded-clang"), string_format(wine_mixed_arena, S8("-{u32}.obj"), half));
                     String8 clang_command[] = {S8(BUSTER_HOST_C_COMPILER), S8("-target"), S8("x86_64-pc-windows-msvc"), S8("-march=x86-64"),
                                               S8("-O0"), S8("-ffreestanding"), S8("-fno-builtin"), S8("-mno-stack-arg-probe"), S8("-c"),
+                                              S8("-DNON_POWER_VECTOR_FREESTANDING_RUNTIME=1"),
                                               padded_defines[half], padded_input, S8("-o"), padded_clang_objects[half]};
                     ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_command), (SliceString8){0},
                                                                  (SliceString8){0}, wine_options);
@@ -13535,13 +13562,28 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                                                      buster_object, padded_clang_objects[direction]};
                             CompilerDriverResult linked = compiler_driver_execute_invocation(padded_temporary.arena,
                                 compiler_driver_parse_arguments(padded_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
+                            if (linked.error != COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                arguments->show(arguments, S8("WIN64_VECTOR padded_mixed mode={u32} direction={u32} link_error={u32} diagnostic={S8}\n"), mode, direction, (u32)linked.error, linked.diagnostic);
+                            }
                             BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
                             if (linked.error == COMPILER_DRIVER_ERROR_NONE)
                             {
                                 String8 run_command[] = {S8("wine"), executable};
                                 ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
                                                                           (SliceString8){0}, wine_options);
-                                BUSTER_TEST(arguments, run.handle && os_process_wait_sync(padded_temporary.arena, run).result == PROCESS_RESULT_SUCCESS);
+                                ProcessWaitResult vector_padded_mixed_wait = {.result = PROCESS_RESULT_NOT_EXISTENT};
+                                if (run.handle)
+                                {
+                                    vector_padded_mixed_wait = os_process_wait_sync(padded_temporary.arena, run);
+                                }
+                                if (vector_padded_mixed_wait.result != PROCESS_RESULT_SUCCESS)
+                                {
+                                    arguments->show(arguments, S8("WIN64_VECTOR padded_mixed mode={u32} direction={u32} launched={u32} result={u32} platform_status={u32:x} stdout={S8} stderr={S8}\n"), mode, direction, run.handle != 0, (u32)vector_padded_mixed_wait.result, vector_padded_mixed_wait.platform_status,
+                                        (String8){.pointer = (char8*)vector_padded_mixed_wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = vector_padded_mixed_wait.streams[STANDARD_STREAM_OUTPUT].length},
+                                        (String8){.pointer = (char8*)vector_padded_mixed_wait.streams[STANDARD_STREAM_ERROR].pointer, .length = vector_padded_mixed_wait.streams[STANDARD_STREAM_ERROR].length});
+                                }
+                                BUSTER_TEST(arguments, run.handle && vector_padded_mixed_wait.result == PROCESS_RESULT_SUCCESS);
                             }
                         }
                         scratch_end(padded_temporary);
@@ -13579,6 +13621,10 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 CompilerDriverResult wine_wide_build = compiler_driver_execute_invocation(
                     wine_wide_temporary.arena,
                     compiler_driver_parse_arguments(wine_wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_command_line)));
+                if (wine_wide_build.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    arguments->show(arguments, S8("WIN64_VECTOR direct model={u32} fixture={u32} build_error={u32} diagnostic={S8}\n"), model_index, fixture, (u32)wine_wide_build.error, wine_wide_build.diagnostic);
+                }
                 BUSTER_TEST(arguments, wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE);
                 if (wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE)
                 {
@@ -13591,7 +13637,14 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     BUSTER_TEST(arguments, wine_wide_run.handle != 0);
                     if (wine_wide_run.handle)
                     {
-                        BUSTER_TEST(arguments, os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run).result == PROCESS_RESULT_SUCCESS);
+                        ProcessWaitResult vector_direct_wait = os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run);
+                        if (vector_direct_wait.result != PROCESS_RESULT_SUCCESS)
+                        {
+                            arguments->show(arguments, S8("WIN64_VECTOR direct model={u32} fixture={u32} result={u32} platform_status={u32:x} stdout={S8} stderr={S8}\n"), model_index, fixture, (u32)vector_direct_wait.result, vector_direct_wait.platform_status,
+                                (String8){.pointer = (char8*)vector_direct_wait.streams[STANDARD_STREAM_OUTPUT].pointer, .length = vector_direct_wait.streams[STANDARD_STREAM_OUTPUT].length},
+                                (String8){.pointer = (char8*)vector_direct_wait.streams[STANDARD_STREAM_ERROR].pointer, .length = vector_direct_wait.streams[STANDARD_STREAM_ERROR].length});
+                        }
+                        BUSTER_TEST(arguments, vector_direct_wait.result == PROCESS_RESULT_SUCCESS);
                     }
                 }
                 scratch_end(wine_wide_temporary);

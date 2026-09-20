@@ -37,108 +37,6 @@ jobs:
           wine --version
           mkdir -p "$(dirname "$WINEPREFIX")"
           wineboot --init
-      - name: Add temporary attribution
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('src/buster/tests/compiler/driver/driver_test.c')
-          text = path.read_text()
-
-          def line_indent(source: str, offset: int) -> str:
-              line_start = source.rfind('\n', 0, offset) + 1
-              return source[line_start:offset]
-
-          def instrument_mixed(source: str, arena: str, label: str) -> str:
-              run_assert = (
-                  'BUSTER_TEST(arguments, run.handle && os_process_wait_sync('
-                  + arena
-                  + ', run).result == PROCESS_RESULT_SUCCESS);'
-              )
-              if source.count(run_assert) != 1:
-                  raise SystemExit(f'{label}: expected one run assertion, found {source.count(run_assert)}')
-
-              run_offset = source.index(run_assert)
-              linked_block = source.rfind('CompilerDriverResult linked =', 0, run_offset)
-              if linked_block < 0:
-                  raise SystemExit(f'{label}: linked block not found')
-              link_assert = 'BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);'
-              link_offset = source.find(link_assert, linked_block, run_offset)
-              if link_offset < 0:
-                  raise SystemExit(f'{label}: link assertion not found')
-              indent = line_indent(source, link_offset)
-              link_replacement = (
-                  f'arguments->show(arguments, S8("ISSUE_913 {label} mode={{u32}} direction={{u32}} '
-                  'link_error={u32} diagnostic={S8}\\n"), mode, direction, (u32)linked.error, linked.diagnostic);\n'
-                  + indent
-                  + link_assert
-              )
-              source = source[:link_offset] + link_replacement + source[link_offset + len(link_assert):]
-
-              run_offset = source.index(run_assert)
-              indent = line_indent(source, run_offset)
-              wait_name = f'issue_913_{label}_wait'
-              run_replacement = (
-                  f'ProcessWaitResult {wait_name} = {{.result = PROCESS_RESULT_NOT_EXISTENT}};\n'
-                  + indent
-                  + 'if (run.handle)\n'
-                  + indent
-                  + '{\n'
-                  + indent
-                  + f'    {wait_name} = os_process_wait_sync({arena}, run);\n'
-                  + indent
-                  + '}\n'
-                  + indent
-                  + f'arguments->show(arguments, S8("ISSUE_913 {label} mode={{u32}} direction={{u32}} launched={{u32}} '
-                  + 'result={u32} platform_status={u32}\\n"), mode, direction, run.handle != 0, '
-                  + f'(u32){wait_name}.result, {wait_name}.platform_status);\n'
-                  + indent
-                  + f'BUSTER_TEST(arguments, run.handle && {wait_name}.result == PROCESS_RESULT_SUCCESS);'
-              )
-              return source[:run_offset] + run_replacement + source[run_offset + len(run_assert):]
-
-          text = instrument_mixed(text, 'wide_temporary.arena', 'wide_mixed')
-          text = instrument_mixed(text, 'padded_temporary.arena', 'padded_mixed')
-
-          build_assert = 'BUSTER_TEST(arguments, wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE);'
-          if text.count(build_assert) != 1:
-              raise SystemExit(f'direct: expected one build assertion, found {text.count(build_assert)}')
-          build_offset = text.index(build_assert)
-          indent = line_indent(text, build_offset)
-          build_replacement = (
-              'arguments->show(arguments, S8("ISSUE_913 direct model={u32} fixture={u32} build_error={u32} '
-              'diagnostic={S8}\\n"), model_index, fixture, (u32)wine_wide_build.error, wine_wide_build.diagnostic);\n'
-              + indent
-              + build_assert
-          )
-          text = text[:build_offset] + build_replacement + text[build_offset + len(build_assert):]
-
-          direct_assert = (
-              'BUSTER_TEST(arguments, os_process_wait_sync(wine_wide_temporary.arena, '
-              'wine_wide_run).result == PROCESS_RESULT_SUCCESS);'
-          )
-          if text.count(direct_assert) != 1:
-              raise SystemExit(f'direct: expected one run assertion, found {text.count(direct_assert)}')
-          direct_offset = text.index(direct_assert)
-          indent = line_indent(text, direct_offset)
-          direct_replacement = (
-              'ProcessWaitResult issue_913_direct_wait = '
-              'os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run);\n'
-              + indent
-              + 'arguments->show(arguments, S8("ISSUE_913 direct model={u32} fixture={u32} result={u32} '
-              + 'platform_status={u32}\\n"), model_index, fixture, (u32)issue_913_direct_wait.result, '
-              + 'issue_913_direct_wait.platform_status);\n'
-              + indent
-              + 'BUSTER_TEST(arguments, issue_913_direct_wait.result == PROCESS_RESULT_SUCCESS);'
-          )
-          text = text[:direct_offset] + direct_replacement + text[direct_offset + len(direct_assert):]
-
-          path.write_text(text)
-          PY
-          git diff --check
-          git diff -- src/buster/tests/compiler/driver/driver_test.c
       - name: Build test runner
         shell: bash
         run: |
@@ -153,5 +51,5 @@ jobs:
           build/Release/ide test --verbose=1 --ci=1 2>&1 | tee build/issue-913-test.log
           status=${PIPESTATUS[0]}
           echo '=== issue 913 diagnostics ==='
-          grep -n -E 'ISSUE_913|c_simd_baseline_path|compiler_driver_tests' build/issue-913-test.log || true
+          grep -n -E 'WIN64_VECTOR|c_simd_baseline_path|compiler_driver_tests' build/issue-913-test.log || true
           exit "$status"

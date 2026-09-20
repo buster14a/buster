@@ -6495,6 +6495,24 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                                              .opcode = MACHINE_X64_PUSH_REGISTER,
                                          });
     }
+    // Materialize scalarized Win64 lanes before publishing any argument
+    // register. Address/load temporaries may otherwise overwrite an earlier
+    // lane already staged in RCX/RDX/R8/R9.
+    u32 windows_scalar_registers[4] = {0};
+    for (u32 argument_index = 0; argument_index < plan->argument_count; argument_index += 1)
+    {
+        MachineX64ValueShape const* shape = plan->argument_shapes + argument_index;
+        MachineX64ArgumentPlacement const* placement = plan->argument_placements + argument_index;
+        if (shape->windows_scalar_lane_size)
+        {
+            for (u32 lane = 0; lane < placement->register_part_count; lane += 1)
+            {
+                windows_scalar_registers[(u32)placement->first_integer + lane] = machine_x64_select_frame_scalar_load(
+                    selector, plan->argument_slots[argument_index], lane * shape->windows_scalar_lane_size,
+                    shape->windows_scalar_lane_size);
+            }
+        }
+    }
     // Explicit fixed-register argument copies, floats-first in two passes
     // like machine_x64_select_return: a float part bounces through RAX into
     // its XMM register via a freshly synthesized load whose free register
@@ -6559,10 +6577,8 @@ BUSTER_GLOBAL_LOCAL u16 machine_x64_stage_call_arguments(MachineX64Selector* sel
                 {
                     for (u32 lane = 0; lane < placement->register_part_count; lane += 1)
                     {
-                        u32 lane_value = machine_x64_select_frame_scalar_load(selector, plan->argument_slots[argument_index],
-                                                                              lane * shape->windows_scalar_lane_size,
-                                                                              shape->windows_scalar_lane_size);
                         u32 slot = (u32)placement->first_integer + lane;
+                        u32 lane_value = windows_scalar_registers[slot];
                         if (lane_float && stage_registers)
                         {
                             machine_x64_select_row(selector, (MachineInstruction){
