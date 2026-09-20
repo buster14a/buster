@@ -1137,6 +1137,18 @@ BUSTER_GLOBAL_LOCAL String8 buster_x86_completion_intel_source(Arena* arena, Bus
             operand.width = 0;
             operand.memory.source_width = 512;
         }
+        else if (operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY &&
+                 buster_x86_completion_string_equal(buster_x86_metadata_string_span(form.category), S8("CONVERT")) &&
+                 (form.encoder_family == BUSTER_X86_METADATA_ENCODER_LEGACY ||
+                  form.encoder_family == BUSTER_X86_METADATA_ENCODER_VEX ||
+                  form.encoder_family == BUSTER_X86_METADATA_ENCODER_XOP) &&
+                 metadata.kind == BUSTER_X86_METADATA_OPERAND_MEMORY &&
+                 (metadata.access & BUSTER_X86_METADATA_ACCESS_READ) &&
+                 !(metadata.access & BUSTER_X86_METADATA_ACCESS_WRITE))
+        {
+            u16 source_width = buster_x86_metadata_form_memory_source_width(form, metadata.atom);
+            if (source_width) operand.memory.source_width = source_width;
+        }
         spelling = operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER
                        ? buster_x86_completion_register(arena, operand.reg)
                        : operand.kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY
