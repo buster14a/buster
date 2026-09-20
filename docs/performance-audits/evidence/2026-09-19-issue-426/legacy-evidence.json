@@ -1,0 +1,225 @@
+{
+  "aggregate_perf_stat_three_repeats": {
+    "core_default_debug": {
+      "branch_misses": 51290153,
+      "branches": 2992656435,
+      "cycles": 5713400806,
+      "elapsed_seconds_mean": 1.130831825,
+      "elapsed_seconds_spread": 0.005844254,
+      "instructions": 15806850033
+    },
+    "memory_default_debug": {
+      "elapsed_seconds_mean": 1.13345757,
+      "elapsed_seconds_spread": 0.003069396,
+      "generic_cache_misses": 19421060,
+      "generic_cache_misses_semantics": "generic perf event only; not relabeled as L1, L2, or DRAM",
+      "instructions": 15806810108,
+      "l1_dcache_load_misses": 209341151,
+      "l1_dcache_loads": 7431500856,
+      "l1_icache_load_misses": 39912092
+    }
+  },
+  "classification": "diagnostic-only-not-qualified",
+  "created_utc": "2026-09-19T22:29:22Z",
+  "five_run_diagnostics": {
+    "default_debug": {
+      "output_sha256": "7fd520e55c3215eaa2d4d13f0e6dd45ae8dfde4c7831c483df084cbbbc2f1f69",
+      "peak_rss_kib": [
+        1952304,
+        1952468,
+        1952752,
+        1952824,
+        1952716
+      ],
+      "peak_rss_summary": {
+        "count": 5,
+        "maximum": 1952824,
+        "mean": 1952612.8,
+        "median": 1952716,
+        "minimum": 1952304,
+        "range_over_median": 0.00026629576446344475,
+        "sample_standard_deviation": 218.49302048349278
+      },
+      "wall_seconds": [
+        1.119,
+        1.12,
+        1.118,
+        1.119,
+        1.119
+      ],
+      "wall_summary": {
+        "count": 5,
+        "maximum": 1.12,
+        "mean": 1.1190000000000002,
+        "median": 1.119,
+        "minimum": 1.118,
+        "range_over_median": 0.001787310098302057,
+        "sample_standard_deviation": 0.0007071067811865482
+      }
+    },
+    "g0": {
+      "output_sha256": "d194eb68b9cbddd76f38533ab17774f5a6fed5fa7f7685ee1ee17d69a576ec83",
+      "peak_rss_kib": [
+        1833756,
+        1833916,
+        1834308,
+        1833556,
+        1834084
+      ],
+      "peak_rss_summary": {
+        "count": 5,
+        "maximum": 1834308,
+        "mean": 1833924.0,
+        "median": 1833916,
+        "minimum": 1833556,
+        "range_over_median": 0.00041005149636079294,
+        "sample_standard_deviation": 290.15857733315414
+      },
+      "wall_seconds": [
+        0.952,
+        0.952,
+        0.952,
+        0.954,
+        0.962
+      ],
+      "wall_summary": {
+        "count": 5,
+        "maximum": 0.962,
+        "mean": 0.9544,
+        "median": 0.952,
+        "minimum": 0.952,
+        "range_over_median": 0.010504201680672278,
+        "sample_standard_deviation": 0.004335896677735764
+      }
+    }
+  },
+  "host": {
+    "boost": true,
+    "cores": 8,
+    "cpu_family": 26,
+    "cpu_model": 68,
+    "cpu_model_name": "AMD Ryzen 7 9700X 8-Core Processor",
+    "cpu_stepping": 0,
+    "cpu_vendor": "AuthenticAMD",
+    "energy_performance_preference": "balance_performance",
+    "hostname": "benchpress",
+    "kernel": "6.18.50-2-lts",
+    "logical_cpus": 16,
+    "memory_total_bytes": 67005931520,
+    "microcode": "0xb404038",
+    "perf_event_paranoid": 2,
+    "perf_version": "7.2.4-1",
+    "runner_name": "buster-zen5-9700x",
+    "scaling_driver": "amd-pstate-epp",
+    "scaling_governor": "powersave",
+    "selected_cpu": 2,
+    "smt_active": true,
+    "swap_total_bytes": 8589930496,
+    "threads_per_core": 2,
+    "transparent_hugepage": "[always] madvise never"
+  },
+  "issue": 426,
+  "qualification_fields_missing_from_legacy_capture": {
+    "cleanup_and_absence_proof": null,
+    "drift_estimate": null,
+    "empirical_resolution_model": null,
+    "event_enabled_time": null,
+    "event_running_time": null,
+    "event_type_and_config_recorded_by_capture": null,
+    "immutable_same_binary_aa_pairs": null,
+    "label_swaps": null,
+    "optional_ibs_inventory": null,
+    "path_swaps": null,
+    "predeclared_fixed_schedule": null,
+    "quiet_phase_receipt": null,
+    "representative_candidate_frozen_verdict": null,
+    "resolved_perf_event_attr": null,
+    "running_fraction": null,
+    "separated_swap_blocks": null,
+    "serial_dependence_estimate": null,
+    "service_job_identity": null,
+    "two_rounds_of_sixty_pairs": null,
+    "whole_job_lease_receipt": null
+  },
+  "reason_not_qualified": [
+    "The five timing samples are sequential diagnostics for two different compiler flag variants, not immutable-binary paired A/A observations.",
+    "The retired direct self-hosted workflow did not prove the current server-owned service, lease, quiet phase, or cleanup contract.",
+    "Named Zen 5 events produced nonzero counts on the exact CPU, but the artifact did not retain resolved perf_event_attr encodings or enabled/running fractions.",
+    "The capture has no fixed-count swap-block noise model and no representative candidate decision under the approved retirement contract."
+  ],
+  "repository": {
+    "branch": "audit/789-fast-live-range-worklist-20260918",
+    "revision": "9ce76c32cd8a0e897aab951e7ca826451b8bb032",
+    "tree": "50422a5e1b2dfc9b284b508e6908a6ce799748f3"
+  },
+  "retained_files": [
+    {
+      "path": "host.log",
+      "sha256": "74c9f79676d90003163f62c921f28311ec61620a81340cd0b236245785901410"
+    },
+    {
+      "path": "build.log",
+      "sha256": "dcf9840bb64d413fdf3e7df9446f2411e1b9c683a9ec14de6f86d73ba8d234cb"
+    },
+    {
+      "path": "counters.log",
+      "sha256": "25db5cd231c29a687188aa46f0be15718c34b0cb0f7c489acaf51838f47dba5e"
+    },
+    {
+      "path": "cache-miss-budget.txt",
+      "sha256": "02a5394562ecd31ee76f5e6a431ce9bc437332d64a061ab66f2ce74157864731"
+    },
+    {
+      "path": "cache-miss-report.txt",
+      "sha256": "d585c86f272913839cd1a92a43350231a8c43bfdc2e06845ba1aa4231385c6fc"
+    }
+  ],
+  "schema": "buster-zen5-legacy-evidence-classification-v1",
+  "source": {
+    "artifact_expires_at": "2026-10-19T01:31:30Z",
+    "artifact_id": 10574009090,
+    "artifact_name": "zen5-audit-35412010412-1",
+    "artifact_sha256": "433abb936a25a91a1c682f8fce36cb493c3ebda287dcdd7f1cbd6a8b3f5299e9",
+    "artifact_size_bytes": 23177359,
+    "completed_at": "2026-09-19T01:31:36Z",
+    "created_at": "2026-09-19T01:14:11Z",
+    "event": "workflow_dispatch",
+    "job_id": 105814630650,
+    "job_url": "https://github.com/buster14a/buster/actions/runs/35412010412/job/105814630650",
+    "run_attempt": 1,
+    "run_id": 35412010412,
+    "run_number": 8,
+    "run_url": "https://github.com/buster14a/buster/actions/runs/35412010412",
+    "runner_labels": [
+      "buster-zen5",
+      "ryzen-9700x"
+    ],
+    "runner_name": "buster-zen5-9700x",
+    "workflow_id": 360788299,
+    "workflow_name": "Zen 5 throughput audit",
+    "workflow_path": ".github/workflows/zen5-audit.yml"
+  },
+  "trusted_compiler_build": {
+    "binary_path": "build/Release/ide",
+    "binary_sha256": "5c7358029e29783b764af0a811ee88dd302abbe67eb2c4b2963bec157139c259",
+    "binary_size_bytes": 44604760,
+    "compiler": "clang version 22.1.8",
+    "linker": "mold"
+  },
+  "version": 1,
+  "zen5_named_event_budget": {
+    "cycles": 5689016537,
+    "instructions": 15807105383,
+    "l1_dcache_load_misses": 209016820,
+    "l1_dcache_loads": 7436416467,
+    "l1_icache_load_misses": 33427379,
+    "l2_cache_req_stat.dc_access_in_l2": 201813925,
+    "l2_cache_req_stat.ls_rd_blk_c": 16845332,
+    "ls_any_fills_from_sys.all": 211266272,
+    "ls_any_fills_from_sys.dram_io_all": 13493637,
+    "ls_any_fills_from_sys.local_l2": 184764139,
+    "ls_l1_d_tlb_miss.all": 330814,
+    "ls_l1_d_tlb_miss.all_l2_miss": 26772,
+    "page_faults": 2815
+  }
+}

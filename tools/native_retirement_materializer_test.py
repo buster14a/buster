@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import native_retirement_dependency_binding as dependency_authority
 import native_retirement_materializer as materializer
 
 
@@ -216,8 +217,7 @@ class MaterializerTests(unittest.TestCase):
         archived_again = materializer.materialize_file(descriptor_path, descriptor_root, self.root / "archived-again")
         self.assertEqual(archived_again, archived)
         repository = Path(__file__).resolve().parents[1]
-        production_descriptor = json.loads(
-            (repository / "docs/native-retirement-dependencies-v1.json").read_text(encoding="utf-8"))
+        _binding, production_descriptor, _snapshot = dependency_authority.load_authority(repository)
         production_records, _metadata = materializer.parse_manifest(production_descriptor)
         replay = materializer._archived_replay(production_descriptor, production_records)
         materializer._verify_archived_fixture_inputs(replay, repository)
