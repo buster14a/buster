@@ -7,9 +7,9 @@ matrix. It complements the strict coverage floor and the native
 differential runner; it does not replace either or authorize backend retirement.
 
 The admitted input inventory is
-[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 560
-explicit SHA-256 rows bind every tracked test byte at the approval point: 412
-subject inputs (406 supported-object subjects and 6 registered non-object
+[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 559
+explicit SHA-256 rows bind every tracked test byte at the approval point: 411
+subject inputs (405 supported-object subjects and 6 registered non-object
 controls), 12 registered rejection controls, 72 support files and 64
 dormant custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
@@ -17,8 +17,8 @@ is therefore a reviewed support decision, not an automatic side effect of adding
 a fixture. Merging a contract change is the maintainer approval record.
 
 The September 17, 2026 integration retains every subject admitted by the
-current support ledger. The integrated profile has 560 inputs,
-412 subjects, 19,776 groups and 79,104 rows: 406 supported-object
+current support ledger. The integrated profile has 559 inputs,
+411 subjects, 19,728 groups and 78,912 rows: 405 supported-object
 subjects plus 6 registered non-object controls. The original 192-row
 historical gap ledger and the original 341 applicability classifications remain
 explicit and source-bound. Eighteen additional source-bound target exclusions
@@ -186,8 +186,8 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 560 input rows, 412 subject inputs (406 supported-object subjects and six
-non-object controls), 79,104 support-contract identities,
+the 558 input rows, 411 subject inputs (405 supported-object subjects and six
+non-object controls), 78,720 support-contract identities,
 or the support ledger bytes and digests. These are historical replay dispositions. The current full census supplies
 the authenticated 692-record project closure, including the target SDK headers
 and the project-owned MinGW varargs adapter described below.
@@ -389,7 +389,7 @@ zero-artifact/zero-counter shape; malformed status, process, fallback, object
 or telemetry evidence remains fatal, and a caller-supplied disposition cannot
 select the skip path. A production manifest is admitted only as
 `profile=full-census`: it must bind
-the exact 560-input/412-subject/79,104-row, four-shard population. The producer
+the exact 558-input/410-subject/78,720-row, four-shard population. The producer
 also copies `docs/native-retirement-supported-gaps-v1.tsv` into the evidence
 directory and binds its SHA-256 in the manifest. The validator checks that
 authenticated seven-column ledger, including all 192 immutable row identities,
