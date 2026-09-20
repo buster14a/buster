@@ -1,12 +1,52 @@
 // Included by ir_test.c. These inspect shared canonical rows before any target
 // can hide a missing transformation; executable differential uses the fixture
 // tests/basic_c_canonical_fast.c with all pass/allocator combinations.
+BUSTER_GLOBAL_LOCAL u64 ir_test_operand_total(IrFunction* function)
+{
+    u64 total = 0;
+    for (u32 index = 0; index < function->instruction_count; index += 1)
+    {
+        total += function->instructions[index].operand_count;
+    }
+    return total;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+        CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("fast-operand-total.c"),
+            preprocess, analysis, target_native, (CIRLowerOptions){0});
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrModule* module = lowered.program->modules;
+            IrFunction* function = 0;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                if (string_equal(module->functions[index].name, S8("test"))) function = module->functions + index;
+            }
+            if (BUSTER_REQUIRE(arguments, function && function->instruction_count))
+            {
+                BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
+                BUSTER_TEST(arguments, function->operand_total == ir_test_operand_total(function));
+                lowered.program->fast_passes = 0;
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(lowered.program, module, false).error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, function->operand_total_rows == function->instruction_count);
+                BUSTER_TEST(arguments, function->published_cfg != 0);
+                ir_function_invalidate_cfg(function);
+                BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count);
+            }
+        }
+        scratch_end(temporary);
+    }
     for (u32 mask = 0; mask <= IR_FAST_ALL; mask += 1)
     {
         TemporalArena temporary = arena_begin_temporal(arguments->arena);
@@ -16,6 +56,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         {
             IrProgram* program = lowered.program;
             IrModule* module = program->modules;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* function = module->functions + index;
+                BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count || function->operand_total == ir_test_operand_total(function));
+            }
             IrValidationResult before = ir_prepare_canonical_module(program, module, false);
             BUSTER_TEST(arguments, before.error == IR_VALIDATION_NONE);
             u32 calls = 0, stores = 0, loads = 0;
@@ -36,6 +81,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             for (u32 index = 0; index < module->function_count; index += 1)
             {
                 IrFunction* function = module->functions + index;
+                BUSTER_TEST(arguments, function->operand_total_rows != function->instruction_count || function->operand_total == ir_test_operand_total(function));
                 after_calls += ir_test_opcode_count(function, IR_OPCODE_CALL);
                 after_stores += ir_test_opcode_count(function, IR_OPCODE_STORE);
                 after_loads += ir_test_opcode_count(function, IR_OPCODE_LOAD);
@@ -225,6 +271,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
     // A safely backed budget-control input: no instruction/block traversal and
     // no value storage. The guard must decline before allocating or touching
     // the advertised value population. This is not a valid-IR certification test.
+    // Known summaries must admit from the producer's facts, before touching
+    // row storage. Unknown summaries and stale row populations scan the row.
+    for (u32 known = 0; known < 3; known += 1)
+    {
+        IrInstruction row = {.opcode = IR_OPCODE_LABEL_ADDRESS, .operand_count = 1};
+        IrFunction probe = {.state = IR_FUNCTION_LOWERED, .instructions = known == 1 ? 0 : &row,
+            .instruction_count = 1, .operand_total_rows = known == 2 ? 0 : 1, .operand_total = IR_FAST_WORK_BUDGET + 1,
+            .opcode_summary = known ? IR_OPCODE_SUMMARY_KNOWN : 0};
+        IrProgram probe_program = {.arena = arguments->arena, .fast_passes = IR_FAST_ALL};
+        IrFastStatistics probe_statistics = ir_test_fast_function(&probe_program, &probe);
+        BUSTER_TEST(arguments, probe_statistics.budget_skips == (known == 1));
+        BUSTER_TEST(arguments, probe_statistics.provenance_skips == (known != 1));
+        BUSTER_TEST(arguments, probe_statistics.scratch_peak_bytes == 0);
+        if (known == 1)
+        {
+            probe.opcode_summary |= IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH);
+            probe.operand_total = 0;
+            probe_statistics = ir_test_fast_function(&probe_program, &probe);
+            BUSTER_TEST(arguments, probe_statistics.provenance_skips == 1 && probe_statistics.budget_skips == 0);
+            BUSTER_TEST(arguments, probe_statistics.scratch_peak_bytes == 0);
+        }
+    }
     IrFunction oversized = {.state = IR_FUNCTION_LOWERED, .value_count = UINT32_MAX};
     IrProgram oversized_program = {.arena = arguments->arena, .disable_local_promotion = true, .fast_passes = IR_FAST_ALL};
     IrFastStatistics oversized_statistics = ir_test_fast_function(&oversized_program, &oversized);

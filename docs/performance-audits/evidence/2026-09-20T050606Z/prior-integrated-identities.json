@@ -1,0 +1,26 @@
+{
+  "base": {
+    "source_commit": "4b2041c4e976c5334184e24c785dbb4902c13107",
+    "source_test_patch_sha256": "56c462256c5d9af6bd8130257231f3d4bafbd091d0460e93722d975f12f27f04",
+    "compiler_sha256": "c56878099c3c509be99b1c76461f5424827a960073d4eca9376b6fe7c08f9918",
+    "full_test_log_sha256": "7fad3c82df3ae1bc9c02ba4062c9a47f4bef05112f44b87033f791f5e4b76df6"
+  },
+  "853": {
+    "source_commit": "8374c5e1bbb96551ab75911ff852dd07e9bb1839",
+    "source_test_patch_sha256": "c4b86a42165abac57a752d4b4df20e41542005e10312e0a0e3dc66077520ebe4",
+    "compiler_sha256": "68c5bea0a1785ab6e7a36e870cc4e8107e1109f2079d7385f69bf38d65cf6221",
+    "full_test_log_sha256": "1268b661a606c4b8805a1e5c8fb4422af619d91d75cb14eec555a79891ef9739"
+  },
+  "856": {
+    "source_commit": "7af5bd9cb1db9dd202e4cb62f35b67a4e1b8a660",
+    "source_test_patch_sha256": "b543de3816577da6470cda5b70875f39287b9138beaa1d160eb38bcadb59c859",
+    "compiler_sha256": "14762adeaa62c23d9b37287418df98d85eba480e21c89298b1fa7ec6f0e5db05",
+    "full_test_log_sha256": "06c1ee24c9035df4fb075b0b43e442db367ba83e9c911f732e943f69b212cc9e"
+  },
+  "857": {
+    "source_commit": "f474019321316b76046433862531b77eeb359ac3",
+    "source_test_patch_sha256": "177811881011072dd2231967d4bd222eb939c928100776439f08eb5f777052c2",
+    "compiler_sha256": "a127ebddf18242bdf252896c618761fa8b9a5a622cf6b7ef2b8d5e99b0119b8b",
+    "full_test_log_sha256": "86367064c70b187f9cadde4a472a834ff6601f75f95cfffdd5dbe0622604e084"
+  }
+}

@@ -1,0 +1,1 @@
+Verified local git diff b7346b3e <revision> -- src tests SHA256 equals each archived remote source-test-patch.sha256 for base, pre854, post854, 856, 857.
