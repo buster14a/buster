@@ -362,3 +362,12 @@ Clang consumer supplies its own `memset` for aggregate initialization; that
 helper is enabled only for this mixed-object build. Link failures retain the
 symbol diagnostic, and runtime failures retain the process status and captured
 output. Exit 1 identifies the first U8x3 value check, not an ISA probe.
+
+## Retirement adapter test checkouts
+
+The immutable statistics-adapter tests use private checkouts of the exact
+current commit. Native-retirement CI reconstructs generated bindings in its
+working tree before running these tests; that expected generated drift must
+not become the fixture for a control that requires clean committed source.
+Tracked-drift, source-identity, and checkout-race controls still exercise the
+production validator against those private checkouts.
