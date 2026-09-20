@@ -1,0 +1,67 @@
+name: Issue 913 Wine rerun
+
+on:
+  push:
+    branches:
+      - codex/913-win64-padded-vector-zero
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      WINEARCH: win64
+      WINEDEBUG: -all
+      WINEPREFIX: ${{ github.workspace }}/build/issue-913-wine
+      BUSTER_TEST_JOBS: 4
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install bootstrap and Wine
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y tcc wine wine64
+          tcc -v
+          clang --version
+          wine --version
+          mkdir -p "$(dirname "$WINEPREFIX")"
+          wineboot --init
+      - name: Apply attribution from the inspection workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/issue-913-inspect.yml').read_text()
+          start_marker = "          python3 - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          script = textwrap.dedent(workflow[start:end])
+          exec(compile(script, 'issue-913-attribution.py', 'exec'))
+          PY
+          git diff --check
+          git diff -- src/buster/tests/compiler/driver/driver_test.c
+      - name: Build test runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          CC=clang ./build.sh generate
+          CC=clang ./build.sh build --config Release -t ide
+      - name: Run Wine vector coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          build/Release/ide test --verbose=1 --ci=1 2>&1 | tee build/issue-913-test.log
+          status=${PIPESTATUS[0]}
+          echo '=== issue 913 diagnostics ==='
+          grep -n -E 'ISSUE_913|c_simd_baseline_path|compiler_driver_tests' build/issue-913-test.log || true
+          exit "$status"
