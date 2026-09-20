@@ -33,6 +33,12 @@
 #include <sys/ioctl.h>
 #endif
 
+#if BUSTER_WINDOWS
+// FileRenameInfoEx has ABI value 22. Some MinGW headers hide its enum
+// name behind NTDDI_VERSION even though the API and rename flags are declared.
+#define BUSTER_WINDOWS_FILE_RENAME_INFO_EX ((FILE_INFO_BY_HANDLE_CLASS)22)
+#endif
+
 #if BUSTER_MACOS && BUSTER_CPU_ARCH_AARCH64 && defined(MAP_JIT)
 extern void pthread_jit_write_protect_np(int enabled);
 #endif
@@ -2444,7 +2450,7 @@ OsError os_file_replace(String8 path, String8 destination)
                 // Existing readers retain the old object while new opens see
                 // the replacement. MoveFileExW alone cannot provide this when
                 // a destination handle is still open, even with delete sharing.
-                if (!SetFileInformationByHandle(handle, FileRenameInfoEx, rename_info, (DWORD)rename_bytes))
+                if (!SetFileInformationByHandle(handle, BUSTER_WINDOWS_FILE_RENAME_INFO_EX, rename_info, (DWORD)rename_bytes))
                 {
                     result = os_get_last_error();
                 }
