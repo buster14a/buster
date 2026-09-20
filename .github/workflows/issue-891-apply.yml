@@ -41,8 +41,10 @@ jobs:
           path = Path("tools/ci_native_observation_test.py")
           text = path.read_text(encoding="utf-8")
           old = '        self.assertNotIn("continue-on-error:", workflow[workflow.index("  native:"):workflow.index("  mobile:")])'
-          new = '''        native = workflow[workflow.index("  native:"):workflow.index("  mobile:")]
-          self.assertNotRegex(native, r"(?m)^\\s*continue-on-error:")'''
+          new = (
+              '        native = workflow[workflow.index("  native:"):workflow.index("  mobile:")]\n'
+              '        self.assertNotRegex(native, r"(?m)^\\s*continue-on-error:")'
+          )
           if old not in text:
               raise SystemExit("expected workflow assertion was not found")
           path.write_text(text.replace(old, new), encoding="utf-8")
