@@ -1,0 +1,183 @@
+name: Issue 889 wrapper-contract refresh
+
+on:
+  push:
+    branches:
+      - diag/889-wrapper-contract-refresh
+
+permissions:
+  contents: write
+
+concurrency:
+  group: issue889-wrapper-contract-refresh
+  cancel-in-progress: true
+
+jobs:
+  repair:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: codex/885-matched-cache-cohorts
+          fetch-depth: 0
+
+      - name: Update wrapper policy owner and frozen identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import hashlib
+          from pathlib import Path
+          import subprocess
+
+          wrapper = Path("tests/bootstrap_wrapper_test.py")
+          support = Path("docs/native-retirement-support-v1.tsv")
+          binding = Path("tools/native_retirement_performance_binding.py")
+
+          text = wrapper.read_text(encoding="utf-8")
+          replacements = (
+              (
+                  '        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == \'success\' }}", block)\n',
+                  '        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == \'success\' && steps.zig_cache_policy.outcome == \'success\' }}", block)\n',
+              ),
+              (
+                  '        for suite in ("tests/ci_tools_test.py", "tools/analyzer_selection_test.py", "tools/differential_ci_policy_test.py"):\n',
+                  '        for suite in ("tests/ci_tools_test.py", "tools/ci_zig_cache_test.py",\n'
+                  '                      "tools/analyzer_selection_test.py", "tools/differential_ci_policy_test.py"):\n',
+              ),
+              (
+                  '        lists = re.findall(r"\'(workflow_tools[^\']*)\'", expression)\n',
+                  '        lists = re.findall(r"\'([^\']*workflow_tools[^\']*)\'", expression)\n',
+              ),
+              (
+                  '        self.assertEqual(lists, ["workflow_tools bootstrap_wrappers zig combinations_unix",\n'
+                  '                                 "workflow_tools bootstrap_wrappers zig combinations_windows"])\n',
+                  '        self.assertEqual(lists, [\n'
+                  '            "zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig "\n'
+                  '            "zig_cache_evidence combinations_unix",\n'
+                  '            "zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig "\n'
+                  '            "zig_cache_evidence combinations_windows",\n'
+                  '        ])\n',
+              ),
+          )
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected one wrapper policy spelling, found {text.count(old)}: {old!r}")
+              text = text.replace(old, new)
+          wrapper.write_text(text, encoding="utf-8", newline="\n")
+
+          target_bytes = wrapper.read_bytes()
+          target_size = len(target_bytes)
+          target_sha256 = hashlib.sha256(target_bytes).hexdigest()
+          old_support_sha256 = hashlib.sha256(support.read_bytes()).hexdigest()
+          old_binding_sha256 = hashlib.sha256(binding.read_bytes()).hexdigest()
+
+          output = []
+          matches = 0
+          for line in support.read_bytes().splitlines(keepends=True):
+              newline = b"\n" if line.endswith(b"\n") else b""
+              body = line[:-1] if newline else line
+              fields = body.split(b"\t")
+              if fields and fields[0] == b"tests/bootstrap_wrapper_test.py":
+                  if len(fields) != 5:
+                      raise SystemExit("malformed bootstrap-wrapper support row")
+                  fields[3] = str(target_size).encode("ascii")
+                  fields[4] = target_sha256.encode("ascii")
+                  line = b"\t".join(fields) + newline
+                  matches += 1
+              output.append(line)
+          if matches != 1:
+              raise SystemExit(f"expected one bootstrap-wrapper support row, found {matches}")
+          support.write_bytes(b"".join(output))
+          new_support_sha256 = hashlib.sha256(support.read_bytes()).hexdigest()
+
+          def grep_paths(token):
+              result = subprocess.run(
+                  ["git", "grep", "-l", "--fixed-strings", token, "--"],
+                  check=False, capture_output=True, text=True)
+              if result.returncode not in (0, 1):
+                  raise SystemExit(result.stderr)
+              return {Path(line) for line in result.stdout.splitlines() if line}
+
+          expected_support_consumers = {
+              Path("tools/bench_service/profiles/native-retirement-performance-v1.blocked"),
+              Path("tools/bench_service/queue.c"),
+              Path("tools/native_retirement_contract.py"),
+              Path("tools/native_retirement_materializer.py"),
+              Path("tools/native_retirement_performance_binding.py"),
+          }
+          consumers = grep_paths(old_support_sha256)
+          if consumers != expected_support_consumers:
+              raise SystemExit(f"unexpected support digest consumers: {sorted(map(str, consumers))}")
+          for path in sorted(consumers):
+              value = path.read_text(encoding="utf-8")
+              if value.count(old_support_sha256) != 1:
+                  raise SystemExit(f"unexpected support digest count in {path}")
+              path.write_text(value.replace(old_support_sha256, new_support_sha256),
+                              encoding="utf-8", newline="\n")
+
+          new_binding_sha256 = hashlib.sha256(binding.read_bytes()).hexdigest()
+          expected_binding_consumers = {
+              Path("tools/bench_service/profiles/native-retirement-performance-v1.blocked"),
+              Path("tools/bench_service/queue.c"),
+          }
+          consumers = grep_paths(old_binding_sha256)
+          if consumers != expected_binding_consumers:
+              raise SystemExit(f"unexpected binding digest consumers: {sorted(map(str, consumers))}")
+          for path in sorted(consumers):
+              value = path.read_text(encoding="utf-8")
+              if value.count(old_binding_sha256) != 1:
+                  raise SystemExit(f"unexpected binding digest count in {path}")
+              path.write_text(value.replace(old_binding_sha256, new_binding_sha256),
+                              encoding="utf-8", newline="\n")
+
+          print(f"bootstrap_wrapper bytes={target_size} sha256={target_sha256}")
+          print(f"support {old_support_sha256} -> {new_support_sha256}")
+          print(f"binding {old_binding_sha256} -> {new_binding_sha256}")
+          PYTHON
+
+      - name: Validate wrapper and support contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/bootstrap_wrapper_test.py BootstrapWorkflowTests -v
+          python3 tests/ci_tools_test.py -q
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          git diff --check
+
+      - name: Create clean verified commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add \
+            tests/bootstrap_wrapper_test.py \
+            docs/native-retirement-support-v1.tsv \
+            tools/native_retirement_contract.py \
+            tools/native_retirement_materializer.py \
+            tools/native_retirement_performance_binding.py \
+            tools/bench_service/profiles/native-retirement-performance-v1.blocked \
+            tools/bench_service/queue.c
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'ci: align bootstrap wrapper policy contract'
+
+      - name: Validate committed performance binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
+          python3 tools/native_retirement_performance_identity_test.py -v
+
+      - name: Publish repair to PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:codex/885-matched-cache-cohorts
