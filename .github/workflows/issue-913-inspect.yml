@@ -1,0 +1,50 @@
+name: Issue 913 Wine reproduction
+
+on:
+  push:
+    branches:
+      - codex/913-wine-validation
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      WINEARCH: win64
+      WINEDEBUG: -all
+      WINEPREFIX: ${{ github.workspace }}/.issue-913-wine
+      BUSTER_TEST_JOBS: 4
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: a99d421f1cd49ca2705da91a9bc7a154a0ac286e
+      - name: Install Wine
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y wine wine64
+          clang --version
+          wine --version
+          mkdir -p "$(dirname "$WINEPREFIX")"
+          wineboot --init
+      - name: Build test runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+      - name: Run Wine vector coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          build/Release/ide test --verbose=1 --ci=1 2>&1 | tee build/issue-913-test.log
+          status=${PIPESTATUS[0]}
+          echo '=== issue 913 diagnostics ==='
+          grep -n -E 'WIN64_VECTOR|c_simd_baseline_path|compiler_driver_tests' build/issue-913-test.log || true
+          exit "$status"
