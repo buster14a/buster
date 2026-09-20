@@ -21,13 +21,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Install bootstrap and Wine
+      - name: Install Wine
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y tcc wine wine64
-          tcc -v
+          sudo apt-get install --no-install-recommends -y wine wine64
           clang --version
           wine --version
           mkdir -p "$(dirname "$WINEPREFIX")"
@@ -49,13 +48,14 @@ jobs:
           exec(compile(script, 'issue-913-attribution.py', 'exec'))
           PY
           git diff --check
-          git diff -- src/buster/tests/compiler/driver/driver_test.c
       - name: Build test runner
         shell: bash
         run: |
           set -euo pipefail
-          CC=clang ./build.sh generate
-          CC=clang ./build.sh build --config Release -t ide
+          mkdir -p build
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build
+          ./build/build generate
+          ./build/build build --config Release -t ide
       - name: Run Wine vector coverage
         shell: bash
         run: |
