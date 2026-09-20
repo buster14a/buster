@@ -21,13 +21,20 @@ are still labelled *public preview* by GitHub; the rest are production-ready.
 `.github/actionlint.yaml` has to name every one of them, because actionlint
 validates `runs-on` against a list baked into its own release.
 
+See [main admission policy](main-branch-protection.md) for the live ruleset,
+required independent workflows, review ownership, and verification limits.
+
 ## Two gates
 
-Every CI job carries:
+Workload jobs carry:
 
 ```yaml
 if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
 ```
+
+The required `CI complete` job keeps only the server guard plus `always()`: it
+must fail when the workload jobs are disabled or skipped. Independent required
+checks likewise execute and fail an explicit enablement check instead of skipping.
 
 The first half exists because **Forgejo also reads `.github/workflows`**.
 Without it, Forgejo would schedule this job against `runs-on: ubuntu-26.04`, a
