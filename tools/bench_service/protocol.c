@@ -1,5 +1,6 @@
 /* Versioned local control codec, not a network server or authentication layer.
- * Requests and responses are capped at 536 bytes, independent of queue size.
+ * Requests and ordinary replies are capped at 536 bytes, independent of queue
+ * size. Authenticated export replies alone allow one fixed 64 KiB chunk.
  * Both human CLI commands and raw protocol requests enter bq_dispatch.
  * bq_public_response_valid checks successful typed replies before rendering.
  */
@@ -8,6 +9,7 @@
 #define BQ_CONTROL_BODY 512u
 #define BQ_CONTROL_CAP (BQ_CONTROL_HEADER + BQ_CONTROL_BODY)
 #define BQ_LOG_PAGE 4u
+#define BQ_PACKET_CAP (BQ_CONTROL_HEADER + BQ_EXPORT_BODY_CAP)
 
 BUSTER_GLOBAL_LOCAL BqWorkerQuarantine bq_worker_quarantine = {.descriptor = -1};
 
@@ -16,13 +18,13 @@ typedef enum BqOperation
     BQ_OP_CAPABILITIES = 1, BQ_OP_SUBMIT, BQ_OP_STATUS, BQ_OP_RESULT,
     BQ_OP_CANCEL, BQ_OP_LOGS, BQ_OP_FAKE_RUN, BQ_OP_FAKE_RECONCILE,
     BQ_OP_MATERIALIZE, BQ_OP_WORKSPACE_RECONCILE, BQ_OP_WORKER_RUN,
-    BQ_OP_SUBMIT_EXCLUSIVE
+    BQ_OP_SUBMIT_EXCLUSIVE, BQ_OP_EXPORT
 } BqOperation;
 
 typedef struct BqPacket
 {
     u32 size;
-    u8 bytes[BQ_CONTROL_CAP];
+    u8 bytes[BQ_PACKET_CAP];
 } BqPacket;
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
@@ -42,7 +44,7 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
     "blocked-recipes=native-retirement-performance-v1\n"
     "profile=smoke validity=not-evaluated materialization=read-only workspace=per-attempt\n"
     "worker=fixed-systemd-service dispatch=fixed-registry admission=idle-only-atomic "
-    "retirement=blocked "
+    "retirement=blocked export=1 "
 #ifdef __linux__
     "transport=unix-seqpacket authentication=peer-uid-gid\n"
 #else
@@ -57,7 +59,7 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
 BUSTER_GLOBAL_LOCAL void bq_packet_schema(BqPacket* packet, u32 schema, u32 operation, u64 correlation, u8 const* body, u32 size)
 {
     *packet = (BqPacket){0};
-    if (size <= BQ_CONTROL_BODY)
+    if (size <= BQ_CONTROL_BODY || (operation == (BQ_OP_EXPORT | 0x80000000u) && size <= BQ_EXPORT_BODY_CAP))
     {
         packet->size = BQ_CONTROL_HEADER + size;
         memcpy(packet->bytes, "BQP1", 4);
@@ -80,7 +82,7 @@ BUSTER_GLOBAL_LOCAL void bq_packet(BqPacket* packet, u32 operation, u64 correlat
 BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPacket const* response)
 {
     bool valid = request && response && request->size >= BQ_CONTROL_HEADER && request->size <= BQ_CONTROL_CAP &&
-                 response->size >= BQ_CONTROL_HEADER + 4 && response->size <= BQ_CONTROL_CAP;
+                 response->size >= BQ_CONTROL_HEADER + 4 && response->size <= BQ_PACKET_CAP;
     if (valid)
     {
         valid = !memcmp(request->bytes, "BQP1", 4) && !memcmp(response->bytes, "BQP1", 4) &&
@@ -97,7 +99,43 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
         u32 length = response->size - BQ_CONTROL_HEADER;
         u8 const* data = response->bytes + BQ_CONTROL_HEADER;
         u8 const* arguments = request->bytes + BQ_CONTROL_HEADER;
-        if (operation == BQ_OP_CAPABILITIES)
+        if (operation == BQ_OP_EXPORT)
+        {
+            valid = request->size == BQ_CONTROL_HEADER + BQ_EXPORT_REQUEST_CAP && length >= BQ_EXPORT_REPLY_HEADER;
+            if (valid)
+            {
+                u64 cursor = bq_u64(arguments + 80), next = bq_u64(data + 28), total = bq_u64(data + 36);
+                u32 count = bq_u32(data + 44);
+                valid = bq_u64(data + 4) == bq_u64(arguments) && bq_u64(data + 12) == bq_u64(arguments + 8) &&
+                        bq_u64(data + 20) == cursor && total && total <= BQ_EXPORT_TOTAL_CAP &&
+                        bq_result_digest_valid(data + 48) && length == BQ_EXPORT_REPLY_HEADER + count;
+                if (valid && cursor == UINT64_MAX)
+                {
+                    valid = count == BQ_EXPORT_RECEIPT_CAP && !next;
+#ifdef __linux__
+                    char digest[SHA256_HEX_CAPACITY];
+                    if (valid) bq_digest(data + BQ_EXPORT_REPLY_HEADER, count, digest);
+                    valid = valid && bq_export_receipt_valid(data + BQ_EXPORT_REPLY_HEADER) &&
+                            !memcmp(digest, data + 48, 64) &&
+                            !memcmp(arguments + 16, data + BQ_EXPORT_REPLY_HEADER + 240, 64) &&
+                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 8) == bq_u64(arguments) &&
+                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 16) == bq_u64(arguments + 8) &&
+                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 24) == total;
+#endif
+                }
+                else if (valid)
+                {
+                    valid = cursor < total && cursor % BQ_EXPORT_CHUNK_CAP == 0 && count > 0 &&
+                            count == (total - cursor < BQ_EXPORT_CHUNK_CAP ? total - cursor : BQ_EXPORT_CHUNK_CAP) &&
+                            next == cursor + count && !memcmp(arguments + 88, data + 48, 64);
+                }
+            }
+        }
+        else if (response->size > BQ_CONTROL_CAP)
+        {
+            valid = false;
+        }
+        else if (operation == BQ_OP_CAPABILITIES)
         {
             valid = request->size == BQ_CONTROL_HEADER && length > 4;
             for (u32 i = 4; valid && i < length; i += 1)

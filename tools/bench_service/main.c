@@ -13,8 +13,10 @@
 #include "exclusive_admission.c"
 #include "workspace.c"
 #include "worker_linux.c"
+#include "export.c"
 #include "protocol.c"
 #include "transport.c"
+#include "export_client.c"
 #include <inttypes.h>
 #include <limits.h>
 
@@ -67,6 +69,26 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
         {
             size = submission.size;
             memcpy(body, submission.bytes, size);
+        }
+    }
+    else if ((argc == 4 || argc == 6) &&
+             ((!strcmp(argv[0], "export") && argc == 4) || (!strcmp(argv[0], "export-chunk") && argc == 6)))
+    {
+        u64 token = 0, cursor = UINT64_MAX;
+        valid = bq_decimal(argv[1], true, &id) && bq_decimal(argv[2], true, &token) && strlen(argv[3]) == 64 &&
+                bq_result_digest_valid((u8 const*)argv[3]);
+        if (valid && argc == 6) valid = bq_decimal(argv[4], false, &cursor) && cursor != UINT64_MAX &&
+                                     cursor % BQ_EXPORT_CHUNK_CAP == 0 && strlen(argv[5]) == 64 &&
+                                     bq_result_digest_valid((u8 const*)argv[5]);
+        *operation = BQ_OP_EXPORT;
+        if (valid)
+        {
+            bq_put64(body, id);
+            bq_put64(body + 8, token);
+            memcpy(body + 16, argv[3], 64);
+            bq_put64(body + 80, cursor);
+            if (argc == 6) memcpy(body + 88, argv[5], 64);
+            size = BQ_EXPORT_REQUEST_CAP;
         }
     }
     else if (argc == 2 && (!strcmp(argv[0], "status") || !strcmp(argv[0], "result") || !strcmp(argv[0], "cancel")))
@@ -169,7 +191,14 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     u64 id = 0;
     u64 argument = 0;
     u64 attempt = 0;
-    if (argc == 10 && !strcmp(argv[1], "worker-unit"))
+    if (argc == 5 && !strcmp(argv[1], "unpack-export"))
+    {
+        valid = true;
+        error = bq_export_unpack(argv[2], argv[3], argv[4]);
+        handled = true;
+        simple_diagnostic = true;
+    }
+    else if (argc == 10 && !strcmp(argv[1], "worker-unit"))
     {
         valid = bq_decimal(argv[3], true, &argument) && bq_decimal(argv[4], true, &attempt);
         error = valid ? bq_worker_unit(string_from_pointer(argv[2]), string_from_pointer(argv[3]),
@@ -330,8 +359,11 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
     }
     if (!handled && typed_remote && valid)
     {
-        error = bq_transport_request(socket_path, &request, &response);
-        if (error == BQ_OK && !bq_public_response_valid(&request, &response))
+        bool download = operation == BQ_OP_EXPORT && bq_u64(request.bytes + BQ_CONTROL_HEADER + 80) == UINT64_MAX;
+        if (download) error = bq_export_download(socket_path, &request, output, diagnostics);
+        else error = bq_transport_request(socket_path, &request, &response);
+        if (operation == BQ_OP_EXPORT) raw = true;
+        if (!download && error == BQ_OK && !bq_public_response_valid(&request, &response))
         {
             response = (BqPacket){0};
             error = BQ_BAD_REQUEST;
@@ -412,6 +444,8 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
                     "gateway capabilities | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
+                    "gateway export JOB TOKEN FULL_SHA | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
+                    "unpack-export ARCHIVE NEW_ABSOLUTE_DIRECTORY RECEIPT_SHA | "
                     "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU\n");
         }
     }

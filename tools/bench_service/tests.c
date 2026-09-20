@@ -1911,7 +1911,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     bq_worker_transport_stop_signal = 0;
     BQ_CHECK(bq_transport_queue_admissible(&(BqQueue){0}));
     BqRequest fake = bq_test_request(7, false), real = {0};
-    String8 fields[BQ_FIELD_COUNT] = {S8("test-principal"), S8("request-7"), S8("validate-buster-v1"),
+    String8 fields[BQ_FIELD_COUNT] = {S8(BQ_EXPORT_PRINCIPAL), S8("request-7"), S8("validate-buster-v1"),
                                       S8("1111111111111111111111111111111111111111"),
                                       S8("2222222222222222222222222222222222222222")};
     BQ_CHECK(bq_request_make(fields, &real) == BQ_OK);
@@ -4563,6 +4563,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 #endif
 #endif
 
+#include "export_tests.c"
+
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
 #ifdef __linux__
@@ -4635,6 +4637,9 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lock_precedes_materialization();
     bq_test_transport_worker_retries_after_busy();
     bq_test_transport_worker_signal_handoff();
+    bq_test_export_inventory();
+    bq_test_export(true);
+    bq_test_export(false);
     bq_test_worker_result_bundle_and_evidence();
     bq_test_worker_failure_bundle_replay();
     bq_test_worker_failure_bundle_coverage();
@@ -4658,7 +4663,15 @@ int main(int argc, char** argv)
     int result;
 #ifdef __linux__
     bool helper = argc == 10 && !strcmp(argv[1], "fixed-recipe-helper");
-    result = helper ? bq_test_fixed_recipe_helper(argc, argv) : bq_test_run_all(argc, argv);
+    if (argc == 2 && !strcmp(argv[1], "--export-only"))
+    {
+        bq_test_export_inventory();
+        bq_test_export(true);
+        bq_test_export(false);
+        printf("EXPORT_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
+        result = bq_test_failures ? 1 : 0;
+    }
+    else result = helper ? bq_test_fixed_recipe_helper(argc, argv) : bq_test_run_all(argc, argv);
 #else
     result = bq_test_run_all(argc, argv);
 #endif
