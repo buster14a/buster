@@ -5,6 +5,7 @@
 // machine_test_a64_atomic_pair_updates pins pair-update payloads, clobbers,
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
 // machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
+// machine_test_sparse_local_state compares sparse and row-based local discovery.
 
 #include <buster/tests/compiler/codegen/machine_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -6388,10 +6389,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("unsigned long test(unsigned long n){volatile unsigned long observed=n;unsigned long x=n+3,y=n*7;"
+           "if(n&1)x+=y;else y+=x;if(x<y)x=y+1;return x+y+observed;}"),
+        S8("int test(int n){int x;if(n)goto use;return n;use:return x;}"),
+        S8("typedef int V __attribute__((vector_size(16)));V test(V a,V b){V x=a;x+=b;return x;}")
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        IrProgram* program = machine_test_compile_c_with_options(arguments->arena, S8("sparse-locals.c"), sources[source], target,
+                                                               (CIRLowerOptions){.disable_direct_ssa = true});
+        if (BUSTER_REQUIRE(arguments, program && program->module_count))
+        {
+            program->disable_local_promotion = true;
+            program->fast_passes = 0;
+            IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+            IrFunction* function = machine_test_ir_function_find(program->modules, S8("test"));
+            if (BUSTER_REQUIRE(arguments, prepared.error == IR_VALIDATION_NONE && function && function->local_places))
+            {
+                MachineEncodeResult sparse = machine_test_encode(arguments->arena, program, function, target, 0);
+                IrValueId* places = function->local_places;
+                function->local_places = 0;
+                MachineEncodeResult rows = machine_test_encode(arguments->arena, program, function, target, 0);
+                function->local_places = places;
+                BUSTER_TEST(arguments, sparse.valid && rows.valid && sparse.byte_count == rows.byte_count);
+                if (sparse.valid && rows.valid && sparse.byte_count == rows.byte_count)
+                {
+                    BUSTER_TEST(arguments, memory_compare(sparse.bytes, rows.bytes, sparse.byte_count));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
+    BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);

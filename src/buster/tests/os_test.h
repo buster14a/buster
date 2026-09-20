@@ -15,5 +15,6 @@ BUSTER_F_DECL bool os_apple_process_is_traced(u32 process_flags);
 BUSTER_F_DECL bool os_windows_pipe_disable_inheritance(OsFileDescriptor* pipe);
 #endif
 
+BUSTER_F_DECL void os_test_process_child_run(UnitTestArguments* arguments);
 BUSTER_F_DECL UnitTestResult os_tests(UnitTestArguments* arguments);
 #endif

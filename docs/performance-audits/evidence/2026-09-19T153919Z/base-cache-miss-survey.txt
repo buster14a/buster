@@ -1,0 +1,264 @@
+====================================================================================================
+CACHE MISS SURVEY
+====================================================================================================
+
+Counter budget (medians over the workload)
+
+  instructions               14,382,781,542
+  cycles                      5,366,215,753   (IPC 2.68)
+  L1d loads                   6,608,891,946
+  L1d load misses               170,327,520   (2.58% of loads, 11.8/kinstr)
+  L1d fills asked of L2         164,163,877
+    ... answered by L2          146,877,453
+  L2 read misses                 16,990,708   (10.0% of L1d misses)
+  fills from DRAM/IO             12,495,748   (7.3% of L1d misses)
+  L1 dTLB misses                    323,929
+    ... page walks                   24,687
+  L1i misses                     34,094,500
+  page faults                         2,787
+  DRAM latency upper bound    3,123,937,000   cycles at 250/fill = 58.2% of the run
+
+Samples per capture
+
+  cycles                       54,748 samples  (every 100003 events) - the denominator: what the time is actually spent on
+  L1d load misses              70,570 samples  (every 2003 events) - mostly answered by L2 (~14 cycles); the bulk count
+  L2 read misses               56,628 samples  (every 211 events) - data reads that leave the core complex
+  fills from DRAM/IO           37,586 samples  (every 251 events) - the expensive ones (~250+ cycles); rank leads by this
+
+Hotspots by dram, as shares of that event's whole capture.  A leaf in
+libc is charged to the nearest frame back inside the binary.  'x cycles' is the
+miss share over the same symbol's cycles share: 1.0 misses in proportion to its
+time, above 2.0 is waiting on memory.
+
+  symbol                                                cycles         l1d      l2miss        dram  x cycles
+  ----------------------------------------------------------------------------------------------------------
+  ir_validate_canonical_module                           6.39%       7.90%       9.96%      15.98%      2.50
+  ir_fast_function                                       2.54%       3.71%       3.69%      11.58%      4.55
+  machine_select_canonical_function_x86_64               3.11%       5.30%       4.47%      10.38%      3.34
+  c_lower_to_ir_with_options                             2.03%       3.87%       6.21%       7.36%      3.64
+  ir_cfg_publish_instruction_rows                        2.22%       3.92%       3.02%       6.22%      2.80
+  ir_promote_function                                    1.41%       2.25%       2.77%       4.57%      3.24
+  ir_function_publish_cfg                                1.24%       1.26%       3.90%       4.44%      3.58
+  codegen_generate_canonical_module_attempt              0.92%       0.92%       2.15%       2.51%      2.73
+  c_analyze_semantics                                    0.54%       0.78%       0.63%       2.12%      3.94
+  c_ir_ssa_slot                                          1.51%       2.05%       2.13%       2.09%      1.39
+  c_preprocess                                           1.78%       1.68%       1.38%       1.93%      1.09
+  c_ir_ssa_finish                                        5.18%      10.54%       6.12%       1.49%      0.29
+  codegen_generate_canonical_module_with_trace           0.12%       0.63%       0.98%       1.41%     11.33
+  debug_model_build                                      0.97%       2.20%       0.84%       1.41%      1.46
+  dwarf_build_model                                      0.12%       0.32%       0.23%       1.17%     10.17
+  machine_fast_placement_build_prepassed                 3.87%       2.35%       1.27%       1.15%      0.30
+  link_native_executable_with_scratch                    0.11%       0.47%       0.39%       1.05%      9.23
+  ir_source_region_position                              0.84%       0.39%       0.94%       0.95%      1.13
+  compiler_driver_execute_c_single                       0.15%       0.63%       0.34%       0.94%      6.29
+  link_native_executable_elf64_x86_64_dynamic            0.13%       0.31%       0.32%       0.84%      6.60
+  c_parse_declaration_type                               0.21%       0.27%       0.25%       0.75%      3.54
+  c_symbol_intern                                        1.16%       0.87%       1.53%       0.74%      0.64
+  c_ir_query_execute                                     0.79%       0.51%       0.49%       0.70%      0.89
+  c_lex_dispatch                                         1.52%       1.27%       0.51%       0.69%      0.45
+  ir_rewrite_compact                                     1.64%       2.73%       0.76%       0.64%      0.39
+
+Same table ordered by L1d misses (the bulk count)
+
+  symbol                                                cycles         l1d      l2miss        dram  x cycles
+  ----------------------------------------------------------------------------------------------------------
+  c_ir_ssa_finish                                        5.18%      10.54%       6.12%       1.49%      2.03
+  ir_validate_canonical_module                           6.39%       7.90%       9.96%      15.98%      1.24
+  machine_select_canonical_function_x86_64               3.11%       5.30%       4.47%      10.38%      1.70
+  ir_cfg_publish_instruction_rows                        2.22%       3.92%       3.02%       6.22%      1.76
+  c_lower_to_ir_with_options                             2.03%       3.87%       6.21%       7.36%      1.91
+  ir_fast_function                                       2.54%       3.71%       3.69%      11.58%      1.46
+  ir_rewrite_compact                                     1.64%       2.73%       0.76%       0.64%      1.67
+  codegen_machine_debug_index_build                      2.58%       2.46%       0.70%       0.18%      0.95
+  machine_fast_placement_build_prepassed                 3.87%       2.35%       1.27%       1.15%      0.61
+  ir_promote_function                                    1.41%       2.25%       2.77%       4.57%      1.60
+  debug_model_build                                      0.97%       2.20%       0.84%       1.41%      2.28
+  machine_debug_values_build                             1.32%       2.06%       0.58%       0.38%      1.57
+  c_ir_ssa_slot                                          1.51%       2.05%       2.13%       2.09%      1.36
+  c_ir_ssa_grow_slots                                    0.44%       1.98%       3.89%       0.45%      4.53
+  c_preprocess                                           1.78%       1.68%       1.38%       1.93%      0.95
+  machine_fast_prepass_build                             2.18%       1.34%       0.68%       0.02%      0.61
+  machine_encode_x86_64                                  1.36%       1.31%       1.08%       0.03%      0.96
+  machine_fast_close_live_ranges                         1.99%       1.30%       1.44%       0.01%      0.65
+  c_lex_dispatch                                         1.52%       1.27%       0.51%       0.69%      0.83
+  ir_function_publish_cfg                                1.24%       1.26%       3.90%       4.44%      1.01
+  c_parse_type_layout                                    0.39%       1.17%       1.18%       0.08%      3.00
+  machine_function_split_parameter_edges                 0.62%       1.02%       0.33%       0.01%      1.65
+  codegen_generate_canonical_module_attempt              0.92%       0.92%       2.15%       2.51%      1.01
+  c_symbol_intern                                        1.16%       0.87%       1.53%       0.74%      0.75
+  c_preprocess_expand                                    1.05%       0.86%       0.28%       0.03%      0.82
+
+Leaves outside ide for dram
+
+  libc.so.6:_dl_mcount_wrapper@GLIBC_2.2.5  13.18%
+
+Call sites of the leaves outside ide (12.92% of samples) - DWARF unwind, so this is the exact site of the call
+
+    2.56%  _dl_mcount_wrapper@GLIBC_2.2.5    link_native_executable_elf64_x86_64_dynamic @ link.c:5077
+    1.69%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_grow_slots @ c_gen.c:5041
+    1.33%  _dl_mcount_wrapper@GLIBC_2.2.5    object_from_canonical_codegen_module @ object.c:10317
+    0.76%  _dl_mcount_wrapper@GLIBC_2.2.5    link_elf_section_table_append @ link.c:3558
+    0.72%  _dl_mcount_wrapper@GLIBC_2.2.5    string_equal @ string.c:221
+    0.53%  _dl_mcount_wrapper@GLIBC_2.2.5    c_source_map_append @ c_source.c:267
+    0.41%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_fast_close_live_ranges @ register_allocator_fast.c:1670
+    0.37%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_fast_close_live_ranges @ register_allocator_fast.c:1669
+    0.30%  _dl_mcount_wrapper@GLIBC_2.2.5    arena_allocate_zeroed_bytes @ arena.h:229
+    0.28%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_stream_flatten @ machine.c:1909
+    0.27%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_finish @ c_gen.c:5706
+    0.27%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_finish @ c_gen.c:5815
+    0.24%  _dl_mcount_wrapper@GLIBC_2.2.5    debug_variable_add_location @ debug.c:376
+    0.22%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_fast_placement_build_prepassed @ register_allocator_fast.c:3101
+    0.20%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_finish @ c_gen.c:5818
+    0.19%  _dl_mcount_wrapper@GLIBC_2.2.5    debug_variable_add @ debug.c:428
+    0.14%  _dl_mcount_wrapper@GLIBC_2.2.5    c_parse_type_layout @ c_parse.c:1514
+    0.14%  _dl_mcount_wrapper@GLIBC_2.2.5    buster_x86_metadata_decode_string_pool @ x86_64_metadata.c:629
+    0.13%  _dl_mcount_wrapper@GLIBC_2.2.5    debug_variable_add_location @ debug.c:386
+    0.12%  _dl_mcount_wrapper@GLIBC_2.2.5    ir_function_instruction_owners @ ir.c:4421
+    0.12%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_fast_color_homes @ register_allocator_fast.c:1914
+    0.10%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_restore_memory @ c_gen.c:5481
+    0.10%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_event @ c_gen.c:4963
+    0.09%  _dl_mcount_wrapper@GLIBC_2.2.5    c_type_parse_frame_push @ c_parse.c:676
+    0.09%  _dl_mcount_wrapper@GLIBC_2.2.5    ir_cfg_pool_operands @ ir_cfg.c:233
+
+Leaves outside ide for l1d
+
+  libc.so.6:_dl_mcount_wrapper@GLIBC_2.2.5  7.68%
+
+Call sites of the leaves outside ide (7.11% of samples) - DWARF unwind, so this is the exact site of the call
+
+    0.82%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_stream_flatten @ machine.c:1909
+    0.63%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_grow_slots @ c_gen.c:5041
+    0.60%  _dl_mcount_wrapper@GLIBC_2.2.5    link_native_executable_elf64_x86_64_dynamic @ link.c:5077
+    0.51%  _dl_mcount_wrapper@GLIBC_2.2.5    string_equal @ string.c:221
+    0.35%  _dl_mcount_wrapper@GLIBC_2.2.5    object_from_canonical_codegen_module @ object.c:10317
+    0.31%  _dl_mcount_wrapper@GLIBC_2.2.5    c_parse_type_layout @ c_parse.c:1514
+    0.23%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_select_canonical_function_x86_64 @ machine_x86_64.c:7569
+    0.23%  _dl_mcount_wrapper@GLIBC_2.2.5    debug_variable_add_location @ debug.c:376
+    0.22%  _dl_mcount_wrapper@GLIBC_2.2.5    debug_scope_add @ debug.c:404
+    0.21%  _dl_mcount_wrapper@GLIBC_2.2.5    c_source_map_append @ c_source.c:267
+    0.17%  _dl_mcount_wrapper@GLIBC_2.2.5    link_elf_section_table_append @ link.c:3558
+    0.15%  _dl_mcount_wrapper@GLIBC_2.2.5    c_parse_type_layout @ c_parse.c:1515
+    0.14%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_select_canonical_function_x86_64 @ machine_x86_64.c:7570
+    0.12%  _dl_mcount_wrapper@GLIBC_2.2.5    ir_cfg_pool_operands @ ir_cfg.c:233
+    0.11%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_event @ c_gen.c:4963
+    0.10%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_fast_close_live_ranges @ register_allocator_fast.c:1670
+    0.09%  _dl_mcount_wrapper@GLIBC_2.2.5    debug_variable_add @ debug.c:428
+    0.09%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_fast_placement_build_prepassed @ register_allocator_fast.c:3101
+    0.08%  _dl_mcount_wrapper@GLIBC_2.2.5    c_preprocess @ c_source.c:9211
+    0.07%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_finish @ c_gen.c:5815
+    0.07%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_fast_close_live_ranges @ register_allocator_fast.c:1669
+    0.06%  _dl_mcount_wrapper@GLIBC_2.2.5    c_ir_ssa_finish @ c_gen.c:5706
+    0.06%  _dl_mcount_wrapper@GLIBC_2.2.5    codegen_record_machine_locations @ codegen.c:10613
+    0.06%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_fast_placement_build_prepassed @ register_allocator_fast.c:3100
+    0.05%  _dl_mcount_wrapper@GLIBC_2.2.5    machine_debug_facts_build @ machine.c:2712
+
+Lines inside the top 8 dram symbols (skid: read a line as its loop, not its instruction)
+
+  ir_validate_canonical_module  (15.98%)
+        4.08%  ir.c:4428  ir_function_instruction_owners
+        2.68%  ir.c:0  ir_validate_function_values
+        0.91%  ir.c:2181  ir_label_metadata_transfer_valid
+        0.79%  ir.c:2180  ir_label_metadata_transfer_valid
+        0.74%  ir.c:4443  ir_function_instruction_owners
+        0.54%  ir.c:4458  ir_function_instruction_owners
+  ir_fast_function  (11.58%)
+        4.98%  ir_fast.c:411  ir_fast_function
+        1.74%  ir_fast.c:412  ir_fast_function
+        1.34%  ir_fast.c:433  ir_fast_function
+        0.83%  ir_fast.c:431  ir_fast_function
+        0.35%  ir_fast.c:129  ir_fast_constant
+        0.31%  ir_fast.c:192  ir_fast_fold
+  machine_select_canonical_function_x86_64  (10.38%)
+        2.84%  machine_x86_64.c:7690  machine_select_canonical_function_x86_64
+        2.55%  machine_x86_64.c:7691  machine_select_canonical_function_x86_64
+        1.14%  machine_x86_64.c:7684  machine_select_canonical_function_x86_64
+        0.55%  machine_x86_64.c:0  machine_select_canonical_function_x86_64
+        0.33%  machine_x86_64.c:7659  machine_select_canonical_function_x86_64
+        0.22%  machine_x86_64.c:472  machine_x64_type_class
+  c_lower_to_ir_with_options  (7.36%)
+        0.84%  c_gen.c:0  c_lower_to_ir_with_options
+        0.56%  c_gen.c:49346  c_lower_to_ir_with_options
+        0.55%  c_gen.c:47563  c_lower_to_ir_with_options
+        0.50%  c_gen.c:38565  c_ir_declaration_initializer_range
+        0.23%  c_gen.c:49642  c_lower_to_ir_with_options
+        0.18%  c_gen.c:47948  c_lower_to_ir_with_options
+  ir_cfg_publish_instruction_rows  (6.22%)
+        1.71%  ir_cfg.c:259  ir_cfg_publish_instruction_rows
+        0.79%  ir_cfg.c:328  ir_cfg_publish_instruction_rows
+        0.70%  ir_cfg.c:287  ir_cfg_publish_instruction_rows
+        0.65%  ir_cfg.c:271  ir_cfg_publish_instruction_rows
+        0.42%  ir_cfg.c:261  ir_cfg_publish_instruction_rows
+        0.36%  ir_cfg.c:275  ir_cfg_publish_instruction_rows
+  ir_promote_function  (4.57%)
+        1.11%  ir_promote.c:0  ir_promote_function
+        1.03%  ir_promote.c:711  ir_promote_function
+        0.56%  ir_promote.c:708  ir_promote_function
+        0.24%  ir.c:0  ir_symbol_from_id
+        0.23%  ir_promote.c:763  ir_promote_function
+        0.19%  ir_promote.c:746  ir_promote_function
+  ir_function_publish_cfg  (4.44%)
+        1.48%  ir_cfg.c:498  ir_function_publish_cfg
+        1.29%  ir_cfg.c:490  ir_function_publish_cfg
+        0.19%  ir_cfg.c:0  ir_function_publish_cfg
+        0.18%  ir_cfg.c:630  ir_function_publish_cfg
+        0.13%  ir_cfg.c:560  ir_function_publish_cfg
+        0.05%  ir_cfg.c:502  ir_function_publish_cfg
+
+Lines inside the top 8 l1d symbols (skid: read a line as its loop, not its instruction)
+
+  c_ir_ssa_finish  (10.54%)
+        0.80%  c_gen.c:5771  c_ir_ssa_finish
+        0.58%  c_gen.c:5302  c_ir_ssa_root
+        0.57%  c_gen.c:5319  c_ir_ssa_enqueue
+        0.37%  c_gen.c:5190  c_ir_ssa_place_local
+        0.33%  c_gen.c:5344  c_ir_ssa_classify_places
+        0.31%  c_gen.c:5709  c_ir_ssa_finish
+  ir_validate_canonical_module  (7.90%)
+        1.69%  ir.c:4428  ir_function_instruction_owners
+        0.75%  ir.c:0  ir_validate_function_values
+        0.44%  ir.c:2181  ir_label_metadata_transfer_valid
+        0.31%  ir.c:0  ir_validate_block_instructions
+        0.30%  ir.c:5600  ir_validate_block_instructions
+        0.28%  ir.c:4443  ir_function_instruction_owners
+  machine_select_canonical_function_x86_64  (5.30%)
+        0.56%  machine_x86_64.c:0  machine_select_canonical_function_x86_64
+        0.38%  machine_x86_64.c:7690  machine_select_canonical_function_x86_64
+        0.36%  machine_x86_64.c:7691  machine_select_canonical_function_x86_64
+        0.26%  machine_x86_64.c:472  machine_x64_type_class
+        0.16%  machine_x86_64.c:7925  machine_select_canonical_function_x86_64
+        0.13%  machine_x86_64.c:7684  machine_select_canonical_function_x86_64
+  ir_cfg_publish_instruction_rows  (3.92%)
+        0.50%  ir_cfg.c:259  ir_cfg_publish_instruction_rows
+        0.48%  ir_cfg.c:328  ir_cfg_publish_instruction_rows
+        0.26%  ir_cfg.c:326  ir_cfg_publish_instruction_rows
+        0.25%  ir_cfg.c:325  ir_cfg_publish_instruction_rows
+        0.24%  ir_cfg.c:164  ir_cfg_pool_operands
+        0.21%  ir_cfg.c:352  ir_cfg_publish_instruction_rows
+  c_lower_to_ir_with_options  (3.87%)
+        0.45%  c_gen.c:0  c_lower_to_ir_with_options
+        0.18%  c_gen.c:49233  c_lower_to_ir_with_options
+        0.13%  c_gen.c:50046  c_lower_to_ir_with_options
+        0.12%  c_gen.c:49211  c_lower_to_ir_with_options
+        0.11%  c_gen.c:135  c_declaration_well_known_set
+        0.09%  c_gen.c:48954  c_lower_to_ir_with_options
+  ir_fast_function  (3.71%)
+        0.58%  ir_fast.c:411  ir_fast_function
+        0.26%  ir_fast.c:188  ir_fast_fold
+        0.22%  ir_fast.c:330  ir_fast_dce
+        0.22%  ir_fast.c:192  ir_fast_fold
+        0.17%  ir_fast.c:327  ir_fast_dce
+        0.17%  ir_fast.c:412  ir_fast_function
+  ir_rewrite_compact  (2.73%)
+        1.08%  ir_promote.c:587  ir_rewrite_compact
+        0.31%  ir_promote.c:517  ir_rewrite_compact
+        0.17%  ir_promote.c:495  ir_rewrite_compact
+        0.13%  ir_promote.c:504  ir_rewrite_compact
+        0.12%  ir_promote.c:502  ir_rewrite_compact
+        0.10%  ir_promote.c:497  ir_rewrite_compact
+  codegen_machine_debug_index_build  (2.46%)
+        0.22%  codegen.c:10037  codegen_machine_debug_index_build
+        0.22%  codegen.c:10051  codegen_machine_debug_index_build
+        0.15%  codegen.c:10049  codegen_machine_debug_index_build
+        0.11%  codegen.c:0  codegen_machine_debug_index_collect
+        0.10%  codegen.c:10050  codegen_machine_debug_index_build
+        0.09%  codegen.c:9869  codegen_machine_debug_index_scatter

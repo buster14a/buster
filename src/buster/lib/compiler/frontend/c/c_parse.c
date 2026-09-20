@@ -2357,7 +2357,10 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
     for (u32 index = start; index + 1 < end && !result.message.length; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if ((skipped && skipped[index - start]) || token.kind != C_TOKEN_IDENTIFIER ||
+        bool is_member_call =
+            index && (c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_DOT) ||
+                      c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_ARROW));
+        if ((skipped && skipped[index - start]) || token.kind != C_TOKEN_IDENTIFIER || is_member_call ||
             !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             continue;
@@ -3370,9 +3373,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPr
             if (close == end - 1)
             {
                 String8 name = c_token_spelling(preprocess.spelling_base, first);
-                if (c_symbol_builtin_from_spelling(name) == C_SYMBOL_BUILTIN_MATH)
+                CSymbolBuiltin builtin = c_symbol_builtin_from_spelling(name);
+                if (builtin == C_SYMBOL_BUILTIN_MATH || builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET)
                 {
-                    CTypeKind kind = string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is"))
+                    CTypeKind kind = builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET || string_starts_with_sequence(name, S8("__builtin_signbit")) || string_starts_with_sequence(name, S8("__builtin_is"))
                                          ? C_TYPE_INT : name.length && name.pointer[name.length - 1] == 'f' && !string_equal(name, S8("__builtin_inf"))
                                          ? C_TYPE_FLOAT : C_TYPE_DOUBLE;
                     return c_parse_expression_scalar_type(result, kind);
@@ -20379,6 +20383,7 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         case C_SYMBOL_BUILTIN_STRLEN:
         case C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS:
         case C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS:
+        case C_SYMBOL_BUILTIN_FIND_FIRST_SET:
         case C_SYMBOL_BUILTIN_POPULATION_COUNT: minimum = maximum = 1; break;
         case C_SYMBOL_BUILTIN_DEBUGTRAP:
         case C_SYMBOL_BUILTIN_SPIN_PAUSE:
@@ -20387,6 +20392,19 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
         }
         String8 message = count < minimum || count > maximum ? S8("could not prepare C calls") : (String8){0};
         u32 location = close;
+        if (builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET && !message.length)
+        {
+            CTypeId type = C_TYPE_ID_INVALID;
+            bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope,
+                                                       starts[0], ends[0], &type);
+            if (typed && type.value < result->type_count &&
+                !c_parse_expression_real_kind(result->types[type.value].kind) &&
+                !c_type_kind_is_complex(result->types[type.value].kind))
+            {
+                message = string_format(result->arena, S8("{S8} requires one arithmetic scalar argument"), name);
+                location = starts[0];
+            }
+        }
         if (builtin == C_SYMBOL_BUILTIN_SSE2_IMMEDIATE_SHIFT)
         {
             CIrSse2ImmediateShiftBuiltin shift = {0};

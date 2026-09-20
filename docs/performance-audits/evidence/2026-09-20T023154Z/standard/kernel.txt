@@ -1,0 +1,1 @@
+Linux version 6.18.50-2-lts (linux-lts@archlinux) (gcc (GCC) 16.2.1 20260810, GNU ld (GNU Binutils) 2.47) #1 SMP PREEMPT_DYNAMIC Tue, 08 Sep 2026 10:48:06 +0000

@@ -173,3 +173,49 @@ These checks validate workflow behavior, not the hosted compiler/mobile
 matrix. Classic branch-protection settings were inaccessible to the GitHub
 integration (403); the documented requirement for `CI complete` still needs
 to be enforced by the repository's merge policy.
+
+
+## #709 matched workflow-dispatch cache protocol
+
+The cohort interface is encoded in deliberate workflow-dispatch refs rather
+than additional event inputs. The mode prefixes are fixed:
+
+- `ci-cohort-prime-<namespace>` selects `prime`;
+- `ci-cohort-read-<namespace>` selects `read`;
+- every other ref selects ordinary mode.
+
+The namespace suffix is validated before cache restore. It is 1–48 characters,
+uses lowercase alphanumeric words separated by single hyphens, and is the only
+arm-specific key component. Prime/read behavior is rejected by policy outside
+`workflow_dispatch`. The prime and read refs for one arm must resolve to the
+same exact source commit, while control and candidate use different namespace
+suffixes.
+
+For the frozen #709 cohort, create and retain these four refs at the reviewed
+control and candidate commits:
+
+```text
+ci-cohort-prime-issue709-control-v1
+ci-cohort-read-issue709-control-v1
+ci-cohort-prime-issue709-candidate-v1
+ci-cohort-read-issue709-candidate-v1
+```
+
+Dispatch `Buster CI` first on each prime ref with
+`cmake_profile=false`. Keep both priming attempts, including misses, failures,
+cancellations, and retries. A usable miss must finish as
+`published-and-verified`: the writer deletes its local archive, restores the
+published exact key, and verifies the pinned digest again.
+
+After both populations are frozen, interleave the read refs and retain at least
+three complete successful control runs and at least three complete successful
+candidate runs. A read run must restore the exact key, finish cache evidence as
+`existing-hit-verified`, and never execute the save step. Missing, substituted,
+or damaged populations fail before the desktop matrix is accepted.
+
+Each desktop artifact retains `zig-cache.json`. Its audit fields include the
+source SHA and ref, mode, namespace, `effective_key`, initial hit/miss,
+publication state, runner identity, Zig target, manifest digest, and whether
+the population was usable. These records belong in the #709 ledger together
+with every queued, failed, cancelled, incomplete, and successful run; no
+attempt is replaced by a later green run.

@@ -377,11 +377,11 @@ BUSTER_GLOBAL_LOCAL bool os_test_thread_name_get(Arena* arena, String8* name)
 }
 #endif
 
-UnitTestResult os_tests(UnitTestArguments* arguments)
+// Private child payloads must run before compiler prewarming and unrelated test
+// modules, so process deadlines measure the payload and not a nested suite.
+void os_test_process_child_run(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
-
-    UnitTestResult result = {0};
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 process_test_mode = os_get_environment_variable(S8("BUSTER_OS_PROCESS_TEST_MODE"));
@@ -449,6 +449,13 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         }
     }
 #endif
+}
+
+UnitTestResult os_tests(UnitTestArguments* arguments)
+{
+    BUSTER_UNUSED(arguments);
+
+    UnitTestResult result = {0};
 
 #if !BUSTER_SINGLE_THREADED && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 resource_failure_mode = os_get_environment_variable(S8("BUSTER_OS_RESOURCE_FAILURE_MODE"));
