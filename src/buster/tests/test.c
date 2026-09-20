@@ -1278,6 +1278,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     os_test_process_child_run(arguments);
+    compiler_driver_test_wasm_node_child_run();
 
     // Some test modules intentionally leave a resident lane gang available
     // for later work on their selected context. Fill every compiler-global
