@@ -21,24 +21,20 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Inspect issue 913 fixture and Win64 lowering
+      - name: Inspect padded-vector transport details
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== generated padded-vector source ==='
-          sed -n '2110,2215p' src/buster/tests/compiler/driver/driver_test.c
-          echo '=== native padded-vector matrix ==='
-          sed -n '2430,2815p' src/buster/tests/compiler/driver/driver_test.c
-          echo '=== Wine padded-vector matrix ==='
-          sed -n '13470,13635p' src/buster/tests/compiler/driver/driver_test.c
-          echo '=== Win64 IR classification ==='
-          sed -n '3540,3655p' src/buster/lib/compiler/ir/ir.c
-          echo '=== canonical padded-vector result/call helpers ==='
-          sed -n '4100,4255p' src/buster/lib/compiler/codegen/codegen.c
-          sed -n '4680,4760p' src/buster/lib/compiler/codegen/codegen.c
-          echo '=== canonical scalar-lane loads/stores ==='
-          grep -n -E 'windows_scalar_(lane|vector)|load_lane_gpr|store_lane_gpr|non_power_vector' src/buster/lib/compiler/codegen/codegen.c | head -n 250
-          echo '=== MIR padded-vector classification ==='
-          sed -n '560,810p' src/buster/lib/compiler/codegen/machine_x86_64.c
-          echo '=== IR/codegen tests mentioning padded scalar lanes ==='
-          git grep -n -E 'padded_one|padded_vec3|windows_scalar_lane|non_power_vector' -- src/buster/tests tests | head -n 400 || true
+          echo '=== complete generated source tail ==='
+          sed -n '2210,2455p' src/buster/tests/compiler/driver/driver_test.c
+          echo '=== canonical lane helpers ==='
+          sed -n '8735,8880p' src/buster/lib/compiler/codegen/codegen.c
+          echo '=== canonical callee argument placement ==='
+          sed -n '13335,13640p' src/buster/lib/compiler/codegen/codegen.c
+          echo '=== canonical caller scalar-lane placement ==='
+          sed -n '16840,17205p' src/buster/lib/compiler/codegen/codegen.c
+          echo '=== canonical padded result transport ==='
+          sed -n '17420,17530p' src/buster/lib/compiler/codegen/codegen.c
+          sed -n '20010,20120p' src/buster/lib/compiler/codegen/codegen.c
+          echo '=== MIR scalar-lane use sites ==='
+          grep -n -E 'windows_scalar_lane_size|windows_scalar_float' src/buster/lib/compiler/codegen/machine_x86_64.c
