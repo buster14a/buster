@@ -7,9 +7,9 @@ matrix. It complements the strict coverage floor and the native
 differential runner; it does not replace either or authorize backend retirement.
 
 The admitted input inventory is
-[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 558
-explicit SHA-256 rows bind every tracked test byte at the approval point: 410
-subject inputs (404 supported-object subjects and 6 registered non-object
+[`native-retirement-support-v1.tsv`](native-retirement-support-v1.tsv). Its 559
+explicit SHA-256 rows bind every tracked test byte at the approval point: 411
+subject inputs (405 supported-object subjects and 6 registered non-object
 controls), 12 registered rejection controls, 72 support files and 64
 dormant custom-language files. An added, removed, renamed, reclassified
 or byte-changed test input makes manifest generation fail. Updating the contract
@@ -17,8 +17,8 @@ is therefore a reviewed support decision, not an automatic side effect of adding
 a fixture. Merging a contract change is the maintainer approval record.
 
 The September 17, 2026 integration retains every subject admitted by the
-current support ledger. The integrated profile has 558 inputs,
-410 subjects, 19,680 groups and 78,720 rows: 404 supported-object
+current support ledger. The integrated profile has 559 inputs,
+411 subjects, 19,728 groups and 78,912 rows: 405 supported-object
 subjects plus 6 registered non-object controls. The original 192-row
 historical gap ledger and the original 341 applicability classifications remain
 explicit and source-bound. Eighteen additional source-bound target exclusions
@@ -143,9 +143,11 @@ Object rows intentionally have no host sysroot. Linux GNU rows receive only the
 target-matched, authenticated musl include roots from the project snapshot;
 Windows, Apple, Android and UEFI rows do not receive those Linux headers.
 
-Repo-owned project dependencies use the checked-in
-[`native-retirement-dependencies-v1.json`](native-retirement-dependencies-v1.json)
-descriptor. Before `evidence-candidate.txt` is created, the workflow runs the
+Repo-owned project dependency policy is reviewed in
+[`native-retirement-dependencies-v1.json`](native-retirement-dependencies-v1.json),
+while exact repository byte/hash identities are generated in
+[`native-retirement-repository-sources-v1.json`](native-retirement-repository-sources-v1.json).
+Before `evidence-candidate.txt` is created, the workflow runs the
 offline external-closure verifier against the exact candidate checkout first.
 That verifier proves pristine GitHub worktrees at the seven descriptor pins
 (cJSON, DoomGeneric, LZ4, yyjson, stb, zlib and musl), checks each admitted
@@ -184,21 +186,21 @@ identity digests. It proves exactly 4,032 archived MIR candidate rows: 264
 repo-owned project-header rows are closed, 3,768 remain diagnostic, and 24 iOS
 SIMD rows remain pending an authenticated `TargetConditionals.h`; those external
 SDK headers are not fabricated by the materializer. These counts do not change
-the 558 input rows, 410 subject inputs (404 supported-object subjects and six
+the 558 input rows, 411 subject inputs (405 supported-object subjects and six
 non-object controls), 78,720 support-contract identities,
 or the support ledger bytes and digests. These are historical replay dispositions. The current full census supplies
 the authenticated 692-record project closure, including the target SDK headers
 and the project-owned MinGW varargs adapter described below.
 
-The binding values are frozen in both the C producer and the independent
-validator: descriptor SHA-256
-`33be3c1582858afb570298ae49db193293e7ec2008d3a6b85f03df3485dea803`, materializer
-receipt SHA-256
-`dc14e25a42f9000071d46c776f43282852bcebbf392a91089afe6b7e46aed55d`, project
-closure SHA-256
-`542c978ad5f8252917fb0fd93cdd318ac8fcca9db14ffa1093edb606a8d637a2`, and
-materializer ledger SHA-256
-`fa98a21ebeeede091e8810034b315d12c66f629ba2d5e2c4225b5f96fc1ce48a`.
+The live dependency aggregate is generated once in
+[`../tools/native_retirement_dependency_binding.generated.h`](../tools/native_retirement_dependency_binding.generated.h).
+That artifact binds the reviewed policy and generated repository snapshot to the
+materializer receipt, project closure, and materializer ledger. The C producer
+includes it directly and the independent Python validator parses the same bytes;
+neither consumer nor this prose carries a separately edited live quartet.
+Malformed, stale, truncated, or mismatched generated state fails closed. The
+immutable legacy descriptor and validator compatibility constants continue to
+authenticate evidence produced before this representation change.
 The archived fixture-input map is
 `bef841ade0921ffe9293440171b1d0d8dd6c3cf798f2535d8790b4ad26542500`, the
 fixture-to-project-header map is
@@ -589,7 +591,7 @@ as its source and driver registration state; its census rows retain that
 platform ownership, and the native driver continues to build and execute it
 with the host compiler. The ARM64 floating-state observer uses `unsigned long
 long` for its 64-bit system-register operands, including LLP64 Windows.
-Every original fixture and all 78,720 row identities remain present.
+Every original fixture and all 78,912 row identities remain present.
 
 Main's Android x86-64 ABI repair selects binary128 long double. Format-specific
 fixtures now test `__LDBL_MANT_DIG__`, retaining the complete x87 bodies on x87

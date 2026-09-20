@@ -15,6 +15,8 @@
 // frame-backed wide vectors through explicit XMM/YMM/ZMM ABI transfer rows.
 // machine_x64_select_i128_divide emits scalar MIR loop blocks; optional
 // block_entries/block_exits preserve canonical control-flow destinations.
+// MachineX64ValueUse is the hot value-use projection; MachineX64LocalUse
+// holds sparse local-promotion store and alias state during selection.
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
@@ -139,8 +141,8 @@ typedef enum MachineX64PlaceKind
 
 // The facts the one row walk scatters per operand, interleaved so that an
 // operand touches one line: the use count, the one block that uses the value,
-// the last use ordinal, and the promotable width of the local the value
-// names (4, 8 or 64, or zero). All zero at rest: the block is stored plus
+// the last use ordinal, and the index of the sparse local-use row (zero for
+// nonlocals). All zero at rest: the block is stored plus
 // one so that zero means unused, and MACHINE_SELECTION_MULTIPLE_BLOCKS once a
 // second block uses the value.
 typedef struct MachineX64ValueUse MachineX64ValueUse;
@@ -149,9 +151,21 @@ struct MachineX64ValueUse
     u32 use_count;
     u32 use_block;
     u32 last_use_ordinal;
-    u32 promotable_width;
+    u32 local_use;
 };
 BUSTER_CT_CHECK(sizeof(MachineX64ValueUse) == 16);
+
+// Only promotable local places need store/alias state. Value rows carry a
+// one-based index; entry zero is the nonlocal sentinel.
+typedef struct MachineX64LocalUse MachineX64LocalUse;
+struct MachineX64LocalUse
+{
+    u32 value;
+    u32 width;
+    u32 store_count;
+    u32 next_store_ordinal;
+    u32 next_store_epoch;
+};
 
 // One stack slot as the selector appends it: the size and the power-of-two
 // alignment travel as one row, and the two public columns are written from
@@ -7561,7 +7575,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u32 value_capacity = function->value_count ? function->value_count : 1;
     u32 block_capacity = function->block_count ? function->block_count : 1;
     bool may_hold_atomic_exchange = ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE));
-    u64 zero_region_bytes = (u64)value_capacity * (sizeof(MachineX64ValueUse) + 4 * sizeof(u32) + 2 * sizeof(u8)) +
+    u64 zero_region_bytes = (u64)value_capacity * (sizeof(MachineX64ValueUse) + sizeof(u32) + 2 * sizeof(u8)) +
                             (u64)block_capacity * sizeof(MachineX64BranchFusion);
     zero_region_bytes = (zero_region_bytes + 15) & ~(u64)15;
     u64 none_region_bytes = (u64)value_capacity * sizeof(u32) * (may_hold_atomic_exchange ? 6 : 5);
@@ -7570,10 +7584,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     memset(value_block + zero_region_bytes, 0xff, none_region_bytes);
     MachineX64ValueUse* value_uses = (MachineX64ValueUse*)value_block;
     u32* value_def_ordinals = (u32*)(value_uses + value_capacity);
-    u32* local_store_counts = value_def_ordinals + value_capacity;
-    u32* next_store_ordinals = local_store_counts + value_capacity;
-    u32* next_store_epochs = next_store_ordinals + value_capacity;
-    selector.branch_fusions = (MachineX64BranchFusion*)(next_store_epochs + value_capacity);
+    selector.branch_fusions = (MachineX64BranchFusion*)(value_def_ordinals + value_capacity);
     selector.fused_dead = (u8*)(selector.branch_fusions + block_capacity);
     selector.place_kinds = selector.fused_dead + value_capacity;
     selector.value_virtual_registers = (u32*)(value_block + zero_region_bytes);
@@ -7681,6 +7692,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // compatibility fallback.
     bool sparse_local_projection = function->local_places ||
                                    ((function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) && function->local_count == 0);
+    u32 local_capacity = sparse_local_projection ? function->local_count : function->value_count;
+    MachineX64LocalUse* local_uses = arena_allocate(arena, MachineX64LocalUse, (u64)local_capacity + 1);
+    local_uses[0] = (MachineX64LocalUse){0};
+    u32 local_use_count = 1;
     if (!program->disable_target_local_promotion && sparse_local_projection)
     {
         for (u32 local_index = 0; local_index < function->local_count; local_index += 1)
@@ -7704,13 +7719,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 continue;
             }
             MachineTypeClass local_class = machine_x64_type_class(&selector, function->values[place.value].canonical_type);
+            u32 width = 0;
             if ((local_class.flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER) && (local_class.size_log2 == 2 || local_class.size_log2 == 3))
             {
-                value_uses[place.value].promotable_width = 1u << local_class.size_log2;
+                width = 1u << local_class.size_log2;
             }
             else if ((local_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER) && selector.vector_registers_supported)
             {
-                value_uses[place.value].promotable_width = 64;
+                width = 64;
+            }
+            if (width)
+            {
+                local_uses[local_use_count] = (MachineX64LocalUse){.value = place.value, .width = width};
+                value_uses[place.value].local_use = local_use_count++;
             }
         }
     }
@@ -7726,13 +7747,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
             u32 value_index = instruction->result.value;
             MachineTypeClass local_class = machine_x64_type_class(&selector, function->values[value_index].canonical_type);
+            u32 width = 0;
             if ((local_class.flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER) && (local_class.size_log2 == 2 || local_class.size_log2 == 3))
             {
-                value_uses[value_index].promotable_width = 1u << local_class.size_log2;
+                width = 1u << local_class.size_log2;
             }
             else if ((local_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER) && selector.vector_registers_supported)
             {
-                value_uses[value_index].promotable_width = 64;
+                width = 64;
+            }
+            if (width)
+            {
+                local_uses[local_use_count] = (MachineX64LocalUse){.value = value_index, .width = width};
+                value_uses[value_index].local_use = local_use_count++;
             }
         }
     }
@@ -7859,7 +7886,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
                 }
                 use->last_use_ordinal = walk_ordinal;
-                if (!use->promotable_width)
+                if (!use->local_use)
                 {
                     continue;
                 }
@@ -7872,7 +7899,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     MachineTypeClass access_class = machine_x64_type_class(&selector, instruction->canonical_type);
                     place_use = !instruction->volatile_access &&
                                 (access_class.flags & (MACHINE_TYPE_CLASS_SCALAR_REGISTER | MACHINE_TYPE_CLASS_VECTOR_REGISTER)) &&
-                                access_class.size_log2 != MACHINE_TYPE_CLASS_NO_LOG2 && (1u << access_class.size_log2) == use->promotable_width;
+                                access_class.size_log2 != MACHINE_TYPE_CLASS_NO_LOG2 && (1u << access_class.size_log2) == local_uses[use->local_use].width;
                 }
                 else if (operand_index == 0 && instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 2 &&
                          instruction->operands[1].value < function->value_count)
@@ -7880,12 +7907,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     MachineTypeClass access_class = machine_x64_type_class(&selector, function->values[instruction->operands[1].value].canonical_type);
                     place_use = !instruction->volatile_access &&
                                 (access_class.flags & (MACHINE_TYPE_CLASS_SCALAR_REGISTER | MACHINE_TYPE_CLASS_VECTOR_REGISTER)) &&
-                                access_class.size_log2 != MACHINE_TYPE_CLASS_NO_LOG2 && (1u << access_class.size_log2) == use->promotable_width;
-                    local_store_counts[used] += 1;
+                                access_class.size_log2 != MACHINE_TYPE_CLASS_NO_LOG2 && (1u << access_class.size_log2) == local_uses[use->local_use].width;
+                    local_uses[use->local_use].store_count += 1;
                 }
                 if (!place_use)
                 {
-                    use->promotable_width = 0;
+                    use->local_use = 0;
                 }
             }
         }
@@ -7951,17 +7978,18 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 IrInstruction* instruction = function->instructions + candidate_row.row;
                 u32 instruction_ordinal = candidate_row.ordinal;
                 if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
-                    value_uses[instruction->operands[0].value].promotable_width)
+                    value_uses[instruction->operands[0].value].local_use)
                 {
-                    next_store_ordinals[instruction->operands[0].value] = instruction_ordinal;
-                    next_store_epochs[instruction->operands[0].value] = epoch;
+                    MachineX64LocalUse* local = local_uses + value_uses[instruction->operands[0].value].local_use;
+                    local->next_store_ordinal = instruction_ordinal;
+                    local->next_store_epoch = epoch;
                 }
                 // The rooting local of a candidate: the load's own place,
                 // or the alias the previous sweep gave a dereference's
                 // pointer operand.
                 u32 root = UINT32_MAX;
                 if (instruction->opcode == IR_OPCODE_LOAD && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
-                    value_uses[instruction->operands[0].value].promotable_width)
+                    value_uses[instruction->operands[0].value].local_use)
                 {
                     root = instruction->operands[0].value;
                 }
@@ -7984,9 +8012,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 // block-local containment is what keeps the layout
                 // reasoning sound: a jump can only re-enter at a block
                 // head, above the row, never between it and a use.
-                if (local_store_counts[root] == 1 ||
+                MachineX64LocalUse* local = local_uses + value_uses[root].local_use;
+                if (local->store_count == 1 ||
                     (value_uses[candidate].use_block == block_index + 1 &&
-                     (next_store_epochs[root] != epoch || next_store_ordinals[root] > value_uses[candidate].last_use_ordinal)))
+                     (local->next_store_epoch != epoch || local->next_store_ordinal > value_uses[candidate].last_use_ordinal)))
                 {
                     // The second sweep recomputes the first's load aliases
                     // identically, so the transition is what keeps one value
@@ -8000,6 +8029,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 }
             }
             candidate_base += block_candidate_count;
+        }
+    }
+    // A local with no store has no defining value to seed a mutable virtual
+    // register.  This is observable for automatic declarations materialized
+    // solely so a later unreachable label can still refer to their storage:
+    // the dead read is valid IR, but the object has indeterminate bytes. Keep
+    // such a local in its frame slot rather than manufacturing an undefined
+    // virtual-register definition.
+    for (u32 index = 1; index < local_use_count; index += 1)
+    {
+        if (local_uses[index].store_count == 0)
+        {
+            value_uses[local_uses[index].value].local_use = 0;
         }
     }
     selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
@@ -8042,7 +8084,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     machine_x64_reject(&selector, instruction->opcode);
                     break;
                 }
-                if (value_uses[instruction->result.value].promotable_width)
+                if (value_uses[instruction->result.value].local_use)
                 {
                     // Promoted: the local is a virtual register for its
                     // whole life and never owns a frame slot. Its loads
@@ -8055,7 +8097,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     selector.value_virtual_registers[instruction->result.value] =
                         machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
                                                                                 .definition_point = MACHINE_POINT_INVALID,
-                                                                                .register_class = value_uses[instruction->result.value].promotable_width == 64
+                                                                                .register_class = local_uses[value_uses[instruction->result.value].local_use].width == 64
                                                                                                       ? MACHINE_REGISTER_CLASS_VECTOR
                                                                                                       : MACHINE_REGISTER_CLASS_GENERAL,
                                                                                 .flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE,
@@ -8202,10 +8244,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // local's latest store ordinal and the commit compares. Types stay
     // integer-class scalars throughout: float compares keep their
     // FCMP_SET materialization and only feed the chain as its bool.
-    // The store counts the sweeps read are done with; the same column now
+    // The store counts the sweeps read are done with; the same sparse column now
     // carries the latest store ordinal per promoted local.
-    u32* local_store_ordinals = local_store_counts;
-    memset(local_store_ordinals, 0, sizeof(*local_store_ordinals) * function->value_count);
+    for (u32 index = 1; index < local_use_count; index += 1)
+    {
+        local_uses[index].store_count = 0;
+    }
     // The stores this stamps and the branches it fuses are both candidate
     // rows, so this pass reads the same compact list the sweeps did, and each
     // entry already carries the ordinal the full walk gave that row.
@@ -8219,9 +8263,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             IrInstruction* instruction = function->instructions + candidate_row.row;
             u32 fusion_ordinal = candidate_row.ordinal;
             if (instruction->opcode == IR_OPCODE_STORE && instruction->operand_count >= 1 && instruction->operands[0].value < function->value_count &&
-                value_uses[instruction->operands[0].value].promotable_width)
+                value_uses[instruction->operands[0].value].local_use)
             {
-                local_store_ordinals[instruction->operands[0].value] = fusion_ordinal;
+                local_uses[value_uses[instruction->operands[0].value].local_use].store_count = fusion_ordinal;
             }
             if (instruction->opcode != IR_OPCODE_BRANCH_IF || instruction->operand_count < 1 || instruction->operands[0].value >= function->value_count)
             {
@@ -8373,7 +8417,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                     continue;
                 }
                 u32 read_root = load_aliases[read_value];
-                if (read_root != UINT32_MAX && local_store_ordinals[read_root] > innermost_ordinal)
+                if (read_root != UINT32_MAX && local_uses[value_uses[read_root].local_use].store_count > innermost_ordinal)
                 {
                     reads_safe = false;
                 }

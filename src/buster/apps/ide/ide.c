@@ -600,7 +600,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_completion_census(void)
                                          diagnostic.reason, diagnostic.assembly_diagnostic_kind, diagnostic.mismatch_index, diagnostic.direct_byte, diagnostic.source_byte);
             manifest = string_format(arena, S8("{S8}{S8}"), manifest, line);
         }
-        bool manifest_written = manifest.length < BUSTER_MB(2) && file_write(compiler_state.completion_census_output_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
+        bool manifest_written = manifest.length < BUSTER_MB(2) && file_publish(compiler_state.completion_census_output_path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
         if (!manifest_written) result = PROCESS_RESULT_FAILED;
         string_print(S8("X86_COMPLETION_CENSUS_MANIFEST path={S8} bytes={u64} written={u32}\n"), compiler_state.completion_census_output_path,
                      manifest.length, manifest_written);
@@ -872,7 +872,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
                                     construction.values[index]);
     }
 #endif
-    return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
+    return file_publish(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
 }
 
 BUSTER_GLOBAL_LOCAL String8 compiler_census_hex(Arena* arena, String8 text)

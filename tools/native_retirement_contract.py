@@ -14,6 +14,9 @@ import struct
 from collections import Counter
 from pathlib import Path
 
+import native_retirement_dependency_binding as dependency_authority
+import native_retirement_materializer as dependency_materializer
+
 
 ALLOCATORS = ("none", "mir-stack", "fast", "quality")
 HOSTED_FIXTURES = frozenset("tests/" + name + ".c" for name in (
@@ -21,16 +24,16 @@ HOSTED_FIXTURES = frozenset("tests/" + name + ".c" for name in (
     "basic_lz4_roundtrip", "basic_stb_compat", "basic_yyjson_roundtrip", "basic_zlib_compat"))
 FULL_CENSUS_PROFILE = "full-census"
 SELF_TEST_PROFILE = "self-test"
-FULL_SUBJECT_COUNT = 410
-FULL_ROW_COUNT = 78720
+FULL_SUBJECT_COUNT = 411
+FULL_ROW_COUNT = 78912
 FULL_SHARD_COUNT = 4
 FULL_SUPPORTED_GAP_COUNT = 192
 # This is the SHA-256 of the canonical JSON list of full-census row numbers
 # declared as supported-native gaps by the frozen support ledger.  The value is
 # deliberately part of the validator contract; a producer cannot change it by
 # renaming a result disposition or by editing a manifest claim.
-FULL_SUPPORTED_GAP_SHA256 = "9e471e4119a8ffc23177b76d876d89b4aaa04d1d9f667f309fd88fd74b5eb8ba"
-FULL_SUPPORT_CONTRACT_SHA256 = "8648b81e7c39c514d2036bb242b5ff43dfa9ffc17d67c4bbb19d2a141ed6c8d8"
+FULL_SUPPORTED_GAP_SHA256 = "0f531b1cf7c7922ea891e15703971bcb2ddf95f398f628e0b2681831d7cbf81e"
+FULL_SUPPORT_CONTRACT_SHA256 = "da7fb84ed7d9cc824629a1204fe12eab001d8f90fb623bf694a983c0ab75cc08"
 SUPPORTED_OBJECT_OBLIGATION = "supported-object-zero-fallback"
 NON_OBJECT_CONTROL_OBLIGATION = "registered-non-object-control"
 # Applicability is a validator-owned projection of the immutable row identity
@@ -45,11 +48,17 @@ SUPPORTED_GAP_LEDGER_FIELDS = ("fixture", "target", "frontend_lowering", "PIC", 
 FULL_SUPPORTED_GAP_LEDGER_SHA256 = "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3"
 APPLICABILITY_LEDGER_FIELDS = ("fixture", "target", "fixture_sha256", "applicability", "reason")
 FULL_APPLICABILITY_LEDGER_COUNT = 374
-FULL_APPLICABILITY_LEDGER_SHA256 = "00cf09f1a58eb0fe8e44fbc1bd9e462a91df4449233c2b0c788442ec7a192a0c"
-FULL_DEPENDENCY_DESCRIPTOR_SHA256 = "33be3c1582858afb570298ae49db193293e7ec2008d3a6b85f03df3485dea803"
-FULL_DEPENDENCY_RECEIPT_SHA256 = "dc14e25a42f9000071d46c776f43282852bcebbf392a91089afe6b7e46aed55d"
-FULL_DEPENDENCY_PROJECT_SHA256 = "542c978ad5f8252917fb0fd93cdd318ac8fcca9db14ffa1093edb606a8d637a2"
-FULL_DEPENDENCY_LEDGER_SHA256 = "fa98a21ebeeede091e8810034b315d12c66f629ba2d5e2c4225b5f96fc1ce48a"
+FULL_APPLICABILITY_LEDGER_SHA256 = "934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa"
+LEGACY_DEPENDENCY_DESCRIPTOR_SHA256 = "33be3c1582858afb570298ae49db193293e7ec2008d3a6b85f03df3485dea803"
+LEGACY_DEPENDENCY_RECEIPT_SHA256 = "dc14e25a42f9000071d46c776f43282852bcebbf392a91089afe6b7e46aed55d"
+LEGACY_DEPENDENCY_PROJECT_SHA256 = "542c978ad5f8252917fb0fd93cdd318ac8fcca9db14ffa1093edb606a8d637a2"
+LEGACY_DEPENDENCY_LEDGER_SHA256 = "fa98a21ebeeede091e8810034b315d12c66f629ba2d5e2c4225b5f96fc1ce48a"
+_DEPENDENCY_ROOT = Path(__file__).resolve().parents[1]
+_DEPENDENCY_BINDING, _DEPENDENCY_RESOLVED_MANIFEST, _DEPENDENCY_SNAPSHOT = dependency_authority.load_authority(_DEPENDENCY_ROOT)
+FULL_DEPENDENCY_DESCRIPTOR_SHA256 = _DEPENDENCY_BINDING["policy_sha256"]
+FULL_DEPENDENCY_RECEIPT_SHA256 = _DEPENDENCY_BINDING["receipt_sha256"]
+FULL_DEPENDENCY_PROJECT_SHA256 = _DEPENDENCY_BINDING["project_sha256"]
+FULL_DEPENDENCY_LEDGER_SHA256 = _DEPENDENCY_BINDING["ledger_sha256"]
 FULL_EXTERNAL_CHECKOUTS = (
     {"name": "cjson", "repository": "DaveGamble/cJSON", "revision": "c859b25da02955fef659d658b8f324b5cde87be3", "path": "external/cjson"},
     {"name": "doom", "repository": "ozkl/doomgeneric", "revision": "dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284", "path": "external/doom"},
@@ -282,30 +291,62 @@ def validate_dependency_binding(directory, manifest, profile, inputs):
     required = profile == FULL_CENSUS_PROFILE or bool(manifest.get("project_include_sha256", ""))
     if not required:
         return
-    assert manifest.get("dependency_manifest") == "docs/native-retirement-dependencies-v1.json"
+    assert manifest.get("dependency_manifest") == dependency_authority.POLICY_PATH
     assert manifest.get("dependency_receipt") == "dependency-receipt.json"
-    descriptor = directory / "dependency-descriptor.json"
     receipt_path = directory / "dependency-receipt.json"
     ledger = directory / "dependency-materializer.tsv"
-    assert sha256(descriptor) == manifest.get("dependency_manifest_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
-    assert sha256(receipt_path) == manifest.get("dependency_receipt_sha256") == FULL_DEPENDENCY_RECEIPT_SHA256
-    assert sha256(ledger) == manifest.get("dependency_ledger_sha256") == FULL_DEPENDENCY_LEDGER_SHA256
-    descriptor_value = json.loads(descriptor.read_text(encoding="utf-8"))
+    policy_path = directory / "dependency-policy.json"
+    snapshot_path = directory / "dependency-source-snapshot.json"
+    resolved_path = directory / "dependency-resolved-descriptor.json"
+    live = policy_path.is_file() or snapshot_path.is_file() or resolved_path.is_file()
+    if live:
+        assert policy_path.is_file() and snapshot_path.is_file() and resolved_path.is_file()
+        policy_raw = policy_path.read_bytes()
+        snapshot_raw = snapshot_path.read_bytes()
+        resolved_raw = resolved_path.read_bytes()
+        assert sha256(policy_path) == manifest.get("dependency_manifest_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
+        assert sha256(snapshot_path) == manifest.get("dependency_snapshot_sha256") == _DEPENDENCY_BINDING["snapshot_sha256"]
+        assert manifest.get("dependency_snapshot") == dependency_authority.SNAPSHOT_PATH
+        policy = dependency_authority.parse_policy(policy_raw)
+        snapshot = dependency_authority.parse_snapshot(snapshot_raw, policy_raw, policy)
+        reconstructed = dependency_authority.render_resolved_descriptor(policy, snapshot)
+        assert resolved_raw == reconstructed
+        assert hashlib.sha256(resolved_raw).hexdigest() == manifest.get("dependency_resolved_descriptor_sha256")
+        descriptor_value = dependency_authority.strict_json(resolved_raw, "evidence resolved dependency descriptor")
+        records, _metadata = dependency_materializer.parse_manifest(descriptor_value)
+        assert ledger.read_bytes() == dependency_materializer._ledger(records)
+        assert descriptor_value == _DEPENDENCY_RESOLVED_MANIFEST
+        assert snapshot == _DEPENDENCY_SNAPSHOT
+        expected_receipt_sha256 = FULL_DEPENDENCY_RECEIPT_SHA256
+        expected_project_sha256 = FULL_DEPENDENCY_PROJECT_SHA256
+        expected_ledger_sha256 = FULL_DEPENDENCY_LEDGER_SHA256
+    else:
+        descriptor = directory / "dependency-descriptor.json"
+        assert sha256(descriptor) == manifest.get("dependency_manifest_sha256") == LEGACY_DEPENDENCY_DESCRIPTOR_SHA256
+        descriptor_value = json.loads(descriptor.read_text(encoding="utf-8"))
+        expected_receipt_sha256 = LEGACY_DEPENDENCY_RECEIPT_SHA256
+        expected_project_sha256 = LEGACY_DEPENDENCY_PROJECT_SHA256
+        expected_ledger_sha256 = LEGACY_DEPENDENCY_LEDGER_SHA256
+    assert sha256(receipt_path) == manifest.get("dependency_receipt_sha256") == expected_receipt_sha256
+    assert sha256(ledger) == manifest.get("dependency_ledger_sha256") == expected_ledger_sha256
     assert descriptor_value.get("external_checkouts") == list(FULL_EXTERNAL_CHECKOUTS)
     assert descriptor_value.get("external_generated") == list(FULL_EXTERNAL_GENERATED)
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt.get("schema") == "buster-native-retirement-dependencies-v1" and receipt.get("version") == 1
-    assert receipt.get("descriptor_path") == "docs/native-retirement-dependencies-v1.json"
-    assert receipt.get("descriptor_sha256") == FULL_DEPENDENCY_DESCRIPTOR_SHA256
-    assert receipt.get("project_include_sha256") == FULL_DEPENDENCY_PROJECT_SHA256
-    assert receipt.get("ledger_sha256") == FULL_DEPENDENCY_LEDGER_SHA256
+    assert receipt.get("descriptor_path") == dependency_authority.POLICY_PATH
+    if live:
+        assert receipt.get("descriptor_sha256") == manifest.get("dependency_resolved_descriptor_sha256")
+    else:
+        assert receipt.get("descriptor_sha256") == LEGACY_DEPENDENCY_DESCRIPTOR_SHA256
+    assert receipt.get("project_include_sha256") == expected_project_sha256
+    assert receipt.get("ledger_sha256") == expected_ledger_sha256
     assert receipt.get("external_checkouts") == list(FULL_EXTERNAL_CHECKOUTS)
     assert receipt.get("external_generated") == list(FULL_EXTERNAL_GENERATED)
     assert receipt.get("external_closure_sha256") == canonical_digest({
         "external_checkouts": list(FULL_EXTERNAL_CHECKOUTS),
         "external_generated": list(FULL_EXTERNAL_GENERATED),
     })
-    assert manifest.get("dependency_project_include_sha256") == FULL_DEPENDENCY_PROJECT_SHA256
+    assert manifest.get("dependency_project_include_sha256") == expected_project_sha256
     assert manifest.get("archived_input_identity_sha256") == FULL_ARCHIVED_INPUT_SHA256
     assert manifest.get("archived_fixture_map_sha256") == FULL_ARCHIVED_FIXTURE_MAP_SHA256
     assert manifest.get("archived_row_identity_sha256") == FULL_ARCHIVED_ROW_SHA256
@@ -529,7 +570,7 @@ def validate_profile(manifest, inputs, row_count):
     if profile == FULL_CENSUS_PROFILE:
         assert manifest.get("support_contract") == "docs/native-retirement-support-v1.tsv"
         assert manifest.get("support_contract_sha256") == FULL_SUPPORT_CONTRACT_SHA256
-        assert manifest.get("inputs") == "558"
+        assert manifest.get("inputs") == "559"
         assert manifest.get("shard_count") == str(FULL_SHARD_COUNT)
         assert manifest.get("fixture_filter", "") == "" and manifest.get("target_filter", "") == ""
         assert manifest.get("subjects") == str(FULL_SUBJECT_COUNT)

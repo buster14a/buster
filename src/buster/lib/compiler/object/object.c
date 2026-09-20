@@ -5474,6 +5474,7 @@ BUSTER_GLOBAL_LOCAL String8 object_read_coff_name(ByteSlice bytes, u64 offset, u
 enum
 {
     OBJECT_COFF_SECTION_LINK_COMDAT = 0x00001000,
+    OBJECT_COFF_SECTION_LINK_NRELOC_OVFL = 0x01000000,
     OBJECT_COFF_STORAGE_EXTERNAL = 2,
     OBJECT_COFF_STORAGE_STATIC = 3,
     OBJECT_COFF_STORAGE_WEAK_EXTERNAL = 105,
@@ -5641,11 +5642,44 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 !object_read_u32(bytes, section + 24, &relocation_offset) || !object_read_u16(bytes, section + 32, &relocation_count) ||
                 !object_read_u32(bytes, section + 36, &characteristics) ||
                 ((characteristics & 0x80) != 0 && raw_offset && raw_size) ||
-                (raw_offset && (raw_offset > bytes.length || raw_size > bytes.length - raw_offset)) ||
-                (relocation_count && (relocation_offset > bytes.length || (u64)relocation_count * COFF_RELOCATION_SIZE > bytes.length - relocation_offset)) ||
-                relocation_count > UINT32_MAX - relocation_capacity)
+                (raw_offset && (raw_offset > bytes.length || raw_size > bytes.length - raw_offset)))
             {
                 read_ok = false;
+            }
+            u32 actual_relocation_count = relocation_count;
+            bool relocation_overflow = relocation_count == UINT16_MAX &&
+                                       (characteristics & OBJECT_COFF_SECTION_LINK_NRELOC_OVFL) != 0;
+            if (read_ok && relocation_overflow)
+            {
+                u32 overflow_count = 0;
+                u32 overflow_symbol = 0;
+                u16 overflow_type = 0;
+                if (!object_read_u32(bytes, relocation_offset, &overflow_count) ||
+                    !object_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
+                    !object_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
+                    overflow_count <= UINT16_MAX || overflow_symbol || overflow_type)
+                {
+                    read_ok = false;
+                }
+                else
+                {
+                    actual_relocation_count = overflow_count;
+                }
+            }
+            u64 relocation_bytes = (u64)actual_relocation_count * COFF_RELOCATION_SIZE +
+                                   (relocation_overflow ? COFF_RELOCATION_SIZE : 0);
+            if (read_ok && actual_relocation_count &&
+                (relocation_offset > bytes.length || relocation_bytes > bytes.length - relocation_offset))
+            {
+                read_ok = false;
+            }
+            if (read_ok && actual_relocation_count > UINT32_MAX - relocation_capacity)
+            {
+                read_ok = false;
+            }
+            if (read_ok)
+            {
+                relocation_capacity += actual_relocation_count;
             }
             bool name_valid = false;
             if (read_ok)
@@ -6117,10 +6151,34 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             u32 raw_offset = 0;
             u32 relocation_offset = 0;
             u16 relocation_count = 0;
+            u32 characteristics = 0;
             object_read_u32(bytes, section + 16, &raw_size);
             object_read_u32(bytes, section + 20, &raw_offset);
             object_read_u32(bytes, section + 24, &relocation_offset);
             object_read_u16(bytes, section + 32, &relocation_count);
+            object_read_u32(bytes, section + 36, &characteristics);
+            u32 actual_relocation_count = relocation_count;
+            u64 relocation_data_offset = relocation_offset;
+            bool relocation_overflow = relocation_count == UINT16_MAX &&
+                                       (characteristics & OBJECT_COFF_SECTION_LINK_NRELOC_OVFL) != 0;
+            if (relocation_overflow)
+            {
+                u32 overflow_count = 0;
+                u32 overflow_symbol = 0;
+                u16 overflow_type = 0;
+                if (!object_read_u32(bytes, relocation_offset, &overflow_count) ||
+                    !object_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
+                    !object_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
+                    overflow_count <= UINT16_MAX || overflow_symbol || overflow_type)
+                {
+                    read_ok = false;
+                }
+                else
+                {
+                    actual_relocation_count = overflow_count;
+                    relocation_data_offset += COFF_RELOCATION_SIZE;
+                }
+            }
             if (section_kinds[section_index] == UINT32_MAX)
             {
                 continue;
@@ -6130,9 +6188,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             {
                 result.comdats[source_comdat_index].first_relocation = result.relocation_count;
             }
-            for (u16 relocation_index = 0; relocation_index < relocation_count && read_ok; relocation_index += 1)
+            for (u32 relocation_index = 0; relocation_index < actual_relocation_count && read_ok; relocation_index += 1)
             {
-                u64 relocation = relocation_offset + (u64)relocation_index * COFF_RELOCATION_SIZE;
+                u64 relocation = relocation_data_offset + (u64)relocation_index * COFF_RELOCATION_SIZE;
                 u32 source_offset = 0;
                 u32 source_symbol = 0;
                 u16 relocation_type = 0;
@@ -7291,7 +7349,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             if (read_ok)
             {
                 function_symbol = (kind == 0 && (reference_kind == 1 || reference_kind == 5)) ||
-                                  (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT);
+                                  (kind == 0x0e && section_kinds[section_number - 1] == OBJECT_SECTION_TEXT) ||
+                                  (kind == 0 && string_equal(name, S8("_tlv_bootstrap")));
                 result.symbols[destination_index] = (ObjectSymbol){
                     .name = string_duplicate_arena(arena, name, false),
                     .value = section_value,
@@ -11446,9 +11505,19 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     object_buffer_zero(&buffer, COFF_HEADER_SIZE + (u64)section_count * COFF_SECTION_SIZE);
     u32* raw_offsets = arena_allocate(arena, u32, section_count);
     u32* relocation_offsets = arena_allocate(arena, u32, section_count);
-    u16* relocation_counts = arena_allocate(arena, u16, section_count);
+    u32* relocation_counts = arena_allocate(arena, u32, section_count);
     memset(relocation_counts, 0, (u64)section_count * sizeof(*relocation_counts));
-    for (u32 section = 0; section < section_count; section += 1)
+    for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+    {
+        ObjectRelocation* source = object->relocations + relocation;
+        if (source->section >= section_count || relocation_counts[source->section] == UINT32_MAX)
+        {
+            buffer.error = OBJECT_ERROR_INVALID_INPUT;
+            break;
+        }
+        relocation_counts[source->section] += 1;
+    }
+    for (u32 section = 0; section < section_count && buffer.error == OBJECT_ERROR_NONE; section += 1)
     {
         ObjectSection* object_section = object->sections + section;
         bool zero_fill = object_section_kind_is_zero_fill(object_section->kind);
@@ -11527,7 +11596,14 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
                 object_write_u32_at(&buffer, raw_offsets[section] + source->offset, (u32)addend);
             }
         }
+        bool relocation_overflow = relocation_counts[section] > UINT16_MAX;
         relocation_offsets[section] = (u32)buffer.count;
+        if (relocation_overflow)
+        {
+            u64 overflow_offset = buffer.count;
+            object_buffer_zero(&buffer, COFF_RELOCATION_SIZE);
+            object_write_u32_at(&buffer, overflow_offset, relocation_counts[section]);
+        }
         for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
         {
             ObjectRelocation* source = object->relocations + relocation;
@@ -11536,7 +11612,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
                 continue;
             }
             u16 type = object_coff_relocation_type(object->target.cpu_arch, source->kind);
-            if (!type || relocation_counts[section] == UINT16_MAX)
+            if (!type)
             {
                 buffer.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                 break;
@@ -11546,7 +11622,6 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
             object_write_u32_at(&buffer, offset, (u32)source->offset);
             object_write_u32_at(&buffer, offset + 4, source->symbol);
             object_write_u16_at(&buffer, offset + 8, type);
-            relocation_counts[section] += 1;
         }
     }
     u32 symbol_table_offset = (u32)buffer.count;
@@ -11611,7 +11686,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         object_write_u32_at(&buffer, offset + 16, (u32)(object_section_kind_is_zero_fill(source->kind) ? source->virtual_size : source->data.length));
         object_write_u32_at(&buffer, offset + 20, raw_offsets[section]);
         object_write_u32_at(&buffer, offset + 24, relocation_counts[section] ? relocation_offsets[section] : 0);
-        object_write_u16_at(&buffer, offset + 32, relocation_counts[section]);
+        object_write_u16_at(&buffer, offset + 32,
+                            relocation_counts[section] > UINT16_MAX ? UINT16_MAX : (u16)relocation_counts[section]);
         // The initializer arrays take Clang's shape for the `.CRT$X*` group:
         // read-only initialized data aligned to 8, which is the entry size,
         // so a priority group never pads a null slot into the middle of the
@@ -11625,6 +11701,10 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
                               : object_section_kind_is_debug(source->kind)     ? 0x42100040
                               : object_section_kind_is_zero_fill(source->kind) ? 0xc0500080
                                                                                : 0xc0500040;
+        if (relocation_counts[section] > UINT16_MAX)
+        {
+            characteristics |= OBJECT_COFF_SECTION_LINK_NRELOC_OVFL;
+        }
         object_write_u32_at(&buffer, offset + 36, characteristics);
     }
     result.error = buffer.error;

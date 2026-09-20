@@ -50,6 +50,14 @@ BUSTER_GLOBAL_LOCAL CompilerDriverError compiler_driver_object_path_test_compile
     BUSTER_CHECK(arena_destroy(arena, 1));
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_process_success(Arena* arena, String8 executable)
+{
+    String8 command[] = {executable};
+    ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                                                   (ProcessSpawnOptions){.use_process_environment = true});
+    return spawned.handle && os_process_wait_sync(arena, spawned).result == PROCESS_RESULT_SUCCESS;
+}
 #endif
 
 UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
@@ -125,10 +133,67 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, compiler_driver_object_path_test_file_exists(S8("collide.o")));
         BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(left_wrong_output));
         BUSTER_TEST(arguments, !compiler_driver_object_path_test_file_exists(right_wrong_output));
-
     }
 
     BUSTER_TEST(arguments, compiler_driver_object_path_test_change_directory(original_directory));
+
+    // A label may re-enter after a fixed-size automatic declaration. Storage
+    // must exist, but the skipped initializer must not execute. The skipped
+    // block-scope extern must continue to refer to external storage.
+    String8 unreachable_source = string_format_z(arena, S8("{S8}/unreachable-local.c"), root_absolute);
+    String8 unreachable_program = S8(
+        "static volatile int initializer_calls;\n"
+        "int external_value = 9;\n"
+        "static int read_external(void)\n"
+        "{\n"
+        "    goto live;\n"
+        "    extern int external_value;\n"
+        "live:\n"
+        "    return external_value;\n"
+        "}\n"
+        "int main(void)\n"
+        "{\n"
+        "    goto live;\n"
+        "    int target = (initializer_calls += 1, 5);\n"
+        "live:\n"
+        "    target = 7;\n"
+        "    goto dead;\n"
+        "dead:\n"
+        "    return initializer_calls != 0 || target != 7 || read_external() != 9;\n"
+        "}\n");
+    BUSTER_TEST(arguments, file_write(unreachable_source, BUSTER_SLICE_TO_BYTE_SLICE(unreachable_program)));
+    String8 allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+#if BUSTER_WINDOWS
+            String8 executable = string_format_z(arena, S8("{S8}/unreachable-local-{u32}-{u32}.exe"), root_absolute, frontend, allocator);
+#else
+            String8 executable = string_format_z(arena, S8("{S8}/unreachable-local-{u32}-{u32}"), root_absolute, frontend, allocator);
+#endif
+            String8 allocator_option = string_format_z(arena, S8("-fregister-allocator={S8}"), allocators[allocator]);
+            String8 command[8] = {allocator_option, frontends[frontend]};
+            u32 command_count = 2;
+            if (allocator != 0)
+            {
+                command[command_count++] = S8("-fno-machine-fallback");
+                command[command_count++] = S8("-fverify-codegen");
+            }
+            command[command_count++] = S8("-o");
+            command[command_count++] = executable;
+            command[command_count++] = unreachable_source;
+            CompilerDriverError error = compiler_driver_object_path_test_compile(
+                arguments, (SliceString8){.pointer = command, .length = command_count});
+            BUSTER_TEST(arguments, error == COMPILER_DRIVER_ERROR_NONE);
+            if (error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                BUSTER_TEST(arguments, compiler_driver_object_path_test_process_success(arena, executable));
+            }
+        }
+    }
+
     BUSTER_TEST(arguments, os_directory_delete(root_absolute));
 #endif
     return result;

@@ -7,8 +7,14 @@ on:
       - '.github/workflows/native-retirement-rebind.yml'
       - 'docs/native-retirement-rebinding.md'
       - 'docs/native-retirement-census.md'
+      - 'docs/native-retirement-materializer.md'
       - 'docs/native-retirement-dependencies-v1.json'
+      - 'docs/native-retirement-dependencies-legacy-v1.json'
+      - 'docs/native-retirement-repository-sources-v1.json'
       - 'docs/native-retirement-sdks-v1.json'
+      - 'tools/native_retirement_dependency_binding.py'
+      - 'tools/native_retirement_dependency_binding.generated.h'
+      - 'tools/native_retirement_dependency_binding_test.py'
       - 'tools/native_retirement_rebind.py'
       - 'tools/native_retirement_rebind_contract.py'
       - 'tools/native_retirement_rebind_test.py'
@@ -27,8 +33,14 @@ on:
       - '.github/workflows/native-retirement-rebind.yml'
       - 'docs/native-retirement-rebinding.md'
       - 'docs/native-retirement-census.md'
+      - 'docs/native-retirement-materializer.md'
       - 'docs/native-retirement-dependencies-v1.json'
+      - 'docs/native-retirement-dependencies-legacy-v1.json'
+      - 'docs/native-retirement-repository-sources-v1.json'
       - 'docs/native-retirement-sdks-v1.json'
+      - 'tools/native_retirement_dependency_binding.py'
+      - 'tools/native_retirement_dependency_binding.generated.h'
+      - 'tools/native_retirement_dependency_binding_test.py'
       - 'tools/native_retirement_rebind.py'
       - 'tools/native_retirement_rebind_contract.py'
       - 'tools/native_retirement_rebind_test.py'
@@ -70,6 +82,7 @@ jobs:
       - name: Exercise deterministic reconstruction and failure controls
         run: |
           python3 --version
+          python3 tools/native_retirement_dependency_binding_test.py -v
           python3 tools/native_retirement_rebind_test.py -v
           python3 tools/native_retirement_materializer.py self-test
           python3 tools/native_retirement_materializer_test.py -v
@@ -153,9 +166,9 @@ jobs:
             | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"
           git diff --exit-code -- \
             docs/native-retirement-dependencies-v1.json \
-            docs/native-retirement-census.md \
-            tools/native_retirement_census.c \
-            tools/native_retirement_contract.py
+            docs/native-retirement-dependencies-legacy-v1.json \
+            docs/native-retirement-repository-sources-v1.json \
+            tools/native_retirement_dependency_binding.generated.h
       - name: Run independent contract suite
         run: |
           python3 tools/native_retirement_contract.py self-test

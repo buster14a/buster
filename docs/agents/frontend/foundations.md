@@ -70,6 +70,16 @@ the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
 strict `basic_c_statement_expression_value.c` corpus checks both goto arms.
 
+A named label can re-enter a token range after control skipped an ordinary
+automatic declaration. Fixed-size objects in a labeled function therefore
+receive their canonical local/place rows before the entry block terminates;
+the declaration still owns its initializer, cleanup activation and source
+location. Block-scope `extern`, static/thread storage and VLA allocation remain
+on their existing declaration paths. A missing mapping for an automatic local
+fails lowering instead of being reinterpreted as a global symbol. Target-local
+promotion keeps a zero-store object in its frame slot, because a mutable
+virtual register would have no defining store.
+
 Existing current-value queries do not grow the sparse table. A missing-key
 insertion owns capacity growth, and parameter creation reuses the slot its
 caller already resolved. Once the journal contains every write, an owner with
@@ -633,3 +643,9 @@ helper is introduced. Small or qualified aggregates retain typed construction.
 The large-frame fixture checks zeroed nested storage, explicit values, copies
 and odd byte tails under both frontend lowering modes. This prevents initializer
 expansion from exceeding Windows ARM64's unwind function-size limit.
+
+- C lowering records every named and temporary local in the canonical
+  `IrFunction.local_places` projection at creation. The frontend-private
+  capacity grows monotonically; unused capacity is never read. Frontend SSA
+  and canonical compaction remap or invalidate its place IDs before later
+  promotion and selection consume it. No frontend entity IDs enter the map.

@@ -5,6 +5,7 @@
 // machine_test_a64_atomic_pair_updates pins pair-update payloads, clobbers,
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
 // machine_test_a64_large_aggregate_copy covers pointer/frame copies beyond imm12.
+// machine_test_sparse_local_state compares sparse and row-based local discovery.
 
 #include <buster/tests/compiler/codegen/machine_test.h>
 #if BUSTER_INCLUDE_TESTS
@@ -2571,11 +2572,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_edge_index(UnitTestArgument
 }
 
 // Frame objects whose touched rows miss each other share storage; the ones
-// whose storage has to outlive their rows do not. The fixture writes and reads
-// slot zero, then slot one, in one straight-line block — disjoint ranges — and
-// hands slot two's address to a register, which puts every later read of it
-// out of the rows' reach. A second fixture puts a slot's only rows on both
-// sides of a backward edge, so a loop re-executes the rows between them.
+// whose storage has to outlive their rows do not. The first fixture writes and
+// reads slot zero, then slot one, in one straight-line block — disjoint ranges
+// — and hands slot two's address to a register, which puts every later read of
+// it out of the rows' reach. The second puts a slot's only rows on both sides
+// of a backward edge, so a loop re-executes the rows between them. The final
+// fixture drives two disjoint waves of non-rematerializable values across block
+// boundaries and requires their allocator-created homes to reuse offsets.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -2688,6 +2691,175 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArgu
     loop_function.returns_twice_absence_certified = true;
     MachineStackPlacement loop_placement = machine_fast_placement_build(arena, &loop_function);
     BUSTER_TEST(arguments, loop_placement.valid && loop_placement.stack_slot_offsets[0] != loop_placement.stack_slot_offsets[1]);
+
+    // Each wave defines more cross-block values than the target register file
+    // can retain, then consumes all of them in the next block. The waves never
+    // overlap. Without CFG-derived home liveness every escaping value remains
+    // dedicated; with it, at least one scalar home offset must serve both waves.
+    enum
+    {
+        HOME_PRESSURE = 24,
+        HOME_WAVE_COUNT = 2,
+    };
+    MachineFunctionBuilder home_builder = machine_function_builder_begin(arena);
+    MachineRef home_values[HOME_WAVE_COUNT][HOME_PRESSURE];
+    u32 home_indices[HOME_WAVE_COUNT][HOME_PRESSURE];
+    for (u32 wave = 0; wave < HOME_WAVE_COUNT; wave += 1)
+    {
+        machine_builder_block_begin(&home_builder);
+        for (u32 index = 0; index < HOME_PRESSURE; index += 1)
+        {
+            u32 row = home_builder.instructions.total_count;
+            u32 value = machine_builder_virtual_register(&home_builder,
+                (MachineVirtualRegister){.definition_point = machine_point_make(row, MACHINE_POINT_AFTER),
+                                         .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+            home_indices[wave][index] = value;
+            home_values[wave][index] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+            machine_builder_instruction(&home_builder,
+                (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                     .operands = {home_values[wave][index], machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)}});
+        }
+        u32 definition_block = 2u * wave;
+        u32 use_block = definition_block + 1u;
+        machine_builder_instruction(&home_builder,
+            (MachineInstruction){.opcode = MACHINE_X64_JMP, .operands = {machine_ref_make(MACHINE_REF_BLOCK, use_block)}});
+        machine_builder_block_end(&home_builder, (MachineBlock){0});
+        machine_builder_edge(&home_builder, (MachineEdge){.source_block = definition_block, .destination_block = use_block});
+        machine_builder_block_begin(&home_builder);
+        for (u32 index = 0; index < HOME_PRESSURE; index += 1)
+        {
+            machine_builder_instruction(&home_builder,
+                (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                     .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), home_values[wave][index]}});
+        }
+        if (wave + 1u < HOME_WAVE_COUNT)
+        {
+            u32 next_block = use_block + 1u;
+            machine_builder_instruction(&home_builder,
+                (MachineInstruction){.opcode = MACHINE_X64_JMP, .operands = {machine_ref_make(MACHINE_REF_BLOCK, next_block)}});
+            machine_builder_edge(&home_builder, (MachineEdge){.source_block = use_block, .destination_block = next_block});
+        }
+        else
+        {
+            machine_builder_instruction(&home_builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+        }
+        machine_builder_block_end(&home_builder, (MachineBlock){0});
+    }
+    MachineFunction home_function = machine_function_builder_finish(arena, &home_builder);
+    home_function.target = machine_target_x86_64();
+    BUSTER_TEST(arguments, machine_verify_function(&home_function).error == MACHINE_VERIFY_NONE);
+    home_function.returns_twice_absence_certified = false;
+    MachineStackPlacement home_dedicated = machine_fast_placement_build(arena, &home_function);
+    home_function.returns_twice_absence_certified = true;
+    MachineStackPlacement home_reused = machine_fast_placement_build(arena, &home_function);
+    BUSTER_TEST(arguments, home_dedicated.valid && home_reused.valid && home_reused.frame_size < home_dedicated.frame_size);
+    u32 wave_homes[HOME_WAVE_COUNT] = {0};
+    u32 shared_offsets = 0;
+    for (u32 first = 0; first < HOME_PRESSURE; first += 1)
+    {
+        u32 first_offset = home_reused.virtual_register_offsets[home_indices[0][first]];
+        wave_homes[0] += first_offset != MACHINE_VIRTUAL_REGISTER_NO_HOME;
+        for (u32 second = 0; first_offset != MACHINE_VIRTUAL_REGISTER_NO_HOME && second < HOME_PRESSURE; second += 1)
+        {
+            u32 second_offset = home_reused.virtual_register_offsets[home_indices[1][second]];
+            shared_offsets += second_offset != MACHINE_VIRTUAL_REGISTER_NO_HOME && first_offset == second_offset;
+        }
+    }
+    for (u32 second = 0; second < HOME_PRESSURE; second += 1)
+    {
+        wave_homes[1] += home_reused.virtual_register_offsets[home_indices[1][second]] != MACHINE_VIRTUAL_REGISTER_NO_HOME;
+    }
+    BUSTER_TEST(arguments, wave_homes[0] && wave_homes[1] && shared_offsets);
+    MachineEncodeResult home_encoded = machine_encode_x86_64(arena, &home_function, &home_reused);
+    BUSTER_TEST(arguments, home_encoded.valid);
+
+    // A second pressure set is born and consumed inside a loop while the first
+    // set remains live from the entry block to the exit. Their edit rows are
+    // separated in linear order, but the backedge can execute the inner rows
+    // while every outer home still holds its value, so no offset may be shared.
+    MachineFunctionBuilder loop_home_builder = machine_function_builder_begin(arena);
+    MachineRef loop_home_values[HOME_WAVE_COUNT][HOME_PRESSURE];
+    u32 loop_home_indices[HOME_WAVE_COUNT][HOME_PRESSURE];
+    machine_builder_block_begin(&loop_home_builder);
+    for (u32 index = 0; index < HOME_PRESSURE; index += 1)
+    {
+        u32 row = loop_home_builder.instructions.total_count;
+        u32 value = machine_builder_virtual_register(&loop_home_builder,
+            (MachineVirtualRegister){.definition_point = machine_point_make(row, MACHINE_POINT_AFTER),
+                                     .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        loop_home_indices[0][index] = value;
+        loop_home_values[0][index] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+        machine_builder_instruction(&loop_home_builder,
+            (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                 .operands = {loop_home_values[0][index], machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)}});
+    }
+    machine_builder_instruction(&loop_home_builder,
+        (MachineInstruction){.opcode = MACHINE_X64_JMP, .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}});
+    machine_builder_block_end(&loop_home_builder, (MachineBlock){0});
+    machine_builder_edge(&loop_home_builder, (MachineEdge){.source_block = 0, .destination_block = 1});
+    machine_builder_block_begin(&loop_home_builder);
+    for (u32 index = 0; index < HOME_PRESSURE; index += 1)
+    {
+        u32 row = loop_home_builder.instructions.total_count;
+        u32 value = machine_builder_virtual_register(&loop_home_builder,
+            (MachineVirtualRegister){.definition_point = machine_point_make(row, MACHINE_POINT_AFTER),
+                                     .register_class = MACHINE_REGISTER_CLASS_GENERAL});
+        loop_home_indices[1][index] = value;
+        loop_home_values[1][index] = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, value);
+        machine_builder_instruction(&loop_home_builder,
+            (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                 .operands = {loop_home_values[1][index], machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)}});
+    }
+    for (u32 index = 0; index < HOME_PRESSURE; index += 1)
+    {
+        machine_builder_instruction(&loop_home_builder,
+            (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), loop_home_values[1][index]}});
+    }
+    machine_builder_instruction(&loop_home_builder,
+        (MachineInstruction){.opcode = MACHINE_X64_CMP64,
+                             .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX),
+                                          machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX)}});
+    machine_builder_instruction(&loop_home_builder,
+        (MachineInstruction){.opcode = MACHINE_X64_JCC, .payload = MACHINE_X64_CONDITION_EQUAL,
+                             .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1), machine_ref_make(MACHINE_REF_BLOCK, 2)}});
+    machine_builder_block_end(&loop_home_builder, (MachineBlock){0});
+    machine_builder_edge(&loop_home_builder, (MachineEdge){.source_block = 1, .destination_block = 1});
+    machine_builder_edge(&loop_home_builder, (MachineEdge){.source_block = 1, .destination_block = 2});
+    machine_builder_block_begin(&loop_home_builder);
+    for (u32 index = 0; index < HOME_PRESSURE; index += 1)
+    {
+        machine_builder_instruction(&loop_home_builder,
+            (MachineInstruction){.opcode = MACHINE_X64_MOV_RR,
+                                 .operands = {machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX), loop_home_values[0][index]}});
+    }
+    machine_builder_instruction(&loop_home_builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&loop_home_builder, (MachineBlock){0});
+    MachineFunction loop_home_function = machine_function_builder_finish(arena, &loop_home_builder);
+    loop_home_function.target = machine_target_x86_64();
+    loop_home_function.returns_twice_absence_certified = true;
+    BUSTER_TEST(arguments, machine_verify_function(&loop_home_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement loop_home_placement = machine_fast_placement_build(arena, &loop_home_function);
+    BUSTER_TEST(arguments, loop_home_placement.valid);
+    u32 loop_wave_homes[HOME_WAVE_COUNT] = {0};
+    u32 loop_shared_offsets = 0;
+    for (u32 outer = 0; outer < HOME_PRESSURE; outer += 1)
+    {
+        u32 outer_offset = loop_home_placement.virtual_register_offsets[loop_home_indices[0][outer]];
+        loop_wave_homes[0] += outer_offset != MACHINE_VIRTUAL_REGISTER_NO_HOME;
+        for (u32 inner = 0; outer_offset != MACHINE_VIRTUAL_REGISTER_NO_HOME && inner < HOME_PRESSURE; inner += 1)
+        {
+            u32 inner_offset = loop_home_placement.virtual_register_offsets[loop_home_indices[1][inner]];
+            loop_shared_offsets += inner_offset != MACHINE_VIRTUAL_REGISTER_NO_HOME && outer_offset == inner_offset;
+        }
+    }
+    for (u32 inner = 0; inner < HOME_PRESSURE; inner += 1)
+    {
+        loop_wave_homes[1] += loop_home_placement.virtual_register_offsets[loop_home_indices[1][inner]] != MACHINE_VIRTUAL_REGISTER_NO_HOME;
+    }
+    BUSTER_TEST(arguments, loop_wave_homes[0] && loop_wave_homes[1] && !loop_shared_offsets);
+    MachineEncodeResult loop_home_encoded = machine_encode_x86_64(arena, &loop_home_function, &loop_home_placement);
+    BUSTER_TEST(arguments, loop_home_encoded.valid);
     return result;
 }
 
@@ -6217,10 +6389,51 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_capacity(UnitTestArg
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("unsigned long test(unsigned long n){volatile unsigned long observed=n;unsigned long x=n+3,y=n*7;"
+           "if(n&1)x+=y;else y+=x;if(x<y)x=y+1;return x+y+observed;}"),
+        S8("int test(int n){int x;if(n)goto use;return n;use:return x;}"),
+        S8("typedef int V __attribute__((vector_size(16)));V test(V a,V b){V x=a;x+=b;return x;}")
+    };
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        IrProgram* program = machine_test_compile_c_with_options(arguments->arena, S8("sparse-locals.c"), sources[source], target,
+                                                               (CIRLowerOptions){.disable_direct_ssa = true});
+        if (BUSTER_REQUIRE(arguments, program && program->module_count))
+        {
+            program->disable_local_promotion = true;
+            program->fast_passes = 0;
+            IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+            IrFunction* function = machine_test_ir_function_find(program->modules, S8("test"));
+            if (BUSTER_REQUIRE(arguments, prepared.error == IR_VALIDATION_NONE && function && function->local_places))
+            {
+                MachineEncodeResult sparse = machine_test_encode(arguments->arena, program, function, target, 0);
+                IrValueId* places = function->local_places;
+                function->local_places = 0;
+                MachineEncodeResult rows = machine_test_encode(arguments->arena, program, function, target, 0);
+                function->local_places = places;
+                BUSTER_TEST(arguments, sparse.valid && rows.valid && sparse.byte_count == rows.byte_count);
+                if (sparse.valid && rows.valid && sparse.byte_count == rows.byte_count)
+                {
+                    BUSTER_TEST(arguments, memory_compare(sparse.bytes, rows.bytes, sparse.byte_count));
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
+    BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);

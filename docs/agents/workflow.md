@@ -60,6 +60,104 @@ definition of done. State what was measured and when, so a stale claim is
 recognisable as stale; the tree moves fast enough that a count quoted without
 a date is a trap. Issues #537-#549 are examples of the form.
 
+## Cross-cutting internal API migrations
+
+Default to **add -> migrate -> remove** when a new internal API can coexist
+safely with its predecessor. A large logical change is not, by itself, a reason
+to rewrite every caller in one branch. The purpose of staging is to keep
+`main` correct while making each caller group independently reviewable,
+mergeable and revertible.
+
+### Add the new contract
+
+Land the new contract, implementation and focused behavior tests first. When
+unmigrated callers still need the previous call shape, retain one narrow
+compatibility entry point that preserves their existing semantics without
+weakening the new invariant. The Add PR must:
+
+- state the old and new ownership, error, environment, inheritance and lookup
+  policies that matter at the boundary;
+- test both entry points in the same partially migrated tree;
+- keep the compatibility symbol explicit and searchable rather than hiding the
+  old behavior behind defaults or an overloaded parameter;
+- file a distinct removal issue and state the objective condition that makes
+  removal safe; and
+- register the active compatibility path in `.github/api-migrations.json`.
+
+Each registry entry gives the compatibility symbol, its owning and removal
+issues, its removal condition, the source globs to audit, and exact token counts
+for the narrow implementation and every admitted old-style caller. For example:
+
+```json
+{
+  "id": "issue-123-explicit-widget-open",
+  "compatibility_symbol": "widget_open_legacy",
+  "owner_issue": 123,
+  "removal_issue": 124,
+  "removal_condition": "Remove after every caller supplies WidgetOpenOptions.",
+  "scan_globs": ["src/**/*.c", "src/**/*.h", "tools/**/*.c", "build.c"],
+  "compatibility_owners": {
+    "src/buster/lib/widget.c": 1,
+    "src/buster/lib/widget.h": 1
+  },
+  "allowed_callers": {
+    "src/buster/apps/ide/ide.c": 1
+  }
+}
+```
+
+`python3 tools/api_migration_audit.py` fails on unregistered uses, changed token
+counts, unsafe or unmatched paths, missing issue ownership, and a compatibility
+entry with no remaining callers. The last caller migration must therefore be
+coordinated with the Remove PR instead of leaving an unused shim on `main`.
+`python3 tools/api_migration_audit_test.py -v` exercises the policy scanner and
+a valid partially migrated tree. The dedicated policy workflow runs both on
+pull requests, merge groups and `main`.
+
+### Migrate caller groups
+
+Start every independent migration PR from current `main`, not from the Add PR
+or another sibling feature branch after Add has landed. Group callers by a
+real subsystem boundary and include only that caller set plus its focused
+tests. State the selected policy explicitly instead of preserving accidental
+ambient behavior. Update the registry's exact admitted caller set in the same
+PR. Unrelated cleanup waits.
+
+Deliberate stacking is allowed when two changes edit the same code and cannot
+be reviewed or tested independently. Name the dependency, keep one writer per
+branch, and rebase the dependent branch after its parent lands. Convenience or
+avoidance of a current-main rebase is not a stacking reason.
+
+### Remove compatibility
+
+Once the old caller set is empty, delete the compatibility entry point and its
+registry entry in a final small PR. Retain or add the cheapest source-level
+regression that prevents the obsolete spelling or behavior from returning.
+Close the removal issue only after the final integrated tree passes the old and
+new contract's applicable tests. A zero-caller compatibility entry is a failed
+audit, not a supported steady state.
+
+### Atomic exceptions
+
+Keep a migration atomic only when no compatibility window can preserve
+correctness. At least one concrete condition must hold:
+
+- exposing the old behavior for any caller would retain a security, resource
+  ownership, memory-safety or hermeticity defect;
+- old and new participants share one representation or protocol boundary and
+  mixed versions cannot interoperate;
+- an adapter cannot distinguish the old intent without ambiguity or cannot
+  reproduce it without weakening the new invariant; or
+- every possible intermediate repository state is broken and no narrow adapter
+  can make one correct.
+
+The atomic PR description must identify the exact seam, show why a bounded
+adapter is unsafe or impossible, and separate that seam from additive API work
+and caller groups that can still migrate independently. “One logical change”,
+“easier to test together”, or “fewer PRs” are not atomicity arguments. Never
+retain unsafe process, descriptor, handle, environment, path, privilege or
+validation behavior merely to create a compatibility window.
+
 **Push a rebase before you re-verify it.** A rebase onto a moved `main` is
 followed by a full local pass — `test_all`, `test_self_host`, whichever compat
 harness the change touches — and that pass takes longer than CI takes to start.

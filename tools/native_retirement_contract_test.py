@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import native_retirement_contract as contract
+import native_retirement_dependency_binding as dependency_authority
 import native_retirement_materializer as materializer
 
 
@@ -358,15 +359,15 @@ class ContractTests(unittest.TestCase):
         manifest = dict(line.split("=", 1) for line in
                         (self.shards[0] / "manifest.txt").read_text(encoding="utf-8").splitlines())
         manifest.update({"profile": "full-census", "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256,
-                         "inputs": "558", "subjects": "410", "shard_count": "4",
+                         "inputs": "559", "subjects": "411", "shard_count": "4",
                          "fixture_filter": "", "target_filter": ""})
         with self.assertRaisesRegex(AssertionError, "full census subject inventory is incomplete"):
             contract.validate_profile(manifest, {"tests/unit.c": {"role": "subject"}}, 192)
 
     def test_exact_full_profile_shape_is_admissible(self):
         manifest = {"profile": "full-census", "support_contract": "docs/native-retirement-support-v1.tsv",
-                    "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256, "inputs": "558",
-                    "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "410"}
+                    "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256, "inputs": "559",
+                    "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "411"}
         inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
         self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
                          (contract.FULL_CENSUS_PROFILE, contract.FULL_SUBJECT_COUNT))
@@ -524,13 +525,13 @@ class ContractTests(unittest.TestCase):
         ledger_path = root / "docs/native-retirement-support-v1.tsv"
         fields, records = read_table(ledger_path)
         self.assertEqual(fields, contract.SUPPORT_FIELDS)
-        self.assertEqual(len(records), 558)
-        self.assertEqual(len({record["path"] for record in records}), 558)
+        self.assertEqual(len(records), 559)
+        self.assertEqual(len({record["path"] for record in records}), 559)
         self.assertEqual({record["role"] for record in records},
                          {"subject", "negative-diagnostic-fixture", "support-file", "dormant-custom-language"})
         role_counts = {role: sum(record["role"] == role for record in records)
                        for role in {record["role"] for record in records}}
-        self.assertEqual(role_counts, {'dormant-custom-language': 64, 'negative-diagnostic-fixture': 12, 'subject': 410, 'support-file': 72})
+        self.assertEqual(role_counts, {'dormant-custom-language': 64, 'negative-diagnostic-fixture': 12, 'subject': 411, 'support-file': 72})
         for record in records:
             path = root / record["path"]
             with self.subTest(path=record["path"]):
@@ -1364,20 +1365,21 @@ class CheckedInDependencyTests(unittest.TestCase):
                 self.assertIsNotNone(match)
                 self.assertEqual(int(match.group(1)), count)
 
-    def test_reviewed_dependency_identities_match_descriptor_and_producer(self):
+    def test_reviewed_dependency_identities_match_single_generated_authority(self):
         root = Path(__file__).resolve().parents[1]
-        descriptor = (root / "docs/native-retirement-dependencies-v1.json").read_bytes()
-        records, _metadata = materializer.parse_manifest(json.loads(descriptor))
-        self.assertEqual(sha(descriptor), contract.FULL_DEPENDENCY_DESCRIPTOR_SHA256)
-        self.assertEqual(sha(materializer._ledger(records)), contract.FULL_DEPENDENCY_LEDGER_SHA256)
+        binding, resolved, snapshot = dependency_authority.load_authority(root)
+        policy = (root / dependency_authority.POLICY_PATH).read_bytes()
+        snapshot_raw = (root / dependency_authority.SNAPSHOT_PATH).read_bytes()
+        records, _metadata = materializer.parse_manifest(resolved)
+        self.assertEqual(sha(policy), binding["policy_sha256"])
+        self.assertEqual(sha(snapshot_raw), binding["snapshot_sha256"])
+        self.assertEqual(sha(materializer._ledger(records)), binding["ledger_sha256"])
+        self.assertEqual(snapshot, contract._DEPENDENCY_SNAPSHOT)
         producer = (root / "tools/native_retirement_census.c").read_text(encoding="utf-8")
-        for name in ("descriptor", "receipt", "project", "ledger"):
-            with self.subTest(identity=name):
-                match = re.search(
-                    r'nrc_dependency_' + name + r'_sha256 = S8_INITIALIZER\("([0-9a-f]{64})"\);',
-                    producer)
-                self.assertIsNotNone(match)
-                self.assertEqual(match.group(1), getattr(contract, "FULL_DEPENDENCY_" + name.upper() + "_SHA256"))
+        self.assertIn('#include "native_retirement_dependency_binding.generated.h"', producer)
+        for value in (binding["policy_sha256"], binding["receipt_sha256"],
+                      binding["project_sha256"], binding["ledger_sha256"]):
+            self.assertNotIn(value, producer)
 
 
 

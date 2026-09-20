@@ -14,8 +14,8 @@ CIRLowerResult c_analyze_with_options(Arena* arena, String8 source_path, CPrepro
                                      CIRLowerOptions options)
 {
     CIRLowerResult result = {0};
-    CAnalysisResult analysis = c_analyze_semantics(arena, preprocess, syntax);
-    if (analysis.diagnostic_count)
+    CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+    if (analysis.diagnostic_count || !analysis.analysis_complete)
     {
         result.diagnostics = analysis.diagnostics;
         result.diagnostic_count = analysis.diagnostic_count;

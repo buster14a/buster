@@ -933,30 +933,356 @@ BUSTER_GLOBAL_LOCAL bool build_compiler_identity_is_gcc(String8 identity)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool build_compiler_query(Arena* arena, SliceString8 arguments, String8* output)
+#define BUILD_COMPILER_QUERY_TIMEOUT_MICROSECONDS (30ull * 1000000ull)
+#define BUILD_COMPILER_QUERY_CAPTURE_BYTES BUSTER_KB(64)
+#define BUILD_COMPILER_QUERY_LOG_BYTES BUSTER_KB(4)
+#define BUILD_COMPILER_QUERY_ATTEMPT_COUNT 2
+
+typedef enum BuildCompilerQueryDisposition
 {
-    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1});
-    bool result = spawn.handle != 0;
-    if (result)
+    BUILD_COMPILER_QUERY_SUCCESS,
+    BUILD_COMPILER_QUERY_LAUNCH_FAILED,
+    BUILD_COMPILER_QUERY_TIMEOUT,
+    BUILD_COMPILER_QUERY_WAIT_FAILED,
+    BUILD_COMPILER_QUERY_CRASH,
+    BUILD_COMPILER_QUERY_NONZERO_EXIT,
+    BUILD_COMPILER_QUERY_CAPTURE_FAILED,
+    BUILD_COMPILER_QUERY_INVALID_OUTPUT,
+    BUILD_COMPILER_QUERY_DISPOSITION_COUNT,
+} BuildCompilerQueryDisposition;
+
+typedef struct BuildCompilerQueryAttempt BuildCompilerQueryAttempt;
+struct BuildCompilerQueryAttempt
+{
+    String8 output;
+    String8 standard_output;
+    String8 standard_error;
+    u64 elapsed_microseconds;
+    u64 timeout_microseconds;
+    u64 observed_output_bytes;
+    u64 captured_output_bytes;
+    u64 observed_error_bytes;
+    u64 captured_error_bytes;
+    u32 platform_status;
+    ProcessResult process_result;
+    BuildCompilerQueryDisposition disposition;
+    bool output_truncated;
+    bool cleanup_failed;
+};
+
+typedef BuildCompilerQueryAttempt BuildCompilerQueryRunner(Arena* arena, SliceString8 arguments, u64 timeout_microseconds, void* context);
+
+BUSTER_GLOBAL_LOCAL String8 build_compiler_query_disposition_name(BuildCompilerQueryDisposition disposition)
+{
+    String8 names[BUILD_COMPILER_QUERY_DISPOSITION_COUNT] = {
+        [BUILD_COMPILER_QUERY_SUCCESS] = S8("success"),
+        [BUILD_COMPILER_QUERY_LAUNCH_FAILED] = S8("launch-failed"),
+        [BUILD_COMPILER_QUERY_TIMEOUT] = S8("timeout"),
+        [BUILD_COMPILER_QUERY_WAIT_FAILED] = S8("wait-failed"),
+        [BUILD_COMPILER_QUERY_CRASH] = S8("crash"),
+        [BUILD_COMPILER_QUERY_NONZERO_EXIT] = S8("nonzero-exit"),
+        [BUILD_COMPILER_QUERY_CAPTURE_FAILED] = S8("capture-failed"),
+        [BUILD_COMPILER_QUERY_INVALID_OUTPUT] = S8("invalid-output"),
+    };
+    String8 result = disposition < BUILD_COMPILER_QUERY_DISPOSITION_COUNT ? names[disposition] : S8("unknown");
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 build_compiler_query_process_result_name(ProcessResult process_result)
+{
+    String8 names[PROCESS_RESULT_COUNT] = {
+        [PROCESS_RESULT_SUCCESS] = S8("success"),
+        [PROCESS_RESULT_FAILED] = S8("failed"),
+        [PROCESS_RESULT_FAILED_TRY_AGAIN] = S8("failed-try-again"),
+        [PROCESS_RESULT_CRASH] = S8("crash"),
+        [PROCESS_RESULT_NOT_EXISTENT] = S8("not-existent"),
+        [PROCESS_RESULT_RUNNING] = S8("running"),
+        [PROCESS_RESULT_UNKNOWN] = S8("unknown"),
+    };
+    String8 result = process_result < PROCESS_RESULT_COUNT ? names[process_result] : S8("unknown");
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query_cleanup_failed(ProcessWaitResult wait)
+{
+    bool result = wait.process_tree_cleanup_failed || wait.process_group_reservation_retained || wait.process_group_ownership_lost;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BuildCompilerQueryDisposition build_compiler_query_classify(bool launched, ProcessWaitResult wait, String8 output)
+{
+    BuildCompilerQueryDisposition result = BUILD_COMPILER_QUERY_SUCCESS;
+    if (!launched)
     {
-        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 30 * 1000000);
-        result = wait.result == PROCESS_RESULT_SUCCESS;
-        if (result)
-        {
-            *output = build_compiler_output_trim(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
-            result = output->length != 0;
-        }
-        else if (wait.streams[STANDARD_STREAM_ERROR].length)
-        {
-            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), wait.streams[STANDARD_STREAM_ERROR]);
-        }
+        result = BUILD_COMPILER_QUERY_LAUNCH_FAILED;
     }
-    if (!result)
+    else if (wait.timed_out)
     {
-        string_print(S8("error: compiler discovery query failed: {[]S8}\n"), arguments);
+        result = BUILD_COMPILER_QUERY_TIMEOUT;
+    }
+    else if (build_compiler_query_cleanup_failed(wait))
+    {
+        result = BUILD_COMPILER_QUERY_WAIT_FAILED;
+    }
+    else if (wait.capture_failed || wait.capture_limit_exceeded || wait.output_truncated)
+    {
+        result = BUILD_COMPILER_QUERY_CAPTURE_FAILED;
+    }
+    else if (wait.result == PROCESS_RESULT_CRASH)
+    {
+        result = BUILD_COMPILER_QUERY_CRASH;
+    }
+    else if (wait.result != PROCESS_RESULT_SUCCESS)
+    {
+        // ProcessResult values are also child exit codes. In particular, an
+        // ordinary compiler exit code 2 appears as FAILED_TRY_AGAIN, so the
+        // native status must win over the enum spelling and must not be retried.
+        result = wait.platform_status ? BUILD_COMPILER_QUERY_NONZERO_EXIT : BUILD_COMPILER_QUERY_WAIT_FAILED;
+    }
+    else if (!output.length)
+    {
+        result = BUILD_COMPILER_QUERY_INVALID_OUTPUT;
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query_retryable(BuildCompilerQueryAttempt attempt)
+{
+    // Only a deadline failure with a proven-empty process tree is safe to
+    // repeat. Launch errors, wait uncertainty, compiler exits and semantic
+    // output failures remain single-attempt, fail-closed results.
+    bool result = attempt.disposition == BUILD_COMPILER_QUERY_TIMEOUT && !attempt.cleanup_failed;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BuildCompilerQueryAttempt build_compiler_query_process(Arena* arena, SliceString8 arguments,
+                                                                            u64 timeout_microseconds, void* context)
+{
+    BUSTER_UNUSED(context);
+    u64 start = os_now_microseconds();
+    ProcessSpawnOptions spawn_options = {
+        .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+        .use_process_environment = 1,
+        // GCC can launch cc1. A timed-out probe may be retried only after the
+        // complete first process tree has been terminated and observed empty.
+        .new_process_group = 1,
+        .capture_limits =
+            {
+                .per_stream =
+                    {
+                        [STANDARD_STREAM_OUTPUT] = BUILD_COMPILER_QUERY_CAPTURE_BYTES,
+                        [STANDARD_STREAM_ERROR] = BUILD_COMPILER_QUERY_CAPTURE_BYTES,
+                    },
+                .total = 2 * BUILD_COMPILER_QUERY_CAPTURE_BYTES,
+            },
+        .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_TRUNCATE,
+    };
+    ProcessSpawnResult spawn = os_process_spawn(arguments, (SliceString8){0}, (SliceString8){0}, spawn_options);
+    bool launched = spawn.handle != 0;
+    ProcessWaitResult wait = {.result = PROCESS_RESULT_UNKNOWN};
+    if (launched)
+    {
+        wait = os_process_wait_deadline(arena, spawn, timeout_microseconds);
+    }
+
+    String8 standard_output = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+    String8 output = build_compiler_output_trim(standard_output);
+    BuildCompilerQueryAttempt result = {
+        .output = output,
+        .standard_output = standard_output,
+        .standard_error = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_ERROR]),
+        .elapsed_microseconds = os_now_microseconds() - start,
+        .timeout_microseconds = timeout_microseconds,
+        .observed_output_bytes = wait.observed_bytes[STANDARD_STREAM_OUTPUT],
+        .captured_output_bytes = wait.captured_bytes[STANDARD_STREAM_OUTPUT],
+        .observed_error_bytes = wait.observed_bytes[STANDARD_STREAM_ERROR],
+        .captured_error_bytes = wait.captured_bytes[STANDARD_STREAM_ERROR],
+        .platform_status = wait.platform_status,
+        .process_result = wait.result,
+        .disposition = build_compiler_query_classify(launched, wait, output),
+        .output_truncated = wait.output_truncated,
+        .cleanup_failed = build_compiler_query_cleanup_failed(wait),
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void build_compiler_query_log_stream(String8 stream_name, u32 attempt, String8 stream,
+                                                          u64 observed_bytes)
+{
+    if (stream.length)
+    {
+        u64 logged_length = stream.length < BUILD_COMPILER_QUERY_LOG_BYTES ? stream.length : BUILD_COMPILER_QUERY_LOG_BYTES;
+        String8 logged = string_slice(stream, 0, logged_length);
+        bool truncated = observed_bytes > logged_length || stream.length > logged_length;
+        string_print(S8("COMPILER_DISCOVERY_QUERY_{S8} attempt={u32} captured={u64} observed={u64} log_truncated={u32}\n{S8}\n"),
+                     stream_name, attempt, stream.length, observed_bytes, (u32)truncated, logged);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void build_compiler_query_log_attempt(SliceString8 arguments, u32 attempt,
+                                                           BuildCompilerQueryAttempt query)
+{
+    bool retryable = build_compiler_query_retryable(query);
+    string_print(S8("COMPILER_DISCOVERY_QUERY attempt={u32}/{u32} result={S8} retryable={u32} elapsed_us={u64} "
+                    "deadline_us={u64} process_result={S8} platform_status={u32} stdout_observed={u64} "
+                    "stdout_captured={u64} stderr_observed={u64} stderr_captured={u64} output_truncated={u32} "
+                    "cleanup_failed={u32} argv={[]S8}\n"),
+                 attempt, (u32)BUILD_COMPILER_QUERY_ATTEMPT_COUNT, build_compiler_query_disposition_name(query.disposition),
+                 (u32)retryable, query.elapsed_microseconds, query.timeout_microseconds,
+                 build_compiler_query_process_result_name(query.process_result), query.platform_status,
+                 query.observed_output_bytes, query.captured_output_bytes, query.observed_error_bytes,
+                 query.captured_error_bytes, (u32)query.output_truncated, (u32)query.cleanup_failed, arguments);
+    if (query.disposition != BUILD_COMPILER_QUERY_SUCCESS || query.standard_error.length)
+    {
+        build_compiler_query_log_stream(S8("STDOUT"), attempt, query.standard_output, query.observed_output_bytes);
+        build_compiler_query_log_stream(S8("STDERR"), attempt, query.standard_error, query.observed_error_bytes);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query_with_runner(Arena* arena, SliceString8 arguments, String8* output,
+                                                           BuildCompilerQueryRunner* runner, void* context,
+                                                           bool emit_diagnostics)
+{
+    *output = (String8){0};
+    BuildCompilerQueryDisposition final_disposition = BUILD_COMPILER_QUERY_LAUNCH_FAILED;
+    for (u32 attempt = 1; attempt <= BUILD_COMPILER_QUERY_ATTEMPT_COUNT; attempt += 1)
+    {
+        BuildCompilerQueryAttempt query = runner(arena, arguments, BUILD_COMPILER_QUERY_TIMEOUT_MICROSECONDS, context);
+        final_disposition = query.disposition;
+        if (emit_diagnostics)
+        {
+            build_compiler_query_log_attempt(arguments, attempt, query);
+        }
+        if (query.disposition == BUILD_COMPILER_QUERY_SUCCESS)
+        {
+            *output = query.output;
+            return true;
+        }
+        if (!build_compiler_query_retryable(query))
+        {
+            break;
+        }
+    }
+    if (emit_diagnostics)
+    {
+        string_print(S8("error: compiler discovery query failed result={S8}: {[]S8}\n"),
+                     build_compiler_query_disposition_name(final_disposition), arguments);
+    }
+    return false;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query(Arena* arena, SliceString8 arguments, String8* output)
+{
+    bool result = build_compiler_query_with_runner(arena, arguments, output, build_compiler_query_process, 0, true);
+    return result;
+}
+
+typedef struct BuildCompilerQueryTestSequence BuildCompilerQueryTestSequence;
+struct BuildCompilerQueryTestSequence
+{
+    BuildCompilerQueryAttempt attempts[BUILD_COMPILER_QUERY_ATTEMPT_COUNT];
+    u32 count;
+    u32 calls;
+};
+
+BUSTER_GLOBAL_LOCAL BuildCompilerQueryAttempt build_compiler_query_test_runner(Arena* arena, SliceString8 arguments,
+                                                                                u64 timeout_microseconds, void* context)
+{
+    BUSTER_UNUSED(arena);
+    BUSTER_UNUSED(arguments);
+    BuildCompilerQueryTestSequence* sequence = context;
+    BuildCompilerQueryAttempt result = {.timeout_microseconds = timeout_microseconds,
+                                        .process_result = PROCESS_RESULT_UNKNOWN,
+                                        .disposition = BUILD_COMPILER_QUERY_WAIT_FAILED};
+    if (sequence->calls < sequence->count)
+    {
+        result = sequence->attempts[sequence->calls];
+        result.timeout_microseconds = timeout_microseconds;
+    }
+    sequence->calls += 1;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool build_compiler_query_policy_self_test(Arena* arena)
+{
+    ProcessWaitResult success_wait = {.result = PROCESS_RESULT_SUCCESS};
+    ProcessWaitResult timeout_wait = {.result = PROCESS_RESULT_FAILED, .timed_out = 1};
+    ProcessWaitResult cleanup_wait = {.result = PROCESS_RESULT_FAILED, .timed_out = 1, .process_tree_cleanup_failed = 1};
+    ProcessWaitResult capture_wait = {.result = PROCESS_RESULT_SUCCESS, .capture_limit_exceeded = 1, .output_truncated = 1};
+    ProcessWaitResult crash_wait = {.result = PROCESS_RESULT_CRASH, .platform_status = 0xc0000005u};
+    ProcessWaitResult exit_wait = {.result = PROCESS_RESULT_FAILED_TRY_AGAIN, .platform_status = 2};
+    ProcessWaitResult wait_failed = {.result = PROCESS_RESULT_FAILED};
+    bool success = build_compiler_query_classify(false, (ProcessWaitResult){0}, (String8){0}) == BUILD_COMPILER_QUERY_LAUNCH_FAILED &&
+                   build_compiler_query_classify(true, timeout_wait, (String8){0}) == BUILD_COMPILER_QUERY_TIMEOUT &&
+                   build_compiler_query_classify(true, cleanup_wait, (String8){0}) == BUILD_COMPILER_QUERY_TIMEOUT &&
+                   build_compiler_query_classify(true, capture_wait, S8("identity")) == BUILD_COMPILER_QUERY_CAPTURE_FAILED &&
+                   build_compiler_query_classify(true, crash_wait, (String8){0}) == BUILD_COMPILER_QUERY_CRASH &&
+                   build_compiler_query_classify(true, exit_wait, (String8){0}) == BUILD_COMPILER_QUERY_NONZERO_EXIT &&
+                   build_compiler_query_classify(true, wait_failed, (String8){0}) == BUILD_COMPILER_QUERY_WAIT_FAILED &&
+                   build_compiler_query_classify(true, success_wait, (String8){0}) == BUILD_COMPILER_QUERY_INVALID_OUTPUT &&
+                   build_compiler_query_classify(true, success_wait, S8("identity")) == BUILD_COMPILER_QUERY_SUCCESS;
+
+    String8 timeout_tool = get_resolved_path(arena, &cmake_path, S8("cmake"));
+    String8 timeout_arguments_array[] = {timeout_tool, S8("-E"), S8("sleep"), S8("1")};
+    BuildCompilerQueryAttempt timeout_attempt = build_compiler_query_process(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(timeout_arguments_array), 10 * 1000, 0);
+    success = timeout_tool.length && timeout_attempt.disposition == BUILD_COMPILER_QUERY_TIMEOUT &&
+              build_compiler_query_retryable(timeout_attempt) && !timeout_attempt.cleanup_failed && success;
+
+    String8 arguments_array[] = {S8("compiler-query-fixture")};
+    SliceString8 arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments_array);
+    String8 output = {0};
+    BuildCompilerQueryTestSequence sequence = {
+        .attempts = {
+            {.process_result = PROCESS_RESULT_FAILED, .disposition = BUILD_COMPILER_QUERY_TIMEOUT},
+            {.output = S8("recovered"), .process_result = PROCESS_RESULT_SUCCESS, .disposition = BUILD_COMPILER_QUERY_SUCCESS},
+        },
+        .count = 2,
+    };
+    success = build_compiler_query_with_runner(arena, arguments, &output, build_compiler_query_test_runner, &sequence, false) &&
+              sequence.calls == 2 && string_equal(output, S8("recovered")) && success;
+
+    sequence = (BuildCompilerQueryTestSequence){
+        .attempts = {
+            {.process_result = PROCESS_RESULT_FAILED, .disposition = BUILD_COMPILER_QUERY_TIMEOUT},
+            {.process_result = PROCESS_RESULT_FAILED, .disposition = BUILD_COMPILER_QUERY_TIMEOUT},
+        },
+        .count = 2,
+    };
+    success = !build_compiler_query_with_runner(arena, arguments, &output, build_compiler_query_test_runner, &sequence, false) &&
+              sequence.calls == 2 && success;
+
+    BuildCompilerQueryDisposition no_retry_dispositions[] = {
+        BUILD_COMPILER_QUERY_LAUNCH_FAILED,
+        BUILD_COMPILER_QUERY_WAIT_FAILED,
+        BUILD_COMPILER_QUERY_CRASH,
+        BUILD_COMPILER_QUERY_NONZERO_EXIT,
+        BUILD_COMPILER_QUERY_CAPTURE_FAILED,
+        BUILD_COMPILER_QUERY_INVALID_OUTPUT,
+    };
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(no_retry_dispositions); i += 1)
+    {
+        sequence = (BuildCompilerQueryTestSequence){
+            .attempts = {
+                {.process_result = PROCESS_RESULT_FAILED, .disposition = no_retry_dispositions[i]},
+                {.output = S8("must-not-run"), .process_result = PROCESS_RESULT_SUCCESS, .disposition = BUILD_COMPILER_QUERY_SUCCESS},
+            },
+            .count = 2,
+        };
+        success = !build_compiler_query_with_runner(arena, arguments, &output, build_compiler_query_test_runner, &sequence, false) &&
+                  sequence.calls == 1 && success;
+    }
+
+    sequence = (BuildCompilerQueryTestSequence){
+        .attempts = {
+            {.process_result = PROCESS_RESULT_FAILED, .disposition = BUILD_COMPILER_QUERY_TIMEOUT, .cleanup_failed = true},
+            {.output = S8("must-not-run"), .process_result = PROCESS_RESULT_SUCCESS, .disposition = BUILD_COMPILER_QUERY_SUCCESS},
+        },
+        .count = 2,
+    };
+    success = !build_compiler_query_with_runner(arena, arguments, &output, build_compiler_query_test_runner, &sequence, false) &&
+              sequence.calls == 1 && success;
+    return success;
 }
 
 BUSTER_GLOBAL_LOCAL bool build_compiler_inspect(Arena* arena, String8 executable, BuildCompilerIdentity* info)
@@ -1290,7 +1616,8 @@ BUSTER_GLOBAL_LOCAL bool build_compiler_discovery_rejection_test(Arena* arena, S
 
 BUSTER_GLOBAL_LOCAL ProcessResult build_compiler_discovery_self_test(Arena* arena)
 {
-    bool success = build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_GNU\n")) &&
+    bool success = build_compiler_query_policy_self_test(arena) &&
+                   build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_GNU\n")) &&
                    build_compiler_identity_is_gcc(S8(" \r\nBUSTER_BUILD_COMPILER_GNU\r\n")) &&
                    !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_CLANG\n")) &&
                    !build_compiler_identity_is_gcc(S8("BUSTER_BUILD_COMPILER_UNKNOWN\n")) &&
@@ -3133,6 +3460,387 @@ BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
 // the buffered output finally reaches the log.
 #define SELF_HOST_TIMEOUT_SECONDS 600
 
+
+#define STAGE_OBJECT_PROVENANCE_MAGIC "BUSTER_STAGE_OBJECT_PROVENANCE_V1"
+
+typedef enum StageObjectProvenanceFailure StageObjectProvenanceFailure;
+enum StageObjectProvenanceFailure
+{
+    STAGE_OBJECT_PROVENANCE_FAILURE_NONE,
+    STAGE_OBJECT_PROVENANCE_FAILURE_RECORD,
+    STAGE_OBJECT_PROVENANCE_FAILURE_OBJECT,
+    STAGE_OBJECT_PROVENANCE_FAILURE_SOURCE,
+    STAGE_OBJECT_PROVENANCE_FAILURE_TREE,
+    STAGE_OBJECT_PROVENANCE_FAILURE_COMPILER,
+    STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN,
+};
+
+typedef struct StageObjectProvenanceRecord StageObjectProvenanceRecord;
+struct StageObjectProvenanceRecord
+{
+    char8 magic[sizeof(STAGE_OBJECT_PROVENANCE_MAGIC)];
+    char8 object_sha256[SHA256_HEX_CAPACITY];
+    char8 source_sha256[SHA256_HEX_CAPACITY];
+    char8 tree_sha256[SHA256_HEX_CAPACITY];
+    char8 compiler_sha256[SHA256_HEX_CAPACITY];
+    char8 toolchain_sha256[SHA256_HEX_CAPACITY];
+    u64 checksum;
+};
+
+typedef struct StageObjectProvenance StageObjectProvenance;
+struct StageObjectProvenance
+{
+    String8 object_path;
+    String8 source_path;
+    String8 compiler_path;
+    String8 record_path;
+    String8 tree_identity;
+    // Optional preauthenticated identities are valid only for immutable snapshots.
+    // A present malformed digest fails closed instead of falling back to a path read.
+    String8 authenticated_source_sha256;
+    String8 authenticated_compiler_sha256;
+    SliceString8 toolchain_arguments;
+    StageObjectProvenanceFailure failure;
+    u32 captured : 1;
+    u32 verified : 1;
+};
+
+BUSTER_GLOBAL_LOCAL String8 stage_object_sha256_bytes(Arena* arena, u8* bytes, u64 length)
+{
+    Sha256 hash = {0};
+    char8 digest[SHA256_HEX_CAPACITY] = {0};
+    sha256_init(&hash);
+    sha256_add(&hash, bytes, length);
+    sha256_finish_hex(&hash, digest);
+    return string_duplicate_arena(arena, string_from_pointer(digest), true);
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_sha256_file(Arena* arena, String8 path, String8* digest)
+{
+    FileMapRead map = file_map_read(arena, path, (FileReadOptions){.map_required = 1});
+    bool result = map.mapped_pointer && map.bytes.pointer && map.bytes.length;
+    if (result)
+    {
+        *digest = stage_object_sha256_bytes(arena, map.bytes.pointer, map.bytes.length);
+    }
+    file_map_unmap(map);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_sha256_valid(String8 digest)
+{
+    bool result = digest.length == SHA256_HEX_CAPACITY - 1;
+    for (u64 index = 0; result && index < digest.length; index += 1)
+    {
+        char8 byte = digest.pointer[index];
+        result = (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_sha256_resolve(Arena* arena, String8 path, String8 authenticated_digest,
+                                                         String8* digest)
+{
+    bool result = false;
+    if (authenticated_digest.length)
+    {
+        result = stage_object_sha256_valid(authenticated_digest);
+        if (result) { *digest = authenticated_digest; }
+    }
+    else
+    {
+        result = stage_object_sha256_file(arena, path, digest);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 stage_object_sha256_arguments(Arena* arena, SliceString8 arguments)
+{
+    Sha256 hash = {0};
+    char8 digest[SHA256_HEX_CAPACITY] = {0};
+    sha256_init(&hash);
+    for (u64 argument_i = 0; argument_i < arguments.length; argument_i += 1)
+    {
+        String8 argument = arguments.pointer[argument_i];
+        sha256_add(&hash, (u8*)&argument.length, sizeof(argument.length));
+        sha256_add(&hash, (u8*)argument.pointer, argument.length);
+    }
+    sha256_finish_hex(&hash, digest);
+    return string_duplicate_arena(arena, string_from_pointer(digest), true);
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_digest_copy(char8 destination[SHA256_HEX_CAPACITY], String8 source)
+{
+    bool result = source.length == SHA256_HEX_CAPACITY - 1;
+    if (result)
+    {
+        memcpy(destination, source.pointer, source.length);
+        destination[source.length] = 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 stage_object_source_tree_identity(Arena* arena)
+{
+    String8 result = {0};
+    String8 arguments[] = {S8("git"), S8("rev-parse"), S8("HEAD^{tree}")};
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), (SliceString8){0}, (SliceString8){0},
+                                                 (ProcessSpawnOptions){
+                                                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                     .use_process_environment = 1,
+                                                 });
+    if (spawn.handle)
+    {
+        ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+        if (wait.result == PROCESS_RESULT_SUCCESS)
+        {
+            result = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+            while (result.length && (u8)result.pointer[result.length - 1] <= ' ')
+            {
+                result.length -= 1;
+            }
+            result = string_duplicate_arena(arena, result, true);
+        }
+    }
+    if (!result.length)
+    {
+        result = os_get_environment_variable(S8("GITHUB_SHA"));
+        if (result.length)
+        {
+            result = string_duplicate_arena(arena, result, true);
+        }
+    }
+    if (!result.length)
+    {
+        String8 build_digest = {0};
+        if (stage_object_sha256_file(arena, S8("build.c"), &build_digest))
+        {
+            result = string_format_z(arena, S8("source-tree-{S8}"), build_digest);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_provenance_record_create(Arena* arena, StageObjectProvenance* provenance,
+                                                                StageObjectProvenanceRecord* record)
+{
+    String8 object_digest = {0};
+    String8 source_digest = {0};
+    String8 compiler_digest = {0};
+    String8 tree_digest = stage_object_sha256_bytes(arena, (u8*)provenance->tree_identity.pointer, provenance->tree_identity.length);
+    String8 toolchain_digest = stage_object_sha256_arguments(arena, provenance->toolchain_arguments);
+    bool result = provenance->tree_identity.length && provenance->toolchain_arguments.length &&
+                  stage_object_sha256_file(arena, provenance->object_path, &object_digest) &&
+                  stage_object_sha256_resolve(arena, provenance->source_path,
+                                              provenance->authenticated_source_sha256, &source_digest) &&
+                  stage_object_sha256_resolve(arena, provenance->compiler_path,
+                                              provenance->authenticated_compiler_sha256, &compiler_digest);
+    if (result)
+    {
+        *record = (StageObjectProvenanceRecord){0};
+        memcpy(record->magic, STAGE_OBJECT_PROVENANCE_MAGIC, sizeof(record->magic));
+        result = stage_object_digest_copy(record->object_sha256, object_digest) &&
+                 stage_object_digest_copy(record->source_sha256, source_digest) &&
+                 stage_object_digest_copy(record->tree_sha256, tree_digest) &&
+                 stage_object_digest_copy(record->compiler_sha256, compiler_digest) &&
+                 stage_object_digest_copy(record->toolchain_sha256, toolchain_digest);
+        if (result)
+        {
+            u64 checksum_bytes = (u64)((u8*)&record->checksum - (u8*)record);
+            record->checksum = buster_hash_64((u8*)record, checksum_bytes);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_provenance_capture(Arena* arena, StageObjectProvenance* provenance, bool diagnostics)
+{
+    StageObjectProvenanceRecord record = {0};
+    provenance->captured = 0;
+    provenance->verified = 0;
+    provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_RECORD;
+    bool result = stage_object_provenance_record_create(arena, provenance, &record) &&
+                  file_write(provenance->record_path, (ByteSlice){.pointer = (u8*)&record, .length = sizeof(record)});
+    if (result)
+    {
+        provenance->captured = 1;
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_NONE;
+    }
+    else if (diagnostics)
+    {
+        string_print(S8("error: could not record stage object provenance before linking: {S8}\n"), provenance->object_path);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 stage_object_provenance_failure_name(StageObjectProvenanceFailure failure)
+{
+    String8 result = S8("record");
+    if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_OBJECT) { result = S8("object digest (stale object)"); }
+    else if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_SOURCE) { result = S8("source identity"); }
+    else if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_TREE) { result = S8("repository tree identity"); }
+    else if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_COMPILER) { result = S8("compiler identity"); }
+    else if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN) { result = S8("toolchain identity"); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_provenance_validate(Arena* arena, StageObjectProvenance* provenance, bool diagnostics)
+{
+    provenance->verified = 0;
+    provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_RECORD;
+    ByteSlice bytes = file_read(arena, provenance->record_path, (FileReadOptions){.map_required = 0});
+    StageObjectProvenanceRecord recorded = {0};
+    StageObjectProvenanceRecord current = {0};
+    bool result = bytes.pointer && bytes.length == sizeof(recorded);
+    if (result)
+    {
+        memcpy(&recorded, bytes.pointer, sizeof(recorded));
+        u64 checksum_bytes = (u64)((u8*)&recorded.checksum - (u8*)&recorded);
+        result = memory_compare(recorded.magic, STAGE_OBJECT_PROVENANCE_MAGIC, sizeof(recorded.magic)) &&
+                 recorded.checksum == buster_hash_64((u8*)&recorded, checksum_bytes) &&
+                 stage_object_provenance_record_create(arena, provenance, &current);
+    }
+    if (result && !memory_compare(recorded.object_sha256, current.object_sha256, sizeof(recorded.object_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_OBJECT;
+        result = false;
+    }
+    if (result && !memory_compare(recorded.source_sha256, current.source_sha256, sizeof(recorded.source_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_SOURCE;
+        result = false;
+    }
+    if (result && !memory_compare(recorded.tree_sha256, current.tree_sha256, sizeof(recorded.tree_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_TREE;
+        result = false;
+    }
+    if (result && !memory_compare(recorded.compiler_sha256, current.compiler_sha256, sizeof(recorded.compiler_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_COMPILER;
+        result = false;
+    }
+    if (result && !memory_compare(recorded.toolchain_sha256, current.toolchain_sha256, sizeof(recorded.toolchain_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN;
+        result = false;
+    }
+    if (result)
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_NONE;
+        provenance->verified = 1;
+    }
+    else if (diagnostics)
+    {
+        string_print(S8("error: stage object provenance {S8} mismatch before linking or retirement validation: {S8}\n"),
+                     stage_object_provenance_failure_name(provenance->failure), provenance->object_path);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult stage_object_provenance_capture_action(Arena* arena, void* data)
+{
+    return stage_object_provenance_capture(arena, (StageObjectProvenance*)data, true) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult stage_object_provenance_validate_action(Arena* arena, void* data)
+{
+    return stage_object_provenance_validate(arena, (StageObjectProvenance*)data, true) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_provenance_self_test(Arena* arena)
+{
+    String8 directory = string_format_z(arena, S8("build/stage-object-provenance-test-{u64}"), os_now_microseconds());
+    make_directory_recursive(arena, directory);
+    String8 object = path_join(arena, directory, S8("stage.o"));
+    String8 source = path_join(arena, directory, S8("stage.c"));
+    String8 compiler = path_join(arena, directory, S8("compiler"));
+    String8 record = path_join(arena, directory, S8("stage.o.provenance"));
+    String8 source_original = S8("int stage(void) { return 1; }\n");
+    String8 object_original = S8("object-v1");
+    String8 compiler_original = S8("compiler-v1");
+    String8 arguments[] = {compiler, S8("cc"), S8("-c"), source, S8("-o"), object};
+    String8 changed_arguments[] = {compiler, S8("cc"), S8("-c"), S8("-fPIC"), source, S8("-o"), object};
+    StageObjectProvenance provenance = {
+        .object_path = object,
+        .source_path = source,
+        .compiler_path = compiler,
+        .record_path = record,
+        .tree_identity = S8("tree-v1"),
+        .toolchain_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+    };
+    bool result = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_original)) &&
+                  file_write(object, BUSTER_SLICE_TO_BYTE_SLICE(object_original)) &&
+                  file_write(compiler, BUSTER_SLICE_TO_BYTE_SLICE(compiler_original)) &&
+                  stage_object_provenance_capture(arena, &provenance, false) &&
+                  stage_object_provenance_validate(arena, &provenance, false) && provenance.verified;
+    if (result)
+    {
+        result = file_write(object, BUSTER_SLICE_TO_BYTE_SLICE(S8("object-v2"))) &&
+                 !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_OBJECT &&
+                 file_write(object, BUSTER_SLICE_TO_BYTE_SLICE(object_original));
+    }
+    if (result)
+    {
+        result = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int stage(void) { return 2; }\n"))) &&
+                 !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_SOURCE &&
+                 file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_original));
+    }
+    if (result)
+    {
+        provenance.tree_identity = S8("tree-v2");
+        result = !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_TREE;
+        provenance.tree_identity = S8("tree-v1");
+    }
+    if (result)
+    {
+        result = file_write(compiler, BUSTER_SLICE_TO_BYTE_SLICE(S8("compiler-v2"))) &&
+                 !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_COMPILER &&
+                 file_write(compiler, BUSTER_SLICE_TO_BYTE_SLICE(compiler_original));
+    }
+    if (result)
+    {
+        provenance.toolchain_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(changed_arguments);
+        result = !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN;
+        provenance.toolchain_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments);
+    }
+    if (result)
+    {
+        String8 source_digest = {0}, compiler_digest = {0};
+        provenance.record_path = path_join(arena, directory, S8("cached.stage.o.provenance"));
+        result = stage_object_sha256_file(arena, source, &source_digest) &&
+                 stage_object_sha256_file(arena, compiler, &compiler_digest);
+        provenance.authenticated_source_sha256 = source_digest;
+        provenance.authenticated_compiler_sha256 = compiler_digest;
+        result = result && stage_object_provenance_capture(arena, &provenance, false) &&
+                 stage_object_provenance_validate(arena, &provenance, false) && provenance.verified;
+    }
+    if (result)
+    {
+        provenance.record_path = path_join(arena, directory, S8("malformed.stage.o.provenance"));
+        provenance.authenticated_source_sha256 = S8("not-a-sha256");
+        result = !stage_object_provenance_capture(arena, &provenance, false) && !provenance.captured;
+        provenance.authenticated_source_sha256 = (String8){0};
+        provenance.authenticated_compiler_sha256 = (String8){0};
+    }
+    if (!result)
+    {
+        string_print(S8("error: stage object provenance self-test failed at check {S8}\n"),
+                     stage_object_provenance_failure_name(provenance.failure));
+    }
+    else
+    {
+        string_print(S8("STAGE_OBJECT_PROVENANCE_SELF_TEST matching=1 stale=1 source=1 tree=1 compiler=1 toolchain=1 cached=1 malformed_cached=1 pre_link=1\n"));
+    }
+    remove_path_recursive(arena, directory);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL SliceString8 self_host_compile_arguments(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
                                                             String8 register_allocator_flag)
 {
@@ -3221,22 +3929,135 @@ BUSTER_GLOBAL_LOCAL SliceString8 self_host_compile_arguments(Arena* arena, Strin
     return os_argument_builder_flush(&builder);
 }
 
-BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
-                                                     String8 timing_description, String8 register_allocator_flag)
+BUSTER_GLOBAL_LOCAL SliceString8 self_host_object_compile_arguments(Arena* arena, String8 compiler, String8 build_directory,
+                                                                   String8 sysroot, String8 output, String8 object,
+                                                                   String8 register_allocator_flag)
 {
-    BuildStep* step = step_add(arena);
-    ProcessRun* run = run_add(arena, step);
-    *run = (ProcessRun){
-        .arguments = self_host_compile_arguments(arena, compiler, build_directory, sysroot, output, register_allocator_flag),
+    String8 generated_include = string_format(arena, S8("-I{S8}/generated"), build_directory);
+    String8 source_metrics = string_format(arena, S8("-fsource-metrics={S8}"), self_host_metrics_path(arena, output));
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-Isrc"));
+    os_argument_builder_append(&builder, generated_include);
+#if BUSTER_WINDOWS
+    os_argument_builder_append(&builder, S8("-nostdinc"));
+    String8 system_includes = os_get_environment_variable(S8("INCLUDE"));
+    for (u64 start = 0; start < system_includes.length;)
+    {
+        u64 end = start;
+        while (end < system_includes.length && system_includes.pointer[end] != ';') { end += 1; }
+        if (end != start)
+        {
+            os_argument_builder_append(&builder, S8("-isystem"));
+            os_argument_builder_append(&builder, string_slice(system_includes, start, end));
+        }
+        start = end + 1;
+    }
+#endif
+    os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
+    os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
+    os_argument_builder_append(&builder, S8("-g"));
+    if (register_allocator_flag.length) { os_argument_builder_append(&builder, register_allocator_flag); }
+    os_argument_builder_append(&builder, S8("-v"));
+    os_argument_builder_append(&builder, source_metrics);
+#if BUSTER_MACOS
+    os_argument_builder_append(&builder, S8("-isysroot"));
+    os_argument_builder_append(&builder, sysroot);
+#else
+    BUSTER_UNUSED(sysroot);
+#endif
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("src/buster/apps/ide/ide.c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, object);
+    return os_argument_builder_flush(&builder);
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 self_host_link_arguments(Arena* arena, String8 compiler, String8 sysroot, String8 object, String8 output)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g"));
+#if BUSTER_MACOS
+    os_argument_builder_append(&builder, S8("-isysroot"));
+    os_argument_builder_append(&builder, sysroot);
+#else
+    BUSTER_UNUSED(sysroot);
+#endif
+    os_argument_builder_append(&builder, object);
+#if BUSTER_MACOS
+    String8 frameworks[] = {S8("AppKit"), S8("Metal"), S8("QuartzCore"), S8("Foundation")};
+    for (u32 framework_index = 0; framework_index < BUSTER_ARRAY_LENGTH(frameworks); framework_index += 1)
+    {
+        os_argument_builder_append(&builder, S8("-framework"));
+        os_argument_builder_append(&builder, frameworks[framework_index]);
+    }
+#endif
+#if !BUSTER_WINDOWS
+    os_argument_builder_append(&builder, S8("-lm"));
+#endif
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    return os_argument_builder_flush(&builder);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
+                                                     String8 timing_description, String8 register_allocator_flag, ProcessRun** link_run_out)
+{
+    String8 object_suffix =
+#if BUSTER_WINDOWS
+        S8(".obj");
+#else
+        S8(".o");
+#endif
+    String8 object = string_format_z(arena, S8("{S8}.stage-object{S8}"), output, object_suffix);
+    String8 record = string_format_z(arena, S8("{S8}.provenance"), object);
+    remove_path_recursive(arena, object);
+    remove_path_recursive(arena, record);
+    SliceString8 compile_arguments = self_host_object_compile_arguments(arena, compiler, build_directory, sysroot, output, object,
+                                                                        register_allocator_flag);
+    SliceString8 link_arguments = self_host_link_arguments(arena, compiler, sysroot, object, output);
+    String8* identity_arguments = arena_allocate(arena, String8, compile_arguments.length + link_arguments.length);
+    u64 identity_count = 0;
+    for (u64 i = 0; i < compile_arguments.length; i += 1) { identity_arguments[identity_count++] = compile_arguments.pointer[i]; }
+    for (u64 i = 0; i < link_arguments.length; i += 1) { identity_arguments[identity_count++] = link_arguments.pointer[i]; }
+    StageObjectProvenance* provenance = arena_allocate(arena, StageObjectProvenance, 1);
+    *provenance = (StageObjectProvenance){
+        .object_path = object,
+        .source_path = S8("src/buster/apps/ide/ide.c"),
+        .compiler_path = compiler,
+        .record_path = record,
+        .tree_identity = stage_object_source_tree_identity(arena),
+        .toolchain_arguments = {.pointer = identity_arguments, .length = identity_count},
+    };
+    BuildStep* compile_step = step_add(arena);
+    ProcessRun* compile_run = run_add(arena, compile_step);
+    *compile_run = (ProcessRun){
+        .arguments = compile_arguments,
         .working_directory = S8("."),
         .timing_description = timing_description,
         .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
-        .spawn_options =
-            (ProcessSpawnOptions){
-                .use_process_environment = 1,
-            },
+        .spawn_options = (ProcessSpawnOptions){.use_process_environment = 1},
     };
-    return run;
+    BuildStep* capture_step = step_add(arena);
+    ProcessRun* capture_run = run_add(arena, capture_step);
+    *capture_run = (ProcessRun){.callback = stage_object_provenance_capture_action, .callback_data = provenance};
+    BuildStep* validate_step = step_add(arena);
+    ProcessRun* validate_run = run_add(arena, validate_step);
+    *validate_run = (ProcessRun){.callback = stage_object_provenance_validate_action, .callback_data = provenance};
+    BuildStep* link_step = step_add(arena);
+    ProcessRun* link_run = run_add(arena, link_step);
+    *link_run = (ProcessRun){
+        .arguments = link_arguments,
+        .working_directory = S8("."),
+        .timing_description = string_format(arena, S8("{S8} link"), timing_description),
+        .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
+        .spawn_options = (ProcessSpawnOptions){.use_process_environment = 1},
+    };
+    if (link_run_out) { *link_run_out = link_run; }
+    return compile_run;
 }
 
 #if BUSTER_MACOS
@@ -3595,7 +4416,7 @@ BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compi
     remove_path_recursive(arena, machine_stage);
     remove_path_recursive(arena, self_host_metrics_path(arena, machine_stage));
     self_host_compile_add(arena, compiler, build_directory, sysroot, machine_stage, S8("Self-host machine stage"),
-                          S8("-fregister-allocator=mir-stack"));
+                          S8("-fregister-allocator=mir-stack"), 0);
     BuildStep* bench_step = step_add(arena);
     ProcessRun* bench_run = run_add(arena, bench_step);
     String8* bench_arguments = arena_allocate(arena, String8, 2);
@@ -3631,7 +4452,7 @@ BUSTER_GLOBAL_LOCAL void self_host_canonical_compile_add(Arena* arena, String8 c
     remove_path_recursive(arena, canonical_stage);
     remove_path_recursive(arena, self_host_metrics_path(arena, canonical_stage));
     self_host_compile_add(arena, compiler, build_directory, sysroot, canonical_stage, S8("Self-host canonical stage"),
-                          S8("-fregister-allocator=none"));
+                          S8("-fregister-allocator=none"), 0);
 }
 #endif
 
@@ -3643,6 +4464,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     string_print(S8("error: artifact fan-out self-host consumer is unsupported on this target\n"));
     return PROCESS_RESULT_FAILED;
 #else
+    if (!stage_object_provenance_self_test(arena))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
     String8 config = cmake_build_config(fanout->options);
     String8 sysroot = {0};
 #if BUSTER_MACOS
@@ -3692,11 +4517,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
         .callback = build_artifact_fanout_validate_action,
         .callback_data = fanout,
     };
+    ProcessRun* stage1_link_run = 0;
     ProcessRun* stage1_run = self_host_compile_add(arena, fanout->private_bootstrap_path, fanout->build_directory, sysroot, stage1,
-                                                   S8("Self-host stage 1"), (String8){0});
-    stage1_run->cleanup_callback = build_artifact_fanout_cleanup_action;
-    stage1_run->cleanup_data = fanout;
-    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0});
+                                                   S8("Self-host stage 1"), (String8){0}, &stage1_link_run);
+    stage1_link_run->cleanup_callback = build_artifact_fanout_cleanup_action;
+    stage1_link_run->cleanup_data = fanout;
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0}, 0);
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb
@@ -3805,6 +4631,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     string_print(S8("error: deterministic self-hosting is currently supported only on Linux and Windows x86-64, and macOS\n"));
     return PROCESS_RESULT_FAILED;
 #else
+    if (!stage_object_provenance_self_test(arena))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
     String8 config = cmake_build_config(options);
     String8 sysroot = {0};
 #if BUSTER_MACOS
@@ -3863,8 +4693,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
 #endif
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
-    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"), (String8){0});
-    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0});
+    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"), (String8){0}, 0);
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0}, 0);
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb
@@ -20465,43 +21295,54 @@ BUSTER_GLOBAL_LOCAL bool cpython_git_verify(Arena* arena, String8 source_directo
     return true;
 }
 
-// Same shape and rationale as quickjs_raise_stack_limit: Buster frames are
-// larger than Clang's, and CPython tunes Py_C_RECURSION_LIMIT assuming an
-// eval frame well under a kilobyte where Buster's is 4 KB (issue 842), so
-// the C-stack recursion tests need an OS limit the budget actually fits in.
-// Both suite runs get the same limit, so the comparison stays symmetric.
-#define CPYTHON_STACK_LIMIT_BYTES (512ull * 1024ull * 1024ull)
+// CPython's recursion accounting assumes the evaluator consumes an ordinary
+// main-thread C-stack budget. Keep both oracle runs at Linux's conventional
+// 8 MiB soft limit: raising it concealed oversized Buster evaluator frames
+// instead of testing the contract issue #79 exists to protect.
+#define CPYTHON_STACK_LIMIT_BYTES (8ull * 1024ull * 1024ull)
 
-BUSTER_GLOBAL_LOCAL void cpython_raise_stack_limit(u64 requested_bytes)
+BUSTER_GLOBAL_LOCAL bool cpython_set_stack_limit(u64 requested_bytes)
 {
+    bool result = true;
 #if BUSTER_LINUX || BUSTER_MACOS
     struct rlimit limit = {0};
     if (getrlimit(RLIMIT_STACK, &limit) != 0)
     {
-        string_print(S8("warning: test_cpython could not read RLIMIT_STACK; the suite runs with the inherited stack\n"));
-        return;
+        string_print(S8("error: test_cpython could not read RLIMIT_STACK\n"));
+        result = false;
     }
-    if (limit.rlim_cur == RLIM_INFINITY || (u64)limit.rlim_cur >= requested_bytes)
+    else
     {
-        string_print(S8("CPYTHON_STACK_LIMIT requested_bytes={u64} status=already-sufficient\n"), requested_bytes);
-        return;
+        u64 previous = limit.rlim_cur == RLIM_INFINITY ? UINT64_MAX : (u64)limit.rlim_cur;
+        if (limit.rlim_max != RLIM_INFINITY && (u64)limit.rlim_max < requested_bytes)
+        {
+            string_print(S8("error: test_cpython hard stack limit {u64} is below required soft limit {u64}\n"), (u64)limit.rlim_max,
+                         requested_bytes);
+            result = false;
+        }
+        else if (limit.rlim_cur == (rlim_t)requested_bytes)
+        {
+            string_print(S8("CPYTHON_STACK_LIMIT soft_bytes={u64} status=already-exact\n"), requested_bytes);
+        }
+        else
+        {
+            limit.rlim_cur = (rlim_t)requested_bytes;
+            if (setrlimit(RLIMIT_STACK, &limit) != 0)
+            {
+                string_print(S8("error: test_cpython could not set RLIMIT_STACK from {u64} to {u64} bytes\n"), previous, requested_bytes);
+                result = false;
+            }
+            else
+            {
+                string_print(S8("CPYTHON_STACK_LIMIT previous_soft_bytes={u64} soft_bytes={u64} reason=eval-frame-budget status=set\n"), previous,
+                             requested_bytes);
+            }
+        }
     }
-    u64 previous = (u64)limit.rlim_cur;
-    u64 target = requested_bytes;
-    if (limit.rlim_max != RLIM_INFINITY && (u64)limit.rlim_max < target)
-    {
-        target = (u64)limit.rlim_max;
-    }
-    limit.rlim_cur = (rlim_t)target;
-    if (setrlimit(RLIMIT_STACK, &limit) != 0)
-    {
-        string_print(S8("warning: test_cpython could not raise RLIMIT_STACK from {u64} to {u64} bytes\n"), previous, target);
-        return;
-    }
-    string_print(S8("CPYTHON_STACK_LIMIT previous_soft_bytes={u64} soft_bytes={u64} reason=buster-frame-layout status=raised\n"), previous, target);
 #else
     string_print(S8("CPYTHON_STACK_LIMIT requested_bytes={u64} status=unsupported-platform\n"), requested_bytes);
 #endif
+    return result;
 }
 
 // The modules both trees disable, and why each is here rather than built:
@@ -20876,7 +21717,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_cpython_action(Arena* arena, void* data)
     make_directory_recursive(arena, output_directory);
     output_directory = os_path_absolute(arena, output_directory, true);
     string_print(S8("CPYTHON_HARNESS ide={S8} clang={S8} output={S8}\n"), ide, clang, output_directory);
-    cpython_raise_stack_limit(CPYTHON_STACK_LIMIT_BYTES);
+    if (!cpython_set_stack_limit(CPYTHON_STACK_LIMIT_BYTES))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
 
     String8 workload_path = path_join(arena, output_directory, S8("workload.py"));
     if (!file_write(workload_path, BUSTER_SLICE_TO_BYTE_SLICE(cpython_workload_source())))
