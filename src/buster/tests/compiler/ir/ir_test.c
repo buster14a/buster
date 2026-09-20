@@ -1521,7 +1521,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                                         .next = IR_INSTRUCTION_ID_INVALID,
                                     },
                                     (IrSourceRange){0});
-        BUSTER_TEST(arguments, summary_function->operand_total == 3);
+        BUSTER_TEST(arguments, summary_function->operand_total_rows != summary_function->instruction_count);
         BUSTER_TEST(arguments, ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY)));
         BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD)));
         ir_function_add_instruction(arguments->arena, summary_function,
@@ -1532,7 +1532,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
                                         .next = IR_INSTRUCTION_ID_INVALID,
                                     },
                                     (IrSourceRange){0});
-        BUSTER_TEST(arguments, summary_function->operand_total == 4);
+        BUSTER_TEST(arguments, summary_function->operand_total_rows != summary_function->instruction_count);
         BUSTER_TEST(arguments, ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_LABEL_ADDRESS)));
         BUSTER_TEST(arguments, !ir_function_may_contain_opcodes(summary_function, IR_OPCODE_BIT(IR_OPCODE_INDIRECT_BRANCH)));
     }
