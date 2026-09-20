@@ -141,6 +141,9 @@ jobs:
           python3 "$GITHUB_WORKSPACE/trusted/tools/native_retirement_external.py" prepare
           --manifest docs/native-retirement-dependencies-v1.json
           --source-root "$(pwd)"
+      # Never regress to `.native-retirement-trusted/tools/native_retirement_rebind.py refresh`:
+      # that former path lived under the untrusted candidate checkout. The executable
+      # command below uses the separately checked-out sibling trusted revision.
       - name: Reconstruct exact candidate binding ephemerally
         run: |
           mkdir -p evidence/native-retirement-rebind
