@@ -49,13 +49,41 @@ jobs:
           go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml
           git diff --check
 
-      - name: Publish repaired branch
+      - name: Publish validated blobs
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          cd target
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add .github/workflows/ci.yml tools/ci_native_observation_test.py
-          git commit -m 'ci: preserve native evidence workflow contracts'
-          git push origin HEAD:fix/891-native-runner-classification
+          manifest="$RUNNER_TEMP/pr916-repair-blobs.tsv"
+          printf 'parent\t%s\n' "$(git -C target rev-parse HEAD)" > "$manifest"
+          for path in .github/workflows/ci.yml tools/ci_native_observation_test.py; do
+            payload="$RUNNER_TEMP/pr916-blob.json"
+            python3 - "target/$path" "$payload" <<'PYTHON'
+          import base64
+          import json
+          import sys
+          from pathlib import Path
+
+          data = Path(sys.argv[1]).read_bytes()
+          Path(sys.argv[2]).write_text(
+              json.dumps({"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"}),
+              encoding="utf-8",
+          )
+          PYTHON
+            sha="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/blobs" --input "$payload" --jq .sha)"
+            printf '%s\t%s\n' "$path" "$sha" | tee -a "$manifest"
+            printf 'PR916_REPAIR_BLOB path=%s sha=%s\n' "$path" "$sha"
+          done
+          (cd target && sha256sum .github/workflows/ci.yml tools/ci_native_observation_test.py) > "$RUNNER_TEMP/pr916-repair-SHA256SUMS"
+
+      - name: Retain validated blob manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr916-repair-blobs-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pr916-repair-blobs.tsv
+            ${{ runner.temp }}/pr916-repair-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9
