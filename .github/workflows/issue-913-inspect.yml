@@ -47,91 +47,94 @@ jobs:
           path = Path('src/buster/tests/compiler/driver/driver_test.c')
           text = path.read_text()
 
-          replacements = {
-          '''                            CompilerDriverResult linked = compiler_driver_execute_invocation(wide_temporary.arena,
-                                  compiler_driver_parse_arguments(wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
-                              BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
-                              if (linked.error == COMPILER_DRIVER_ERROR_NONE)
-                              {
-                                  String8 run_command[] = {S8("wine"), executable};
-                                  ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
-                                                                            (SliceString8){0}, wine_options);
-                                  BUSTER_TEST(arguments, run.handle && os_process_wait_sync(wide_temporary.arena, run).result == PROCESS_RESULT_SUCCESS);
-                              }
-          ''': '''                            CompilerDriverResult linked = compiler_driver_execute_invocation(wide_temporary.arena,
-                                  compiler_driver_parse_arguments(wide_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
-                              String8 link_description = string_format(wide_temporary.arena,
-                                  S8("issue 913 wide mixed link mode={S8} direction={u32}: {S8}"), wide_modes[mode], direction, linked.diagnostic);
-                              BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, link_description);
-                              if (linked.error == COMPILER_DRIVER_ERROR_NONE)
-                              {
-                                  String8 run_command[] = {S8("wine"), executable};
-                                  ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
-                                                                            (SliceString8){0}, wine_options);
-                                  ProcessWaitResult wait = run.handle ? os_process_wait_sync(wide_temporary.arena, run) :
-                                                                       (ProcessWaitResult){.result = PROCESS_RESULT_NOT_EXISTENT};
-                                  String8 run_description = string_format(wide_temporary.arena,
-                                      S8("issue 913 wide mixed run mode={S8} direction={u32} launched={u32} result={u32} platform_status={u32}"),
-                                      wide_modes[mode], direction, run.handle != 0, (u32)wait.result, wait.platform_status);
-                                  BUSTER_TEST_RAW(arguments, run.handle && wait.result == PROCESS_RESULT_SUCCESS, run_description);
-                              }
-          ''',
-          '''                            CompilerDriverResult linked = compiler_driver_execute_invocation(padded_temporary.arena,
-                                  compiler_driver_parse_arguments(padded_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
-                              BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);
-                              if (linked.error == COMPILER_DRIVER_ERROR_NONE)
-                              {
-                                  String8 run_command[] = {S8("wine"), executable};
-                                  ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
-                                                                            (SliceString8){0}, wine_options);
-                                  BUSTER_TEST(arguments, run.handle && os_process_wait_sync(padded_temporary.arena, run).result == PROCESS_RESULT_SUCCESS);
-                              }
-          ''': '''                            CompilerDriverResult linked = compiler_driver_execute_invocation(padded_temporary.arena,
-                                  compiler_driver_parse_arguments(padded_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link_command)));
-                              String8 link_description = string_format(padded_temporary.arena,
-                                  S8("issue 913 padded mixed link mode={S8} direction={u32}: {S8}"), padded_modes[mode], direction, linked.diagnostic);
-                              BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, link_description);
-                              if (linked.error == COMPILER_DRIVER_ERROR_NONE)
-                              {
-                                  String8 run_command[] = {S8("wine"), executable};
-                                  ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_command), (SliceString8){0},
-                                                                            (SliceString8){0}, wine_options);
-                                  ProcessWaitResult wait = run.handle ? os_process_wait_sync(padded_temporary.arena, run) :
-                                                                       (ProcessWaitResult){.result = PROCESS_RESULT_NOT_EXISTENT};
-                                  String8 run_description = string_format(padded_temporary.arena,
-                                      S8("issue 913 padded mixed run mode={S8} direction={u32} launched={u32} result={u32} platform_status={u32}"),
-                                      padded_modes[mode], direction, run.handle != 0, (u32)wait.result, wait.platform_status);
-                                  BUSTER_TEST_RAW(arguments, run.handle && wait.result == PROCESS_RESULT_SUCCESS, run_description);
-                              }
-          ''',
-          '''                    ProcessSpawnResult wine_wide_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_run_arguments),
-                          (SliceString8){0}, (SliceString8){0}, wine_options);
-                      BUSTER_TEST(arguments, wine_wide_run.handle != 0);
-                      if (wine_wide_run.handle)
-                      {
-                          BUSTER_TEST(arguments, os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run).result == PROCESS_RESULT_SUCCESS);
-                      }
-          ''': '''                    ProcessSpawnResult wine_wide_run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(wine_wide_run_arguments),
-                          (SliceString8){0}, (SliceString8){0}, wine_options);
-                      ProcessWaitResult wine_wide_wait = wine_wide_run.handle ? os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run) :
-                                                                               (ProcessWaitResult){.result = PROCESS_RESULT_NOT_EXISTENT};
-                      String8 wine_wide_description = string_format(wine_wide_temporary.arena,
-                          S8("issue 913 direct Wine model={S8} fixture={u32} launched={u32} result={u32} platform_status={u32}"),
-                          wine_wide_models[model_index], fixture, wine_wide_run.handle != 0, (u32)wine_wide_wait.result,
-                          wine_wide_wait.platform_status);
-                      BUSTER_TEST_RAW(arguments, wine_wide_run.handle != 0, wine_wide_description);
-                      if (wine_wide_run.handle)
-                      {
-                          BUSTER_TEST_RAW(arguments, wine_wide_wait.result == PROCESS_RESULT_SUCCESS, wine_wide_description);
-                      }
-          ''',
-          }
+          def line_indent(source: str, offset: int) -> str:
+              line_start = source.rfind('\n', 0, offset) + 1
+              return source[line_start:offset]
 
-          for old, new in replacements.items():
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'expected one replacement, found {count}')
-              text = text.replace(old, new)
+          def instrument_mixed(source: str, arena: str, label: str) -> str:
+              run_assert = (
+                  'BUSTER_TEST(arguments, run.handle && os_process_wait_sync('
+                  + arena
+                  + ', run).result == PROCESS_RESULT_SUCCESS);'
+              )
+              if source.count(run_assert) != 1:
+                  raise SystemExit(f'{label}: expected one run assertion, found {source.count(run_assert)}')
+
+              run_offset = source.index(run_assert)
+              linked_block = source.rfind('CompilerDriverResult linked =', 0, run_offset)
+              if linked_block < 0:
+                  raise SystemExit(f'{label}: linked block not found')
+              link_assert = 'BUSTER_TEST(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE);'
+              link_offset = source.find(link_assert, linked_block, run_offset)
+              if link_offset < 0:
+                  raise SystemExit(f'{label}: link assertion not found')
+              indent = line_indent(source, link_offset)
+              link_replacement = (
+                  f'arguments->show(arguments, S8("ISSUE_913 {label} mode={{u32}} direction={{u32}} '
+                  'link_error={u32} diagnostic={S8}\\n"), mode, direction, (u32)linked.error, linked.diagnostic);\n'
+                  + indent
+                  + link_assert
+              )
+              source = source[:link_offset] + link_replacement + source[link_offset + len(link_assert):]
+
+              run_offset = source.index(run_assert)
+              indent = line_indent(source, run_offset)
+              wait_name = f'issue_913_{label}_wait'
+              run_replacement = (
+                  f'ProcessWaitResult {wait_name} = {{.result = PROCESS_RESULT_NOT_EXISTENT}};\n'
+                  + indent
+                  + 'if (run.handle)\n'
+                  + indent
+                  + '{\n'
+                  + indent
+                  + f'    {wait_name} = os_process_wait_sync({arena}, run);\n'
+                  + indent
+                  + '}\n'
+                  + indent
+                  + f'arguments->show(arguments, S8("ISSUE_913 {label} mode={{u32}} direction={{u32}} launched={{u32}} '
+                  + 'result={u32} platform_status={u32}\\n"), mode, direction, run.handle != 0, '
+                  + f'(u32){wait_name}.result, {wait_name}.platform_status);\n'
+                  + indent
+                  + f'BUSTER_TEST(arguments, run.handle && {wait_name}.result == PROCESS_RESULT_SUCCESS);'
+              )
+              return source[:run_offset] + run_replacement + source[run_offset + len(run_assert):]
+
+          text = instrument_mixed(text, 'wide_temporary.arena', 'wide_mixed')
+          text = instrument_mixed(text, 'padded_temporary.arena', 'padded_mixed')
+
+          build_assert = 'BUSTER_TEST(arguments, wine_wide_build.error == COMPILER_DRIVER_ERROR_NONE);'
+          if text.count(build_assert) != 1:
+              raise SystemExit(f'direct: expected one build assertion, found {text.count(build_assert)}')
+          build_offset = text.index(build_assert)
+          indent = line_indent(text, build_offset)
+          build_replacement = (
+              'arguments->show(arguments, S8("ISSUE_913 direct model={u32} fixture={u32} build_error={u32} '
+              'diagnostic={S8}\\n"), model_index, fixture, (u32)wine_wide_build.error, wine_wide_build.diagnostic);\n'
+              + indent
+              + build_assert
+          )
+          text = text[:build_offset] + build_replacement + text[build_offset + len(build_assert):]
+
+          direct_assert = (
+              'BUSTER_TEST(arguments, os_process_wait_sync(wine_wide_temporary.arena, '
+              'wine_wide_run).result == PROCESS_RESULT_SUCCESS);'
+          )
+          if text.count(direct_assert) != 1:
+              raise SystemExit(f'direct: expected one run assertion, found {text.count(direct_assert)}')
+          direct_offset = text.index(direct_assert)
+          indent = line_indent(text, direct_offset)
+          direct_replacement = (
+              'ProcessWaitResult issue_913_direct_wait = '
+              'os_process_wait_sync(wine_wide_temporary.arena, wine_wide_run);\n'
+              + indent
+              + 'arguments->show(arguments, S8("ISSUE_913 direct model={u32} fixture={u32} result={u32} '
+              + 'platform_status={u32}\\n"), model_index, fixture, (u32)issue_913_direct_wait.result, '
+              + 'issue_913_direct_wait.platform_status);\n'
+              + indent
+              + 'BUSTER_TEST(arguments, issue_913_direct_wait.result == PROCESS_RESULT_SUCCESS);'
+          )
+          text = text[:direct_offset] + direct_replacement + text[direct_offset + len(direct_assert):]
+
           path.write_text(text)
           PY
           git diff --check
@@ -150,5 +153,5 @@ jobs:
           build/Release/ide test --verbose=1 --ci=1 2>&1 | tee build/issue-913-test.log
           status=${PIPESTATUS[0]}
           echo '=== issue 913 diagnostics ==='
-          grep -n -E 'issue 913|c_simd_baseline_path|compiler_driver_tests' build/issue-913-test.log || true
+          grep -n -E 'ISSUE_913|c_simd_baseline_path|compiler_driver_tests' build/issue-913-test.log || true
           exit "$status"
