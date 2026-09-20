@@ -1,22 +1,61 @@
-name: Diagnose PR 916 workflow tools
+name: Repair PR 916 workflow contracts
 
 on:
   push:
     branches: [audit/916-workflow-tools]
 
+concurrency:
+  group: repair-pr-916-workflow-contracts
+  cancel-in-progress: false
+
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  repair:
     runs-on: ubuntu-26.04-arm
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Checkout repair control
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          path: control
           persist-credentials: false
-      - name: Run workflow-tool regression suite
+
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: fix/891-native-runner-classification
+          path: target
+          fetch-depth: 0
+
+      - name: Apply bounded workflow repair
+        shell: bash
+        run: python3 control/tools/repair_pr916.py target
+
+      - name: Validate repaired tree
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          GOSUMDB: sum.golang.org
+        run: |
+          set -euo pipefail
+          cd target
+          python3 -m py_compile tools/ci_native_observation.py tools/ci_native_observation_test.py
+          python3 tools/ci_native_observation_test.py -v
+          python3 tests/ci_tools_test.py -v
+          python3 tools/check_action_pins.py
+          python3 tests/action_pins_test.py
+          go run github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106 -color .github/workflows/*.yml
+          git diff --check
+
+      - name: Publish repaired branch
         shell: bash
         run: |
           set -euo pipefail
-          python3 tests/ci_tools_test.py -v
+          cd target
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/ci.yml tools/ci_native_observation_test.py
+          git commit -m 'ci: preserve native evidence workflow contracts'
+          git push origin HEAD:fix/891-native-runner-classification
