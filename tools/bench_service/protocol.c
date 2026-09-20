@@ -39,7 +39,7 @@ BUSTER_GLOBAL_LOCAL char const bq_capabilities_v1[] =
 #endif
 
 BUSTER_GLOBAL_LOCAL char const bq_capabilities_v2[] =
-    "schema=2 journal=3 materialization-journal=2 legacy-journal=1 executor=supervisor pending=8 jobs=64\n"
+    "schema=2 journal=3 legacy-journal=1 executor=supervisor pending=8 jobs=64\n"
     "local-recipes=fake-success-v1,fake-failure-v1 service-recipes=validate-buster-v1 "
     "blocked-recipes=native-retirement-performance-v1\n"
     "profile=smoke validity=not-evaluated materialization=read-only workspace=per-attempt\n"
