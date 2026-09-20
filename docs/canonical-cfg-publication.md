@@ -14,7 +14,9 @@ visited prefix has exactly one owner. A first forward jump materializes the
 identity prefix and leaves the existing map-based ownership/reordering path
 responsible for the remaining rows. Backward/repeated and out-of-range IDs
 still fail; publication does not depend on a validator certificate or retain
-mutable links as a shortcut. The published slices are:
+mutable links as a shortcut. Once ownership and pool validation succeed, the
+operand-pointer publication walk also clears builder links, avoiding a separate
+row walk. The published slices are:
 
 - Instructions occupy one contiguous span per block, in block ID order.
 - Successor edges are grouped by source, retaining first terminator-target order.
