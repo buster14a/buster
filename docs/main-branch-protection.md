@@ -8,15 +8,19 @@ credentials. Repository rules, rather than legacy branch protection, enforce it.
 
 ## Required review and checks
 
-Every PR needs one approval, dismissal of stale approvals after new commits,
-approval of the latest push by someone other than its pusher, and resolved
-review threads. Code-owner review is required. `.github/CODEOWNERS` designates
-`@davidgmbb` for workflows/action pins, build/bootstrap policy, tooling and
-native-retirement authority, generated assembly state, and agent instructions.
-Ownership takes effect only after CODEOWNERS lands on main. GitHub forbids
-self-approval: a davidgmbb-authored PR needs another eligible reviewer; once
-CODEOWNERS lands, sensitive changes by that author need another designated
-owner with write access. No second reviewer was configured by this change.
+Every change must use a PR, with zero required approvals and resolved review
+threads. Mandatory code-owner approval, latest-push approval, stale approval
+dismissal, and extra approval for unattributed changes are disabled. This is
+the explicitly selected solo-maintainer policy: the author can inspect the
+changes and merge when required validation passes, without another account.
+
+`.github/CODEOWNERS` designates `@davidgmbb` for workflows/action pins,
+build/bootstrap policy, tooling and native-retirement authority, generated
+assembly state, and agent instructions. It records responsibility and routes
+reviews; it is not an enforced independent-review barrier. GitHub forbids
+self-approval, so independent review requires adding another maintainer and
+revisiting this policy. The initial one-approval setting was corrected for
+solo development; `ruleset-before-solo.json` preserves that intermediate state.
 
 All six checks below are bound to the observed GitHub Actions app ID 15368.
 Strict checks require the PR branch to be current with main. Deletion and
@@ -36,7 +40,7 @@ and the exact job inventory. Every dependency must succeed. Independent
 required jobs fail explicitly when GH_ACTIONS_CI_ENABLED is unset or false;
 the aggregate runs despite disabled/skipped dependencies and rejects them.
 GitHub itself accepts skipped/neutral checks, so required status settings alone
-cannot enforce this distinction. Keep the job guards and review policy intact.
+cannot enforce this distinction. Keep the job guards and admission policy intact.
 Binding the source app does not uniquely bind a workflow; owners must reject
 changes that replace validation with a same-name check or weaken these gates.
 
@@ -54,8 +58,10 @@ broaden private-runner access.
 - Read-back of `/rules/branches/main` confirms all rules and check sources;
   `/branches/main` reports `protected: true`. The legacy protection subobject
   remains disabled and is not the authority for rulesets.
-- Existing same-repository PR #897 reports `BLOCKED` and `REVIEW_REQUIRED`
-  after the settings update. No production merge/push rejection was attempted.
+- The effective PR rule reports zero required approvals and no mandatory
+  code-owner/latest-push approval after the solo-maintainer correction. PR #898
+  no longer reports `REVIEW_REQUIRED`. No production merge/push rejection
+  was attempted.
 - `python3 tests/ci_tools_test.py -v`: 63 tests pass, including the executable
   aggregate outcome fixture (625 combinations plus independent UEFI/analyzer
   failures) and enabled/disabled/missing-variable guards for all independent
@@ -68,9 +74,10 @@ broaden private-runner access.
 - No live fork PR or merge-group execution was performed. No fork PR appeared
   in the most recent 100 PRs inspected. Queue execution must be validated when
   queueing is enabled; configuration and fixtures do not prove live behavior.
-- The ownership/guard patch must merge and a second independent reviewer must
-  be available before #556 can be considered complete. Recheck live results
-  on the submitted revision; do not treat these local fixtures as full CI.
+- The ownership/guard patch must merge; live fork and merge-group validation
+  remain outstanding for #556. Independent review is deliberately excluded
+  from the solo-maintainer policy. Recheck live results on the submitted
+  revision; do not treat these local fixtures as full CI.
 
 ## Emergency procedure
 
@@ -78,5 +85,5 @@ There is no standing bypass. An emergency requires an explicitly authorized
 administrator to record the reason and exact temporary settings change, retain
 before/after evidence, and restore and verify the admission policy immediately
 afterward. This document grants no permission to weaken protection. Prefer a
-reviewed repair PR. Never replace cancelled, failed, missing, or outdated CI
+repair PR with passing required validation. Never replace cancelled, failed, missing, or outdated CI
 with a manual success status.
