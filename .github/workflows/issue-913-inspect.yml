@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - codex/913-win64-padded-vector-zero
+  pull_request:
+    paths:
+      - '.github/workflows/issue-913-inspect.yml'
+      - 'src/buster/tests/compiler/driver/driver_test.c'
+      - 'src/buster/lib/compiler/**'
 
 permissions:
   contents: read
