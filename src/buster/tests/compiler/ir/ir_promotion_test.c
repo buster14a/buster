@@ -209,6 +209,27 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
             if (function)
             {
                 BUSTER_TEST(arguments, !function->local_count || function->local_places != 0);
+                if (input_certified && function->local_places)
+                {
+                    // Reverse canonical owner IDs without changing place
+                    // identities. Sparse discovery must recover row order.
+                    BUSTER_TEST(arguments, !function->local_types && !function->local_uses_memory);
+                    for (u32 local = 0; local < function->local_count / 2; local += 1)
+                    {
+                        u32 other = function->local_count - local - 1;
+                        IrValueId place = function->local_places[local];
+                        function->local_places[local] = function->local_places[other];
+                        function->local_places[other] = place;
+                    }
+                    for (u32 row = 0; row < function->instruction_count; row += 1)
+                    {
+                        IrLocalId* local = &function->instructions[row].canonical_local;
+                        if (local->value < function->local_count)
+                        {
+                            local->value = function->local_count - local->value - 1;
+                        }
+                    }
+                }
                 u32 old_instructions = function->instruction_count;
                 u32 old_values = function->value_count;
                 u32 old_locals = ir_test_opcode_count(function, IR_OPCODE_LOCAL);

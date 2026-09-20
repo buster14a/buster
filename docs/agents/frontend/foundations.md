@@ -107,6 +107,8 @@ The existing conservative opcode summary also tracks `LOCAL`, so shared
 promotion skips its discovery scan for certified functions with no memory
 locals. Summary-known functions discover remaining live definitions through
 `local_places`, retaining definition-row order for deterministic promotion.
+If canonical owner IDs are out of definition order, one bounded row scan
+restores the order instead of sorting by repeated displacement.
 Tracked barrier opcodes avoid further inspection when absent. The required
 operand/event walk qualifies indirect/returns-twice calls before any promotion,
 so ordinary calls do not require a separate discovery scan. Unknown summaries
