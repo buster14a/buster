@@ -406,6 +406,13 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   created by `ir_module_add_function` and filled by
   `ir_function_add_instruction`; IR whose rows were written straight into
   `instructions` reads as unknown and every consumer keeps a scan for it.
+  Frontend SSA and shared compaction already sum operand slots for their dense
+  pools. They publish `operand_total` with `operand_total_rows`; FAST reuses
+  the total only when that population still equals `instruction_count` and the
+  opcode summary is known. Appends change the population and reopening a
+  published CFG clears it. Construction retracts rows before frontend SSA publishes this fact.
+  Missing/stale totals and unknown summaries retain the conservative row scan.
+  There is no per-append operand accounting.
 - Source diagnostics in shared layers use canonical `IrSourceRange` and
   `IrSourcePosition`. Do not reintroduce parser-specific source-range APIs into
   codegen, debug information, object writing, or the linker.

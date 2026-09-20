@@ -167,6 +167,12 @@
   not as a signalable emulator; the harness holds a child unreaped to cover
   this path deterministically. Unknown process-state queries remain fail-closed.
 
+The private OS flood and process-tree child modes dispatch at the start of
+`library_tests`, before compiler prewarming and other test modules. They must
+not recursively run the suite before producing their pipe payload or readiness
+marker. Capture limits, byte-count assertions, and process deadlines remain
+identical for these child modes.
+
 ## Throughput runner integration
 
 The desktop combination matrix builds and runs `bench_throughput self-test`

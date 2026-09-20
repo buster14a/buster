@@ -1277,6 +1277,8 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         return result;
     }
 
+    os_test_process_child_run(arguments);
+
     // Some test modules intentionally leave a resident lane gang available
     // for later work on their selected context. Fill every compiler-global
     // read-only table before the first module can create those workers.
