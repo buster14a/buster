@@ -2631,6 +2631,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_vector_boundaries(U
                                 if (linked) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
                             }
 #endif
+#if BUSTER_CPU_ARCH_X86_64 && BUSTER_WINDOWS
+                            bool runnable = cpu == 0 || (cpu == 1 ? target_cpu_feature_has(target_native, TARGET_CPU_FEATURE_X86_AVX2)
+                                : ir_simd_operation_supported(target_native, IR_SIMD_SPLAT_BYTE));
+                            if (target == 4 && runnable && frontend == 1 && pic == 1 &&
+                                compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-padded-vector-native"), S8(".exe"));
+                                String8 link[] = {S8("-target"), targets[target], cpus[cpu], object, S8("-o"), executable};
+                                CompilerDriverResult linked = compiler_driver_execute_invocation(temporary.arena,
+                                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(link)));
+                                BUSTER_TEST_RAW(arguments, linked.error == COMPILER_DRIVER_ERROR_NONE, linked.diagnostic);
+                                if (linked.error == COMPILER_DRIVER_ERROR_NONE)
+                                {
+                                    BUSTER_TEST_RAW(arguments, compiler_driver_test_process_success(temporary.arena, executable), description);
+                                }
+                            }
+#endif
                             scratch_end(temporary);
                         }
                     }
