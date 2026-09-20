@@ -11,7 +11,7 @@ BUSTER_GLOBAL_LOCAL u64 ir_test_operand_total(IrFunction* function)
     return total;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_identity_tests(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     for (u32 variant = 0; variant < 4; variant += 1)
@@ -97,7 +97,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_identity_tests(UnitTestArgumen
 
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = ir_publication_identity_tests(arguments);
+    UnitTestResult result = ir_publication_span_tests(arguments);
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");

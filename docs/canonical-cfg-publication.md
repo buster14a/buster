@@ -8,14 +8,7 @@ extend an input semantic certificate to arbitrary later mutations.
 
 Publication checks exact construction-list extents, tails, incoming order/types,
 topology agreement and bounded IDs/counts. It proves instruction ownership while
-building one instruction permutation, then publishes these immutable slices.
-Identity-order chains allocate no permutation maps: the cursor proves the
-visited prefix has exactly one owner. A first forward jump materializes the
-identity prefix and leaves the existing map-based ownership/reordering path
-responsible for the remaining rows. Backward/repeated and out-of-range IDs
-still fail; publication does not depend on a validator certificate. Published
-walkers use instruction spans; construction-only `next` values are ignored.
-The published slices are:
+building one instruction permutation, then publishes these immutable slices:
 
 - Instructions occupy one contiguous span per block, in block ID order.
 - Successor edges are grouped by source, retaining first terminator-target order.

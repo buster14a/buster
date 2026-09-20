@@ -246,11 +246,9 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
 {
     IrValidationResult result = ir_validation_ok();
     u32 count = function->instruction_count;
-    // Identity-order chains need no permutation storage. Materialize the
-    // maps only at the first forward jump; the already visited prefix is
-    // exactly 0..cursor-1, so it reconstructs without another row walk.
-    IrInstructionId* remap = 0;
-    u32* inverse = 0;
+    IrInstructionId* remap = arena_allocate(scratch, IrInstructionId, count);
+    u32* inverse = arena_allocate(scratch, u32, count);
+    memset(remap, 0xff, sizeof(*remap) * count);
     u32 cursor = 0;
     bool moved = false;
     for (u32 index = 0; index < function->block_count && result.error == IR_VALIDATION_NONE; index += 1)
@@ -259,26 +257,6 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
         IrInstructionId id = block->first_instruction;
         IrInstructionId last = IR_INSTRUCTION_ID_INVALID;
         blocks[index].first_instruction = cursor;
-        if (!remap)
-        {
-            while (id.value == cursor && cursor < count)
-            {
-                last = id;
-                id = function->instructions[cursor].next;
-                cursor += 1;
-            }
-            if (id.value != IR_ID_UNDERLYING_INVALID)
-            {
-                remap = arena_allocate(scratch, IrInstructionId, count);
-                inverse = arena_allocate(scratch, u32, count);
-                for (u32 prefix = 0; prefix < cursor; prefix += 1)
-                {
-                    remap[prefix].value = prefix;
-                    inverse[prefix] = prefix;
-                }
-                memset(remap + cursor, 0xff, sizeof(*remap) * (count - cursor));
-            }
-        }
         while (id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
         {
             if (id.value >= count || remap[id.value].value != IR_ID_UNDERLYING_INVALID)
