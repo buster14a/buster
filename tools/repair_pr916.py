@@ -40,18 +40,46 @@ workflow = workflow[:start] + pack + workflow[end:]
 def expr(text: str) -> str:
     return expr_open + " " + text + " " + expr_close
 
-replacements = {
-    "        if: " + expr("always() && steps.pack.outcome == 'success'") + "\n":
-        "        if: " + expr("!cancelled() && steps.pack.outcome == 'success'") + "\n",
-    "        if: " + expr("always() && steps.checkout.outcome == 'success' && steps.pack.outcome != 'success'") + "\n":
-        "        if: " + expr("!cancelled() && steps.checkout.outcome == 'success' && steps.pack.outcome != 'success'") + "\n",
-    "        if: " + expr("always() && steps.pack.outcome != 'success'") + "\n":
-        "        if: " + expr("!cancelled() && steps.pack.outcome != 'success'") + "\n",
-}
-for old, new in replacements.items():
-    if workflow.count(old) != 1:
-        raise SystemExit(f"unexpected condition population: {old.strip()}")
-    workflow = workflow.replace(old, new, 1)
+def replace_in_block(text: str, start_marker: str, end_marker: str, old: str, new: str) -> str:
+    block_start = text.index(start_marker)
+    block_end = text.index(end_marker, block_start)
+    block = text[block_start:block_end]
+    if block.count(old) != 1:
+        raise SystemExit(f"unexpected condition population in {start_marker.strip()}: {old.strip()}")
+    block = block.replace(old, new, 1)
+    return text[:block_start] + block + text[block_end:]
+
+packed_old = "        if: " + expr("always() && steps.pack.outcome == 'success'") + "\n"
+packed_new = "        if: " + expr("!cancelled() && steps.pack.outcome == 'success'") + "\n"
+if workflow.count(packed_old) != 1:
+    raise SystemExit("unexpected packed-upload condition population")
+workflow = workflow.replace(packed_old, packed_new, 1)
+
+shared_failure_old = (
+    "        if: " +
+    expr("always() && steps.checkout.outcome == 'success' && steps.pack.outcome != 'success'") +
+    "\n"
+)
+record_failure_new = (
+    "        if: " +
+    expr("!cancelled() && steps.checkout.outcome == 'success' && steps.pack.outcome != 'success'") +
+    "\n"
+)
+unpacked_new = "        if: " + expr("!cancelled() && steps.pack.outcome != 'success'") + "\n"
+workflow = replace_in_block(
+    workflow,
+    "      - name: Record native packaging failure\n",
+    "      - name: Retain unpacked native logs\n",
+    shared_failure_old,
+    record_failure_new,
+)
+workflow = replace_in_block(
+    workflow,
+    "      - name: Retain unpacked native logs\n",
+    "\n  mobile:\n",
+    shared_failure_old,
+    unpacked_new,
+)
 workflow_path.write_text(workflow, encoding="utf-8")
 
 test_path = root / "tools/ci_native_observation_test.py"
