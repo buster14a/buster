@@ -143,11 +143,16 @@ For this named GCC row, use `BUSTER_GCC` instead of a conflicting
 existing behavior.
 
 `compiler_discovery_self_test` runs before both combination matrices. It checks
-platform/override selection and identity parsing, exercises the real Clang
-preprocessor, and launches negative `generate --cc gcc` children with Clang,
-a missing executable and a conflicting CMake override. Each must report the
-specific failure and preserve an existing configuration sentinel. macOS also reports the actual unversioned
-`gcc` identity, independently of the selected versioned GCC row.
+platform/override selection, identity parsing and the compiler-query retry
+policy, exercises the real Clang preprocessor, and launches negative
+`generate --cc gcc` children with Clang, a missing executable and a conflicting
+CMake override. Each must report the specific failure and preserve an existing
+configuration sentinel. Discovery queries retain bounded stdout/stderr and
+process-result evidence. Only one timed-out read-only probe may be repeated,
+and only after process-tree cleanup is proven; compiler exits, malformed output,
+identity rejection and cleanup uncertainty remain single-attempt failures.
+macOS also reports the actual unversioned `gcc` identity, independently of the
+selected versioned GCC row.
 
 `musl_directory_self_test` checks complete, unique directory inventories through
 two capacity growths, opposite creation orders, manifest sorting and architecture
