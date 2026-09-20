@@ -2692,6 +2692,68 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_frame_storage_reuse(UnitTestArgu
     MachineStackPlacement loop_placement = machine_fast_placement_build(arena, &loop_function);
     BUSTER_TEST(arguments, loop_placement.valid && loop_placement.stack_slot_offsets[0] != loop_placement.stack_slot_offsets[1]);
 
+    // The switch side table is part of the CFG too. Slot zero is read in an
+    // early case, while the later case writes slot one and jumps back to the
+    // dispatch. A subsequent trip may select the early case, so slot zero is
+    // live through the later case even though their touched rows are disjoint.
+    // Omitting case targets from the predecessor graph aliases the two slots.
+    MachineFunctionBuilder switch_builder = machine_function_builder_begin(arena);
+    MachineRef slot_zero = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+    MachineRef slot_one = machine_ref_make(MACHINE_REF_STACK_SLOT, 1);
+    MachineRef rax = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RAX);
+    MachineRef rdx = machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, MACHINE_X64_RDX);
+    machine_builder_block_begin(&switch_builder);
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64,
+                                                                      .operands = {slot_zero, rax}});
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_JMP,
+                                                                      .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}});
+    machine_builder_block_end(&switch_builder, (MachineBlock){0});
+    machine_builder_edge(&switch_builder, (MachineEdge){.source_block = 0, .destination_block = 1});
+    machine_builder_block_begin(&switch_builder);
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_SWITCH,
+                                                                      .operands = {rax, machine_ref_make(MACHINE_REF_BLOCK, 4)},
+                                                                      .payload = 0, .flags = 2});
+    machine_builder_block_end(&switch_builder, (MachineBlock){0});
+    machine_builder_edge(&switch_builder, (MachineEdge){.source_block = 1, .destination_block = 2});
+    machine_builder_edge(&switch_builder, (MachineEdge){.source_block = 1, .destination_block = 3});
+    machine_builder_edge(&switch_builder, (MachineEdge){.source_block = 1, .destination_block = 4});
+    machine_builder_block_begin(&switch_builder);
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME,
+                                                                      .operands = {rdx, slot_zero}});
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&switch_builder, (MachineBlock){0});
+    machine_builder_block_begin(&switch_builder);
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_STORE_FRAME64,
+                                                                      .operands = {slot_one, rax}});
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_LOAD_FRAME,
+                                                                      .operands = {rdx, slot_one}});
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_JMP,
+                                                                      .operands = {machine_ref_make(MACHINE_REF_BLOCK, 1)}});
+    machine_builder_block_end(&switch_builder, (MachineBlock){0});
+    machine_builder_edge(&switch_builder, (MachineEdge){.source_block = 3, .destination_block = 1});
+    machine_builder_block_begin(&switch_builder);
+    machine_builder_instruction(&switch_builder, (MachineInstruction){.opcode = MACHINE_X64_RET});
+    machine_builder_block_end(&switch_builder, (MachineBlock){0});
+    MachineFunction switch_function = machine_function_builder_finish(arena, &switch_builder);
+    switch_function.target = machine_target_x86_64();
+    switch_function.switch_cases = arena_allocate(arena, MachineSwitchCase, 2);
+    switch_function.switch_cases[0] = (MachineSwitchCase){.value = 0, .target_block = 2};
+    switch_function.switch_cases[1] = (MachineSwitchCase){.value = 1, .target_block = 3};
+    switch_function.switch_case_count = 2;
+    switch_function.stack_slot_sizes = arena_allocate(arena, u32, 2);
+    switch_function.stack_slot_alignments = arena_allocate(arena, u32, 2);
+    for (u32 slot = 0; slot < 2; slot += 1)
+    {
+        switch_function.stack_slot_sizes[slot] = 8;
+        switch_function.stack_slot_alignments[slot] = 8;
+    }
+    switch_function.stack_slot_count = 2;
+    switch_function.returns_twice_absence_certified = true;
+    BUSTER_TEST(arguments, machine_verify_function(&switch_function).error == MACHINE_VERIFY_NONE);
+    MachineStackPlacement switch_placement = machine_fast_placement_build(arena, &switch_function);
+    BUSTER_TEST(arguments, switch_placement.valid &&
+                               switch_placement.stack_slot_offsets[0] != switch_placement.stack_slot_offsets[1]);
+
     // Each wave defines more cross-block values than the target register file
     // can retain, then consumes all of them in the next block. The waves never
     // overlap. Without CFG-derived home liveness every escaping value remains
