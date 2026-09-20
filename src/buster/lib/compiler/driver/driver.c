@@ -1639,11 +1639,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.reject_machine_fallback &&
         (invocation.has_gpu_target || invocation.emit_llvm_bitcode ||
          (invocation.target.cpu_arch != CPU_ARCH_X86_64 && invocation.target.cpu_arch != CPU_ARCH_AARCH64) ||
-         invocation.register_allocator == CODEGEN_REGISTER_ALLOCATOR_NONE || invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ||
+         invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS ||
          invocation.action == COMPILER_DRIVER_ACTION_SYNTAX_ONLY))
     {
         invocation.error = COMPILER_DRIVER_ERROR_ARGUMENT;
-        invocation.diagnostic = S8("-fno-machine-fallback requires native code generation with mir-stack, fast, or quality allocation");
+        invocation.diagnostic = S8("-fno-machine-fallback requires native x86-64 or AArch64 code generation");
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && !invocation.no_standard_includes && !invocation.has_gpu_target &&
         invocation.target.os != OPERATING_SYSTEM_UEFI)
@@ -3773,11 +3773,10 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             .code = compiler_driver_codegen_error_name(code.error), .backend = &backend,
             .primary = compiler_driver_backend_location(lowered.program, module, code.failed_function, code.failed_instruction),
         };
-        diagnostic.message = backend.reason.length
-            ? string_format(arena, S8("{S8} (in function '{S8}')"), backend.reason, backend.function)
-            : string_format(arena,
-                S8("C code generation refused: kind={S8} target={S8} allocator={S8} function='{S8}' opcode={S8} operation={S8}"),
-                diagnostic.code, backend.target, backend.allocator, backend.function, backend.opcode, backend.operation);
+        diagnostic.message = string_format(arena,
+            S8("C code generation refused: kind={S8} target={S8} allocator={S8} reason={S8} function='{S8}' opcode={S8} operation={S8}"),
+            diagnostic.code, backend.target, backend.allocator, backend.reason.length ? backend.reason : S8("not-applicable"),
+            backend.function, backend.opcode, backend.operation);
         compiler_driver_collect_diagnostic(warnings, diagnostic);
         result.error = COMPILER_DRIVER_ERROR_CODEGEN;
         result.diagnostic = compiler_diagnostic_render(arena, diagnostic);
