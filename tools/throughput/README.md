@@ -632,6 +632,47 @@ intervals, disagreeing rounds, both family corrections, aggregates, malformed
 declarations, fixed sample counts, and supported caps. This software test is not
 dedicated-host A/A admission and issues no #36 performance verdict.
 
+### Native-retirement invocation evidence
+
+`retirement_execution.h` supplies the native cursor and bounded invocation
+encoder for the existing performance binding's execution transcript. The cursor
+uses `tp_retirement_block_schedule` directly, includes two warmups per variant,
+and exhausts both rounds of compiler invocations before the native-runtime
+campaign. Its runtime row map is copied at initialization. A failed commit
+permanently invalidates the attempt; there is no skip or resume operation. The
+complete population's result-input capacity permits at most 254 pairs per round,
+so this collection boundary rejects 256 even though the statistics kernel can
+analyze that count for a smaller population. It does not change statistical
+limits, family construction, or decisions.
+
+Linux `tp_process_observe` captures a fresh child's PID and `/proc/PID/stat`
+start token while that child is waiting for launch permission. It records the
+same monotonic interval used for wall time, and retains ordinary wait status,
+timeout and RSS evidence. Other Unix platforms reject requested process
+observations as unsupported. The existing `tp_process` entry point retains its
+ordinary throughput behavior and does not read process identity. Diagnostic PMU
+collection remains separate.
+
+The encoder emits the existing canonical JSONL invocation schema in at most
+8,192 bytes. It checks successful child status, required hashes, exact interval
+agreement, compiler RSS, and code-section applicability before emitting bytes.
+Nanosecond serialization uses integer operations and a bounded decimal domain;
+missing runtime RSS is `null`. The native regression fixture is read unchanged
+by the production Python transcript validator, including the sample join:
+
+```sh
+./build.sh bench_throughput self-test
+python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests
+./build.sh bench_throughput self-test --sanitize
+python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests-sanitized
+```
+
+These primitives are not an admitted service recipe or an authenticated receipt.
+The service must still own the immutable plan, launch isolation, independent
+output checks, shard publication, lifecycle and receipt authority. The
+`native-retirement-performance-v1` descriptor remains blocked until that complete
+producer is integrated; `validate-buster-v1` continues to produce smoke evidence.
+
 ## Result bundle
 
 `metadata.json` contains schema, workload/binary hashes, flags, selected environment

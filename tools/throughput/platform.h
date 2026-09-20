@@ -39,6 +39,15 @@ typedef enum TpDiagnostic
     TP_DIAGNOSTICS
 } TpDiagnostic;
 
+/* Optional execution evidence. Ordinary CI timing does not pay for proc reads.
+ * Only a trusted supervisor may authenticate these observations; this structure
+ * by itself is neither a service receipt nor performance acceptance. */
+typedef struct TpProcessObservation
+{
+    uint64_t pid, start_token, started_ns, finished_ns;
+    int valid;
+} TpProcessObservation;
+
 typedef struct TpProcess
 {
     double wall_seconds, user_seconds, system_seconds, peak_rss_bytes;
@@ -249,10 +258,90 @@ static void tp_cancel_handler(int signal_number)
     _exit(128 + signal_number);
 }
 
-static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
-                            unsigned timeout_seconds, int cpu, int counters)
+#ifdef __linux__
+/* /proc/PID/stat field 2 may contain spaces and ')' characters. The final
+ * ')' closes comm; fields 3 through 21 precede the unsigned starttime token.
+ * Parse a bounded byte slice, never a truncated NUL-terminated prefix. */
+static int tp_process_start_token(char const* bytes, size_t size, uint64_t wanted_pid, uint64_t* token)
+{
+    size_t at = 0;
+    uint64_t pid = 0, value = 0;
+    int ok = bytes && token && size > 0 && size < 4096 && wanted_pid > 0;
+    for (size_t i = 0; ok && i < size; ++i) ok = bytes[i] != 0;
+    while (ok && at < size && bytes[at] >= '0' && bytes[at] <= '9')
+    {
+        unsigned digit = (unsigned)(bytes[at++] - '0');
+        ok = pid <= (UINT64_MAX - digit) / 10;
+        if (ok) pid = pid * 10 + digit;
+    }
+    ok = ok && at > 0 && pid == wanted_pid && at + 2 < size && bytes[at] == ' ' && bytes[at + 1] == '(';
+    size_t end_comm = size;
+    while (ok && end_comm > at + 1 && bytes[end_comm - 1] != ')') --end_comm;
+    ok = ok && end_comm > at + 2 && end_comm + 3 < size && bytes[end_comm] == ' ' &&
+         bytes[end_comm + 1] != ' ' && bytes[end_comm + 2] == ' ';
+    at = end_comm + 3;
+    for (unsigned field = 4; ok && field <= 22; ++field)
+    {
+        size_t begin = at;
+        while (at < size && bytes[at] != ' ' && bytes[at] != '\n') ++at;
+        ok = at > begin && at < size;
+        if (ok && field == 22)
+        {
+            for (size_t i = begin; ok && i < at; ++i)
+            {
+                ok = bytes[i] >= '0' && bytes[i] <= '9';
+                unsigned digit = ok ? (unsigned)(bytes[i] - '0') : 0;
+                ok = ok && value <= (UINT64_MAX - digit) / 10;
+                if (ok) value = value * 10 + digit;
+            }
+            ok = ok && value > 0;
+        }
+        ++at;
+    }
+    if (token) *token = ok ? value : 0;
+    return ok;
+}
+
+static int tp_process_identity(pid_t pid, uint64_t* token)
+{
+    char path[64], bytes[4096];
+    if (token) *token = 0;
+    int length = snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
+    int descriptor = length > 0 && (size_t)length < sizeof(path) ?
+                     open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    size_t used = 0;
+    int ok = descriptor >= 0;
+    while (ok && used < sizeof(bytes))
+    {
+        ssize_t count = read(descriptor, bytes + used, sizeof(bytes) - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) ok = 0;
+        else if (!count) break;
+        else used += (size_t)count;
+    }
+    if (descriptor >= 0 && close(descriptor) != 0) ok = 0;
+    ok = ok && tp_process_start_token(bytes, used, (uint64_t)pid, token);
+    return ok;
+}
+
+static uint64_t tp_process_monotonic_ns(void)
+{
+    struct timespec now;
+    uint64_t result = 0;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0 && now.tv_sec >= 0 &&
+        (uint64_t)now.tv_sec <= (UINT64_MAX - 999999999) / 1000000000 &&
+        now.tv_nsec >= 0 && now.tv_nsec < 1000000000)
+        result = (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+    return result;
+}
+#endif
+
+static TpProcess tp_process_observe(char* const* args, char const* directory, char const* log_path,
+                                    unsigned timeout_seconds, int cpu, int counters,
+                                    TpProcessObservation* observation)
 {
     TpProcess result = {0};
+    if (observation) *observation = (TpProcessObservation){0};
     result.exit_code = -1;
     result.peak_rss_bytes = NAN;
     int counter_fds[TP_COUNTERS];
@@ -266,6 +355,9 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     int ready[2] = {-1, -1};
     int log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     int ok = log >= 0 && pipe(ready) == 0;
+#ifndef __linux__
+    if (observation) { ok = 0; errno = ENOTSUP; }
+#endif
     struct sigaction handler, previous, ignore_pipe, previous_pipe, cancel, previous_int, previous_term;
     memset(&cancel, 0, sizeof(cancel));
     cancel.sa_handler = tp_cancel_handler;
@@ -283,6 +375,13 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     ok = ok && handler_set && pipe_handler_set && int_set && term_set;
     pid_t pid = -1;
     TimeDataType start = timestamp_take();
+#ifdef __linux__
+    if (ok && observation)
+    {
+        observation->started_ns = tp_process_monotonic_ns();
+        ok = observation->started_ns > 0;
+    }
+#endif
     if (ok)
     {
         pid = fork();
@@ -363,6 +462,14 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
             }
         }
 #endif
+        int identity_ok = 1;
+#ifdef __linux__
+        if (observation)
+        {
+            observation->pid = (uint64_t)pid;
+            identity_ok = tp_process_identity(pid, &observation->start_token);
+        }
+#endif
         tp_active_pid = (sig_atomic_t)pid;
         tp_timeout_fired = 0;
         alarm(timeout_seconds);
@@ -370,8 +477,8 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
         ssize_t sent;
         do
         {
-            sent = write(ready[1], &byte, 1);
-        } while (sent < 0 && errno == EINTR);
+            sent = identity_ok ? write(ready[1], &byte, 1) : -1;
+        } while (identity_ok && sent < 0 && errno == EINTR);
         close(ready[1]);
         ready[1] = -1;
         if (sent != 1)
@@ -387,10 +494,20 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
             waited = wait4(pid, &status, 0, &usage);
         } while (waited < 0 && errno == EINTR);
         result.wall_seconds = (double)timestamp_ns_between(start, timestamp_take()) * 1e-9;
+#ifdef __linux__
+        if (observation)
+        {
+            observation->finished_ns = tp_process_monotonic_ns();
+            observation->valid = identity_ok && waited == pid && sent == 1 &&
+                                 observation->finished_ns > observation->started_ns;
+            if (observation->valid)
+                result.wall_seconds = (double)(observation->finished_ns - observation->started_ns) / 1000000000.0;
+        }
+#endif
         alarm(0);
         tp_active_pid = 0;
         result.timed_out = tp_timeout_fired != 0;
-        ok = waited == pid && sent == 1;
+        ok = waited == pid && sent == 1 && (!observation || observation->valid);
         if (ok)
         {
             result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
@@ -473,6 +590,13 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
     {
         sigaction(SIGALRM, &previous, NULL);
     }
+    return result;
+}
+
+static TpProcess tp_process(char* const* args, char const* directory, char const* log_path,
+                            unsigned timeout_seconds, int cpu, int counters)
+{
+    TpProcess result = tp_process_observe(args, directory, log_path, timeout_seconds, cpu, counters, NULL);
     return result;
 }
 #endif

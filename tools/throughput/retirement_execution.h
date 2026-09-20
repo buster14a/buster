@@ -1,0 +1,347 @@
+/* Native producer side of #568's execution transcript for #881.
+ * The cursor uses the reviewed #619 block schedule and retains only O(rows)
+ * state. peek/commit makes a failed or unwritten invocation non-resumable.
+ * These are collection primitives, not service admission or a verdict. The
+ * supervisor must own the plan, process launcher, output and receipt authority.
+ */
+#ifndef BUSTER_THROUGHPUT_RETIREMENT_EXECUTION_H
+#define BUSTER_THROUGHPUT_RETIREMENT_EXECUTION_H
+#include "retirement_stats.h"
+#include "platform.h"
+#include <buster/lib/hash.h>
+#include <inttypes.h>
+
+#define TP_RETIREMENT_WARMUPS 2u
+/* #568's complete population includes link and self-host rows. */
+#define TP_RETIREMENT_EXECUTION_MAX_PAIRS 254u
+#define TP_RETIREMENT_EXECUTION_LINE_CAP 8192u
+
+typedef struct TpRetirementInvocation
+{
+    uint64_t sequence;
+    unsigned row, kind, phase, variant;
+    int round, pair, warmup, position;
+} TpRetirementInvocation;
+
+typedef struct TpRetirementExecution
+{
+    uint64_t seed, sequence, expected;
+    unsigned rows, runtime_count, pairs;
+    unsigned* runtime_rows;
+    unsigned* first_orders;
+    unsigned* first_cells;
+    unsigned* second_cells;
+    unsigned kind, phase, cell, repeat, position, round, block, pair_in_block;
+    int failed, pending, scheduled;
+    TpRetirementInvocation current;
+} TpRetirementExecution;
+
+typedef enum TpRetirementNext
+{
+    TP_RETIREMENT_NEXT_INVALID, TP_RETIREMENT_NEXT_READY, TP_RETIREMENT_NEXT_DONE
+} TpRetirementNext;
+
+static int tp_retirement_execution_init(TpRetirementExecution* state, uint64_t seed,
+                                        unsigned rows, unsigned const* runtime_rows,
+                                        unsigned runtime_count, unsigned pairs,
+                                        unsigned* workspace, size_t workspace_count)
+{
+    int ok = state && seed && rows && rows <= TP_RETIREMENT_MAX_CELLS &&
+             runtime_count <= rows && (!runtime_count || runtime_rows) &&
+             pairs >= TP_RETIREMENT_MIN_PAIRS_PER_ROUND &&
+             pairs <= TP_RETIREMENT_EXECUTION_MAX_PAIRS && !(pairs & 1) &&
+             workspace && workspace_count == (size_t)rows * 4;
+    for (unsigned i = 0; ok && i < runtime_count; ++i)
+        ok = runtime_rows[i] < rows && (!i || runtime_rows[i] > runtime_rows[i - 1]);
+    if (state)
+    {
+        *state = (TpRetirementExecution){.failed = !ok};
+        if (ok)
+        {
+            state->seed = seed;
+            state->rows = rows;
+            state->runtime_rows = workspace + rows * 3;
+            if (runtime_count) memmove(state->runtime_rows, runtime_rows, sizeof(*runtime_rows) * runtime_count);
+            state->runtime_count = runtime_count;
+            state->pairs = pairs;
+            state->first_orders = workspace;
+            state->first_cells = workspace + rows;
+            state->second_cells = workspace + rows * 2;
+            state->expected = (uint64_t)(rows + runtime_count) * 2 *
+                              (TP_RETIREMENT_WARMUPS + TP_RETIREMENT_ROUNDS * pairs);
+        }
+    }
+    return ok;
+}
+
+static TpRetirementNext tp_retirement_execution_peek(TpRetirementExecution* state,
+                                                    TpRetirementInvocation* invocation)
+{
+    TpRetirementNext result = TP_RETIREMENT_NEXT_INVALID;
+    if (state && invocation && !state->failed && state->rows)
+    {
+        unsigned count = state->kind ? state->runtime_count : state->rows;
+        if (state->sequence == state->expected)
+            result = TP_RETIREMENT_NEXT_DONE;
+        else if (state->pending)
+            result = TP_RETIREMENT_NEXT_READY;
+        else if (count && state->kind < 2)
+        {
+            TpRetirementInvocation next = {.sequence = state->sequence, .kind = state->kind,
+                .phase = state->phase, .round = -1, .pair = -1, .warmup = -1, .position = -1};
+            unsigned dense = state->cell;
+            int ok = 1;
+            if (!state->phase)
+            {
+                next.warmup = (int)state->repeat;
+                next.variant = state->position;
+            }
+            else
+            {
+                if (!state->scheduled)
+                {
+                    ok = tp_retirement_block_schedule(state->seed, state->round, state->block, count,
+                        state->first_orders, state->first_cells, state->second_cells, count);
+                    state->scheduled = ok;
+                }
+                if (ok)
+                {
+                    dense = (state->pair_in_block ? state->second_cells : state->first_cells)[state->cell];
+                    next.variant = state->first_orders[dense] ^ state->pair_in_block ^ state->position;
+                    next.round = (int)state->round;
+                    next.pair = (int)(state->block * 2 + state->pair_in_block);
+                    next.position = (int)state->position;
+                }
+            }
+            if (ok)
+            {
+                next.row = state->kind ? state->runtime_rows[dense] : dense;
+                state->current = next;
+                state->pending = 1;
+                result = TP_RETIREMENT_NEXT_READY;
+            }
+            else state->failed = 1;
+        }
+        else state->failed = 1;
+        if (result == TP_RETIREMENT_NEXT_READY) *invocation = state->current;
+    }
+    return result;
+}
+
+/* A failed launch, failed oracle, failed write or cancelled invocation poisons
+ * this attempt. There is deliberately no skip, rewind, import or resume API. */
+static int tp_retirement_execution_commit(TpRetirementExecution* state, int complete)
+{
+    int ok = state && !state->failed && state->pending && complete;
+    if (ok)
+    {
+        unsigned count = state->kind ? state->runtime_count : state->rows;
+        state->pending = 0;
+        ++state->sequence;
+        if (++state->position == 2)
+        {
+            state->position = 0;
+            if (!state->phase)
+            {
+                if (++state->repeat == TP_RETIREMENT_WARMUPS)
+                {
+                    state->repeat = 0;
+                    if (++state->cell == count) { state->cell = 0; state->phase = 1; }
+                }
+            }
+            else if (++state->cell == count)
+            {
+                state->cell = 0;
+                if (++state->pair_in_block == 2)
+                {
+                    state->pair_in_block = 0;
+                    state->scheduled = 0;
+                    if (++state->block == state->pairs / 2)
+                    {
+                        state->block = 0;
+                        if (++state->round == TP_RETIREMENT_ROUNDS)
+                        {
+                            state->round = 0;
+                            state->phase = 0;
+                            ++state->kind;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (state && !ok) state->failed = 1;
+    return ok;
+}
+
+static int tp_retirement_execution_complete(TpRetirementExecution const* state)
+{
+    int result = state && state->rows && !state->failed && !state->pending &&
+                 state->expected && state->sequence == state->expected;
+    return result;
+}
+
+static int tp_retirement_token(char const* text)
+{
+    size_t count = text ? strlen(text) : 0;
+    int ok = count > 0 && count <= 128;
+    for (size_t i = 0; ok && i < count; ++i)
+    {
+        unsigned char c = (unsigned char)text[i];
+        int alphanumeric = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        ok = alphanumeric || (i && (c == '_' || c == '.' || c == ':' || c == '-'));
+    }
+    return ok;
+}
+
+static int tp_retirement_process_instance(char output[65], char const* job, uint64_t attempt,
+                                         char const* boot, uint64_t pid, char const* start_token)
+{
+    char bytes[640];
+    int ok = output && attempt && pid && tp_retirement_token(job) &&
+             tp_retirement_token(boot) && tp_retirement_token(start_token);
+    int length = ok ? snprintf(bytes, sizeof(bytes),
+        "{\"attempt\":%" PRIu64 ",\"boot_id\":\"%s\",\"job_id\":\"%s\",\"pid\":%" PRIu64
+        ",\"process_start_token\":\"%s\"}", attempt, boot, job, pid, start_token) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(bytes);
+    if (ok)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, bytes, (u64)length);
+        sha256_finish_hex(&hash, output);
+    }
+    else if (output) output[0] = 0;
+    return ok;
+}
+
+/* Render an exact nanosecond interval in Python's canonical JSON number form.
+ * Limiting one invocation to a day keeps at most 14 significant decimal digits;
+ * every such decimal round-trips without changing its shortest representation.
+ * Integer seconds remain JSON integers. Tiny intervals use the same exponent
+ * spelling as json.dumps. No locale-dependent floating-point formatting runs
+ * in collection. The service's per-invocation deadline is stricter than this
+ * representation bound; this is not an execution-policy override. */
+static int tp_retirement_seconds(char output[32], uint64_t nanoseconds)
+{
+    int ok = output && nanoseconds && nanoseconds <= UINT64_C(86400000000000);
+    if (ok)
+    {
+        if (nanoseconds < 100000)
+        {
+            char digits[16];
+            int count = snprintf(digits, sizeof(digits), "%" PRIu64, nanoseconds);
+            int exponent = 10 - count;
+            while (count > 1 && digits[count - 1] == '0') digits[--count] = 0;
+            if (count == 1) snprintf(output, 32, "%ce-0%d", digits[0], exponent);
+            else snprintf(output, 32, "%c.%se-0%d", digits[0], digits + 1, exponent);
+        }
+        else
+        {
+            uint64_t whole = nanoseconds / 1000000000;
+            unsigned fraction = (unsigned)(nanoseconds % 1000000000);
+            if (!fraction) snprintf(output, 32, "%" PRIu64, whole);
+            else
+            {
+                int count = snprintf(output, 32, "%" PRIu64 ".%09u", whole, fraction);
+                while (count > 0 && output[count - 1] == '0') output[--count] = 0;
+            }
+        }
+    }
+    else if (output) output[0] = 0;
+    return ok;
+}
+
+static int tp_retirement_digest(char const* text)
+{
+    int ok = text && strlen(text) == 64;
+    for (unsigned i = 0; ok && i < 64; ++i)
+        ok = (text[i] >= '0' && text[i] <= '9') || (text[i] >= 'a' && text[i] <= 'f');
+    return ok;
+}
+
+typedef struct TpRetirementOutput
+{
+    char const* executable_sha256;
+    char const* command_sha256;
+    char const* output_sha256;
+    char const* code_section_sha256;
+    uint64_t code_section_bytes;
+} TpRetirementOutput;
+
+/* Only the supervisor can supply authenticated plan/output identities. This
+ * encoder provides bounded bytes, ordering and failure handling, not authority.
+ * It writes the existing #568 invocation schema and adds no result schema. */
+static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
+    TpRetirementInvocation const* invocation, TpProcessObservation const* observed,
+    TpProcess const* process, TpRetirementOutput const* output,
+    char const* job, uint64_t attempt, char const* boot, int cpu)
+{
+    size_t result = 0;
+    char instance[65], start[32], seconds[32];
+    int ok = bytes && capacity && capacity <= TP_RETIREMENT_EXECUTION_LINE_CAP &&
+        invocation && invocation->kind < 2 && invocation->phase < 2 && invocation->variant < 2 &&
+        observed && observed->valid && observed->pid && observed->start_token &&
+        observed->started_ns && observed->finished_ns > observed->started_ns &&
+        process && !process->launch_error && !process->exit_code && !process->signal_number &&
+        !process->timed_out && isfinite(process->wall_seconds) && process->wall_seconds > 0 &&
+        cpu >= 0 && output && tp_retirement_digest(output->executable_sha256) &&
+        tp_retirement_digest(output->command_sha256) && tp_retirement_digest(output->output_sha256);
+    if (ok)
+    {
+        ok = invocation->phase ? invocation->round >= 0 && (unsigned)invocation->round < TP_RETIREMENT_ROUNDS &&
+            invocation->pair >= 0 && (unsigned)invocation->pair < TP_RETIREMENT_EXECUTION_MAX_PAIRS &&
+            invocation->warmup == -1 && invocation->position >= 0 && invocation->position < 2 :
+            invocation->round == -1 && invocation->pair == -1 && invocation->position == -1 &&
+            invocation->warmup >= 0 && (unsigned)invocation->warmup < TP_RETIREMENT_WARMUPS;
+        ok = ok && (output->code_section_bytes ? !invocation->kind &&
+            output->code_section_bytes <= INT64_MAX && tp_retirement_digest(output->code_section_sha256) :
+            output->code_section_sha256 == NULL);
+        ok = ok && (invocation->kind || (isfinite(process->peak_rss_bytes) &&
+            process->peak_rss_bytes > 0 && process->peak_rss_bytes <= 9007199254740991.0 &&
+            floor(process->peak_rss_bytes) == process->peak_rss_bytes));
+    }
+    if (ok)
+    {
+        uint64_t elapsed = observed->finished_ns - observed->started_ns;
+        snprintf(start, sizeof(start), "%" PRIu64, observed->start_token);
+        ok = tp_retirement_process_instance(instance, job, attempt, boot, observed->pid, start) &&
+            tp_retirement_seconds(seconds, elapsed) &&
+            fabs(process->wall_seconds * 1000000000.0 - (double)elapsed) <= 1.0;
+    }
+    if (ok)
+    {
+        char code_bytes[32] = "null", code_hash[68] = "null", rss[32] = "null";
+        char round[16] = "null", pair[16] = "null", warmup[16] = "null", position[16] = "null";
+        if (output->code_section_bytes)
+        {
+            snprintf(code_bytes, sizeof(code_bytes), "%" PRIu64, output->code_section_bytes);
+            snprintf(code_hash, sizeof(code_hash), "\"%s\"", output->code_section_sha256);
+        }
+        if (!invocation->kind) snprintf(rss, sizeof(rss), "%" PRIu64, (uint64_t)process->peak_rss_bytes);
+        if (invocation->phase)
+        {
+            snprintf(round, sizeof(round), "%d", invocation->round);
+            snprintf(pair, sizeof(pair), "%d", invocation->pair);
+            snprintf(position, sizeof(position), "%d", invocation->position);
+        }
+        else snprintf(warmup, sizeof(warmup), "%d", invocation->warmup);
+        int count = snprintf(bytes, capacity,
+            "{\"cancelled\":false,\"code_section_bytes\":%s,\"code_section_sha256\":%s,"
+            "\"command_sha256\":\"%s\",\"cpu\":%d,\"executable_sha256\":\"%s\",\"exit_code\":0,"
+            "\"finished_ns\":%" PRIu64 ",\"kind\":\"%s\",\"output_sha256\":\"%s\",\"pair\":%s,"
+            "\"peak_rss_bytes\":%s,\"phase\":\"%s\",\"pid\":%" PRIu64 ",\"position\":%s,"
+            "\"process_instance_sha256\":\"%s\",\"process_start_token\":\"%s\",\"round\":%s,"
+            "\"row\":%u,\"sequence\":%" PRIu64 ",\"signal\":0,\"started_ns\":%" PRIu64 ","
+            "\"timed_out\":false,\"variant\":\"%s\",\"wall_seconds\":%s,\"warmup\":%s}\n",
+            code_bytes, code_hash, output->command_sha256, cpu, output->executable_sha256,
+            observed->finished_ns, invocation->kind ? "runtime" : "compiler", output->output_sha256,
+            pair, rss, invocation->phase ? "sample" : "warmup", observed->pid, position, instance,
+            start, round, invocation->row, invocation->sequence, observed->started_ns,
+            invocation->variant ? "candidate" : "baseline", seconds, warmup);
+        if (count > 0 && (size_t)count < capacity) result = (size_t)count;
+    }
+    if (!result && bytes && capacity) bytes[0] = 0;
+    return result;
+}
+#endif
