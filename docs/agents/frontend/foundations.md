@@ -655,3 +655,5 @@ expansion from exceeding Windows ARM64's unwind function-size limit.
   capacity grows monotonically; unused capacity is never read. Frontend SSA
   and canonical compaction remap or invalidate its place IDs before later
   promotion and selection consume it. No frontend entity IDs enter the map.
+
+Enum initializer lookup includes pending members of earlier enum definitions: file-scope enumerators become ordinary entities only after the declaration pass. The typed integer-constant evaluator retains their existing `int` binding until #900 selects dialect-correct declaration-point types.

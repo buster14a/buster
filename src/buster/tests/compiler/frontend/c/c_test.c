@@ -294,7 +294,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestA
     target.cpu_arch = CPU_ARCH_X86_64;
     target.os = OPERATING_SYSTEM_LINUX;
     String8 source =
-        S8("enum TypedIntegerConstants {\n"
+        S8("enum PriorIntegerConstants { PRIOR_VALUE = 4 };\n"
+           "struct AtomicEnumOperand { char bytes[3]; };\n"
+           "enum TypedIntegerConstants {\n"
+           " PRIOR_REFERENCE = PRIOR_VALUE,\n"
+           " ATOMIC_SIZE = sizeof(_Atomic struct AtomicEnumOperand),\n"
+           " ATOMIC_ALIGNMENT = _Alignof(_Atomic(struct AtomicEnumOperand)),\n"
            " HEX_U64 = 0xffffffffffffffff,\n"
            " DEC_U64 = 18446744073709551615,\n"
            " CONDITIONAL_LL = (1U ? -1LL : 0LL),\n"
@@ -304,7 +309,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestA
            " ABOVE_I64 = 9223372036854775808,\n"
            " WIDE_POSITIVE = ((__int128)1 << 100),\n"
            " WIDE_NEGATIVE = -((__int128)1 << 100)\n"
-           "};\n");
+           "};\n"
+           "_Static_assert(sizeof(_Atomic struct AtomicEnumOperand) == 4, \"atomic layout after enum\");\n");
     CPreprocessResult preprocess = c_preprocess(
         temporary.arena, source,
         (CPreprocessOptions){
@@ -326,6 +332,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestA
         bool is_signed;
         bool is_negative;
     } expected[] = {
+        {S8("PRIOR_VALUE"), 4, 0, C_TYPE_INT, C_INTEGER_RANK_INT, 32, true, false},
+        {S8("PRIOR_REFERENCE"), 4, 0, C_TYPE_INT, C_INTEGER_RANK_INT, 32, true, false},
+        {S8("ATOMIC_SIZE"), 4, 0, C_TYPE_UNSIGNED_LONG, C_INTEGER_RANK_LONG, 64, false, false},
+        {S8("ATOMIC_ALIGNMENT"), 4, 0, C_TYPE_UNSIGNED_LONG, C_INTEGER_RANK_LONG, 64, false, false},
         {S8("HEX_U64"), UINT64_MAX, 0, C_TYPE_UNSIGNED_LONG, C_INTEGER_RANK_LONG, 64, false, false},
         {S8("DEC_U64"), UINT64_MAX, 0, C_TYPE_INT128, C_INTEGER_RANK_INT128, 128, true, false},
         {S8("CONDITIONAL_LL"), 1, 0, C_TYPE_LONG_LONG, C_INTEGER_RANK_LONG_LONG, 64, true, true},

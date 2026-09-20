@@ -335,3 +335,13 @@ streams, and `/dev/full` on Linux, must still terminate normally with status 1
 within the existing deadline. Fatal reporters use recoverable output attempts
 so an output failure cannot recursively report itself. These are unsuccessful
 process controls, not successful compiler or missing-evidence observations.
+
+## Win64 padded-vector execution
+
+The inline padded-vector fixture runs natively on Windows x86-64 in all four
+allocator modes for supported baseline/Haswell/Zen 5 models. On Linux with
+Wine, its Clang/Buster halves also run in both directions. The freestanding
+Clang consumer supplies its own `memset` for aggregate initialization; that
+helper is enabled only for this mixed-object build. Link failures retain the
+symbol diagnostic, and runtime failures retain the process status and captured
+output. Exit 1 identifies the first U8x3 value check, not an ISA probe.

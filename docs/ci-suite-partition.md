@@ -290,3 +290,7 @@ object reuse is implemented separately by #412. Evidence packaging is described
 above (#409). Internal combination sharding (#333), analyzer partitioning (#92)
 and full coverage manifests (#335) remain separately tracked; no issue is
 closed by the suite split alone.
+
+## Native runner phase observations
+
+Native correctness ownership is unchanged. `tools/ci_native_observation.py` wraps the existing native commands with identity-bound monotonic phase records and publishes `native-observation.json` through the existing packed artifact. See [Native runner observations](native-runner-observations.md) for schemas, failure retention, and the exact-match broad-degradation classifier.

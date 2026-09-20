@@ -418,3 +418,7 @@ alphanumeric words separated by single hyphens. Both refs for one arm must
 point to the same reviewed commit. Any other selected ref is ordinary mode.
 The effective key still binds runner OS and architecture, Zig target, and the
 pinned `.github/zig.json` digest; it adds only the validated namespace.
+
+## Native runner phase observations
+
+Every native matrix lane retains calibrated, process-local phase evidence through its existing artifact. Provider preamble and Actions API clocks are joined only during audit; missing or contradictory identity is retained but cannot enter a performance comparison. See [Native runner observations](native-runner-observations.md).

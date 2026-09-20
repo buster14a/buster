@@ -3075,9 +3075,9 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
     return kind;
 }
 
-// Enumerators are published as ordinary entities only after their enum type
-// has been completed. Explicit initializers still need earlier members of the
-// same definition, so semantic constant evaluation gets this bounded view.
+// File-scope enumerators are published as ordinary entities after the whole
+// declaration pass. Initializers can reference an earlier enum as well as an
+// earlier member of the current definition, so retain the existing pending view.
 // Until #900 selects each enumerator's dialect-correct declaration-point type,
 // those identifiers deliberately retain the frontend's current `int` binding.
 BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CTypeParseMachine* machine, CPreprocessResult preprocess,
@@ -3087,7 +3087,7 @@ BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CTypeParseMachi
     if (machine && machine->enum_constant_members_active && machine->enum_constant_member_start <= result->enum_member_count)
     {
         String8 name = c_token_spelling(preprocess.spelling_base, token);
-        for (u32 index = result->enum_member_count; !found && index > machine->enum_constant_member_start; index -= 1)
+        for (u32 index = result->enum_member_count; !found && index; index -= 1)
         {
             CEnumMember const* member = result->enum_members + index - 1;
             bool symbol_match = token.symbol && member->symbol == token.symbol;
@@ -17581,7 +17581,10 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
             operand_start += 1;
             operand_end -= 1;
             u32 cursor = operand_start;
-            type = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, operand_start, operand_end, &cursor);
+            if (!machine->enum_constant_members_active)
+            {
+                type = c_parse_scalar_type_in_scope(machine, result, preprocess, scope, operand_start, operand_end, &cursor);
+            }
             if (type.value < result->type_count)
             {
                 type = c_parse_pointer_chain(result, preprocess, type, &cursor, operand_end);
@@ -17596,13 +17599,18 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
                 type = C_TYPE_ID_INVALID;
             }
         }
-        if (type.value >= result->type_count)
+        if (!machine->enum_constant_members_active && type.value >= result->type_count)
         {
             c_parse_expression_type_query(machine, arena, preprocess, result, scope, operand_start, operand_end, &type);
         }
         u64 size = 0;
         u32 alignment = 0;
-        value.valid = c_parse_type_layout(machine, arena, preprocess, result, type, &size, &alignment);
+        // An enum initializer runs inside the type machine. Its sizeof query
+        // must not mutate that machine's in-progress tag and qualifier state.
+        value.valid = machine->enum_constant_members_active
+                          ? c_parse_machineless_sizeof_operand_layout(arena, result, preprocess, scope,
+                                                                      operand_start, operand_end, &size, &alignment)
+                          : c_parse_type_layout(machine, arena, preprocess, result, type, &size, &alignment);
         if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_FUNCTION)
         {
             size = 1;
