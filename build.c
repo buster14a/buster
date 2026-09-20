@@ -3133,6 +3133,387 @@ BUSTER_GLOBAL_LOCAL String8 self_host_metrics_path(Arena* arena, String8 output)
 // the buffered output finally reaches the log.
 #define SELF_HOST_TIMEOUT_SECONDS 600
 
+
+#define STAGE_OBJECT_PROVENANCE_MAGIC "BUSTER_STAGE_OBJECT_PROVENANCE_V1"
+
+typedef enum StageObjectProvenanceFailure StageObjectProvenanceFailure;
+enum StageObjectProvenanceFailure
+{
+    STAGE_OBJECT_PROVENANCE_FAILURE_NONE,
+    STAGE_OBJECT_PROVENANCE_FAILURE_RECORD,
+    STAGE_OBJECT_PROVENANCE_FAILURE_OBJECT,
+    STAGE_OBJECT_PROVENANCE_FAILURE_SOURCE,
+    STAGE_OBJECT_PROVENANCE_FAILURE_TREE,
+    STAGE_OBJECT_PROVENANCE_FAILURE_COMPILER,
+    STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN,
+};
+
+typedef struct StageObjectProvenanceRecord StageObjectProvenanceRecord;
+struct StageObjectProvenanceRecord
+{
+    char8 magic[sizeof(STAGE_OBJECT_PROVENANCE_MAGIC)];
+    char8 object_sha256[SHA256_HEX_CAPACITY];
+    char8 source_sha256[SHA256_HEX_CAPACITY];
+    char8 tree_sha256[SHA256_HEX_CAPACITY];
+    char8 compiler_sha256[SHA256_HEX_CAPACITY];
+    char8 toolchain_sha256[SHA256_HEX_CAPACITY];
+    u64 checksum;
+};
+
+typedef struct StageObjectProvenance StageObjectProvenance;
+struct StageObjectProvenance
+{
+    String8 object_path;
+    String8 source_path;
+    String8 compiler_path;
+    String8 record_path;
+    String8 tree_identity;
+    // Optional preauthenticated identities are valid only for immutable snapshots.
+    // A present malformed digest fails closed instead of falling back to a path read.
+    String8 authenticated_source_sha256;
+    String8 authenticated_compiler_sha256;
+    SliceString8 toolchain_arguments;
+    StageObjectProvenanceFailure failure;
+    u32 captured : 1;
+    u32 verified : 1;
+};
+
+BUSTER_GLOBAL_LOCAL String8 stage_object_sha256_bytes(Arena* arena, u8* bytes, u64 length)
+{
+    Sha256 hash = {0};
+    char8 digest[SHA256_HEX_CAPACITY] = {0};
+    sha256_init(&hash);
+    sha256_add(&hash, bytes, length);
+    sha256_finish_hex(&hash, digest);
+    return string_duplicate_arena(arena, string_from_pointer(digest), true);
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_sha256_file(Arena* arena, String8 path, String8* digest)
+{
+    FileMapRead map = file_map_read(arena, path, (FileReadOptions){.map_required = 1});
+    bool result = map.mapped_pointer && map.bytes.pointer && map.bytes.length;
+    if (result)
+    {
+        *digest = stage_object_sha256_bytes(arena, map.bytes.pointer, map.bytes.length);
+    }
+    file_map_unmap(map);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_sha256_valid(String8 digest)
+{
+    bool result = digest.length == SHA256_HEX_CAPACITY - 1;
+    for (u64 index = 0; result && index < digest.length; index += 1)
+    {
+        char8 byte = digest.pointer[index];
+        result = (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_sha256_resolve(Arena* arena, String8 path, String8 authenticated_digest,
+                                                         String8* digest)
+{
+    bool result = false;
+    if (authenticated_digest.length)
+    {
+        result = stage_object_sha256_valid(authenticated_digest);
+        if (result) { *digest = authenticated_digest; }
+    }
+    else
+    {
+        result = stage_object_sha256_file(arena, path, digest);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 stage_object_sha256_arguments(Arena* arena, SliceString8 arguments)
+{
+    Sha256 hash = {0};
+    char8 digest[SHA256_HEX_CAPACITY] = {0};
+    sha256_init(&hash);
+    for (u64 argument_i = 0; argument_i < arguments.length; argument_i += 1)
+    {
+        String8 argument = arguments.pointer[argument_i];
+        sha256_add(&hash, (u8*)&argument.length, sizeof(argument.length));
+        sha256_add(&hash, (u8*)argument.pointer, argument.length);
+    }
+    sha256_finish_hex(&hash, digest);
+    return string_duplicate_arena(arena, string_from_pointer(digest), true);
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_digest_copy(char8 destination[SHA256_HEX_CAPACITY], String8 source)
+{
+    bool result = source.length == SHA256_HEX_CAPACITY - 1;
+    if (result)
+    {
+        memcpy(destination, source.pointer, source.length);
+        destination[source.length] = 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 stage_object_source_tree_identity(Arena* arena)
+{
+    String8 result = {0};
+    String8 arguments[] = {S8("git"), S8("rev-parse"), S8("HEAD^{tree}")};
+    ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(arguments), (SliceString8){0}, (SliceString8){0},
+                                                 (ProcessSpawnOptions){
+                                                     .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                                     .use_process_environment = 1,
+                                                 });
+    if (spawn.handle)
+    {
+        ProcessWaitResult wait = os_process_wait_sync(arena, spawn);
+        if (wait.result == PROCESS_RESULT_SUCCESS)
+        {
+            result = BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]);
+            while (result.length && (u8)result.pointer[result.length - 1] <= ' ')
+            {
+                result.length -= 1;
+            }
+            result = string_duplicate_arena(arena, result, true);
+        }
+    }
+    if (!result.length)
+    {
+        result = os_get_environment_variable(S8("GITHUB_SHA"));
+        if (result.length)
+        {
+            result = string_duplicate_arena(arena, result, true);
+        }
+    }
+    if (!result.length)
+    {
+        String8 build_digest = {0};
+        if (stage_object_sha256_file(arena, S8("build.c"), &build_digest))
+        {
+            result = string_format_z(arena, S8("source-tree-{S8}"), build_digest);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_provenance_record_create(Arena* arena, StageObjectProvenance* provenance,
+                                                                StageObjectProvenanceRecord* record)
+{
+    String8 object_digest = {0};
+    String8 source_digest = {0};
+    String8 compiler_digest = {0};
+    String8 tree_digest = stage_object_sha256_bytes(arena, (u8*)provenance->tree_identity.pointer, provenance->tree_identity.length);
+    String8 toolchain_digest = stage_object_sha256_arguments(arena, provenance->toolchain_arguments);
+    bool result = provenance->tree_identity.length && provenance->toolchain_arguments.length &&
+                  stage_object_sha256_file(arena, provenance->object_path, &object_digest) &&
+                  stage_object_sha256_resolve(arena, provenance->source_path,
+                                              provenance->authenticated_source_sha256, &source_digest) &&
+                  stage_object_sha256_resolve(arena, provenance->compiler_path,
+                                              provenance->authenticated_compiler_sha256, &compiler_digest);
+    if (result)
+    {
+        *record = (StageObjectProvenanceRecord){0};
+        memcpy(record->magic, STAGE_OBJECT_PROVENANCE_MAGIC, sizeof(record->magic));
+        result = stage_object_digest_copy(record->object_sha256, object_digest) &&
+                 stage_object_digest_copy(record->source_sha256, source_digest) &&
+                 stage_object_digest_copy(record->tree_sha256, tree_digest) &&
+                 stage_object_digest_copy(record->compiler_sha256, compiler_digest) &&
+                 stage_object_digest_copy(record->toolchain_sha256, toolchain_digest);
+        if (result)
+        {
+            u64 checksum_bytes = (u64)((u8*)&record->checksum - (u8*)record);
+            record->checksum = buster_hash_64((u8*)record, checksum_bytes);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_provenance_capture(Arena* arena, StageObjectProvenance* provenance, bool diagnostics)
+{
+    StageObjectProvenanceRecord record = {0};
+    provenance->captured = 0;
+    provenance->verified = 0;
+    provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_RECORD;
+    bool result = stage_object_provenance_record_create(arena, provenance, &record) &&
+                  file_write(provenance->record_path, (ByteSlice){.pointer = (u8*)&record, .length = sizeof(record)});
+    if (result)
+    {
+        provenance->captured = 1;
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_NONE;
+    }
+    else if (diagnostics)
+    {
+        string_print(S8("error: could not record stage object provenance before linking: {S8}\n"), provenance->object_path);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 stage_object_provenance_failure_name(StageObjectProvenanceFailure failure)
+{
+    String8 result = S8("record");
+    if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_OBJECT) { result = S8("object digest (stale object)"); }
+    else if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_SOURCE) { result = S8("source identity"); }
+    else if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_TREE) { result = S8("repository tree identity"); }
+    else if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_COMPILER) { result = S8("compiler identity"); }
+    else if (failure == STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN) { result = S8("toolchain identity"); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_provenance_validate(Arena* arena, StageObjectProvenance* provenance, bool diagnostics)
+{
+    provenance->verified = 0;
+    provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_RECORD;
+    ByteSlice bytes = file_read(arena, provenance->record_path, (FileReadOptions){.map_required = 0});
+    StageObjectProvenanceRecord recorded = {0};
+    StageObjectProvenanceRecord current = {0};
+    bool result = bytes.pointer && bytes.length == sizeof(recorded);
+    if (result)
+    {
+        memcpy(&recorded, bytes.pointer, sizeof(recorded));
+        u64 checksum_bytes = (u64)((u8*)&recorded.checksum - (u8*)&recorded);
+        result = memory_compare(recorded.magic, STAGE_OBJECT_PROVENANCE_MAGIC, sizeof(recorded.magic)) &&
+                 recorded.checksum == buster_hash_64((u8*)&recorded, checksum_bytes) &&
+                 stage_object_provenance_record_create(arena, provenance, &current);
+    }
+    if (result && !memory_compare(recorded.object_sha256, current.object_sha256, sizeof(recorded.object_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_OBJECT;
+        result = false;
+    }
+    if (result && !memory_compare(recorded.source_sha256, current.source_sha256, sizeof(recorded.source_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_SOURCE;
+        result = false;
+    }
+    if (result && !memory_compare(recorded.tree_sha256, current.tree_sha256, sizeof(recorded.tree_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_TREE;
+        result = false;
+    }
+    if (result && !memory_compare(recorded.compiler_sha256, current.compiler_sha256, sizeof(recorded.compiler_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_COMPILER;
+        result = false;
+    }
+    if (result && !memory_compare(recorded.toolchain_sha256, current.toolchain_sha256, sizeof(recorded.toolchain_sha256)))
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN;
+        result = false;
+    }
+    if (result)
+    {
+        provenance->failure = STAGE_OBJECT_PROVENANCE_FAILURE_NONE;
+        provenance->verified = 1;
+    }
+    else if (diagnostics)
+    {
+        string_print(S8("error: stage object provenance {S8} mismatch before linking or retirement validation: {S8}\n"),
+                     stage_object_provenance_failure_name(provenance->failure), provenance->object_path);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult stage_object_provenance_capture_action(Arena* arena, void* data)
+{
+    return stage_object_provenance_capture(arena, (StageObjectProvenance*)data, true) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult stage_object_provenance_validate_action(Arena* arena, void* data)
+{
+    return stage_object_provenance_validate(arena, (StageObjectProvenance*)data, true) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+}
+
+BUSTER_GLOBAL_LOCAL bool stage_object_provenance_self_test(Arena* arena)
+{
+    String8 directory = string_format_z(arena, S8("build/stage-object-provenance-test-{u64}"), os_now_microseconds());
+    make_directory_recursive(arena, directory);
+    String8 object = path_join(arena, directory, S8("stage.o"));
+    String8 source = path_join(arena, directory, S8("stage.c"));
+    String8 compiler = path_join(arena, directory, S8("compiler"));
+    String8 record = path_join(arena, directory, S8("stage.o.provenance"));
+    String8 source_original = S8("int stage(void) { return 1; }\n");
+    String8 object_original = S8("object-v1");
+    String8 compiler_original = S8("compiler-v1");
+    String8 arguments[] = {compiler, S8("cc"), S8("-c"), source, S8("-o"), object};
+    String8 changed_arguments[] = {compiler, S8("cc"), S8("-c"), S8("-fPIC"), source, S8("-o"), object};
+    StageObjectProvenance provenance = {
+        .object_path = object,
+        .source_path = source,
+        .compiler_path = compiler,
+        .record_path = record,
+        .tree_identity = S8("tree-v1"),
+        .toolchain_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments),
+    };
+    bool result = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_original)) &&
+                  file_write(object, BUSTER_SLICE_TO_BYTE_SLICE(object_original)) &&
+                  file_write(compiler, BUSTER_SLICE_TO_BYTE_SLICE(compiler_original)) &&
+                  stage_object_provenance_capture(arena, &provenance, false) &&
+                  stage_object_provenance_validate(arena, &provenance, false) && provenance.verified;
+    if (result)
+    {
+        result = file_write(object, BUSTER_SLICE_TO_BYTE_SLICE(S8("object-v2"))) &&
+                 !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_OBJECT &&
+                 file_write(object, BUSTER_SLICE_TO_BYTE_SLICE(object_original));
+    }
+    if (result)
+    {
+        result = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(S8("int stage(void) { return 2; }\n"))) &&
+                 !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_SOURCE &&
+                 file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_original));
+    }
+    if (result)
+    {
+        provenance.tree_identity = S8("tree-v2");
+        result = !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_TREE;
+        provenance.tree_identity = S8("tree-v1");
+    }
+    if (result)
+    {
+        result = file_write(compiler, BUSTER_SLICE_TO_BYTE_SLICE(S8("compiler-v2"))) &&
+                 !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_COMPILER &&
+                 file_write(compiler, BUSTER_SLICE_TO_BYTE_SLICE(compiler_original));
+    }
+    if (result)
+    {
+        provenance.toolchain_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(changed_arguments);
+        result = !stage_object_provenance_validate(arena, &provenance, false) && !provenance.verified &&
+                 provenance.failure == STAGE_OBJECT_PROVENANCE_FAILURE_TOOLCHAIN;
+        provenance.toolchain_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(arguments);
+    }
+    if (result)
+    {
+        String8 source_digest = {0}, compiler_digest = {0};
+        provenance.record_path = path_join(arena, directory, S8("cached.stage.o.provenance"));
+        result = stage_object_sha256_file(arena, source, &source_digest) &&
+                 stage_object_sha256_file(arena, compiler, &compiler_digest);
+        provenance.authenticated_source_sha256 = source_digest;
+        provenance.authenticated_compiler_sha256 = compiler_digest;
+        result = result && stage_object_provenance_capture(arena, &provenance, false) &&
+                 stage_object_provenance_validate(arena, &provenance, false) && provenance.verified;
+    }
+    if (result)
+    {
+        provenance.record_path = path_join(arena, directory, S8("malformed.stage.o.provenance"));
+        provenance.authenticated_source_sha256 = S8("not-a-sha256");
+        result = !stage_object_provenance_capture(arena, &provenance, false) && !provenance.captured;
+        provenance.authenticated_source_sha256 = (String8){0};
+        provenance.authenticated_compiler_sha256 = (String8){0};
+    }
+    if (!result)
+    {
+        string_print(S8("error: stage object provenance self-test failed at check {S8}\n"),
+                     stage_object_provenance_failure_name(provenance.failure));
+    }
+    else
+    {
+        string_print(S8("STAGE_OBJECT_PROVENANCE_SELF_TEST matching=1 stale=1 source=1 tree=1 compiler=1 toolchain=1 cached=1 malformed_cached=1 pre_link=1\n"));
+    }
+    remove_path_recursive(arena, directory);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL SliceString8 self_host_compile_arguments(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
                                                             String8 register_allocator_flag)
 {
@@ -3221,22 +3602,135 @@ BUSTER_GLOBAL_LOCAL SliceString8 self_host_compile_arguments(Arena* arena, Strin
     return os_argument_builder_flush(&builder);
 }
 
-BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
-                                                     String8 timing_description, String8 register_allocator_flag)
+BUSTER_GLOBAL_LOCAL SliceString8 self_host_object_compile_arguments(Arena* arena, String8 compiler, String8 build_directory,
+                                                                   String8 sysroot, String8 output, String8 object,
+                                                                   String8 register_allocator_flag)
 {
-    BuildStep* step = step_add(arena);
-    ProcessRun* run = run_add(arena, step);
-    *run = (ProcessRun){
-        .arguments = self_host_compile_arguments(arena, compiler, build_directory, sysroot, output, register_allocator_flag),
+    String8 generated_include = string_format(arena, S8("-I{S8}/generated"), build_directory);
+    String8 source_metrics = string_format(arena, S8("-fsource-metrics={S8}"), self_host_metrics_path(arena, output));
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-Isrc"));
+    os_argument_builder_append(&builder, generated_include);
+#if BUSTER_WINDOWS
+    os_argument_builder_append(&builder, S8("-nostdinc"));
+    String8 system_includes = os_get_environment_variable(S8("INCLUDE"));
+    for (u64 start = 0; start < system_includes.length;)
+    {
+        u64 end = start;
+        while (end < system_includes.length && system_includes.pointer[end] != ';') { end += 1; }
+        if (end != start)
+        {
+            os_argument_builder_append(&builder, S8("-isystem"));
+            os_argument_builder_append(&builder, string_slice(system_includes, start, end));
+        }
+        start = end + 1;
+    }
+#endif
+    os_argument_builder_append(&builder, S8("-DBUSTER_UNITY_BUILD=1"));
+    os_argument_builder_append(&builder, S8("-DBUSTER_INCLUDE_TESTS=0"));
+    os_argument_builder_append(&builder, S8("-g"));
+    if (register_allocator_flag.length) { os_argument_builder_append(&builder, register_allocator_flag); }
+    os_argument_builder_append(&builder, S8("-v"));
+    os_argument_builder_append(&builder, source_metrics);
+#if BUSTER_MACOS
+    os_argument_builder_append(&builder, S8("-isysroot"));
+    os_argument_builder_append(&builder, sysroot);
+#else
+    BUSTER_UNUSED(sysroot);
+#endif
+    os_argument_builder_append(&builder, S8("-c"));
+    os_argument_builder_append(&builder, S8("src/buster/apps/ide/ide.c"));
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, object);
+    return os_argument_builder_flush(&builder);
+}
+
+BUSTER_GLOBAL_LOCAL SliceString8 self_host_link_arguments(Arena* arena, String8 compiler, String8 sysroot, String8 object, String8 output)
+{
+    OsArgumentBuilder builder = os_argument_builder_start(arena);
+    os_argument_builder_append(&builder, compiler);
+    os_argument_builder_append(&builder, S8("cc"));
+    os_argument_builder_append(&builder, S8("-g"));
+#if BUSTER_MACOS
+    os_argument_builder_append(&builder, S8("-isysroot"));
+    os_argument_builder_append(&builder, sysroot);
+#else
+    BUSTER_UNUSED(sysroot);
+#endif
+    os_argument_builder_append(&builder, object);
+#if BUSTER_MACOS
+    String8 frameworks[] = {S8("AppKit"), S8("Metal"), S8("QuartzCore"), S8("Foundation")};
+    for (u32 framework_index = 0; framework_index < BUSTER_ARRAY_LENGTH(frameworks); framework_index += 1)
+    {
+        os_argument_builder_append(&builder, S8("-framework"));
+        os_argument_builder_append(&builder, frameworks[framework_index]);
+    }
+#endif
+#if !BUSTER_WINDOWS
+    os_argument_builder_append(&builder, S8("-lm"));
+#endif
+    os_argument_builder_append(&builder, S8("-o"));
+    os_argument_builder_append(&builder, output);
+    return os_argument_builder_flush(&builder);
+}
+
+BUSTER_GLOBAL_LOCAL ProcessRun* self_host_compile_add(Arena* arena, String8 compiler, String8 build_directory, String8 sysroot, String8 output,
+                                                     String8 timing_description, String8 register_allocator_flag, ProcessRun** link_run_out)
+{
+    String8 object_suffix =
+#if BUSTER_WINDOWS
+        S8(".obj");
+#else
+        S8(".o");
+#endif
+    String8 object = string_format_z(arena, S8("{S8}.stage-object{S8}"), output, object_suffix);
+    String8 record = string_format_z(arena, S8("{S8}.provenance"), object);
+    remove_path_recursive(arena, object);
+    remove_path_recursive(arena, record);
+    SliceString8 compile_arguments = self_host_object_compile_arguments(arena, compiler, build_directory, sysroot, output, object,
+                                                                        register_allocator_flag);
+    SliceString8 link_arguments = self_host_link_arguments(arena, compiler, sysroot, object, output);
+    String8* identity_arguments = arena_allocate(arena, String8, compile_arguments.length + link_arguments.length);
+    u64 identity_count = 0;
+    for (u64 i = 0; i < compile_arguments.length; i += 1) { identity_arguments[identity_count++] = compile_arguments.pointer[i]; }
+    for (u64 i = 0; i < link_arguments.length; i += 1) { identity_arguments[identity_count++] = link_arguments.pointer[i]; }
+    StageObjectProvenance* provenance = arena_allocate(arena, StageObjectProvenance, 1);
+    *provenance = (StageObjectProvenance){
+        .object_path = object,
+        .source_path = S8("src/buster/apps/ide/ide.c"),
+        .compiler_path = compiler,
+        .record_path = record,
+        .tree_identity = stage_object_source_tree_identity(arena),
+        .toolchain_arguments = {.pointer = identity_arguments, .length = identity_count},
+    };
+    BuildStep* compile_step = step_add(arena);
+    ProcessRun* compile_run = run_add(arena, compile_step);
+    *compile_run = (ProcessRun){
+        .arguments = compile_arguments,
         .working_directory = S8("."),
         .timing_description = timing_description,
         .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
-        .spawn_options =
-            (ProcessSpawnOptions){
-                .use_process_environment = 1,
-            },
+        .spawn_options = (ProcessSpawnOptions){.use_process_environment = 1},
     };
-    return run;
+    BuildStep* capture_step = step_add(arena);
+    ProcessRun* capture_run = run_add(arena, capture_step);
+    *capture_run = (ProcessRun){.callback = stage_object_provenance_capture_action, .callback_data = provenance};
+    BuildStep* validate_step = step_add(arena);
+    ProcessRun* validate_run = run_add(arena, validate_step);
+    *validate_run = (ProcessRun){.callback = stage_object_provenance_validate_action, .callback_data = provenance};
+    BuildStep* link_step = step_add(arena);
+    ProcessRun* link_run = run_add(arena, link_step);
+    *link_run = (ProcessRun){
+        .arguments = link_arguments,
+        .working_directory = S8("."),
+        .timing_description = string_format(arena, S8("{S8} link"), timing_description),
+        .timeout_seconds = SELF_HOST_TIMEOUT_SECONDS,
+        .spawn_options = (ProcessSpawnOptions){.use_process_environment = 1},
+    };
+    if (link_run_out) { *link_run_out = link_run; }
+    return compile_run;
 }
 
 #if BUSTER_MACOS
@@ -3595,7 +4089,7 @@ BUSTER_GLOBAL_LOCAL void self_host_machine_bench_add(Arena* arena, String8 compi
     remove_path_recursive(arena, machine_stage);
     remove_path_recursive(arena, self_host_metrics_path(arena, machine_stage));
     self_host_compile_add(arena, compiler, build_directory, sysroot, machine_stage, S8("Self-host machine stage"),
-                          S8("-fregister-allocator=mir-stack"));
+                          S8("-fregister-allocator=mir-stack"), 0);
     BuildStep* bench_step = step_add(arena);
     ProcessRun* bench_run = run_add(arena, bench_step);
     String8* bench_arguments = arena_allocate(arena, String8, 2);
@@ -3631,7 +4125,7 @@ BUSTER_GLOBAL_LOCAL void self_host_canonical_compile_add(Arena* arena, String8 c
     remove_path_recursive(arena, canonical_stage);
     remove_path_recursive(arena, self_host_metrics_path(arena, canonical_stage));
     self_host_compile_add(arena, compiler, build_directory, sysroot, canonical_stage, S8("Self-host canonical stage"),
-                          S8("-fregister-allocator=none"));
+                          S8("-fregister-allocator=none"), 0);
 }
 #endif
 
@@ -3643,6 +4137,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
     string_print(S8("error: artifact fan-out self-host consumer is unsupported on this target\n"));
     return PROCESS_RESULT_FAILED;
 #else
+    if (!stage_object_provenance_self_test(arena))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
     String8 config = cmake_build_config(fanout->options);
     String8 sysroot = {0};
 #if BUSTER_MACOS
@@ -3692,11 +4190,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_from_existing_add(Arena* arena, Buil
         .callback = build_artifact_fanout_validate_action,
         .callback_data = fanout,
     };
+    ProcessRun* stage1_link_run = 0;
     ProcessRun* stage1_run = self_host_compile_add(arena, fanout->private_bootstrap_path, fanout->build_directory, sysroot, stage1,
-                                                   S8("Self-host stage 1"), (String8){0});
-    stage1_run->cleanup_callback = build_artifact_fanout_cleanup_action;
-    stage1_run->cleanup_data = fanout;
-    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0});
+                                                   S8("Self-host stage 1"), (String8){0}, &stage1_link_run);
+    stage1_link_run->cleanup_callback = build_artifact_fanout_cleanup_action;
+    stage1_link_run->cleanup_data = fanout;
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, fanout->build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0}, 0);
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb
@@ -3805,6 +4304,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
     string_print(S8("error: deterministic self-hosting is currently supported only on Linux and Windows x86-64, and macOS\n"));
     return PROCESS_RESULT_FAILED;
 #else
+    if (!stage_object_provenance_self_test(arena))
+    {
+        return PROCESS_RESULT_FAILED;
+    }
     String8 config = cmake_build_config(options);
     String8 sysroot = {0};
 #if BUSTER_MACOS
@@ -3863,8 +4366,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult self_host_add(Arena* arena, String8 build_dire
 #endif
     String8 targets[] = {S8("ide")};
     build_add(arena, build_directory, (SliceString8)BUSTER_ARRAY_TO_SLICE(targets), (SliceString8){0}, options);
-    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"), (String8){0});
-    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0});
+    ProcessRun* stage1_run = self_host_compile_add(arena, bootstrap, build_directory, sysroot, stage1, S8("Self-host stage 1"), (String8){0}, 0);
+    ProcessRun* stage2_run = self_host_compile_add(arena, stage1, build_directory, sysroot, stage2, S8("Self-host stage 2"), (String8){0}, 0);
     self_host_compare_and_bench_add(arena, stage1, stage2, stage1_run, stage2_run
 #if BUSTER_WINDOWS
                                     , stage1_pdb, stage2_pdb

@@ -1,0 +1,89 @@
+7fd520e55c3215eaa2d4d13f0e6dd45ae8dfde4c7831c483df084cbbbc2f1f69  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/warm
+== wall/CPU/RSS, 5 runs each, pinned to CPU 2: default (-g) then -g0 ==
+STAGE1_TIMING variant=default run=1 rc=0 wall_s=1.119 user_s=1.041 sys_s=0.077 maxrss_kib=1952304
+STAGE1_TIMING variant=default run=2 rc=0 wall_s=1.120 user_s=1.016 sys_s=0.103 maxrss_kib=1952468
+STAGE1_TIMING variant=default run=3 rc=0 wall_s=1.118 user_s=1.030 sys_s=0.087 maxrss_kib=1952752
+STAGE1_TIMING variant=default run=4 rc=0 wall_s=1.119 user_s=1.028 sys_s=0.090 maxrss_kib=1952824
+STAGE1_TIMING variant=default run=5 rc=0 wall_s=1.119 user_s=1.011 sys_s=0.106 maxrss_kib=1952716
+STAGE1_TIMING variant=g0 run=1 rc=0 wall_s=0.952 user_s=0.868 sys_s=0.083 maxrss_kib=1833756
+STAGE1_TIMING variant=g0 run=2 rc=0 wall_s=0.952 user_s=0.881 sys_s=0.070 maxrss_kib=1833916
+STAGE1_TIMING variant=g0 run=3 rc=0 wall_s=0.952 user_s=0.884 sys_s=0.067 maxrss_kib=1834308
+STAGE1_TIMING variant=g0 run=4 rc=0 wall_s=0.954 user_s=0.876 sys_s=0.077 maxrss_kib=1833556
+STAGE1_TIMING variant=g0 run=5 rc=0 wall_s=0.962 user_s=0.887 sys_s=0.073 maxrss_kib=1834084
+7fd520e55c3215eaa2d4d13f0e6dd45ae8dfde4c7831c483df084cbbbc2f1f69  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/default-1
+7fd520e55c3215eaa2d4d13f0e6dd45ae8dfde4c7831c483df084cbbbc2f1f69  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/default-2
+7fd520e55c3215eaa2d4d13f0e6dd45ae8dfde4c7831c483df084cbbbc2f1f69  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/default-3
+7fd520e55c3215eaa2d4d13f0e6dd45ae8dfde4c7831c483df084cbbbc2f1f69  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/default-4
+7fd520e55c3215eaa2d4d13f0e6dd45ae8dfde4c7831c483df084cbbbc2f1f69  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/default-5
+d194eb68b9cbddd76f38533ab17774f5a6fed5fa7f7685ee1ee17d69a576ec83  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/g0-1
+d194eb68b9cbddd76f38533ab17774f5a6fed5fa7f7685ee1ee17d69a576ec83  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/g0-2
+d194eb68b9cbddd76f38533ab17774f5a6fed5fa7f7685ee1ee17d69a576ec83  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/g0-3
+d194eb68b9cbddd76f38533ab17774f5a6fed5fa7f7685ee1ee17d69a576ec83  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/g0-4
+d194eb68b9cbddd76f38533ab17774f5a6fed5fa7f7685ee1ee17d69a576ec83  /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/g0-5
+== perf stat group A (core), 3 repeats, pinned ==
+
+ Performance counter stats for 'taskset -c 2 build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/statA' (3 runs):
+
+        5713400806      cycles                                                                  ( +-  0.05% )
+       15806850033      instructions                                                            ( +-  0.00% )
+        2992656435      branches                                                                ( +-  0.00% )
+          51290153      branch-misses                                                           ( +-  0.10% )
+           1119.74 msec task-clock:u                                                            ( +-  0.15% )
+              2827      page-faults:u                                                           ( +-  0.27% )
+                 0      context-switches:u                                                    
+
+       1.130831825 +- 0.005844254 seconds time elapsed  ( +-  0.52% )
+
+== perf stat group B (memory), 3 repeats, pinned ==
+
+ Performance counter stats for 'taskset -c 2 build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/statB' (3 runs):
+
+       15806810108      instructions                                                            ( +-  0.00% )
+        7431500856      L1-dcache-loads                                                         ( +-  0.03% )
+         209341151      L1-dcache-load-misses                                                   ( +-  0.17% )
+          39912092      L1-icache-load-misses                                                   ( +-  0.14% )
+          19421060      cache-misses                                                            ( +-  0.61% )
+
+       1.133457570 +- 0.003069396 seconds time elapsed  ( +-  0.27% )
+
+== perf stat group A with -g0, 3 repeats, pinned ==
+
+ Performance counter stats for 'taskset -c 2 build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g0 src/buster/apps/ide/ide.c -lm -o /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/statA-g0' (3 runs):
+
+        4823591493      cycles                                                                  ( +-  0.08% )
+       12737229140      instructions                                                            ( +-  0.00% )
+        2330504845      branches                                                                ( +-  0.00% )
+          43222085      branch-misses                                                           ( +-  0.05% )
+            951.70 msec task-clock:u                                                            ( +-  0.09% )
+
+       0.960648919 +- 0.003929705 seconds time elapsed  ( +-  0.41% )
+
+== perf stat group A, object only (-g -c), 3 repeats, pinned ==
+
+ Performance counter stats for 'taskset -c 2 build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c src/buster/apps/ide/ide.c -o /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/statA.o' (3 runs):
+
+        5675695438      cycles                                                                  ( +-  0.02% )
+       15808613826      instructions                                                            ( +-  0.00% )
+        2999775533      branches                                                                ( +-  0.00% )
+          51162067      branch-misses                                                           ( +-  0.18% )
+           1112.74 msec task-clock:u                                                            ( +-  0.15% )
+
+       1.122347425 +- 0.005974846 seconds time elapsed  ( +-  0.53% )
+
+== perf stat group A, preprocess only (-E), 3 repeats, pinned ==
+
+ Performance counter stats for 'taskset -c 2 build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -E src/buster/apps/ide/ide.c -o /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/statA.i' (3 runs):
+
+         542862816      cycles                                                                  ( +-  0.04% )
+        1856212245      instructions                                                            ( +-  0.00% )
+         305567439      branches                                                                ( +-  0.00% )
+           3771501      branch-misses                                                           ( +-  0.11% )
+            132.21 msec task-clock:u                                                            ( +-  0.69% )
+
+       0.137203012 +- 0.003182414 seconds time elapsed  ( +-  2.32% )
+
+-rwx------ 1 buster-github-runner buster-github-runner 42267960 Sep 19 01:25 /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/statA
+-rw------- 1 buster-github-runner buster-github-runner 27458560 Sep 19 01:25 /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/statA.i
+-rw------- 1 buster-github-runner buster-github-runner 48201096 Sep 19 01:25 /var/lib/buster-github-runner/actions-runner/_work/_temp/zen5-audit/stage1/statA.o
+== ide bench ==
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=30 bytes=21042 min_ns=819944 median_ns=845492 throughput_mb_s=24

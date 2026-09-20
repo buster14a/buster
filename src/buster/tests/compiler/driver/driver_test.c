@@ -4,6 +4,7 @@
 // compiler_driver_test_dwarf5_objects covers external DWARF contributions and links.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <buster/lib/compiler/driver/driver_internal.h>
+#include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/tests/compiler/driver/driver_test.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/tests/compiler/codegen/codegen_test.h>
@@ -1481,6 +1482,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
     {
         String8 source;
         bool valid;
+        bool gnu;
     } cases[] = {
         {S8("int f(int); int g(void) { return sizeof(f()); }\n"), false},
         {S8("int f(void); int g(void) { return sizeof(f(1)); }\n"), false},
@@ -1491,11 +1493,219 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int g(void) { return; }\n"), false},
         {S8("_Static_assert(0, \"syntax diagnostic corpus\");\n"), false},
         {S8("int g(int x) { return _Generic(x, int: 1, int: 2); }\n"), false},
+        {S8("int g(void) { return _Generic(1, default: 1, default: 2); }\n"), false},
+        {S8("int g(void) { return _Generic(1.0, int: 1); }\n"), false},
+        {S8("int g(void) { return _Generic(1, void: 1, default: 2); }\n"), false},
         {S8("int g(int n) { int a[n] = {1}; return a[0]; }\n"), false},
+        {S8("int g(int n) { static int a[n]; return a[0]; }\n"), false},
         {S8("int g(int n) { switch(n) { case 1: return 1; case 1: return 2; } return 0; }\n"), false},
+        {S8("int g(int n) { switch(n) { case 1 ... 2: return 1; } return 0; }\n"), false},
         {S8("int f(int); int g(void) { return sizeof(f(1)); }\n"), true},
         {S8("int g(int x) { return x * 3 + 1; }\n"), true},
+        {S8("int g(void) { int a[sizeof(int)]; return a[0]; }\n"), true},
+        {S8("int g(void) { int a[2]; return _Generic(a, int *: 1); }\n"), true},
+        {S8("int g(void) { const int x = 1; return _Generic(x, int: 1); }\n"), true},
+        {S8("int g(void) { const int *p = 0; return _Generic(p, const int *: 1, int *: 2); }\n"), false},
+        {S8("long long g(long long x) { switch (x) { case -1: return 1; case 4294967295LL: return 2; } return 0; }\n"), true},
         {S8("static int x; int *p = &x;\n"), true},
+        {S8("int f(int x) { return x + 1; }\n"), true, true},
+        {S8("int f(void) { const int x = 1; x = 2; return x; }\n"), false, true},
+        {S8("int f(void) { const int x = 1; (x) = 2; return x; }\n"), false, true},
+        {S8("int f(const int *p) { *p = 2; return *p; }\n"), false, true},
+        {S8("int f(void) { const int x = 1; return x++; }\n"), false, true},
+        {S8("int f(void) { const int x = 1; return ++x; }\n"), false, true},
+        {S8("int f(void) { const int a[2] = {1,2}; a[0] = 3; return a[0]; }\n"), false, true},
+        {S8("int f(void) { 1 = 2; return 0; }\n"), false, true},
+        {S8("struct S { int x; }; int f(struct S *p) { return p->missing; }\n"), false, true},
+        {S8("int f(int); int g(void) { return (*f)(); }\n"), false, true},
+        {S8("struct S { int (*f)(int); }; int g(struct S *s) { return s->f(); }\n"), false, true},
+        {S8("int f(int); int g(void) { int (*p)(double) = f; return 0; }\n"), false, true},
+        {S8("int f(void) { goto missing; return 0; }\n"), false, true},
+        {S8("int f(void) { label: ; label: return 0; }\n"), false, true},
+        {S8("int f(void) { void x; return 0; }\n"), false, true},
+        {S8("struct S; int f(void) { struct S x; return 0; }\n"), false, true},
+        {S8("int f(void) { extern int x = 1; return x; }\n"), false, true},
+        {S8("_Static_assert((unsigned char)256, \"false\");\n"), false, true},
+        {S8("int f(void) { _Static_assert((unsigned char)256, \"false\"); return 0; }\n"), false, true},
+        {S8("int f(void); int x = f();\n"), false, true},
+        {S8("int f(void); int g(void) { static int x = f(); return x; }\n"), false, true},
+        {S8("int x; constexpr int *p = &x;\n"), false, true},
+        {S8("int f(void) __attribute__((alias(\"missing\")));\n"), false, true},
+        {S8("_Alignas(3) int x;\n"), false, true},
+        {S8("_Alignas(1) int x;\n"), false, true},
+        {S8("int f(void) { _Alignas(3) int x; return 0; }\n"), false, true},
+        {S8("int f(int x) { switch(x) { default: return 1; default: return 2; } }\n"), false, true},
+        {S8("int f(int x) { switch(x) { case x: return 1; } return 0; }\n"), false, true},
+        {S8("int f(int *x) { switch(x) { case 0: return 1; } return 0; }\n"), false, true},
+        {S8("int f(int n) { int a[n]; return sizeof(a); }\n"), true, true},
+        {S8("int f(void) { int *p = 0; return _Generic(p, int *: 1); }\n"), true, true},
+        {S8("int f(void) { int a[2]; return _Generic(a, int *: 1); }\n"), true, true},
+        {S8("int f(void) { const int x = 1; return _Generic(x, int: 1); }\n"), true, true},
+        {S8("int f(int); int g(void) { return _Generic(f, int (*)(int): 1); }\n"), false, true},
+        {S8("int f(int x) { switch(x) { case 1 ? 2 : 3: return 1; } return 0; }\n"), true, true},
+        {S8("int f(double); int g(void) { int (*p)(int); p=f; return 0; }\n"), false, true},
+        {S8("int f(double); int (*g(void))(int) { return f; }\n"), false, true},
+        {S8("int f(double); int h(int(*)(int)); int g(void) { return h(f); }\n"), false, true},
+        {S8("int g(int *const p) { p=0; return 0; }\n"), false, true},
+        {S8("int g(const int *p) { ++*p; return 0; }\n"), false, true},
+        {S8("int g(void) { 1++; return 0; }\n"), false, true},
+        {S8("struct S {int x;}; int g(void) { struct S s; return s; }\n"), false, true},
+        {S8("int f(void *p) { goto *p; }\n"), false, true},
+        {S8("void *g(void) { a: return &&a; }\n"), false, true},
+        {S8("void h(void*); void g(void) { a: h(&&a); }\n"), false, true},
+        {S8("void *p; void g(void) { a: p=&&a; }\n"), false, true},
+        {S8("int f(void) { void *p=&&a; goto *(int*)p; a: return 0; }\n"), false, true},
+        {S8("typedef int T; int g(void) { return sizeof((T)); }\n"), false, true},
+        {S8("void a[3];\n"), false, true},
+        {S8("void a;\n"), false, true},
+        {S8("int n; _Alignas(n) int x;\n"), false, true},
+        {S8("_Alignas(-4) int x;\n"), false, true},
+        {S8("struct S{_Alignas(3) int x;};\n"), false, true},
+        {S8("typedef int T __attribute__((aligned(3))); T x;\n"), false, true},
+        {S8("_Thread_local int y; int *x=&y;\n"), false, true},
+        {S8("int g(int y){static int x=y; return x;}\n"), false, true},
+        {S8("struct S{int a;}; struct S x={.bad=1};\n"), false, true},
+        {S8("int x[1]={1,2};\n"), false, true},
+        {S8("int a[3]={[2 ... 1]=0};\n"), false, true},
+        {S8("struct S{int a;}; int f(void){struct S x={.bad=1};return 0;}\n"), false, true},
+        {S8("int f(void){int x[1]={1,2};return 0;}\n"), false, true},
+        {S8("int x=_Generic(0,int:1,int:2);\n"), false, true},
+        {S8("int f(int); int g(void){return _Generic(0,int:1,default:f());}\n"), true, true},
+        {S8("_Static_assert(((__int128)1 << 100) > 1, \"wide\");\n"), true, true},
+        {S8("_Static_assert((short)-1 < 0, \"signed\");\n"), true, true},
+        {S8("_Static_assert(_Generic(0,int:1,default:0), \"generic\");\n"), true, true},
+        {S8("struct S{int a;double b;}; int f(void){static char a[__builtin_offsetof(struct S,b)];return sizeof a;}\n"), true, true},
+        {S8("int f(void){return __builtin_expect(1);}\n"), false, true},
+        {S8("void *f(void){return __builtin_frame_address(1);}\n"), false, true},
+        {S8("int f(void){return __builtin_complex(1,2);}\n"), false, true},
+        {S8("int f(void){__builtin_va_list p;__builtin_va_start(p,0);return 0;}\n"), false, true},
+        {S8("int f(void){int p;return __builtin_va_arg(p,int);}\n"), false, true},
+        {S8("void f(void *p){__builtin_memcpy(p,p);}\n"), false, true},
+        {S8("void f(void){__asm__(\"\"::::x);x:;}\n"), false, true},
+        {S8("void f(int x){__asm__(\"%[bad]\"::\"r\"(x));}\n"), false, true},
+        {S8("void f(void){__asm__(\"\":::\"unknown\");}\n"), false, true},
+        {S8("int f(void); int g(void) __attribute__((alias(\"f\")));\n"), false, true},
+        {S8("int f(void){return 1;} int g(void) __attribute__((alias(\"f\"))); int g(void){return 1;}\n"), false, true},
+        {S8("struct S { int a[4]; }; int f(const struct S *p) { int a[sizeof p->a / sizeof((p->a)[0])] = {0}; return a[0]; }\n"), true, true},
+        {S8("enum { N=3 }; int f(void) { int a[] = {[(unsigned long)N]=1}; _Static_assert(sizeof a / sizeof a[0] == N+1, \"inferred\"); return a[N]; }\n"), true, true},
+        {S8("struct S { struct { int x; }; int y; }; struct S s = {.x=1,.y=2};\n"), true, true},
+        {S8("int f(int); int g(void) { return _Generic(0,int:1,default:f()); }\n"), true, true},
+        {S8("int f(void); int x=sizeof(f());\n"), true, true},
+        {S8("int f(void); int x=0&&f();\n"), true, true},
+        {S8("int f(void) { typedef void *P; P p=(P)&&done; goto *p; done: return 0; }\n"), true, true},
+        {S8("double _Complex f(void) { return __builtin_complex(__builtin_nan(\"\"), 0.0); }\n"), true, true},
+        {S8("double f(void) { return ((union { double x; int i; }){.x=1}).x; }\n"), true, true},
+        {S8("void f(int n) { _Alignas(32) char a[n]; a[0]=0; }\n"), true, true},
+        {S8("typedef int V __attribute__((vector_size(16))); struct S { V v; int x; }; struct S s={1,2,3,4,5};\n"), true, true},
+        {S8("struct S{int x;};void f(struct S s){s+1;}\n"), false, true},
+        {S8("void f(int x){*x;}\n"), false, true},
+        {S8("void f(int x){&(x+1);}\n"), false, true},
+        {S8("int f(int x){return x[0];}\n"), false, true},
+        {S8("int f(int*p,double x){return p[x];}\n"), false, true},
+        {S8("void g(void);int f(void){return g()+1;}\n"), true, true},
+        {S8("struct S{int x;};int f(struct S s){if(s)return 1;return 0;}\n"), false, true},
+        {S8("struct S{int x;};void f(struct S s){while(s){break;}}\n"), false, true},
+        {S8("struct S{int x;};void f(struct S s){-s;}\n"), false, true},
+        {S8("double f(double a){return a%2.0;}\n"), false, true},
+        {S8("double f(double a){return a&2.0;}\n"), false, true},
+        {S8("double f(double a){return a<<2;}\n"), false, true},
+        {S8("void *f(int*a,int*b){return a+b;}\n"), false, true},
+        {S8("void *f(int*a){return a*2;}\n"), false, true},
+        {S8("struct S{int x;};void f(struct S s){int x=s;}\n"), false, true},
+        {S8("typedef typeof(nullptr) N;void f(void){N x; x=1;}\n"), false, true},
+        {S8("typedef typeof(nullptr) N;N f(void){return 1;}\n"), false, true},
+        {S8("typedef typeof(nullptr) N;void g(N);void f(void){g(1);}\n"), false, true},
+        {S8("struct S{int x;};int f(struct S s){return (int)s;}\n"), false, true},
+        {S8("struct S{int x;};void f(struct S s){1?s:2;}\n"), false, true},
+        {S8("void f(void){goto;}\n"), false, true},
+        {S8("void f(void){if(){} }\n"), false, true},
+        {S8("int f(void){return 1+;}\n"), false, true},
+        {S8("int f(void){return 1}\n"), false, true},
+        {S8("int f(void){unknown;return 0;}\n"), false, true},
+        {S8("void f(void){int const x=1;(++x);}\n"), false, true},
+        {S8("void f(void*p){*p;}\n"), true, true},
+        {S8("struct S{int x;}; void f(int a,int * b){ a == b; }\n"), false, true},
+        {S8("struct S{int x;}; void g(int x); void f(int a,double _Complex b){1?a:b;}\n"), true, true},
+        {S8("struct S{int x;}; void g(int x); void f(int a,typeof(nullptr) b){(int)b;}\n"), false, true},
+        {S8("struct S{int x;}; void g(unsigned x); void f(unsigned a,typeof(nullptr) b){unsigned x=b;}\n"), false, true},
+        {S8("struct S{int x;}; void g(double x); void f(double a,int * b){(double)b;}\n"), false, true},
+        {S8("struct S{int x;}; void g(double x); void f(double a,struct S b){1?a:b;}\n"), false, true},
+        {S8("struct S{int x;}; void g(double x); void f(double a,typeof(nullptr) b){a=b;}\n"), false, true},
+        {S8("struct S{int x;}; void g(int * x); void f(int * a,double b){a=b;}\n"), false, true},
+        {S8("struct S{int x;}; void f(int * a,void * b){ a - b; }\n"), false, true},
+        {S8("struct S{int x;}; void g(int * x); void f(int * a,double _Complex b){int * x=b;}\n"), false, true},
+        {S8("struct S{int x;}; void g(double _Complex x); void f(double _Complex a,int * b){g(b);}\n"), false, true},
+        {S8("struct S{int x;}; void g(double _Complex x); void f(double _Complex a,double _Complex b){1?a:b;}\n"), true, true},
+        {S8("struct S{int x;}; void g(double _Complex x); void f(double _Complex a,typeof(nullptr) b){g(b);}\n"), false, true},
+        {S8("struct S{int x;}; void f(double a){ ~a; }\n"), false, true},
+        {S8("struct S{int x;}; void f(int * a){ +a; }\n"), true, true},
+        {S8("struct S{int x;}; void f(struct S a){ +a; }\n"), true, true},
+        {S8("struct S{int x;}; void f(struct S a){ ++a; }\n"), false, true},
+        {S8("struct S{int x;}; void f(typeof(nullptr) a){ --a; }\n"), false, true},
+        {S8("struct S{int x;};void g(int);void f(struct S s,int x,int*p){g(s+1);}\n"), false, true},
+        {S8("struct S{int x;};void g(int);void f(struct S s,int x,int*p){int a[1]={s+1};}\n"), false, true},
+        {S8("struct S{int x;};void g(int);void f(struct S s,int x,int*p){struct S a={.x=*x};}\n"), false, true},
+        {S8("struct S{int x;};void g(int);void f(struct S s,int x,int*p){int a=({(int)s;0;});}\n"), false, true},
+        {S8("struct S{int x;};void g(int);void f(struct S s,int x,int*p){int a=(1?s:1)?1:2;}\n"), false, true},
+        {S8("struct S{int x;};void g(int);void f(struct S s,int x,int*p){int a=((double)p)?1:2;}\n"), false, true},
+        {S8("void f(void){__builtin_buster_simd_load();}\n"), false, true},
+        {S8("void f(void){__builtin_buster_simd_load(1);}\n"), false, true},
+        {S8("void f(void){__builtin_buster_simd_sign_byte(1);}\n"), false, true},
+        {S8("struct S{int x;};void f(struct S s){int a={s};}\n"), false, true},
+        {S8("struct S{int x;};struct T{int x;};void f(struct S s){struct T t=s;}\n"), false, true},
+        {S8("void g(void); void f(int c){c?g():(void)0;}\n"), true, true},
+        {S8("int f(void *p){return --*(int *)p;}\n"), true, true},
+        {S8("int f(void){int a[2]={1,2};int*p=a;typeof(*p++)*q=&(*p++);return *q;}\n"), true, true},
+        {S8("int g(int x){return x;}int(*pick(int x))(int){(void)x;return g;}int f(void){return pick(0)(1);}\n"), true, true},
+        {S8("struct S{int x;};void f(struct S s){volatile struct S v=s;v=s;}\n"), true, true},
+        {S8("struct S{int x;};struct S f(struct S s){_Atomic(struct S) a=s;return a;}\n"), true, true},
+        {S8("int f(char const*a,char*b){return (int)(a-b);}\n"), true, true},
+        {S8("int f(int x){if(x)(void)0;return x;}\n"), true, true},
+        {S8("int f(void){return sizeof(struct {int x;});}\n"), true, true},
+        {S8("int f(void){return 1,2;}\n"), true, true},
+        {S8("typedef int V __attribute__((vector_size(16))); void f(V v){__builtin_ia32_pslldi128(v);}\n"), false, true},
+        {S8("typedef int V __attribute__((vector_size(16))); void f(V v){__builtin_ia32_pslldi128(v,1,2);}\n"), false, true},
+        {S8("typedef int V __attribute__((vector_size(16))); void f(void){__builtin_ia32_pslldi128(1,2);}\n"), false, true},
+        {S8("typedef int V __attribute__((vector_size(16))); void f(V v,int n){__builtin_ia32_pslldi128(v,n);}\n"), false, true},
+        {S8("typedef int V __attribute__((vector_size(16))); void f(V v){__builtin_ia32_pslldi128(v,1.0);}\n"), false, true},
+        {S8("typedef int V __attribute__((vector_size(16))); void f(V v){__builtin_ia32_psllqi128(v,1);}\n"), false, true},
+        {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_pslldi128(v,3);}\n"), true, true},
+        {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_psradi128(v,99);}\n"), true, true},
+        {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_psrldi128(v,-1);}\n"), true, true},
+        {S8("typedef int V __attribute__((vector_size(16))); V f(V v){return __builtin_ia32_pslldi128(__builtin_ia32_pslldi128(v,1),2);}\n"), true, true},
+        {S8("typedef unsigned char V __attribute__((vector_size(64))); V x=__builtin_buster_simd_splat_byte(1);\n"), false, true},
+        {S8("typedef int V __attribute__((vector_size(16))); V x=__builtin_ia32_pslldi128((V){1,2,3,4},1);\n"), false, true},
+        {S8("int x=__builtin_popcount(3);\n"), false, true},
+        {S8("int x=__builtin_expect(1,1);\n"), false, true},
+        {S8("double _Complex x=__builtin_complex(1,2);\n"), false, true},
+        {S8("double _Complex x=__builtin_complex(1.0);\n"), false, true},
+        {S8("double f(void); double _Complex x=__builtin_complex(f(),1.0);\n"), false, true},
+        {S8("double x=__builtin_sin(1.0);\n"), false, true},
+        {S8("double _Complex x=__builtin_complex(1.0,2.0);\n"), true, true},
+        {S8("double x=__builtin_inf();\n"), true, true},
+        {S8("double x=__builtin_nan(\"\");\n"), true, true},
+        {S8("void *x=__builtin_alloca(4);\n"), false, true},
+        {S8("int x=__builtin_constant_p(42);\n"), false, true},
+        {S8("int f(void){static int x=__builtin_popcount(3); return x;}\n"), false, true},
+        {S8("int f(void); int *x=(int[]){f()};\n"), false, true},
+        {S8("int *e(void); void f(int c) {int x=1;if(c) (*e())=22;}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;if(c) *e()=22;}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;while(c) (*e())=22;}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;for(;c;) (*e())=22;}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;if(c) ; else (*e())=22;}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;do (*e())=22; while(c);}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;switch(c) (*e())=22;}\n"), false, true},
+        {S8("int *e(void); void f(int c) {int x=1;if(c) if(c) (*e())=22;}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;if(c) (x)=22;}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;if(c) *e()+=22;}\n"), true, true},
+        {S8("int *e(void); void f(int c) {int x=1;if(c) e()=22;}\n"), false, true},
+        {S8("int *e(void); void f(int c) {int x=1;while(c) e()=22;}\n"), false, true},
+        {S8("int *e(void); void f(int c) {int x=1;for(;c;) e()=22;}\n"), false, true},
+        {S8("int *e(void); void f(int c) {int x=1;if(c) ; else e()=22;}\n"), false, true},
+        {S8("int *e(void); void f(int c) {int x=1;do e()=22; while(c);}\n"), false, true},
+        {S8("const int *e(void); void f(int c) {const int x=1;if(c) *e()=22;}\n"), false, true},
+        {S8("const int *e(void); void f(int c) {const int x=1;if(c) (x)=22;}\n"), false, true},
+        {S8("struct D { int fd; }; int *error(void);\n#define errno (*error())\n#define dirfd(d) ({ struct D *p=(d); int r=-1; if (p == 0 || p->fd < 0) errno=22; else r=p->fd; r; })\nint f(struct D *d) { int directory=dirfd(d); return directory; }\n\n"), true, true},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
@@ -1507,15 +1717,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
             String8 input = buster_test_temporary_path(arena, S8("buster-syntax-diagnostic-corpus"), S8(".c"));
             String8 output = buster_test_temporary_path(arena, S8("buster-syntax-diagnostic-corpus"), S8(".o"));
             BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source)));
-            String8 syntax_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-fsyntax-only"), input};
-            String8 object_command[] = {S8("-g0"), S8("-std=c23"), forms[form], S8("-c"), S8("-o"), output, input};
+            String8 dialect = cases[index].gnu ? S8("-std=gnu23") : S8("-std=c23");
+            String8 syntax_command[] = {S8("-g0"), dialect, forms[form], S8("-fsyntax-only"), input};
+            String8 object_command[] = {S8("-g0"), dialect, forms[form], S8("-c"), S8("-o"), output, input};
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters ir_before = ir_construction_counters();
+#endif
             CompilerDriverResult syntax = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+#if BUSTER_BENCH_ALLOCATIONS
+            IrConstructionCounters ir_after = ir_construction_counters();
+            BUSTER_TEST(arguments, !ir_before.overflowed && !ir_after.overflowed);
+            for (u32 counter = 0; counter < IR_CONSTRUCTION_COUNT; counter += 1)
+            {
+                BUSTER_TEST(arguments, ir_before.values[counter] == ir_after.values[counter]);
+            }
+#endif
             CompilerDriverResult object = compiler_driver_execute_invocation(
                 arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+#if BUSTER_BENCH_ALLOCATIONS
+            if (cases[index].valid)
+            {
+                IrConstructionCounters object_after = ir_construction_counters();
+                BUSTER_TEST(arguments, object_after.values[IR_CONSTRUCTION_PROGRAM_STARTS] > ir_after.values[IR_CONSTRUCTION_PROGRAM_STARTS]);
+                BUSTER_TEST(arguments, object_after.values[IR_CONSTRUCTION_TYPE_APPENDS] > ir_after.values[IR_CONSTRUCTION_TYPE_APPENDS]);
+            }
+#endif
             BUSTER_TEST(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[index].valid);
             BUSTER_TEST(arguments, syntax.error == object.error);
-            BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+            BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostic, object.diagnostic),
+                            string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
+                                          cases[index].source, syntax.diagnostic, object.diagnostic));
             BUSTER_STRING_TEST(arguments, syntax.warning, object.warning);
             BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
             BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
@@ -1526,7 +1758,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
                 BUSTER_TEST(arguments, first.severity == second.severity && first.note_count == second.note_count);
                 BUSTER_STRING_TEST(arguments, first.code, second.code);
                 BUSTER_STRING_TEST(arguments, first.symbol, second.symbol);
-                BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, first), compiler_diagnostic_render(arena, second));
+                String8 first_rendered = compiler_diagnostic_render(arena, first);
+                String8 second_rendered = compiler_diagnostic_render(arena, second);
+                BUSTER_TEST_RAW(arguments, string_equal(first_rendered, second_rendered),
+                                string_format(arena, S8("source={S8}\nsyntax={S8}\nobject={S8}"),
+                                              cases[index].source, first_rendered, second_rendered));
             }
             scratch_end(temporary);
         }
