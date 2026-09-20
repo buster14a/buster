@@ -6,14 +6,14 @@ on:
 
 concurrency:
   group: repair-pr-916-workflow-contracts
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
   repair:
-    runs-on: ubuntu-26.04-arm
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - name: Checkout repair control
