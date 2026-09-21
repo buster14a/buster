@@ -722,7 +722,7 @@ def _github_pull_event(repo: Path, api: GitHubApi, event: dict, report_dir: Path
                        summary: Path | None, context: str) -> bool:
     pull = event.get("pull_request")
     if not isinstance(pull, dict) or not isinstance(pull.get("number"), int):
-        raise PreflightError("pull_request_target event omits pull_request.number")
+        raise PreflightError("pull request event omits pull_request.number")
     number = pull["number"]
     report, head = _analyze_stable_pull(repo, api, number, context)
     output = report_dir / f"pr-{number}-{head}.json"
@@ -730,6 +730,31 @@ def _github_pull_event(repo: Path, api: GitHubApi, event: dict, report_dir: Path
     api.publish_status(head, report, context, _target_url())
     return bool(report["outcome"]["blocking"])
 
+
+
+def _workflow_run_pull_number(event: dict) -> int:
+    run = event.get("workflow_run")
+    if not isinstance(run, dict) or run.get("event") != "pull_request":
+        raise PreflightError("workflow_run event is not for a pull_request workflow")
+    pulls = run.get("pull_requests")
+    if (not isinstance(pulls, list) or len(pulls) != 1 or
+            not isinstance(pulls[0], dict)):
+        raise PreflightError("workflow_run event must identify exactly one pull request")
+    number = pulls[0].get("number")
+    if not isinstance(number, int) or number <= 0:
+        raise PreflightError("workflow_run pull request has an invalid number")
+    return number
+
+
+def _github_workflow_run_event(repo: Path, api: GitHubApi, event: dict,
+                               report_dir: Path, summary: Path | None,
+                               context: str) -> bool:
+    number = _workflow_run_pull_number(event)
+    report, head = _analyze_stable_pull(repo, api, number, context)
+    output = report_dir / f"pr-{number}-{head}.json"
+    _write_report(report, output, summary, f"PR #{number} merge-conflict preflight")
+    api.publish_status(head, report, context, _target_url())
+    return bool(report["outcome"]["blocking"])
 
 def _github_push_event(repo: Path, api: GitHubApi, event: dict, report_dir: Path,
                        summary: Path | None, context: str) -> bool:
@@ -800,8 +825,8 @@ def github_event(repo: Path, event_path: Path, repository: str, report_dir: Path
         raise PreflightError("GITHUB_EVENT_NAME is required")
     api = GitHubApi(repository, os.environ.get("GITHUB_TOKEN", ""), api_url)
     event = _event(event_path)
-    if event_name == "pull_request_target":
-        blocking = _github_pull_event(repo, api, event, report_dir, summary, context)
+    if event_name == "workflow_run":
+        blocking = _github_workflow_run_event(repo, api, event, report_dir, summary, context)
     elif event_name in ("push", "workflow_dispatch"):
         blocking = _github_push_event(repo, api, event, report_dir, summary, context)
     elif event_name == "merge_group":

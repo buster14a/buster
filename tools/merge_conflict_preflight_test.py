@@ -19,6 +19,8 @@ import unittest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = Path(__file__).with_name("merge_conflict_preflight.py")
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "merge-conflict-preflight.yml"
+REGRESSION_WORKFLOW_PATH = (REPO_ROOT / ".github" / "workflows" /
+                            "merge-conflict-preflight-regression.yml")
 GUIDANCE_PATH = REPO_ROOT / "docs" / "agents" / "workflow.md"
 INTEGRATION_PATH = Path(__file__).with_name("native_retirement_integration.py")
 SPEC = importlib.util.spec_from_file_location("merge_conflict_preflight", TOOL_PATH)
@@ -271,19 +273,45 @@ class MergeConflictPreflightTest(unittest.TestCase):
         )
 
     def test_workflow_separates_untrusted_tests_from_trusted_status_publication(self) -> None:
-        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
-        self.assertIn("pull_request:\n", workflow)
-        self.assertIn("pull_request_target:\n", workflow)
-        self.assertIn("push:\n    branches: [main]", workflow)
-        self.assertIn("merge_group:\n    types: [checks_requested]", workflow)
-        self.assertIn("github.event_name == 'pull_request'", workflow)
-        self.assertIn("github.event_name != 'pull_request'", workflow)
-        self.assertIn("pull-requests: read\n      statuses: write", workflow)
-        self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
-        self.assertIn("persist-credentials: false", workflow)
-        self.assertIn("python3 -B tools/merge_conflict_preflight_test.py -v", workflow)
-        self.assertNotIn("github.event.pull_request.head", workflow)
-        self.assertNotIn("github.head_ref", workflow)
+        trusted = WORKFLOW_PATH.read_text(encoding="utf-8")
+        regression = REGRESSION_WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("workflow_run:\n", trusted)
+        self.assertIn("workflows: [Merge conflict preflight regression]", trusted)
+        self.assertIn("push:\n    branches: [main]", trusted)
+        self.assertIn("merge_group:\n    types: [checks_requested]", trusted)
+        self.assertIn("pull-requests: read\n      statuses: write", trusted)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", trusted)
+        self.assertIn("persist-credentials: false", trusted)
+        self.assertNotIn("pull_request_target", trusted)
+        self.assertNotIn("python3 -B tools/merge_conflict_preflight_test.py -v", trusted)
+
+        self.assertIn("pull_request:\n", regression)
+        self.assertIn("python3 -B tools/merge_conflict_preflight_test.py -v", regression)
+        self.assertIn("persist-credentials: false", regression)
+        self.assertNotIn("statuses: write", regression)
+        self.assertNotIn("GITHUB_TOKEN", regression)
+        self.assertNotIn("tools/merge_conflict_preflight.py github-event", regression)
+
+    def test_workflow_run_payload_requires_one_pull_request(self) -> None:
+        event = {
+            "workflow_run": {
+                "event": "pull_request",
+                "pull_requests": [{"number": 922}],
+            },
+        }
+        self.assertEqual(PREFLIGHT._workflow_run_pull_number(event), 922)
+        invalid = (
+            {},
+            {"workflow_run": {"event": "push", "pull_requests": [{"number": 922}]}},
+            {"workflow_run": {"event": "pull_request", "pull_requests": []}},
+            {"workflow_run": {"event": "pull_request", "pull_requests": [{"number": 0}]}},
+            {"workflow_run": {"event": "pull_request", "pull_requests": [
+                {"number": 1}, {"number": 2},
+            ]}},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(PREFLIGHT.PreflightError):
+                PREFLIGHT._workflow_run_pull_number(payload)
 
     def test_workflow_guidance_prescribes_each_classification_response(self) -> None:
         guidance = GUIDANCE_PATH.read_text(encoding="utf-8")
