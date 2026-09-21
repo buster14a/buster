@@ -1,0 +1,24 @@
+name: Issue 902 isolated work
+on:
+  push:
+    branches: [work/902-enum-bitfields-runner]
+    paths: [.github/workflows/issue902-work.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 46ed5e141baed17dfc1e977691ac73e08be5b9f5
+          persist-credentials: false
+      - name: Export exact source
+        run: git archive --format=tar.gz --output="$RUNNER_TEMP/issue902-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue902-source
+          path: ${{ runner.temp }}/issue902-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
