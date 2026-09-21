@@ -20,9 +20,34 @@ jobs:
           ref: ${{ github.ref }}
 
       - name: Apply focused issue 929 patch
-        run: python3 tools/apply_929_patch.py
+        id: apply
+        shell: bash
+        run: |
+          set +e
+          python3 tools/apply_929_patch.py >apply-929-error.txt 2>&1
+          status=$?
+          cat apply-929-error.txt
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Publish patch diagnostic
+        if: steps.apply.outputs.status != '0'
+        run: |
+          git config user.name "openai-codex"
+          git config user.email "openai-codex@users.noreply.github.com"
+          git add -f apply-929-error.txt
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "ci: retain issue 929 patch diagnostic"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Stop after patch diagnostic
+        if: steps.apply.outputs.status != '0'
+        run: exit 1
 
       - name: Validate syntax and focused contracts
+        if: steps.apply.outputs.status == '0'
         run: |
           python3 -m py_compile \
             tools/native_retirement_performance_schema.py \
@@ -36,6 +61,7 @@ jobs:
           python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
 
       - name: Commit applied patch
+        if: steps.apply.outputs.status == '0'
         run: |
           git config user.name "openai-codex"
           git config user.email "openai-codex@users.noreply.github.com"
