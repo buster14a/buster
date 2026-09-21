@@ -135,6 +135,18 @@ class RulesTests(unittest.TestCase):
     def test_desired_ruleset(self):
         gate.validate_ruleset(self.ruleset())
 
+    def test_each_admission_check_remains_independently_required(self):
+        for context in ("Native retirement merge admission", "Main integration admission"):
+            with self.subTest(context=context):
+                data = self.ruleset()
+                parameters = data["rules"][3]["parameters"]
+                parameters["required_status_checks"] = [
+                    row for row in parameters["required_status_checks"]
+                    if row["context"] != context
+                ]
+                with self.assertRaises(gate.AdmissionError):
+                    gate.validate_ruleset(data)
+
     def test_no_parallel_builds_batches_rewrites_or_headgreen(self):
         for key, value in (("max_entries_to_build", 2), ("max_entries_to_merge", 2),
                            ("grouping_strategy", "HEADGREEN"), ("merge_method", "SQUASH"),
