@@ -55,7 +55,7 @@ BUSTER_GLOBAL_LOCAL ProcessWaitResult uefi_boot_command(UefiBootContext *context
     if (!context->io_failed)
     {
         ProcessSpawnResult spawn = os_process_spawn(command, (SliceString8){0}, (SliceString8){0},
-            (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+            (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1, .search_path = 1});
         if (spawn.handle)
         {
             wait = os_process_wait_deadline(arena, spawn, timeout_us);

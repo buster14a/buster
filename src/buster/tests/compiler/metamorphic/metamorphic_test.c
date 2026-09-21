@@ -366,7 +366,7 @@ BUSTER_GLOBAL_LOCAL MetaOutcome meta_process(Arena* arena, SliceString8 argv, Me
     }
     result.command = meta_finish(arena, &command);
     ProcessSpawnResult spawn = os_process_spawn(argv, (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1});
+        (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR), .use_process_environment = 1, .search_path = 1});
     result.launched = spawn.handle != 0;
     if (result.launched)
     {

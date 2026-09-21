@@ -1,0 +1,6 @@
+0	tiny_startup/fast
+1	large_function/fast
+2	many_functions/fast
+3	symbol_table/fast
+4	control_flow/fast
+5	backend_pressure/fast

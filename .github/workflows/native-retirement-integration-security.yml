@@ -1,0 +1,45 @@
+name: Native retirement trust-boundary security
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/native-retirement-integration-security.yml'
+      - '.github/workflows/native-retirement-integration.yml'
+      - '.github/workflows/native-retirement-rebind.yml'
+      - 'tools/native_retirement_integration.py'
+      - 'tools/native_retirement_integration_security_test.py'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/native-retirement-integration-security.yml'
+      - '.github/workflows/native-retirement-integration.yml'
+      - '.github/workflows/native-retirement-rebind.yml'
+      - 'tools/native_retirement_integration.py'
+      - 'tools/native_retirement_integration_security_test.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-retirement-integration-security-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  reserved-paths:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    name: Reserved checkout roots (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Reject candidate-controlled trusted and pinned checkout roots
+        run: python3 tools/native_retirement_integration_security_test.py -v

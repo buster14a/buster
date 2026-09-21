@@ -106,6 +106,13 @@ honor `BUSTER_TEST_JOBS`. Report the actual revision, commands, results, and
 unavailable gates; never call an unrun check green. Follow the existing
 [rebase validation workflow](docs/agents/workflow.md) when rebasing a code change.
 
+Native-retirement generated source identities and the aggregate binding are
+integration-owned. Ordinary feature PRs must not refresh or commit them;
+the read-only gate reconstructs them ephemerally and the serialized trusted
+writer publishes the exact integrated tree. Read
+[native-retirement rebinding](docs/native-retirement-rebinding.md) before
+changing its policy, authority code, schema, consumers, or workflows.
+
 ## Benchmarking and diagnostics
 
 Before performance work, read the newest audit (`tools/new_audit.py --newest`

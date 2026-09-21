@@ -75,6 +75,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* 
                         BUSTER_TEST(arguments, row->opcode == original[index].opcode && row->result.value == original[index].result.value);
                         // Dead construction metadata must not influence a
                         // published walk or the strict canonical validator.
+                        BUSTER_TEST(arguments, row->next.value == IR_ID_UNDERLYING_INVALID);
                         row->next.value = UINT32_MAX - 1;
                         IrInstructionId published_next = ir_block_next_instruction(function, block, (IrInstructionId){.value = index});
                         BUSTER_TEST(arguments, published_next.value == (index + 1 < count ? index + 1 : UINT32_MAX));

@@ -45,6 +45,41 @@
 - Renderers consume window-system handles through `WmNativeSurface`; do not
   reach into `WmHandle` or `WmWindowHandle` from a rendering backend.
 
+## Transactional process spawning
+
+`os_process_spawn` validates all bounded argv and environment strings before it
+allocates a pipe or initializes a platform spawn object. Empty argv, embedded
+NUL bytes, mismatched key/value counts, empty keys and keys containing `=` are
+recoverable failures. `ProcessSpawnResult.failure` identifies the first failed
+validation/setup stage and `error` preserves its native error; zero/`NONE` are
+reserved for success. Every failure path destroys only objects that completed
+initialization and closes every pipe or temporary handle it created.
+
+Executable selection is a separate, explicit policy. With `search_path` clear,
+`argv[0]` is made into one exact absolute path and the OS is never asked to
+search. With it set, a bare name is resolved once against the environment
+captured at program entry, before setup begins; the child environment cannot
+redirect that lookup. `use_process_environment` independently selects full
+inheritance. Otherwise the supplied key/value slices are the complete child
+environment, and an empty Windows block is represented by the required two
+UTF-16 NUL code units.
+
+Children inherit only standard streams selected by the caller. Captured pipe
+ends are first moved above descriptors 0-2, so a parent with closed standard
+streams cannot make `dup2` alias a pipe end that is subsequently closed. Linux
+uses a close-from spawn action, Apple uses `POSIX_SPAWN_CLOEXEC_DEFAULT` plus
+explicit standard-stream inheritance, and Windows passes only duplicated
+standard handles and captured pipe ends through
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. Parent pipe ends are non-inheritable and
+all temporary duplicates are closed after `CreateProcessW`.
+
+GPU tool execution opts into captured-PATH lookup for the tool itself, then
+passes a fixed SDK/locale/temporary-directory environment allowlist rather than
+the complete compiler environment. Registered `os_tests` inject each setup
+failure, compare live descriptor/handle counts, exercise an unrelated
+inheritable object, an exact hostile-PATH environment, and a subprocess that
+closes descriptors 0-2 before spawning with capture.
+
 ## Virtual memory commitment and prefaulting
 
 `os_commit` reports commitment and nothing else. Its `prefault` argument asks

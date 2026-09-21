@@ -499,8 +499,6 @@ struct IrInstruction
     IrTypeId canonical_type;
     IrSymbolId symbol;
     IrLocalId canonical_local;
-    // Construction only; published consumers use block spans. Reopening
-    // reconstructs this field, whose stored value is unspecified while published.
     IrInstructionId next;
     IrValueId result;
     u32 operand_count;

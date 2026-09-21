@@ -41,14 +41,12 @@ removed. Selected machine IR still owns its graph: AArch64 legalization can
 split canonical blocks and i128 joins expand a value into two registers. That
 is a target lowering result, not a duplicate canonical CFG.
 
-Publication clears builder parameter/predecessor first/last pointers. Each
-instruction's `next` is construction-only: its stored value is unspecified
-while published, and walkers/validation must use the span instead. Publication
-therefore does not rewrite every instruction merely to erase inactive metadata.
-There is no second authoritative linked representation. Old parameter and
-predecessor node allocations become unreachable; arena high-water memory is
-reclaimed when the translation unit is released, not by freeing individual
-nodes at publication. This cost must be included in peak-memory measurements.
+Publication clears every per-instruction `next` and every builder
+parameter/predecessor first/last pointer. The linked construction graph is no
+longer retained as a second authoritative representation. Its arena allocations
+become unreachable; arena high-water memory is reclaimed when the translation
+unit is released, not by freeing individual nodes at publication. This cost
+must be included in peak-memory measurements.
 
 `ir_function_invalidate_cfg` explicitly reopens construction: it reconstructs
 mutable links from the published slices, then clears the publication pointer.
@@ -77,7 +75,7 @@ These counts are not compiler throughput results.
 duplicate destinations, optional predecessor lists, invalid IDs,
 truncated/overlong/cyclic lists and wrong tails. Instruction-span tests cover
 interleaving, explicit remaps, source/extras/value-definition preservation,
-nonzero entry identity, poisoned inactive links and reconstruction. Existing native/mode,
+nonzero entry identity, link discard and reconstruction. Existing native/mode,
 Wasm, eBPF and bitcode tests cover downstream behavior. Performance acceptance
 requires paired measurements and must account for finalization cost and peak
 arena memory as well as saved backend traversal.

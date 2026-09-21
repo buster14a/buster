@@ -246,6 +246,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
           "$BUSTER_CI_PYTHON" tools/native_producer_profile_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-producer-profile.log"
           "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-observation-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
@@ -602,11 +603,33 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Initialize native observation
+        id: native_observation
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          observation_root="$RUNNER_TEMP/buster-ci/native-observation"
+          mkdir -p "$observation_root"
+          printf 'BUSTER_CI_OBSERVATION_ROOT=%s\n' "$observation_root" >> "$GITHUB_ENV"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py init \
+            --root "$observation_root" \
+            --job-name '${{ matrix.name }}' \
+            --runner-label '${{ matrix.runner }}' \
+            --platform '${{ matrix.platform }}' \
+            --os '${{ matrix.os }}' \
+            --arch '${{ matrix.arch }}' \
+            --configuration Release \
+            --compiler clang \
+            --linker DEFAULT \
+            --debug-info OFF \
+            --differential-workers '${{ matrix.platform == 'unix' && '4' || '0' }}'
+
       # A failed mode suite must not hide the independent differential result.
       # No continue-on-error: either failure still fails this Unix native lane.
       - name: Execution-mode matrix
         id: modes
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
         shell: bash
         env:
           CFLAGS: -Wno-invalid-feature-combination
@@ -616,13 +639,17 @@ jobs:
           exec > >(tee "$RUNNER_TEMP/buster-ci/modes.log") 2>&1
           # generate recreates build/, so the driver and logs must live outside it.
           driver="$RUNNER_TEMP/buster-build"
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-          "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
-          "$driver" test_mode_matrix --config Release
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py toolchain             --root "$BUSTER_CI_OBSERVATION_ROOT" --compiler clang --cmake cmake --ninja ninja
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase bootstrap_driver --sequence 10 --             clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase configuration --sequence 20 --             "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          # test_mode_matrix already requires this producer. Build it explicitly
+          # so the following interval contains payload work instead of hidden build work.
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase producer_build --sequence 30 --             "$driver" build --config Release -t ide
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase mode_payload --sequence 40 --             "$driver" test_mode_matrix --config Release
 
       - name: Execution-mode matrix (Windows)
         id: modes_windows
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'windows' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'windows' }}
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
@@ -651,18 +678,35 @@ jobs:
           if ($ClangVersion -notmatch "Target:\s*${env:CLANG_ARCH}-") {
             throw "clang does not default to a ${env:CLANG_ARCH} target"
           }
+          & $env:BUSTER_CI_PYTHON tools/ci_native_observation.py toolchain `
+            --root $env:BUSTER_CI_OBSERVATION_ROOT --compiler clang --cmake cmake --ninja ninja
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
-          cmd /c "clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o `"$Driver`""
+          & $env:BUSTER_CI_PYTHON tools/ci_native_observation.py run `
+            --root $env:BUSTER_CI_OBSERVATION_ROOT --phase bootstrap_driver --sequence 10 -- `
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable `
+            -Wno-microsoft-enum-forward-reference -g build.c -lws2_32 -o $Driver
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Redirect inside cmd, so native stderr is not a terminating PS error.
-          cmd /c "`"$Driver`" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'modes-generate.log')
+          $Generate = "`"$Driver`" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF 2>&1"
+          & $env:BUSTER_CI_PYTHON tools/ci_native_observation.py run `
+            --root $env:BUSTER_CI_OBSERVATION_ROOT --phase configuration --sequence 20 -- `
+            cmd /d /s /c $Generate | Tee-Object -FilePath (Join-Path $Logs 'modes-generate.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /c "`"$Driver`" test_mode_matrix --config Release 2>&1" | Tee-Object -FilePath (Join-Path $Logs 'modes.log')
+          $Build = "`"$Driver`" build --config Release -t ide 2>&1"
+          & $env:BUSTER_CI_PYTHON tools/ci_native_observation.py run `
+            --root $env:BUSTER_CI_OBSERVATION_ROOT --phase producer_build --sequence 30 -- `
+            cmd /d /s /c $Build | Tee-Object -FilePath (Join-Path $Logs 'modes-build.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Modes = "`"$Driver`" test_mode_matrix --config Release 2>&1"
+          & $env:BUSTER_CI_PYTHON tools/ci_native_observation.py run `
+            --root $env:BUSTER_CI_OBSERVATION_ROOT --phase mode_payload --sequence 40 -- `
+            cmd /d /s /c $Modes | Tee-Object -FilePath (Join-Path $Logs 'modes.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Native configuration differential matrix
         id: differential
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'unix' }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
         shell: bash
         env:
           CFLAGS: -Wno-invalid-feature-combination
@@ -671,15 +715,18 @@ jobs:
           mkdir -p "$RUNNER_TEMP/buster-ci"
           exec > >(tee "$RUNNER_TEMP/buster-ci/differential.log") 2>&1
           driver="$RUNNER_TEMP/buster-build"
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
-          "$driver" test_differential --self-test
+          if [[ ! -f "$BUSTER_CI_OBSERVATION_ROOT/toolchain.json" ]]; then
+            "$BUSTER_CI_PYTHON" tools/ci_native_observation.py toolchain               --root "$BUSTER_CI_OBSERVATION_ROOT" --compiler clang --cmake cmake --ninja ninja
+          fi
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_driver_refresh --sequence 50 --             clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$driver"
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_preparation --sequence 60 --             "$driver" test_differential --self-test
           # The preceding mode step normally configured this tree. Recover a
           # missing graph too, so an earlier failure cannot skip this gate.
           if [[ ! -f build/CMakeCache.txt ]]; then
-            "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+            "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run               --root "$BUSTER_CI_OBSERVATION_ROOT" --phase recovery_configuration --sequence 65 --               "$driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
           fi
-          "$driver" build --config Release -t ide
-          "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle --jobs 4
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_producer_check --sequence 70 --             "$driver" build --config Release -t ide
+          "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase differential_corpus --sequence 80 -- "$driver" test_differential --ide build/Release/ide --out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle --jobs 4
 
       - name: Native result and reproduction
         if: ${{ always() && steps.checkout.outcome == 'success' }}
@@ -700,7 +747,10 @@ jobs:
         id: pack
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         shell: bash
-        run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; else python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; fi
+        env:
+          BUSTER_CI_NATIVE_PLATFORM: ${{ matrix.platform }}
+          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
+        run: if test -n "$BUSTER_CI_OBSERVATION_ROOT"; then python_command="$BUSTER_CI_PYTHON"; if test -z "$python_command" || ! command -v "$python_command" >/dev/null 2>&1; then python_command=python3; fi; mkdir -p "$RUNNER_TEMP/native-ci-upload"; pack_status=0; "$python_command" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase evidence_packing --sequence 85 -- "$python_command" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" || pack_status=$?; expect_complete="$BUSTER_CI_NATIVE_COMPLETE"; if test "$pack_status" -ne 0; then expect_complete=0; fi; finalize_status=0; if test "$BUSTER_CI_NATIVE_PLATFORM" = unix; then "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase differential_driver_refresh --required-phase differential_preparation --required-phase differential_producer_check --required-phase differential_corpus --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; else "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; fi; if test "$pack_status" -ne 0; then exit "$pack_status"; fi; exit "$finalize_status"; elif test -n "$BUSTER_CI_PYTHON" && command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; else python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; fi
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
@@ -733,6 +783,7 @@ jobs:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/buster-ci/
+            ${{ runner.temp }}/native-ci-upload/
             !${{ runner.temp }}/buster-ci/differential/**/program
             !${{ runner.temp }}/buster-ci/differential/**/subject.o
           if-no-files-found: ignore

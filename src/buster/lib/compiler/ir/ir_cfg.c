@@ -356,6 +356,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
             IrCfgBlock* published = blocks + index;
             block->first_instruction.value = published->instruction_count ? published->first_instruction : IR_ID_UNDERLYING_INVALID;
             block->last_instruction.value = published->instruction_count ? published->first_instruction + published->instruction_count - 1 : IR_ID_UNDERLYING_INVALID;
+            // The mutable chain stops existing at publication. Consumers use
+            // the dense span; explicit invalidation reconstructs builder links.
+            for (u32 offset = 0; offset < published->instruction_count; offset += 1)
+            {
+                u32 row = published->first_instruction + offset;
+                function->instructions[row].next = IR_INSTRUCTION_ID_INVALID;
+            }
         }
         cfg->instruction_count = count;
     }

@@ -6,21 +6,27 @@ on:
       - main
     paths:
       - .github/workflows/native-retirement-contract.yml
+      - .github/workflows/native-retirement-integration-security.yml
+      - .github/workflows/native-retirement-integration.yml
+      - .github/workflows/native-retirement-rebind.yml
       # Android status tests reuse frozen mobile support inputs. Keep their
       # contract validation scheduled even when tests/** itself is unchanged.
       - .github/workflows/ci.yml
       - .github/workflows/ios-monitor-tests.yml
       - android/**
       - .github/workflows/native-retirement-evidence.yml
+      - AGENTS.md
       - build.c
       - docs/agents/build.md
       - docs/agents/benchmarking.md
+      - docs/agents/workflow.md
       - docs/native-retirement-census.md
       - docs/native-retirement-performance-contract.md
       - docs/native-retirement-support-v1.tsv
       - docs/native-retirement-supported-gaps-v1.tsv
       - docs/native-retirement-applicability-v1.tsv
       - docs/native-retirement-dependencies-v1.json
+      - docs/native-retirement-rebinding.md
       - tools/differential.c
       - tools/native_retirement_census.c
       - tools/native_retirement_contract.py
@@ -33,6 +39,9 @@ on:
       - tools/native_retirement_sdks.py
       - tools/native_retirement_sdks_test.py
       - tools/native_retirement_reference.py
+      - tools/native_retirement_integration.py
+      - tools/native_retirement_integration_security_test.py
+      - tools/native_retirement_integration_test.py
       - tools/native-retirement-mingw/**
       - docs/native-retirement-sdks-v1.json
       - tools/native_retirement_external_test.py
@@ -75,17 +84,56 @@ jobs:
     name: Frozen support and environment contract
     runs-on: ubuntu-26.04
     timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: candidate
     steps:
       - name: Check out exact revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          path: candidate
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check out the previously trusted rebinder revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reject candidate-controlled checkout destinations
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          for relative in external .native-retirement-trusted; do
+            path="$GITHUB_WORKSPACE/candidate/$relative"
+            if [[ -e "$path" || -L "$path" ]]; then
+              echo "error: candidate controls reserved materialization root '$relative'" >&2
+              exit 1
+            fi
+          done
+          if [[ -f "$GITHUB_WORKSPACE/trusted/tools/native_retirement_integration.py" ]]; then
+            python3 - "$GITHUB_WORKSPACE/candidate" "$GITHUB_WORKSPACE/trusted/tools/native_retirement_integration.py" <<'PY'
+          import importlib.util
+          from pathlib import Path
+          import sys
+          candidate = Path(sys.argv[1])
+          tool = Path(sys.argv[2])
+          spec = importlib.util.spec_from_file_location("trusted_native_retirement_integration", tool)
+          module = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          sys.modules[spec.name] = module
+          spec.loader.exec_module(module)
+          module.reject_reserved_materialization_roots(candidate)
+          PY
+          fi
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: DaveGamble/cJSON
           ref: c859b25da02955fef659d658b8f324b5cde87be3
-          path: external/cjson
+          path: candidate/external/cjson
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned DoomGeneric closure
@@ -93,7 +141,7 @@ jobs:
         with:
           repository: ozkl/doomgeneric
           ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
-          path: external/doom
+          path: candidate/external/doom
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned LZ4 closure
@@ -101,7 +149,7 @@ jobs:
         with:
           repository: lz4/lz4
           ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
-          path: external/lz4
+          path: candidate/external/lz4
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned yyjson closure
@@ -109,7 +157,7 @@ jobs:
         with:
           repository: ibireme/yyjson
           ref: 8b4a38dc994a110abaec8a400615567bd996105f
-          path: external/yyjson
+          path: candidate/external/yyjson
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned stb closure
@@ -117,7 +165,7 @@ jobs:
         with:
           repository: nothings/stb
           ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
-          path: external/stb
+          path: candidate/external/stb
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned zlib closure
@@ -125,7 +173,7 @@ jobs:
         with:
           repository: madler/zlib
           ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
-          path: external/zlib
+          path: candidate/external/zlib
           fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned musl closure
@@ -133,16 +181,30 @@ jobs:
         with:
           repository: ifduyue/musl
           ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
-          path: external/musl
+          path: candidate/external/musl
           fetch-depth: 1
           persist-credentials: false
-      - name: Materialize pinned target SDK headers
-        run: python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
+      - name: Materialize pinned target SDK headers with trusted code
+        run: python3 "$GITHUB_WORKSPACE/trusted/tools/native_retirement_sdks.py" --source-root "$(pwd)"
       - name: Prepare the pinned external closure
         run: >-
-          python3 tools/native_retirement_external.py prepare
+          python3 "$GITHUB_WORKSPACE/trusted/tools/native_retirement_external.py" prepare
           --manifest docs/native-retirement-dependencies-v1.json
           --source-root "$(pwd)"
+      # Never regress to `.native-retirement-trusted/tools/native_retirement_rebind.py refresh`:
+      # that former path lived under the untrusted candidate checkout. The executable
+      # command below uses the separately checked-out sibling trusted revision.
+      - name: Reconstruct exact candidate binding ephemerally
+        run: |
+          mkdir -p evidence/native-retirement-rebind
+          python3 "$GITHUB_WORKSPACE/trusted/tools/native_retirement_rebind.py" refresh \
+            --repo-root "$(pwd)" \
+            | tee evidence/native-retirement-rebind/refresh.json
+          python3 "$GITHUB_WORKSPACE/trusted/tools/native_retirement_rebind.py" check \
+            --repo-root "$(pwd)" \
+            | tee evidence/native-retirement-rebind/check.json
+          python3 tools/native_retirement_rebind.py check --repo-root "$(pwd)" \
+            | tee evidence/native-retirement-rebind/candidate-check.json
       - name: Build and validate the manifest producer
         run: |
           clang --version
@@ -220,7 +282,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-retirement-contract-${{ github.run_id }}
-          path: evidence/
+          path: candidate/evidence/
           retention-days: 7
           if-no-files-found: error
       - name: State durable evidence boundary

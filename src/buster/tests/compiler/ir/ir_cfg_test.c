@@ -258,6 +258,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_instruction_span_tests(UnitTestArgumen
             {
                 BUSTER_TEST(arguments, rows[index].operands[operand].value == old + operand);
             }
+            BUSTER_TEST(arguments, rows[index].next.value == IR_ID_UNDERLYING_INVALID);
+            // Spans stay authoritative even if inactive construction links are poisoned.
             rows[index].next.value = UINT32_MAX - 1;
             IrInstructionId published_next = ir_block_next_instruction(&function, blocks + (index < 3 ? 0 : 1), (IrInstructionId){.value = index});
             BUSTER_TEST(arguments, published_next.value == (index == 2 || index == 4 ? UINT32_MAX : index + 1));
