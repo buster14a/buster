@@ -1,0 +1,45 @@
+name: Apply issue 929 patch
+
+on:
+  push:
+    branches:
+      - codex/929-retirement-performance-eligibility
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Apply focused issue 929 patch
+        run: python3 tools/apply_929_patch.py
+
+      - name: Validate syntax and focused contracts
+        run: |
+          python3 -m py_compile \
+            tools/native_retirement_performance_schema.py \
+            tools/native_retirement_contract.py \
+            tools/native_retirement_performance_binding.py \
+            tools/native_retirement_performance_binding_test.py \
+            tools/native_retirement_performance_identity_test.py \
+            tools/native_retirement_performance_eligibility_test.py
+          python3 -W error::ResourceWarning tools/native_retirement_performance_eligibility_test.py -v
+          python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
+          python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
+
+      - name: Commit applied patch
+        run: |
+          git config user.name "openai-codex"
+          git config user.email "openai-codex@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "bench: reconcile retirement performance eligibility"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
