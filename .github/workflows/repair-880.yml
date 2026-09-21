@@ -1,0 +1,39 @@
+name: Materialize issue 880 workflow payload
+
+on:
+  push:
+    branches:
+      - fix/880-9700x-durable-evidence
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-issue-880-workflow
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check out staging payload
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: true
+
+      - name: Materialize and verify exact workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/repair-880/*.b64 | base64 --decode > .github/workflows/9700x-service-dispatch.yml
+          test "$(sha256sum .github/workflows/9700x-service-dispatch.yml | cut -d' ' -f1)" = \
+            "727ead6f1e751553ba72ffa903b738a1ba4062bf0d1e95754ab96a57ec043708"
+          test "$(git hash-object .github/workflows/9700x-service-dispatch.yml)" = \
+            "796f20fdd0f6bb0b58bd2bed29a39f00b7e9f915"
+          rm -rf .github/repair-880 .github/workflows/repair-880.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "bench: materialize durable evidence workflow"
+          git push origin HEAD:fix/880-9700x-durable-evidence
