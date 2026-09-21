@@ -1,0 +1,35 @@
+name: PR 923 isolated source access
+on:
+  push:
+    branches: [work/923-source-access]
+    paths: [.github/workflows/923-source-access.yml]
+permissions:
+  contents: read
+concurrency:
+  group: pr-923-source-access-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ea49afe045444918121d441431d07f6520ad90ae
+          persist-credentials: false
+      - name: Archive exact reviewed source
+        run: |
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/pr923-source.tar.gz"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/pr923-identities.txt"
+          cd "$RUNNER_TEMP"
+          sha256sum pr923-source.tar.gz > pr923-source.tar.gz.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr923-source-ea49afe
+          path: |
+            ${{ runner.temp }}/pr923-source.tar.gz
+            ${{ runner.temp }}/pr923-source.tar.gz.sha256
+            ${{ runner.temp }}/pr923-identities.txt
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
