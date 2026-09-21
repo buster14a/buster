@@ -1,0 +1,22 @@
+# Ownership and review routing for admission policy and trust roots.
+# Advisory under the solo-maintainer policy; approval is not mandatory.
+# Owners must have write access; authors cannot approve their own PRs.
+/.github/ @davidgmbb
+/.forgejo/ @davidgmbb
+AGENTS.md @davidgmbb
+CLAUDE.md @davidgmbb
+/docs/agents/ @davidgmbb
+/build.c @davidgmbb
+/build.sh @davidgmbb
+/build.ps1 @davidgmbb
+/CMakeLists.txt @davidgmbb
+/cmake/ @davidgmbb
+/tools/ @davidgmbb
+/tests/bootstrap* @davidgmbb
+/tests/ci* @davidgmbb
+/tests/gpu/*requirements* @davidgmbb
+/docs/native-retirement* @davidgmbb
+/src/buster/lib/compiler/assembly/generated/ @davidgmbb
+/.codex/ @davidgmbb
+/.claude/ @davidgmbb
+/docs/main-branch-protection* @davidgmbb

@@ -19,13 +19,22 @@ concurrency:
 
 jobs:
   bootstrap:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ github.server_url == 'https://github.com' }}
     name: Canonical TCC bootstrap
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       LC_ALL: C
     steps:
+      - name: Require CI admission to be enabled
+        shell: bash
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: |
+          if [[ "$CI_ENABLED" != true ]]; then
+            echo '::error::Required validation is disabled; refusing a skipped admission check.'
+            exit 1
+          fi
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
