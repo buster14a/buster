@@ -287,6 +287,7 @@ jobs:
         run: |
           python3 tools/native_retirement_dependency_binding_test.py -v
           python3 tools/native_retirement_integration_test.py -v
+          python3 tools/native_retirement_merge_gate_test.py -v
           python3 tools/native_retirement_rebind_test.py -v
           python3 tools/native_retirement_materializer.py self-test
           python3 tools/native_retirement_materializer_test.py -v
@@ -299,13 +300,14 @@ jobs:
 
   publish:
     needs: [prepare, validate]
-    name: Publish one lease-guarded integration commit
+    name: Publish one lease-guarded PR integration head
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     environment: native-retirement-integration
     permissions:
       contents: write
       pull-requests: read
+      statuses: write
     steps:
       - name: Check out the immutable trusted rebinder revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -409,27 +411,76 @@ jobs:
             --pull-request "$PR_NUMBER" \
             --expected-head "$EXPECTED_HEAD" \
             --transition-kind "$TRANSITION_KIND"
-      - name: Atomically publish or fail closed on stale main
+      - name: Publish and attest exact integration head
+        shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          base='${{ needs.prepare.outputs.base }}'
+          head='${{ needs.prepare.outputs.head }}'
+          final_tree='${{ needs.prepare.outputs.final_tree }}'
+          evidence='${{ needs.prepare.outputs.evidence_sha256 }}'
+          transition='${{ needs.prepare.outputs.classification }}'
+          pr_json=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          head_repo=$(jq -r '.head.repo.full_name' <<<"$pr_json")
+          head_ref=$(jq -r '.head.ref' <<<"$pr_json")
+          head_sha=$(jq -r '.head.sha' <<<"$pr_json")
+          test "$head_repo" = "$GITHUB_REPOSITORY"
+          test "$head_sha" = "$head"
+          git check-ref-format --branch "$head_ref" >/dev/null
+          main_remote=$(git -C trusted ls-remote --refs origin refs/heads/main | cut -f1)
+          pull_remote=$(git -C trusted ls-remote --refs origin "refs/pull/$PR_NUMBER/head" | cut -f1)
+          branch_remote=$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)
+          test "$main_remote" = "$base"
+          test "$pull_remote" = "$head"
+          test "$branch_remote" = "$head"
+          printf -v message '%s\n' \
+            "Integrate pull request #$PR_NUMBER with native-retirement binding" \
+            "" \
+            "Native-retirement-integration-evidence: $evidence" \
+            "Native-retirement-base: $base" \
+            "Native-retirement-candidate: $head" \
+            "Native-retirement-final-tree: $final_tree" \
+            "Native-retirement-transition-kind: $transition"
+          commit=$(
+            printf '%s' "$message" |
+              GIT_AUTHOR_NAME='github-actions[bot]' \
+              GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+              GIT_COMMITTER_NAME='github-actions[bot]' \
+              GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+              git -C trusted commit-tree "$final_tree" -p "$base" -p "$head"
+          )
           askpass="$RUNNER_TEMP/native-retirement-askpass.sh"
-          cat > "$askpass" <<'SH'
-          #!/bin/sh
-          case "$1" in
-            *Username*) printf '%s\n' x-access-token ;;
-            *) printf '%s\n' "$GITHUB_TOKEN" ;;
-          esac
-          SH
+          # Literal lines for the child script; expansion there is intentional.
+          # shellcheck disable=SC2016
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" x-access-token ;;' \
+            '  *) printf "%s\\n" "$GITHUB_TOKEN" ;;' \
+            'esac' > "$askpass"
           chmod 700 "$askpass"
           trap 'rm -f "$askpass"' EXIT
-          GIT_ASKPASS="$askpass" python3 trusted/tools/native_retirement_integration.py publish \
-            --repo-root trusted \
-            --pull-request "$PR_NUMBER" \
-            --evidence "$RUNNER_TEMP/native-retirement/evidence.json" \
-            --message "Integrate pull request #$PR_NUMBER with native-retirement binding" \
-            | tee "$RUNNER_TEMP/native-retirement/publication.json"
+          test "$(git -C trusted ls-remote --refs origin refs/heads/main | cut -f1)" = "$base"
+          test "$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)" = "$head"
+          staging_ref="refs/heads/native-retirement-staging/pr-$PR_NUMBER-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          GIT_ASKPASS="$askpass" git -C trusted push --porcelain \
+            origin "$commit:$staging_ref"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$commit" \
+            -f state=success \
+            -f context='Native retirement trusted integration' \
+            -f description="evidence ${evidence:0:16}" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          GIT_ASKPASS="$askpass" git -C trusted push --porcelain \
+            --force-with-lease="refs/heads/$head_ref:$head" \
+            origin "$commit:refs/heads/$head_ref"
+          test "$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)" = "$commit"
+          GIT_ASKPASS="$askpass" git -C trusted push --porcelain --delete origin "$staging_ref"
+          printf '{\n  "status": "published",\n  "commit": "%s",\n  "tree": "%s",\n  "evidence_sha256": "%s"\n}\n' \
+            "$commit" "$final_tree" "$evidence" \
+            > "$RUNNER_TEMP/native-retirement/publication.json"
       - name: Retain publication evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
