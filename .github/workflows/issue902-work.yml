@@ -6,19 +6,121 @@ on:
 permissions:
   contents: read
 jobs:
-  source:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 46ed5e141baed17dfc1e977691ac73e08be5b9f5
+          path: source
           persist-credentials: false
-      - name: Export exact source
-        run: git archive --format=tar.gz --output="$RUNNER_TEMP/issue902-source.tar.gz" HEAD
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          name: issue902-source
-          path: ${{ runner.temp }}/issue902-source.tar.gz
-          retention-days: 1
+          ref: 5186833693f7de58092c3933c4429a6cf8080459
+          path: payload
+          persist-credentials: false
+      - name: Verify patch and prepare frontend-only diagnostic dispatch
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          cp ../payload/issue902.patch.gz.b64 "$RUNNER_TEMP/evidence/transport.b64"
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib
+          s = Path('../payload/issue902.patch.gz.b64').read_text()
+          s = s.replace('UIzMnCAOEjE9', 'UIzMnCAOEENjE9').replace('GJUKO6WXRNJOH', 'GJUKO6XRNHJOH')
+          p = gzip.decompress(base64.b64decode(s))
+          assert hashlib.sha256(p).hexdigest() == '8d4b5a4e1ba24e99d03abc78332a7915713920c990936581514de6210e7bfdcf'
+          Path('../issue902.patch').write_bytes(p)
+          PY
+          sha256sum ../issue902.patch | tee "$RUNNER_TEMP/evidence/patch.sha256"
+          git apply --check ../issue902.patch
+          git apply --exclude=src/buster/lib/compiler/frontend/c/c_gen.c ../issue902.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/buster/tests/test.c')
+          s = p.read_text()
+          old = 'buster_test_run_parallel_descriptors(arguments, test_descriptors, BUSTER_ARRAY_LENGTH(test_descriptors), timing_enabled, &timing_record_count)'
+          assert s.count(old) == 1
+          s = s.replace(old, 'buster_test_run_parallel_descriptors(arguments, test_descriptors + TEST_ID_C_FRONTEND, 1, timing_enabled, &timing_record_count)')
+          s = s.replace('timing_record_count == expected_timing_records', 'timing_record_count == 1')
+          p.write_text(s)
+          PY
+          git diff --check
+      - name: Build baseline production with the added regressions
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/evidence/baseline-build.log") 2>&1
+          clang --version
+          gcc --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/driver"
+          "$RUNNER_TEMP/driver" generate --cc clang --config Debug --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/driver" build --config Debug -t ide
+      - name: Baseline frontend suite including new enum bit-field regressions
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUSTER_TEST_JOBS=2 timeout 600 build/Debug/ide test --ci=1 2>&1 | tee "$RUNNER_TEMP/evidence/baseline-frontend.log"
+      - name: Baseline Debug-seeded fixed point
+        if: ${{ matrix.runner == 'ubuntu-26.04' }}
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/evidence/baseline-selfhost.log") 2>&1
+          timeout 300 build/Debug/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/baseline-stage1"
+          timeout 300 "$RUNNER_TEMP/baseline-stage1" cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/baseline-stage2"
+          cmp "$RUNNER_TEMP/baseline-stage1" "$RUNNER_TEMP/baseline-stage2"
+          sha256sum "$RUNNER_TEMP/baseline-stage1" "$RUNNER_TEMP/baseline-stage2"
+      - name: Build candidate
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --include=src/buster/lib/compiler/frontend/c/c_gen.c ../issue902.patch
+          "$RUNNER_TEMP/driver" build --config Debug -t ide 2>&1 | tee "$RUNNER_TEMP/evidence/candidate-build.log"
+      - name: Candidate complete frontend suite
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUSTER_TEST_JOBS=2 timeout 600 build/Debug/ide test --ci=1 2>&1 | tee "$RUNNER_TEMP/evidence/candidate-frontend.log"
+      - name: Candidate Debug-seeded fixed point
+        if: ${{ matrix.runner == 'ubuntu-26.04' }}
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/evidence/candidate-selfhost.log") 2>&1
+          timeout 300 build/Debug/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/candidate-stage1"
+          timeout 300 "$RUNNER_TEMP/candidate-stage1" cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/candidate-stage2"
+          cmp "$RUNNER_TEMP/candidate-stage1" "$RUNNER_TEMP/candidate-stage2"
+          sha256sum "$RUNNER_TEMP/candidate-stage1" "$RUNNER_TEMP/candidate-stage2"
+      - name: Verify production patch has no test dispatch changes
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git restore src/buster/tests/test.c
+          git diff --check
+          git diff --binary > "$RUNNER_TEMP/evidence/validated.patch"
+          echo '8d4b5a4e1ba24e99d03abc78332a7915713920c990936581514de6210e7bfdcf  '"$RUNNER_TEMP/evidence/validated.patch" | sha256sum -c -
+          git diff --stat | tee "$RUNNER_TEMP/evidence/diff-stat.txt"
+      - name: Retain validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue902-validation-${{ matrix.runner }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence
           if-no-files-found: error
+          retention-days: 7
