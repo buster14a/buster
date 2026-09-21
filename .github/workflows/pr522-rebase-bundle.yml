@@ -1,4 +1,4 @@
-name: PR 522 rebase bundle
+name: PR 522 source reconciliation transport
 
 on:
   push:
@@ -8,43 +8,58 @@ on:
       - '.github/workflows/pr522-rebase-bundle.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
+  publish-source:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Export immutable reconciliation inputs
+      - name: Reconstruct only the reviewed source tree
         shell: bash
+        env:
+          GIT_AUTHOR_NAME: David
+          GIT_AUTHOR_EMAIL: davidgmbb@gmail.com
+          GIT_COMMITTER_NAME: David
+          GIT_COMMITTER_EMAIL: davidgmbb@gmail.com
+          GIT_AUTHOR_DATE: '2026-09-21T23:31:20+00:00'
+          GIT_COMMITTER_DATE: '2026-09-21T23:31:20+00:00'
         run: |
           set -euo pipefail
-          test "$(git rev-parse refs/remotes/origin/main)" = "1d64654d72b259485dbac6ddc36c784fe2bac6c3"
-          test "$(git rev-parse refs/remotes/origin/codex/513-mir-only-native)" = "abda0f3bbea9cb7b8bac21ae9d20cc57b589c808"
-          refs=(
-            refs/remotes/origin/main
-            refs/remotes/origin/codex/513-mir-only-native
-            refs/remotes/origin/codex/513-reconciled-candidate
-            refs/remotes/origin/codex/513-f-exact-native-candidate
-            refs/remotes/origin/codex/522-f-exact-retirement-candidate
-          )
-          git show-ref "${refs[@]}" | tee "$RUNNER_TEMP/pr522-input-refs.txt"
-          git bundle create "$RUNNER_TEMP/pr522-rebase.bundle" "${refs[@]}"
-          git bundle verify "$RUNNER_TEMP/pr522-rebase.bundle"
-          cd "$RUNNER_TEMP"
-          sha256sum pr522-rebase.bundle | tee pr522-rebase.bundle.sha256
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: pr522-rebase-bundle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/pr522-rebase.bundle
-            ${{ runner.temp }}/pr522-rebase.bundle.sha256
-            ${{ runner.temp }}/pr522-input-refs.txt
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
+          main=1d64654d72b259485dbac6ddc36c784fe2bac6c3
+          old=abda0f3bbea9cb7b8bac21ae9d20cc57b589c808
+          test "$(git rev-parse refs/remotes/origin/main)" = "$main"
+          test "$(git rev-parse refs/remotes/origin/codex/513-mir-only-native)" = "$old"
+          git checkout --detach "$main"
+          git -c user.name=David -c user.email=davidgmbb@gmail.com merge --no-commit --no-ff "$old" && exit 1
+          test "$(git diff --name-only --diff-filter=U)" = docs/agents/machine.md
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('docs/agents/machine.md')
+          s = p.read_text()
+          markers = ('<<<<<<< HEAD\n', '=======\n', '>>>>>>> abda0f3bbea9cb7b8bac21ae9d20cc57b589c808\n')
+          assert all(s.count(m) == 1 for m in markers)
+          s = s.replace(markers[0], '').replace(markers[1], '\n').replace(markers[2], '')
+          p.write_text(s)
+          PY
+          git add docs/agents/machine.md
+          git diff --cached --check
+          git diff --cached --exit-code "$main" -- docs/native-retirement-repository-sources-v1.json tools/native_retirement_dependency_binding.generated.h
+          tree=$(git write-tree)
+          test "$tree" = fd6be9eedbc7f145c66437708df006d556fb9596
+          cat > "$RUNNER_TEMP/commit-message" <<'EOF'
+          codegen: reconcile MIR-only cutover with landed prerequisites and current main
+
+          Integrate main 1d64654d72b259485dbac6ddc36c784fe2bac6c3 into the designated #522 implementation without rewriting its history. Preserve the sparse x86 local-use and Win64 argument staging changes, all #845-#849 repairs, and #927 trusted admission authority. Resolve the machine guide overlap by retaining both independently applicable sections.
+
+          This is a source reconciliation only, not a trusted integration attestation or #512 performance acceptance. Keep #522 draft and #513/#36 open.
+          EOF
+          commit=$(git commit-tree "$tree" -p "$main" -p "$old" < "$RUNNER_TEMP/commit-message")
+          test "$commit" = be93ed3047044b099872ced1679ad8b795c9ce94
+          git merge-base --is-ancestor "$old" "$commit"
+          git push origin "$commit:refs/heads/automation/pr522-source-be93ed30"
+          printf 'Source commit: %s\nSource tree: %s\nNo candidate code executed; no trust attestation or PR/main update performed.\n' "$commit" "$tree" >> "$GITHUB_STEP_SUMMARY"
