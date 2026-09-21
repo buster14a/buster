@@ -1,0 +1,179 @@
+name: Validate PR 922 policy repair
+
+on:
+  push:
+    branches: [repair/922-ci-policy-20260921]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repair-922-ci-policy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: ${{ github.repository == 'buster14a/buster' && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      candidate: ${{ steps.candidate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 24afc62a3adac9ad551baa78dffbbfa7097b3175
+          persist-credentials: false
+      - name: Apply the one-file policy repair
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib
+          import subprocess
+          workflow = Path('.github/workflows/merge-conflict-preflight.yml')
+          assert subprocess.check_output(['git', 'hash-object', str(workflow)], text=True).strip() == 'b6233361ed1b310ad1e5b925eac69233c5e5cd48'
+          digest = hashlib.sha256(workflow.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
+          path = Path('tests/ci_tools_test.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''                text = path.read_text()
+                          self.assertNotIn("pull_request_target", text)
+                          self.assertIn("contents: read", text)'''.replace('\n                          ', '\n                ')
+          new = '''                text = path.read_text(encoding="utf-8")
+                          self.assert_pull_request_target_policy(path, text)
+                          self.assertIn("contents: read", text)'''.replace('\n                          ', '\n                ')
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          addition = '''    def assert_pull_request_target_policy(self, path, text):
+                  if path.name == "merge-conflict-preflight.yml":
+                      # The sole exception is the exact reviewed workflow, not a filename
+                      # allowlist. Its candidate tests are read-only and PR-only; the
+                      # status-writing job executes only the trusted default-branch tool.
+                      # Any workflow edit must be reviewed against that boundary before
+                      # this literal is updated, including otherwise harmless formatting.
+                      # read_text normalizes checkout CRLF before hashing on Windows.
+                      self.assertEqual(
+                          hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                          "APPROVED_DIGEST",
+                          "preflight workflow changed: review event guards, permissions, "
+                          "trusted checkout, and every executed step before renewing approval",
+                      )
+                  else:
+                      self.assertNotIn("pull_request_target", text)
+
+              def test_preflight_target_exception_is_not_a_general_event_allowlist(self):
+                  workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+                  text = workflow.read_text(encoding="utf-8")
+                  self.assert_pull_request_target_policy(workflow, text)
+                  for name in ("ci.yml", "unreviewed.yml", "merge-conflict-preflight.yaml"):
+                      with self.subTest(name=name), self.assertRaises(AssertionError):
+                          self.assert_pull_request_target_policy(workflow.with_name(name), text)
+
+              def test_preflight_target_exception_rejects_privilege_and_execution_changes(self):
+                  workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+                  text = workflow.read_text(encoding="utf-8")
+                  changes = (
+                      ("contents: read", "contents: write"),
+                      ("persist-credentials: false", "persist-credentials: true"),
+                      ("ref: ${{ github.event.repository.default_branch }}",
+                       "ref: ${{ github.event.pull_request.head.sha }}"),
+                      ("github.event_name == 'pull_request'", "always()"),
+                      ("github.event_name != 'pull_request'", "always()"),
+                      ("statuses: write", "statuses: write\\n      contents: write"),
+                      ("run: python3 -B tools/merge_conflict_preflight_test.py -v",
+                       "env:\\n          GITHUB_TOKEN: ${{ github.token }}\\n"
+                       "        run: python3 -B tools/merge_conflict_preflight_test.py -v"),
+                      ("python3 -B tools/merge_conflict_preflight.py github-event",
+                       "python3 -B tools/merge_conflict_preflight_test.py -v"),
+                      ("retention-days: 14", "retention-days: 14\\n"
+                       "      - name: Unreviewed execution\\n        run: echo unreviewed"),
+                  )
+                  for before, after in changes:
+                      with self.subTest(change=before):
+                          self.assertIn(before, text)
+                          changed = text.replace(before, after)
+                          self.assertNotEqual(changed, text)
+                          with self.assertRaises(AssertionError):
+                              self.assert_pull_request_target_policy(workflow, changed)
+
+              def test_preflight_target_approval_normalizes_checkout_line_endings(self):
+                  workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+                  text = workflow.read_text(encoding="utf-8")
+                  with tempfile.TemporaryDirectory() as directory:
+                      copy = Path(directory) / workflow.name
+                      copy.write_bytes(text.replace("\\n", "\\r\\n").encode("utf-8"))
+                      self.assert_pull_request_target_policy(copy, copy.read_text(encoding="utf-8"))
+
+          '''
+          addition = addition.replace('\n          ', '\n').replace('APPROVED_DIGEST', digest)
+          # Preserve GitHub expressions as literal fixture bytes, never as runner interpolation.
+          addition = addition.replace('ref: main', 'ref: ' + '$' + '{{ github.event.repository.default_branch }}')
+          anchor = '    def test_integrity_and_security_policy(self):\n'
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, addition + anchor)
+          with path.open('w', encoding='utf-8', newline='\n') as stream:
+              stream.write(text)
+          compile(text, str(path), 'exec')
+          print('Approved preflight workflow SHA-256:', digest)
+      - name: Run workflow suites without write credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/922-repair"
+          git diff --check
+          python3 -B tools/check_action_pins.py
+          for suite in tests/ci_tools_test.py tools/ci_zig_test.py tools/ci_zig_cache_test.py tools/ci_android_sdk_test.py tools/analyzer_selection_test.py tools/coverage_manifest_test.py tools/matrix_shard_test.py tools/differential_ci_policy_test.py tools/native_producer_profile_test.py tools/ci_configure_evidence_test.py tools/ci_native_observation_test.py tools/merge_conflict_preflight_test.py; do
+            python3 -B "$suite" -v 2>&1 | tee "$RUNNER_TEMP/922-repair/$(basename "$suite").log"
+          done
+      - name: Export the tested single-file commit
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'David Gonzalez Martin'
+          git config user.email '39247043+davidgmbb@users.noreply.github.com'
+          git add tests/ci_tools_test.py
+          git -c core.hooksPath=/dev/null commit -m 'ci: narrowly approve trusted merge preflight target event'
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          git diff HEAD^ HEAD -- tests/ci_tools_test.py > "$RUNNER_TEMP/922-repair/repair.patch"
+          git bundle create "$RUNNER_TEMP/922-repair/candidate.bundle" HEAD ^24afc62a3adac9ad551baa78dffbbfa7097b3175
+          git archive HEAD | gzip > "$RUNNER_TEMP/922-repair/source.tar.gz"
+          printf '%s\n' "$sha" > "$RUNNER_TEMP/922-repair/candidate-sha.txt"
+      - name: Retain tests and candidate objects
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: repair-922-evidence
+          path: ${{ runner.temp }}/922-repair/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 24afc62a3adac9ad551baa78dffbbfa7097b3175
+          persist-credentials: false
+      - name: Publish verified objects to a scratch branch without executing candidate code
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ needs.validate.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name repair-922-evidence --dir "$RUNNER_TEMP/922-import"
+          git -c core.hooksPath=/dev/null fetch "$RUNNER_TEMP/922-import/candidate.bundle" HEAD
+          sha=$(git rev-parse FETCH_HEAD)
+          test "$sha" = "$EXPECTED_SHA"
+          test "$(git show -s --format=%P "$sha")" = 24afc62a3adac9ad551baa78dffbbfa7097b3175
+          test "$(git diff-tree --no-commit-id --name-only -r "$sha")" = tests/ci_tools_test.py
+          git diff --check "$sha^" "$sha"
+          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null git push origin "$sha:refs/heads/repair/922-verified-20260921"
+          printf 'Verified single-file repair commit: `%s`\n' "$sha" >> "$GITHUB_STEP_SUMMARY"
