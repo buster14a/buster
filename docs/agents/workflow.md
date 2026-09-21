@@ -184,6 +184,57 @@ can become trusted; then dispatch the separate policy transition. Manual
 generated-file edits are rejected for every class. See
 [native-retirement rebinding](../native-retirement-rebinding.md).
 
+## Merge-conflict preflight
+
+The `merge-conflict-preflight` status is a cheap read-only answer for one exact
+triple: current `main`, candidate head and merge base. Its description embeds
+the full main and head SHAs; the retained JSON also records their trees, every
+merge-base SHA/tree and the exact combined tree when clean. A result for
+`m=<old-main> h=<head>` is not authoritative after `main` moves, even when the
+same head still shows a green status. The default-branch refresh rewrites the
+status for open PRs, and the later merge-group admission path must validate its
+own exact combined head rather than reuse a historical PR-head result.
+
+The preflight never checks out, rebases, merges or updates a PR branch. It uses
+`git merge-tree` plumbing, reports every unmerged path and Git's conflict kind,
+and does not choose `ours`, `theirs`, a union driver or a semantic resolution.
+Respond to its numbered classification exactly as follows:
+
+1. **Generated/integration-owned workflow violation.** Remove
+   `docs/native-retirement-repository-sources-v1.json` and/or
+   `tools/native_retirement_dependency_binding.generated.h` from the PR. Do not
+   hand-resolve hashes or refresh generated state on the feature branch; rerun
+   ephemeral validation and let the serialized trusted writer publish the
+   integrated result.
+2. **Genuine source overlap.** Stop the expensive matrix and inspect the exact
+   named paths. Choose an intentional order, rebase or explicit stack; preserve
+   both changes where required, run the affected focused tests, then let the
+   preflight evaluate the new immutable head. Never auto-resolve merely because
+   textual hunks appear disjoint.
+3. **Clean but stale.** Do not rebase solely to make the branch pointer current.
+   Keep the clean branch directly mergeable under the loose-check policy, but
+   require validation of the reported exact combined tree (or the later
+   merge-group head). Rerun that validation whenever either main or the head
+   SHA changes.
+4. **Policy/schema/trust-boundary overlap.** Use the reviewed native-retirement
+   bootstrap/policy transition procedure. Do not let candidate-modified trust
+   code approve its own output, and do not combine a trust implementation
+   bootstrap with its dependent policy/schema transition. Resolve ordering and
+   independent review before running expensive acceptance again.
+
+For a local diagnosis with already-fetched immutable commits, run:
+
+```sh
+python3 -B tools/merge_conflict_preflight.py analyze \
+  --repo . --main <main-sha> --head <head-sha> \
+  --summary /tmp/merge-conflict-preflight.md --fail-on-blocking
+```
+
+This command may write ordinary Git merge-tree objects to the local object
+database, but it does not change refs, the index, the worktree or either input
+branch. The hosted trusted job records the same machine-readable report without
+executing candidate code.
+
 **Push a rebase before you re-verify it.** A rebase onto a moved `main` is
 followed by a full local pass — `test_all`, `test_self_host`, whichever compat
 harness the change touches — and that pass takes longer than CI takes to start.
