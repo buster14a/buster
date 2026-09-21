@@ -9,9 +9,10 @@ Use the [validate-buster-v1 provisioning and evidence checklist](VALIDATE_BUSTER
 before starting the reference service. It separates repository prerequisites,
 privileged operator work, and still-unperformed live checks. The reference now
 selects the authenticated long-lived `serve` endpoint, not the one-shot
-`worker-run` CLI. The executable includes the fixed gateway and
-[bounded result exporter](../EXPORT.md); granting the gateway access remains
-operator work. No deployment or live host qualification is implied.
+`worker-run` CLI. The installed service includes the fixed gateway and
+[bounded result exporter](../EXPORT.md); this directory still supplies no
+runner authorization, durable publication destination or physical-host
+qualification.
 
 The installed executable must be the reviewed `bench_service` binary at
 `/usr/local/libexec/buster-bench-service`. The queue, workspace root and stable
