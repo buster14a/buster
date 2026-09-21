@@ -1,4 +1,4 @@
 Traceback (most recent call last):
-  File "/home/runner/work/buster/buster/tools/apply_929_patch.py", line 1, in <module>
-    PLACEHOLDER
-NameError: name 'PLACEHOLDER' is not defined
+  File "/home/runner/work/buster/buster/tools/run_929_patch.py", line 25, in <module>
+    raise RuntimeError("staged patch driver has an unexpected test-import edit")
+RuntimeError: staged patch driver has an unexpected test-import edit
