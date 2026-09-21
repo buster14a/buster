@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          python3 tools/apply_929_patch.py >apply-929-error.txt 2>&1
+          python3 tools/run_929_patch.py >apply-929-error.txt 2>&1
           status=$?
           cat apply-929-error.txt
           echo "status=$status" >> "$GITHUB_OUTPUT"
