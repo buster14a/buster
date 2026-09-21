@@ -1974,12 +1974,17 @@ static void test_process_observations(char const* executable, char const* root)
 #include "qualification_test.h"
 
 #include "retirement_samples_test.h"
+#include "retirement_measurement_test.h"
 
 int main(int argc, char** argv)
 {
     ThreadContext* context = thread_context_allocate();
     thread_context_select(context);
     int result = 2;
+#ifdef __linux__
+    if (argc >= 2 && !strcmp(argv[1], "retirement-child")) result = test_retirement_measurement_child(argc, argv);
+    else
+#endif
     if (argc >= 2 && !strcmp(argv[1], "cc")) result = test_compiler_child(argc, argv);
     else if (argc >= 2 && !strcmp(argv[1], "child")) result = test_child(argc, argv);
     else if (argc == 2)
@@ -2037,6 +2042,9 @@ int main(int argc, char** argv)
         test_retirement_execution();
         test_retirement_records(root);
         test_retirement_samples(root);
+#ifdef __linux__
+        test_retirement_measurement(executable, root);
+#endif
         test_retirement_shards(root);
 #ifdef __linux__
         test_process_observations(executable, root);

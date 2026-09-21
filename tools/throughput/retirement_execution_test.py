@@ -8,6 +8,7 @@ Run after `bench_throughput self-test`, with its output directory as argument.
 """
 import copy
 from contextlib import closing
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -31,6 +32,60 @@ class NativeExecutionTests(unittest.TestCase):
         cls.sample_data = (cls.root / "retirement-samples-0000.jsonl").read_bytes()
         cls.shard = {"path": "retirement-execution.jsonl", "bytes": len(cls.data),
                      "sha256": hashlib.sha256(cls.data).hexdigest(), "records": 1220}
+
+    @unittest.skipUnless(sys.platform == "linux", "descriptor-bound execution requires Linux")
+    def test_real_measured_commands_outputs_and_numeric_joins(self):
+        commands = {}
+        escaped = (self.root / "retirement-measured-command-escaped.json").read_bytes()
+        self.assertEqual(escaped, json.dumps(json.loads(escaped), sort_keys=True, separators=(",", ":")).encode())
+        self.assertEqual(hashlib.sha256(escaped).hexdigest(),
+            (self.root / "retirement-measured-command-escaped.sha256").read_text())
+        for kind in ("compiler", "runtime"):
+            data = (self.root / f"retirement-measured-command-{kind}.json").read_bytes()
+            command = json.loads(data)
+            self.assertEqual(data, json.dumps(command, sort_keys=True, separators=(",", ":")).encode())
+            self.assertEqual(command["environment"], ["LC_ALL=C", "TP_RETIREMENT_TEST=explicit"])
+            commands[kind] = hashlib.sha256(data).hexdigest()
+        data = (self.root / "retirement-measured-execution.jsonl").read_bytes()
+        shard = {"path": "retirement-measured-execution.jsonl", "bytes": len(data),
+                 "sha256": hashlib.sha256(data).hexdigest(), "records": 488}
+        events = list(binding._execution_trace_records(self.root, [shard], 488))
+        schedule = binding._execution_schedule([{"row": 0, "metrics": {"generated_runtime": True}}],
+            {"seed": 1, "rounds": 2, "pairs_per_round": 60, "warmups_per_variant": 2})
+        output_digest = hashlib.sha256(b"fixture-code\n").hexdigest()
+        measured = {}
+        identities = set()
+        previous_end = 0
+        for event, expected in zip(events, schedule, strict=True):
+            for key, value in expected.items():
+                self.assertEqual(event[key], value)
+            self.assertEqual(event["command_sha256"], commands[event["kind"]])
+            self.assertEqual(event["output_sha256"], output_digest)
+            self.assertEqual(event["code_section_bytes"], 13 if event["kind"] == "compiler" else None)
+            self.assertEqual(event["code_section_sha256"], output_digest if event["kind"] == "compiler" else None)
+            self.assertGreater(event["started_ns"], previous_end)
+            elapsed = event["finished_ns"] - event["started_ns"]
+            self.assertGreater(elapsed, 0)
+            self.assertEqual(Decimal(str(event["wall_seconds"])) * 1_000_000_000, elapsed)
+            previous_end = event["finished_ns"]
+            self.assertNotIn(event["process_instance_sha256"], identities)
+            identities.add(event["process_instance_sha256"])
+            if event["phase"] == "sample":
+                measured[event["round"], event["pair"], event["variant"], event["kind"]] = event
+        lines = (self.root / "retirement-measured-samples.jsonl").read_bytes().splitlines(keepends=True)
+        self.assertEqual(len(lines), 120)
+        for ordinal, line in enumerate(lines):
+            sample = json.loads(line)
+            self.assertEqual(line, (json.dumps(sample, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            self.assertEqual((sample["row"], sample["round"], sample["pair"]), (0, ordinal // 60, ordinal % 60))
+            for variant in ("baseline", "candidate"):
+                compiler = measured[sample["round"], sample["pair"], variant, "compiler"]
+                runtime = measured[sample["round"], sample["pair"], variant, "runtime"]
+                metrics = sample["measurements"]
+                self.assertEqual(metrics["compiler_wall_time"][variant], compiler["wall_seconds"])
+                self.assertEqual(metrics["compiler_peak_rss"][variant], compiler["peak_rss_bytes"])
+                self.assertEqual(metrics["generated_code_bytes"][variant], compiler["code_section_bytes"])
+                self.assertEqual(metrics["generated_runtime"][variant], runtime["wall_seconds"])
 
     def test_exact_native_bytes_pass_canonical_reader(self):
         events = list(binding._execution_trace_records(self.root, [self.shard], 1220))

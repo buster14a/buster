@@ -653,6 +653,52 @@ observations as unsupported. The existing `tp_process` entry point retains its
 ordinary throughput behavior and does not read process identity. Diagnostic PMU
 collection remains separate.
 
+`retirement_measurement.h` provides the Linux observation boundary for an
+already verified service plan. It hashes a read-only executable once before
+timing, retains its open descriptor and metadata identity, and launches that
+descriptor with `fexecve`. The command digest covers canonical ASCII JSON with
+the keys `argv`, `cwd`, and `environment`; arguments and sorted, unique
+`NAME=value` entries have a combined 64 KiB bound. There are at most 256
+arguments and 128 environment entries. The inherited environment is excluded.
+The supplied cwd descriptor must match the named working directory; its source
+tree still requires the service's independent immutable-closure verification.
+
+The optional `TpProcessInputs` path uses the existing process observer with PMU
+disabled, an empty service-owned log, explicit environment and null stdin.
+Linux `close_range(CLOSE_RANGE_CLOEXEC)` prevents unrelated supervisor handles
+from reaching the child, including handles the caller forgot to mark CLOEXEC.
+A kernel that cannot perform that operation fails the invocation. This does
+not install the service sandbox or acquire its lease.
+
+Before compiler launch, the artifact must be absent from the service-opened
+private output directory. Afterwards, the producer opens it relative to that
+descriptor without following links. Runtime output is read from the actual
+child's log descriptor. Both paths hash a regular, single-link file, bounded to
+1 GiB, with identity/size/metadata checks around the read. The observed digest
+must equal the independently prepared oracle. Compiler code-section facts
+come from that oracle's separately parsed artifact: exact whole-artifact byte
+equality establishes the same code payload, without treating file size as code
+size. The caller cannot use this helper to establish the oracle's correctness.
+
+Only successful execution and output verification advance the attached sample
+collector. `TpRetirementMeasurementResult` retains the process identity, wait
+status, timeout, observed output digest/size and failure stage for the service's
+failure recorder. A failure poisons the attempt. The helper does not delete
+logs or artifacts; the service must retain failures, retire successful scratch
+files before reuse, and seal evidence durably. It also owns cancellation,
+descendant absence proof and quiet-phase scheduling; these local observations
+are not authenticated service receipts.
+
+The native regression runs a complete one-row fixture through 488 fresh
+compiler/runtime child processes (two warmups and two 60-pair rounds per
+variant), then writes 120 numeric records. These deterministic fixture
+programs are functional tests, not compiler-performance measurements. Python
+independently checks canonical command hashes, every output identity, the
+schedule, process instances, and all numeric joins. Failure controls cover
+nonzero exit, timeout, wrong/missing compiler and runtime output, stale output,
+symlinks/hard links, changed binaries, command/cwd mismatch, inherited handles,
+ambient environment, and retry after failure.
+
 The encoder emits the existing canonical JSONL invocation schema in at most
 8,192 bytes. It checks successful child status, required hashes, exact interval
 agreement, compiler RSS, and code-section applicability before emitting bytes.

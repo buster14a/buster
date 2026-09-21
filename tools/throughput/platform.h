@@ -211,6 +211,7 @@ static TpProcess tp_process(char* const* args, char const* directory, char const
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
+#include <linux/close_range.h>
 #include <linux/perf_event.h>
 #include <sched.h>
 #include <sys/syscall.h>
@@ -336,9 +337,19 @@ static uint64_t tp_process_monotonic_ns(void)
 }
 #endif
 
-static TpProcess tp_process_observe(char* const* args, char const* directory, char const* log_path,
-                                    unsigned timeout_seconds, int cpu, int counters,
-                                    TpProcessObservation* observation)
+/* The retirement producer can bind already-open inputs and an explicit
+ * environment. Ordinary throughput keeps its existing path-based launch.
+ * These descriptors must be private, >= 3 and close-on-exec; the caller owns
+ * their lifetime. This is process plumbing, not the service sandbox or lease. */
+typedef struct TpProcessInputs
+{
+    int executable, directory, log;
+    char* const* environment;
+} TpProcessInputs;
+
+static TpProcess tp_process_observe_inputs(char* const* args, char const* directory, char const* log_path,
+    unsigned timeout_seconds, int cpu, int counters, TpProcessObservation* observation,
+    TpProcessInputs const* inputs)
 {
     TpProcess result = {0};
     if (observation) *observation = (TpProcessObservation){0};
@@ -353,7 +364,23 @@ static TpProcess tp_process_observe(char* const* args, char const* directory, ch
         result.counter_errors[i] = counters ? ENOSYS : 0;
     }
     int ready[2] = {-1, -1};
-    int log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int log = -1;
+#ifdef __linux__
+    if (inputs)
+    {
+        int descriptors[] = {inputs->executable, inputs->directory, inputs->log};
+        int valid = inputs->environment != NULL;
+        for (unsigned i = 0; valid && i < 3; ++i)
+        {
+            int flags = descriptors[i] >= 3 ? fcntl(descriptors[i], F_GETFD) : -1;
+            valid = flags >= 0 && (flags & FD_CLOEXEC);
+        }
+        if (valid) log = fcntl(inputs->log, F_DUPFD_CLOEXEC, 3);
+        else errno = EINVAL;
+    }
+    else
+#endif
+    if (!inputs) log = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     int ok = log >= 0 && pipe(ready) == 0;
 #ifndef __linux__
     if (observation) { ok = 0; errno = ENOTSUP; }
@@ -396,6 +423,9 @@ static TpProcess tp_process_observe(char* const* args, char const* directory, ch
         {
             child_ok = chdir(directory) == 0;
         }
+#ifdef __linux__
+        if (child_ok && inputs) child_ok = fchdir(inputs->directory) == 0;
+#endif
         if (child_ok && cpu >= 0)
         {
 #ifdef __linux__
@@ -424,6 +454,21 @@ static TpProcess tp_process_observe(char* const* args, char const* directory, ch
         if (child_ok && received == 1)
         {
             sigaction(SIGPIPE, &previous_pipe, NULL);
+#ifdef __linux__
+            if (inputs)
+            {
+                /* Neither a sample spool nor an unrelated supervisor handle
+                 * may leak into the child. Fail closed on an older kernel. */
+#ifdef SYS_close_range
+                int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+                child_ok = input >= 0 && dup2(input, STDIN_FILENO) >= 0 &&
+                    syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) == 0;
+                if (input >= 0) close(input);
+                if (child_ok) fexecve(inputs->executable, args, inputs->environment);
+#endif
+            }
+            else
+#endif
             execv(args[0], args);
         }
         /* No buffered parent streams are flushed after a failed exec. */
@@ -590,6 +635,14 @@ static TpProcess tp_process_observe(char* const* args, char const* directory, ch
     {
         sigaction(SIGALRM, &previous, NULL);
     }
+    return result;
+}
+
+static TpProcess tp_process_observe(char* const* args, char const* directory, char const* log_path,
+    unsigned timeout_seconds, int cpu, int counters, TpProcessObservation* observation)
+{
+    TpProcess result = tp_process_observe_inputs(args, directory, log_path,
+        timeout_seconds, cpu, counters, observation, NULL);
     return result;
 }
 
