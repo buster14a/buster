@@ -79,9 +79,22 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      - name: Check out exact combined validation tree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          # On PRs this is GitHub's immutable merge revision, not the old head.
+          # Self-tests added on main must not require rebasing clean branches.
+          # This checkout is test input only; trusted/ remains the authority.
+          ref: ${{ github.sha }}
+          path: validation
+          fetch-depth: 1
+          persist-credentials: false
       - name: Test native-retirement merge admission
-        working-directory: candidate
-        run: python3 -B tools/native_retirement_merge_gate_test.py -v
+        shell: bash
+        working-directory: validation
+        run: |
+          python3 -B tools/native_retirement_merge_gate_test.py -v
+          python3 -B tools/native_retirement_merge_gate_workflow_test.py -v
       - name: Enforce trusted native-retirement integration
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
         shell: bash
