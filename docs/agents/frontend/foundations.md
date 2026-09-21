@@ -705,11 +705,22 @@ Windows x86-64, and validates canonical IR in both frontend SSA forms.
 `c_test_enumerator_type_differential` executes the same assertion-bearing source
 with Clang GNU17 and GCC GNU2x at O0/O2, then with Buster GNU17/GNU23 in both
 frontend forms with strict codegen verification. The independently verified
-reference versions are Clang 17.0.0 and GCC 14.2.0. Expectations are hardcoded in
-the source: a newer reference that changes the contract fails visibly rather
-than silently becoming a new oracle. GCC 14's GNU17 mode already applies its
-C23 completion rule, whereas Clang 17's GNU2x mode still uses its older rule;
-neither is a substitute for the chosen reference/dialect pairing.
+reference versions are Clang 17.0.0/21.1.8 and GCC 14.2.0/15.2.0. Clang 20's
+[N3029 implementation](https://github.com/llvm/llvm-project/pull/103917) also
+changed its pre-C23 extension behavior: Clang 20 and later use the C23 completion
+profile in GNU17 mode; earlier Clang uses the historical profile. The external
+Clang source selects these two hardcoded profiles using `__clang_major__`, not
+observed probe results. GCC GNU2x always uses the C23 profile. GCC 14's GNU17 mode
+already applies its C23 completion rule, whereas Clang 17's GNU2x mode still uses
+its older rule; dialect names alone do not identify an external oracle.
+
+Buster receives a separate source file with an unconditional `ENUM_C23=0` or
+`ENUM_C23=1`, selected only by its requested dialect. The external prefix never
+reaches Buster, so a reference upgrade cannot weaken its GNU17 checks or silently
+change its semantics. Every reference must compile and execute the full
+assertion-bearing fixture. A compiler failure reports the executable, dialect,
+optimization, native status, timeout and captured stdout/stderr; failed source
+writes never launch a compiler against an earlier temporary file.
 
 Specification: [WG14 N3029](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3029.htm)
 and [N3030 fixed enums](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3030.htm).

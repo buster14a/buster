@@ -382,9 +382,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestA
     return result;
 }
 
-// #900 pins two deliberately different completed-enumerator contracts:
-// Clang 17 GNU17 and GCC 14 GNU2x. Do not derive the expectation from whichever
-// compiler happens to build the test runner or from __STDC_VERSION__.
+// #900 pins Buster's GNU17 and C23 completed-enumerator contracts independently
+// of the compiler building the test runner. External references get a separate
+// versioned prefix; their extension policy must not change Buster's expectations.
 BUSTER_GLOBAL_LOCAL String8 const c_test_enumerator_type_source = S8_INITIALIZER(
     "#define TY(v) _Generic((v), int:1,unsigned int:2,long:3,unsigned long:4,long long:5,unsigned long long:6,default:9)\n"
     "#define SIGNED_WIDE (sizeof(long)==8?3:5)\n"
@@ -566,6 +566,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     String8 reference_names[] = {S8("clang"), S8("gcc")};
     String8 reference_dialects[] = {S8("-std=gnu17"), S8("-std=gnu2x")};
+    // Clang 20 implemented N3029 in pre-C23 modes too (llvm-project #103917).
+    // Select a documented reference profile, never a result learned from a probe.
+    // This prefix is used only by the external compiler, not by Buster.
+    String8 reference_prefixes[] = {
+        S8("#if !defined(__clang__)\n#error expected a Clang reference\n#endif\n"
+           "#if __clang_major__ >= 20\n#define ENUM_C23 1\n#else\n#define ENUM_C23 0\n#endif\n"),
+        S8("#define ENUM_C23 1\n"),
+    };
     String8 buster_dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     String8 frontend_flags[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
@@ -576,20 +584,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             String8 compiler = executable_resolve_in_path(temporary.arena, reference_names[c23]);
             String8 source_path = buster_test_temporary_path(temporary.arena, S8("enumerator-types"), S8(".c"));
+            String8 reference_path = buster_test_temporary_path(temporary.arena, S8("enumerator-oracle"), S8(".c"));
             String8 output_path = buster_test_temporary_path(temporary.arena, S8("enumerator-reference"), S8(""));
             String8 source = string_format(temporary.arena, S8("#define ENUM_C23 {u32}\n{S8}"), c23, c_test_enumerator_type_source);
-            BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+            String8 reference_source = string_format(temporary.arena, S8("{S8}{S8}"), reference_prefixes[c23], c_test_enumerator_type_source);
+            bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+            bool reference_written = file_write(reference_path, BUSTER_SLICE_TO_BYTE_SLICE(reference_source));
+            BUSTER_TEST(arguments, source_written);
+            BUSTER_TEST(arguments, reference_written);
             BUSTER_TEST(arguments, compiler.length != 0);
-            if (compiler.length)
+            if (compiler.length && reference_written)
             {
-                String8 command[] = {compiler, reference_dialects[c23], optimizations[form], source_path, S8("-o"), output_path};
+                String8 command[] = {compiler, reference_dialects[c23], optimizations[form], reference_path, S8("-o"), output_path};
                 ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
                     (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
                                           .use_process_environment = true, .search_path = true});
                 if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
                 {
                     ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, spawn, 30000000);
-                    if (BUSTER_REQUIRE(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS))
+                    bool reference_ok = !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST_RAW(arguments, reference_ok, string_format(temporary.arena,
+                        S8("enum reference {S8} {S8} {S8}: status={u32} timed_out={u32}\n{S8}{S8}"),
+                        compiler, reference_dialects[c23], optimizations[form], wait.platform_status, (u32)wait.timed_out,
+                        (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+                                  .length = wait.streams[STANDARD_STREAM_OUTPUT].length},
+                        (String8){.pointer = (char8*)wait.streams[STANDARD_STREAM_ERROR].pointer,
+                                  .length = wait.streams[STANDARD_STREAM_ERROR].length}));
+                    if (reference_ok)
                     {
                         String8 run[] = {output_path};
                         ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
@@ -602,20 +623,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
                     }
                 }
             }
-            output_path = buster_test_temporary_path(temporary.arena, S8("enumerator-buster"), S8(""));
-            String8 command[] = {S8("-nostdinc"), buster_dialects[c23], frontend_flags[form], S8("-fverify-codegen"), S8("-o"), output_path, source_path};
-            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
-                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
-            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            if (source_written)
             {
-                String8 run[] = {output_path};
-                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                    (ProcessSpawnOptions){.use_process_environment = true});
-                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                output_path = buster_test_temporary_path(temporary.arena, S8("enumerator-buster"), S8(""));
+                String8 command[] = {S8("-nostdinc"), buster_dialects[c23], frontend_flags[form], S8("-fverify-codegen"), S8("-o"), output_path, source_path};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                    compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
-                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    String8 run[] = {output_path};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                    }
                 }
             }
             scratch_end(temporary);
