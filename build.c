@@ -94,6 +94,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_TIMING_SUMMARY,
     BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST,
     BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST,
+    BUILD_COMMAND_LUA_STAGING_SELF_TEST,
     BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST,
     BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA,
     BUILD_COMMAND_IMPORT_ARM_A64_METADATA,
@@ -11720,16 +11721,95 @@ BUSTER_GLOBAL_LOCAL bool lua_compile_clang(Arena* arena, String8 clang, String8 
 
 BUSTER_GLOBAL_LOCAL bool lua_stage_tests(Arena* arena, String8 tests_directory, String8 output_directory, String8* staged_tests_out)
 {
-    String8 stage_parent = path_join(arena, output_directory, S8("upstream-tests"));
-    make_directory_recursive(arena, stage_parent);
-    String8 copy_arguments[] = {S8("cp"), S8("-a"), tests_directory, stage_parent};
-    LuaCommandResult copy = lua_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(copy_arguments), S8("."), false);
-    if (copy.result != PROCESS_RESULT_SUCCESS)
+    bool staged = false;
+    *staged_tests_out = (String8){0};
+    // Like Git and Clang, select this host tool from the captured parent PATH.
+    // lua_command deliberately uses literal executable selection for its binaries.
+    String8 cp = executable_resolve_in_path(arena, S8("cp"));
+    if (!cp.length)
     {
-        return false;
+        string_print(S8("error: test_lua requires cp in PATH to stage upstream tests\n"));
     }
-    *staged_tests_out = path_join(arena, stage_parent, lua_basename(tests_directory));
-    return path_exists(arena, path_join(arena, *staged_tests_out, S8("all.lua")));
+    else
+    {
+        String8 stage_parent = path_join(arena, output_directory, S8("upstream-tests"));
+        make_directory_recursive(arena, stage_parent);
+        String8 copy_arguments[] = {cp, S8("-a"), tests_directory, stage_parent};
+        LuaCommandResult copy = lua_command(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(copy_arguments), S8("."), false);
+        if (copy.result == PROCESS_RESULT_SUCCESS)
+        {
+            String8 staged_tests = path_join(arena, stage_parent, lua_basename(tests_directory));
+            staged = path_exists(arena, path_join(arena, staged_tests, S8("all.lua")));
+            if (staged)
+            {
+                *staged_tests_out = staged_tests;
+            }
+        }
+    }
+    return staged;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessResult lua_staging_self_test(Arena* arena)
+{
+    String8 directory = {0};
+    bool owned = summary_self_test_claim_directory(arena, S8("lua-staging"), &directory);
+    bool passed = owned;
+    if (owned)
+    {
+        String8 source = path_join(arena, directory, S8("pristine tests"));
+        String8 output = path_join(arena, directory, S8("output with spaces"));
+        make_directory_recursive(arena, path_join(arena, source, S8("libs")));
+        String8 names[] = {S8("all.lua"), S8("libs/staging fixture.c"), S8(".hidden")};
+        String8 contents[] = {S8("-- synthetic all.lua\n"), S8("/* synthetic library */\n"), S8("retained bytes\n")};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        {
+            passed = file_write(path_join(arena, source, names[index]), BUSTER_SLICE_TO_BYTE_SLICE(contents[index])) && passed;
+        }
+        String8 staged = {0};
+        bool copied = lua_stage_tests(arena, source, output, &staged);
+        passed = copied && string_equal(staged, path_join(arena, output, S8("upstream-tests/pristine tests"))) && passed;
+        if (copied)
+        {
+            for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+            {
+                ByteSlice original = file_read(arena, path_join(arena, source, names[index]), (FileReadOptions){.map_required = 0});
+                ByteSlice copy = file_read(arena, path_join(arena, staged, names[index]), (FileReadOptions){.map_required = 0});
+                bool equal = original.pointer && copy.pointer && original.length == contents[index].length && copy.length == original.length &&
+                             memcmp(original.pointer, contents[index].pointer, (size_t)original.length) == 0 &&
+                             memcmp(copy.pointer, original.pointer, (size_t)original.length) == 0;
+                passed = equal && passed;
+            }
+        }
+
+        // These negative controls must not publish a stale or partial staging path.
+        String8 missing = S8("not cleared");
+        bool missing_source = lua_stage_tests(arena, path_join(arena, directory, S8("absent")),
+                                             path_join(arena, directory, S8("missing-source-output")), &missing);
+        passed = !missing_source && !missing.pointer && !missing.length && passed;
+        String8 incomplete_source = path_join(arena, directory, S8("incomplete"));
+        make_directory_recursive(arena, incomplete_source);
+        missing = S8("not cleared");
+        bool incomplete = lua_stage_tests(arena, incomplete_source, path_join(arena, directory, S8("incomplete-output")), &missing);
+        passed = !incomplete && !missing.pointer && !missing.length && passed;
+
+        // This self-test runs in the serial driver preflight. Isolate only the
+        // captured lookup snapshot, then restore it before other work; never
+        // mutate the host environment or the global spawn default.
+        SliceString8 saved_keys = program_state->input.environment_keys;
+        SliceString8 saved_values = program_state->input.environment_values;
+        program_state->input.environment_keys = (SliceString8){0};
+        program_state->input.environment_values = (SliceString8){0};
+        String8 no_tool_output = path_join(arena, directory, S8("no-tool-output"));
+        missing = S8("not cleared");
+        bool missing_tool = lua_stage_tests(arena, source, no_tool_output, &missing);
+        program_state->input.environment_keys = saved_keys;
+        program_state->input.environment_values = saved_values;
+        passed = !missing_tool && !missing.pointer && !missing.length && !path_exists(arena, no_tool_output) && passed;
+        passed = os_directory_delete(directory) && passed;
+    }
+    string_print(S8("LUA_STAGING_SELF_TEST status={S8} copied_files=3 missing_source=1 missing_all_lua=1 missing_tool=1\n"),
+                 passed ? S8("pass") : S8("fail"));
+    return passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
 
 BUSTER_GLOBAL_LOCAL bool lua_build_test_libraries(Arena* arena, String8 clang, String8 source_directory, String8 staged_tests_directory)
@@ -24439,6 +24519,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             return PROCESS_RESULT_FAILED;
         }
         ProcessResult focused_test_result = musl_directory_self_test(arena);
+#if BUSTER_LINUX || BUSTER_APPLE
+        if (focused_test_result == PROCESS_RESULT_SUCCESS)
+        {
+            focused_test_result = lua_staging_self_test(arena);
+        }
+#endif
         if (focused_test_result == PROCESS_RESULT_SUCCESS)
         {
             focused_test_result = build_artifact_fanout_tests(arena, fanout_forced);
@@ -38989,6 +39075,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_TIMING_SUMMARY] = S8_INITIALIZER("test_timing_summary"),
         [BUILD_COMMAND_TEST_TIMING_SUMMARY_SELF_TEST] = S8_INITIALIZER("test_timing_summary_self_test"),
         [BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST] = S8_INITIALIZER("musl_directory_self_test"),
+        [BUILD_COMMAND_LUA_STAGING_SELF_TEST] = S8_INITIALIZER("lua_staging_self_test"),
         [BUILD_COMMAND_COMPILER_DISCOVERY_SELF_TEST] = S8_INITIALIZER("compiler_discovery_self_test"),
         [BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA] = S8_INITIALIZER("import_assembly_metadata"),
         [BUILD_COMMAND_IMPORT_ARM_A64_METADATA] = S8_INITIALIZER("import_arm_a64_metadata"),
@@ -40164,6 +40251,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_MUSL_DIRECTORY_SELF_TEST:
         {
             result = musl_directory_self_test(arena);
+        }
+        break;
+        case BUILD_COMMAND_LUA_STAGING_SELF_TEST:
+        {
+            result = lua_staging_self_test(arena);
         }
         break;
         case BUILD_COMMAND_IMPORT_ASSEMBLY_METADATA:
