@@ -1,0 +1,63 @@
+name: PR 856 candidate validation
+on:
+  push:
+    branches: [codex/856-candidate-validation-20260920]
+permissions:
+  contents: read
+concurrency:
+  group: pr856-candidate-validation
+  cancel-in-progress: true
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: d87d0e053c57e91142f19e75ed003566614c82ff
+          persist-credentials: false
+      - name: Record exact source and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git show -s --format='%H %T' HEAD | tee evidence/source.txt
+          test "$(git rev-parse HEAD^{tree})" = 25c4ccd8256613c6125af34cea560648696814e3
+          clang --version | tee evidence/clang.txt
+          cmake --version | tee evidence/cmake.txt
+          lscpu > evidence/cpu.txt
+          git diff --check 9bd4f8e8f4a20cd54ca49538417ed14972d03fb1 HEAD -- src/
+      - name: Bootstrap and configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF 2>&1 | tee evidence/configure.log
+      - name: Candidate self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee evidence/self-host.log
+      - name: Candidate complete Release tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j2 2>&1 | tee evidence/test-all.log
+      - name: Candidate native modes
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee evidence/modes.log
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: pr856-candidate-${{ github.run_id }}
+          path: |
+            evidence/
+            build/compile_commands.json
+          retention-days: 7
+          if-no-files-found: error
