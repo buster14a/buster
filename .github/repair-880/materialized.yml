@@ -1,0 +1,861 @@
+name: 9700X benchmark service dispatch
+
+# The benchmark-host job never checks out repository content and receives no
+# GITHUB_TOKEN permissions. It may invoke only the operator-installed,
+# hash-verified gateway, locally replay the authenticated export, and hand the
+# exact bytes to a short-lived Actions artifact. Hosted jobs publish those bytes
+# to an immutable run-specific prerelease and independently retrieve/replay it.
+# Keep BENCH_SERVICE_DISPATCH_ENABLED disabled until the ruleset, protected
+# environment and host verification in GITHUB_ADMISSION.md are complete.
+on:
+  workflow_dispatch:
+    inputs:
+      idempotency_key:
+        description: Stable retry key (letters, digits, dot, underscore or dash)
+        required: true
+        type: string
+      base_commit:
+        description: Full lowercase hexadecimal base commit
+        required: true
+        type: string
+      candidate_commit:
+        description: Full lowercase hexadecimal candidate commit
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: buster-9700x-service-dispatch
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    if: ${{ github.ref == 'refs/heads/main' && vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true' }}
+    environment: benchmark-9700x
+    runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 150
+    env:
+      BQ_IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+      BQ_BASE_COMMIT: ${{ inputs.base_commit }}
+      BQ_CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+      BQ_EVIDENCE_DIR: ${{ runner.temp }}/validate-buster-v1-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      asset_base: ${{ steps.export.outputs.asset_base }}
+      release_tag: ${{ steps.export.outputs.release_tag }}
+      terminal_outcome: ${{ steps.result.outputs.terminal_outcome }}
+      transport_name: ${{ steps.export.outputs.transport_name }}
+    steps:
+      - name: Validate immutable request fields and installed gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$BQ_IDEMPOTENCY_KEY" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
+          [[ "$BQ_BASE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ "$BQ_CANDIDATE_COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]
+          [[ ${#BQ_BASE_COMMIT} -eq ${#BQ_CANDIDATE_COMMIT} ]]
+          test ! -e "$BQ_EVIDENCE_DIR"
+          mkdir -m 0700 "$BQ_EVIDENCE_DIR"
+          service=/usr/local/libexec/buster-bench-service
+          test -x "$service"
+          test -f "$service"
+          test ! -L "$service"
+          [[ "$(stat -c '%u' "$service")" == 0 ]]
+          [[ "$(stat -c '%h' "$service")" == 1 ]]
+          service_mode="$(stat -c '%a' "$service")"
+          (( (8#$service_mode & 0022) == 0 ))
+          [[ ! -w "$service" ]]
+          for tool in chmod cp dd find grep head mktemp od rm sed sha256sum stat tr; do
+            command -v "$tool" >/dev/null
+          done
+          stat --printf='path=/usr/local/libexec/buster-bench-service\ndevice=%d\ninode=%i\nuid=%u\ngid=%g\nmode=%a\nlinks=%h\nbytes=%s\n' \
+            "$service" > "$BQ_EVIDENCE_DIR/installed-service.txt"
+          /usr/bin/sudo -n -u buster-bench -- \
+            /usr/local/libexec/buster-bench-service gateway capabilities \
+            > "$BQ_EVIDENCE_DIR/capabilities.txt"
+          grep -Fq 'service-recipes=validate-buster-v1' "$BQ_EVIDENCE_DIR/capabilities.txt"
+          grep -Fq 'admission=idle-only-atomic' "$BQ_EVIDENCE_DIR/capabilities.txt"
+
+      - name: Drain and submit through the fixed gateway
+        id: admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt=
+          admitted=0
+          for ((attempt = 0; attempt < 180; attempt += 1)); do
+            set +e
+            receipt="$(/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway submit \
+              "$BQ_IDEMPOTENCY_KEY" "$BQ_BASE_COMMIT" "$BQ_CANDIDATE_COMMIT" 2>&1)"
+            status=$?
+            set -e
+            if [[ $status -eq 0 ]]; then
+              admitted=1
+              break
+            fi
+            if [[ "$receipt" == "bench_service: busy" ]]; then
+              sleep 10
+            else
+              printf '%s\n' "$receipt" >&2
+              exit "$status"
+            fi
+          done
+          [[ $admitted -eq 1 ]]
+          printf '%s\n' "$receipt" > "$BQ_EVIDENCE_DIR/admission-receipt.txt"
+          job="$(printf '%s\n' "$receipt" | sed -n 's/^job=\([1-9][0-9]*\) .*/\1/p')"
+          [[ "$job" =~ ^[1-9][0-9]*$ ]]
+          [[ "$receipt" =~ request-sha256=([0-9a-f]{64}) ]]
+          request_sha256="${BASH_REMATCH[1]}"
+          printf 'job=%s\n' "$job" >> "$GITHUB_OUTPUT"
+          printf 'request_sha256=%s\n' "$request_sha256" >> "$GITHUB_OUTPUT"
+          {
+            printf '## 9700X admission\n\n'
+            printf -- '- service job: `%s`\n' "$job"
+            printf -- '- request SHA-256: `%s`\n' "$request_sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for the complete terminal service receipt
+        id: result
+        shell: bash
+        env:
+          BQ_JOB: ${{ steps.admission.outputs.job }}
+          BQ_REQUEST_SHA256: ${{ steps.admission.outputs.request_sha256 }}
+        run: |
+          set -euo pipefail
+          complete=0
+          result=
+          for ((attempt = 0; attempt < 360; attempt += 1)); do
+            set +e
+            result="$(/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result "$BQ_JOB" 2>&1)"
+            status=$?
+            set -e
+            if [[ $status -eq 0 && "$result" == *"phase=finished"* ]]; then
+              complete=1
+              break
+            fi
+            if [[ $status -ne 0 && "$result" != "bench_service: io-uncertain" && "$result" != "bench_service: busy" ]]; then
+              printf '%s\n' "$result" >&2
+              exit "$status"
+            fi
+            sleep 10
+          done
+          [[ $complete -eq 1 ]]
+          printf '%s\n' "$result" > "$BQ_EVIDENCE_DIR/service-result-receipt.txt"
+          first_line="$(head -n 1 "$BQ_EVIDENCE_DIR/service-result-receipt.txt")"
+          [[ "$first_line" =~ ^job=([1-9][0-9]*)[[:space:]]token=([1-9][0-9]*)[[:space:]] ]]
+          [[ "${BASH_REMATCH[1]}" == "$BQ_JOB" ]]
+          token="${BASH_REMATCH[2]}"
+          [[ "$first_line" =~ [[:space:]]phase=finished[[:space:]] ]]
+          [[ "$first_line" =~ [[:space:]]outcome=(succeeded|failed|cancelled|interrupted)[[:space:]] ]]
+          terminal_outcome="${BASH_REMATCH[1]}"
+          [[ "$first_line" =~ [[:space:]]request-sha256=([0-9a-f]{64})[[:space:]] ]]
+          [[ "${BASH_REMATCH[1]}" == "$BQ_REQUEST_SHA256" ]]
+          grep -Fxq 'result-bound=1 statistical-decision=not-evaluated' "$BQ_EVIDENCE_DIR/service-result-receipt.txt"
+          mapfile -t manifest_lines < <(grep -E '^manifest-sha256=[0-9a-f]{64}$' "$BQ_EVIDENCE_DIR/service-result-receipt.txt")
+          mapfile -t bundle_lines < <(grep -E '^bundle-sha256=[0-9a-f]{64}$' "$BQ_EVIDENCE_DIR/service-result-receipt.txt")
+          mapfile -t full_lines < <(grep -E '^full-result-sha256=[0-9a-f]{64}$' "$BQ_EVIDENCE_DIR/service-result-receipt.txt")
+          [[ ${#manifest_lines[@]} -eq 1 && ${#bundle_lines[@]} -eq 1 && ${#full_lines[@]} -eq 1 ]]
+          manifest_sha256="${manifest_lines[0]#*=}"
+          bundle_sha256="${bundle_lines[0]#*=}"
+          full_sha256="${full_lines[0]#*=}"
+          printf 'token=%s\n' "$token" >> "$GITHUB_OUTPUT"
+          printf 'terminal_outcome=%s\n' "$terminal_outcome" >> "$GITHUB_OUTPUT"
+          printf 'manifest_sha256=%s\n' "$manifest_sha256" >> "$GITHUB_OUTPUT"
+          printf 'bundle_sha256=%s\n' "$bundle_sha256" >> "$GITHUB_OUTPUT"
+          printf 'full_sha256=%s\n' "$full_sha256" >> "$GITHUB_OUTPUT"
+          {
+            printf '\n## Terminal result receipt\n\n'
+            printf -- '- attempt token: `%s`\n' "$token"
+            printf -- '- outcome: `%s`\n' "$terminal_outcome"
+            printf -- '- manifest SHA-256: `%s`\n' "$manifest_sha256"
+            printf -- '- bundle SHA-256: `%s`\n' "$bundle_sha256"
+            printf -- '- full-result SHA-256: `%s`\n' "$full_sha256"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Export, bind and locally replay exact result bytes
+        id: export
+        shell: bash
+        env:
+          BQ_JOB: ${{ steps.admission.outputs.job }}
+          BQ_REQUEST_SHA256: ${{ steps.admission.outputs.request_sha256 }}
+          BQ_TOKEN: ${{ steps.result.outputs.token }}
+          BQ_TERMINAL_OUTCOME: ${{ steps.result.outputs.terminal_outcome }}
+          BQ_MANIFEST_SHA256: ${{ steps.result.outputs.manifest_sha256 }}
+          BQ_BUNDLE_SHA256: ${{ steps.result.outputs.bundle_sha256 }}
+          BQ_FULL_SHA256: ${{ steps.result.outputs.full_sha256 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          asset_base="validate-buster-v1-job-${BQ_JOB}-attempt-${BQ_TOKEN}"
+          release_tag="validate-buster-v1-run-${GITHUB_RUN_ID}-run-attempt-${GITHUB_RUN_ATTEMPT}-job-${BQ_JOB}-service-attempt-${BQ_TOKEN}"
+          export_file="$BQ_EVIDENCE_DIR/$asset_base.bqexport"
+          export_receipt_file="$BQ_EVIDENCE_DIR/$asset_base.export-receipt.txt"
+          service_copy="$BQ_EVIDENCE_DIR/$asset_base.bench-service"
+          metadata_file="$BQ_EVIDENCE_DIR/$asset_base.metadata"
+          replay_file="$BQ_EVIDENCE_DIR/$asset_base.local-replay.txt"
+          checksums_file="$BQ_EVIDENCE_DIR/$asset_base.SHA256SUMS"
+          mv "$BQ_EVIDENCE_DIR/admission-receipt.txt" "$BQ_EVIDENCE_DIR/$asset_base.admission-receipt.txt"
+          mv "$BQ_EVIDENCE_DIR/capabilities.txt" "$BQ_EVIDENCE_DIR/$asset_base.capabilities.txt"
+          mv "$BQ_EVIDENCE_DIR/installed-service.txt" "$BQ_EVIDENCE_DIR/$asset_base.installed-service.txt"
+          mv "$BQ_EVIDENCE_DIR/service-result-receipt.txt" "$BQ_EVIDENCE_DIR/$asset_base.service-result-receipt.txt"
+          /usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway export \
+            "$BQ_JOB" "$BQ_TOKEN" "$BQ_FULL_SHA256" > "$export_file" 2> "$export_receipt_file"
+          mapfile -t export_receipt_lines < <(grep -E '^export-receipt-sha256=[0-9a-f]{64}$' "$export_receipt_file")
+          [[ ${#export_receipt_lines[@]} -eq 1 ]]
+          export_receipt_sha256="${export_receipt_lines[0]#*=}"
+          export_bytes="$(stat -c '%s' "$export_file")"
+          [[ "$export_bytes" =~ ^[0-9]+$ ]]
+          (( export_bytes > 1024 && export_bytes <= 546178048 ))
+          actual_receipt_sha256="$(head -c 1024 "$export_file" | sha256sum | sed 's/[[:space:]].*$//')"
+          [[ "$actual_receipt_sha256" == "$export_receipt_sha256" ]]
+          receipt_job="$(od -An -tu8 -j8 -N8 "$export_file" | tr -d '[:space:]')"
+          receipt_token="$(od -An -tu8 -j16 -N8 "$export_file" | tr -d '[:space:]')"
+          receipt_request_sha256="$(dd if="$export_file" bs=1 skip=48 count=64 status=none)"
+          receipt_manifest_sha256="$(dd if="$export_file" bs=1 skip=112 count=64 status=none)"
+          receipt_bundle_sha256="$(dd if="$export_file" bs=1 skip=176 count=64 status=none)"
+          receipt_full_sha256="$(dd if="$export_file" bs=1 skip=240 count=64 status=none)"
+          receipt_service_sha256="$(dd if="$export_file" bs=1 skip=432 count=64 status=none)"
+          [[ "$receipt_job" == "$BQ_JOB" && "$receipt_token" == "$BQ_TOKEN" ]]
+          [[ "$receipt_request_sha256" == "$BQ_REQUEST_SHA256" ]]
+          [[ "$receipt_manifest_sha256" == "$BQ_MANIFEST_SHA256" ]]
+          [[ "$receipt_bundle_sha256" == "$BQ_BUNDLE_SHA256" ]]
+          [[ "$receipt_full_sha256" == "$BQ_FULL_SHA256" ]]
+          cp /usr/local/libexec/buster-bench-service "$service_copy"
+          chmod 0500 "$service_copy"
+          service_sha256="$(sha256sum "$service_copy" | sed 's/[[:space:]].*$//')"
+          [[ "$service_sha256" == "$receipt_service_sha256" ]]
+          export_file_sha256="$(sha256sum "$export_file" | sed 's/[[:space:]].*$//')"
+          replay_parent="$(mktemp -d "$BQ_EVIDENCE_DIR/replay.XXXXXX")"
+          replay_dir="$replay_parent/result"
+          trap 'rm -rf -- "$replay_parent"' EXIT
+          "$service_copy" unpack-export "$export_file" "$replay_dir" "$export_receipt_sha256"
+          test -d "$replay_dir"
+          test -z "$(find "$replay_dir" -name .lease-handoff -print -quit)"
+          printf 'schema=validate-buster-v1-local-replay-v1\nresult=passed\nlease_handoff_absent=passed\n' > "$replay_file"
+          rm -rf -- "$replay_parent"
+          trap - EXIT
+          cat > "$metadata_file" <<METADATA
+          schema=validate-buster-v1-release-v1
+          repository=$GITHUB_REPOSITORY
+          workflow_commit=$GITHUB_SHA
+          workflow_ref=$GITHUB_REF
+          workflow_run_id=$GITHUB_RUN_ID
+          workflow_run_attempt=$GITHUB_RUN_ATTEMPT
+          idempotency_key=$BQ_IDEMPOTENCY_KEY
+          base_commit=$BQ_BASE_COMMIT
+          candidate_commit=$BQ_CANDIDATE_COMMIT
+          service_job=$BQ_JOB
+          service_attempt=$BQ_TOKEN
+          terminal_outcome=$BQ_TERMINAL_OUTCOME
+          request_sha256=$BQ_REQUEST_SHA256
+          manifest_sha256=$BQ_MANIFEST_SHA256
+          bundle_sha256=$BQ_BUNDLE_SHA256
+          full_result_sha256=$BQ_FULL_SHA256
+          export_receipt_sha256=$export_receipt_sha256
+          export_file_sha256=$export_file_sha256
+          export_file_bytes=$export_bytes
+          service_binary_sha256=$service_sha256
+          release_tag=$release_tag
+          asset_base=$asset_base
+          local_replay=passed
+          lease_handoff_absent=passed
+          METADATA
+          (
+            cd "$BQ_EVIDENCE_DIR"
+            sha256sum \
+              "$asset_base.admission-receipt.txt" \
+              "$asset_base.bench-service" \
+              "$asset_base.bqexport" \
+              "$asset_base.capabilities.txt" \
+              "$asset_base.export-receipt.txt" \
+              "$asset_base.installed-service.txt" \
+              "$asset_base.local-replay.txt" \
+              "$asset_base.metadata" \
+              "$asset_base.service-result-receipt.txt" \
+              > "$asset_base.SHA256SUMS"
+          )
+          chmod 0400 "$BQ_EVIDENCE_DIR"/*
+          chmod 0500 "$service_copy"
+          transport_name="validate-buster-v1-transport-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf 'asset_base=%s\n' "$asset_base" >> "$GITHUB_OUTPUT"
+          printf 'release_tag=%s\n' "$release_tag" >> "$GITHUB_OUTPUT"
+          printf 'transport_name=%s\n' "$transport_name" >> "$GITHUB_OUTPUT"
+          {
+            printf '\n## Authenticated export\n\n'
+            printf -- '- export receipt SHA-256: `%s`\n' "$export_receipt_sha256"
+            printf -- '- exact export bytes: `%s`\n' "$export_bytes"
+            printf -- '- export file SHA-256: `%s`\n' "$export_file_sha256"
+            printf -- '- local clean reconstruction: `passed`\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Transfer exact bytes to the hosted publisher
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.export.outputs.transport_name }}
+          path: ${{ env.BQ_EVIDENCE_DIR }}/
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: false
+
+      - name: Remove the runner-side transfer copy
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- "$BQ_EVIDENCE_DIR"
+
+  publish:
+    needs: submit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BQ_ASSET_BASE: ${{ needs.submit.outputs.asset_base }}
+      BQ_RELEASE_TAG: ${{ needs.submit.outputs.release_tag }}
+      BQ_TRANSPORT_NAME: ${{ needs.submit.outputs.transport_name }}
+    steps:
+      - name: Retrieve and verify the short-lived transport artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          evidence="$RUNNER_TEMP/evidence"
+          for delay in 0 2 5; do
+            (( delay == 0 )) || sleep "$delay"
+            rm -rf -- "$evidence"
+            mkdir -m 0700 "$evidence"
+            if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$BQ_TRANSPORT_NAME" --dir "$evidence"; then
+              break
+            fi
+          done
+          test -f "$evidence/$BQ_ASSET_BASE.metadata"
+          test -f "$evidence/$BQ_ASSET_BASE.SHA256SUMS"
+          (
+            cd "$evidence"
+            sha256sum -c "$BQ_ASSET_BASE.SHA256SUMS"
+          )
+          metadata="$evidence/$BQ_ASSET_BASE.metadata"
+          field() {
+            local key=$1
+            [[ "$(grep -c "^${key}=" "$metadata")" == 1 ]]
+            sed -n "s/^${key}=//p" "$metadata"
+          }
+          [[ "$(field schema)" == validate-buster-v1-release-v1 ]]
+          [[ "$(field repository)" == "$GITHUB_REPOSITORY" ]]
+          [[ "$(field workflow_commit)" == "$GITHUB_SHA" ]]
+          [[ "$(field workflow_ref)" == refs/heads/main ]]
+          [[ "$(field workflow_run_id)" == "$GITHUB_RUN_ID" ]]
+          [[ "$(field release_tag)" == "$BQ_RELEASE_TAG" ]]
+          [[ "$(field asset_base)" == "$BQ_ASSET_BASE" ]]
+          [[ "$(field local_replay)" == passed ]]
+          [[ "$(field lease_handoff_absent)" == passed ]]
+          python3 - "$evidence" "$BQ_ASSET_BASE" <<'PY'
+          import hashlib
+          import pathlib
+          import struct
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          base = sys.argv[2]
+          metadata = {}
+          for line in (root / f"{base}.metadata").read_text(encoding="utf-8").splitlines():
+              key, value = line.split("=", 1)
+              if key in metadata:
+                  raise SystemExit(f"duplicate metadata field: {key}")
+              metadata[key] = value
+          with (root / f"{base}.bqexport").open("rb") as stream:
+              receipt = stream.read(1024)
+          if len(receipt) != 1024:
+              raise SystemExit("truncated export receipt")
+          checks = {
+              "export_receipt_sha256": hashlib.sha256(receipt).hexdigest(),
+              "request_sha256": receipt[48:112].decode("ascii"),
+              "manifest_sha256": receipt[112:176].decode("ascii"),
+              "bundle_sha256": receipt[176:240].decode("ascii"),
+              "full_result_sha256": receipt[240:304].decode("ascii"),
+              "service_binary_sha256": receipt[432:496].decode("ascii"),
+          }
+          for key, actual in checks.items():
+              if metadata.get(key) != actual:
+                  raise SystemExit(f"receipt mismatch: {key}")
+          if str(struct.unpack_from("<Q", receipt, 8)[0]) != metadata.get("service_job"):
+              raise SystemExit("receipt job mismatch")
+          if str(struct.unpack_from("<Q", receipt, 16)[0]) != metadata.get("service_attempt"):
+              raise SystemExit("receipt attempt mismatch")
+          principal = receipt[496:560].split(b"\0", 1)[0].decode("ascii")
+          recipe = receipt[560:608].split(b"\0", 1)[0].decode("ascii")
+          if principal != "github-actions" or recipe != "validate-buster-v1":
+              raise SystemExit("receipt principal or recipe mismatch")
+          outcome_names = {1: "succeeded", 2: "failed", 3: "cancelled", 4: "interrupted"}
+          outcome = outcome_names.get(struct.unpack_from("<I", receipt, 1012)[0])
+          if outcome != metadata.get("terminal_outcome"):
+              raise SystemExit("receipt outcome mismatch")
+          if struct.unpack_from("<I", receipt, 1020)[0] != 7:
+              raise SystemExit("receipt is not terminal")
+          PY
+
+      - name: Publish immutable release assets and verify destination bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          release_download() {
+            local name=$1
+            local destination=$2
+            local delay
+            for delay in 0 2 5; do
+              (( delay == 0 )) || sleep "$delay"
+              rm -f "$destination/$name"
+              if gh release download "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --pattern "$name" --dir "$destination" >/dev/null 2>&1; then
+                test -f "$destination/$name"
+                return 0
+              fi
+            done
+            return 1
+          }
+          evidence="$RUNNER_TEMP/evidence"
+          metadata="$evidence/$BQ_ASSET_BASE.metadata"
+          workflow_commit="$(sed -n 's/^workflow_commit=//p' "$metadata")"
+          service_job="$(sed -n 's/^service_job=//p' "$metadata")"
+          service_attempt="$(sed -n 's/^service_attempt=//p' "$metadata")"
+          outcome="$(sed -n 's/^terminal_outcome=//p' "$metadata")"
+          workflow_tree="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$workflow_commit" --jq .tree.sha)"
+          [[ "$workflow_tree" =~ ^[0-9a-f]{40}$ ]]
+          mapfile -t benchmark_job_ids < <(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name == "submit") | .id')
+          [[ ${#benchmark_job_ids[@]} -eq 1 ]]
+          benchmark_job_id="${benchmark_job_ids[0]}"
+          [[ "$benchmark_job_id" =~ ^[1-9][0-9]*$ ]]
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<NOTES
+          Authenticated validate-buster-v1 service evidence.
+
+          - workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          - workflow commit/tree: $workflow_commit / $workflow_tree
+          - service job/attempt: $service_job/$service_attempt
+          - terminal outcome: $outcome
+
+          The .bqexport asset is the exact #878 stream. SHA256SUMS and metadata bind
+          the service receipt, export receipt, installed service binary and local
+          clean reconstruction. This prerelease is evidence, not a performance verdict.
+          NOTES
+          if ! gh release view "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if ! gh release create "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$workflow_commit" --title "$BQ_RELEASE_TAG evidence" \
+              --notes-file "$notes" --prerelease; then
+              sleep 2
+              gh release view "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+            fi
+          fi
+          release_commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BQ_RELEASE_TAG" --jq .sha)"
+          [[ "$release_commit" == "$workflow_commit" ]]
+          [[ "$(gh release view "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" == false ]]
+          [[ "$(gh release view "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" == true ]]
+          release_id="$(gh release view "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
+          [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
+          publication="$evidence/$BQ_ASSET_BASE.release-publication.txt"
+          cat > "$publication" <<PUBLICATION
+          schema=validate-buster-v1-release-publication-v1
+          repository=$GITHUB_REPOSITORY
+          workflow_commit=$workflow_commit
+          workflow_tree=$workflow_tree
+          workflow_run_id=$GITHUB_RUN_ID
+          workflow_run_attempt=$GITHUB_RUN_ATTEMPT
+          benchmark_job_id=$benchmark_job_id
+          release_id=$release_id
+          release_tag=$BQ_RELEASE_TAG
+          asset_base=$BQ_ASSET_BASE
+          service_job=$service_job
+          service_attempt=$service_attempt
+          terminal_outcome=$outcome
+          result=passed
+          PUBLICATION
+          expected="$RUNNER_TEMP/expected-assets"
+          find "$evidence" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort -u > "$expected"
+          actual="$RUNNER_TEMP/actual-assets"
+          gh release view "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' | LC_ALL=C sort -u > "$actual"
+          while IFS= read -r name; do
+            if grep -Fxq "$name" "$expected"; then
+              continue
+            fi
+            if [[ "$name" =~ ^${BQ_ASSET_BASE}\.release-(replay|manifest)-run-attempt-[1-9][0-9]*\.txt$ ]]; then
+              continue
+            fi
+            printf 'unexpected existing release asset: %s\n' "$name" >&2
+            exit 1
+          done < "$actual"
+          existing="$RUNNER_TEMP/existing-assets"
+          mkdir -m 0700 "$existing"
+          while IFS= read -r file; do
+            name="$(basename "$file")"
+            if grep -Fxq "$name" "$actual"; then
+              release_download "$name" "$existing"
+              cmp "$file" "$existing/$name"
+            elif ! gh release upload "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$file"; then
+              release_download "$name" "$existing"
+              cmp "$file" "$existing/$name"
+            fi
+          done < <(find "$evidence" -maxdepth 1 -type f -print | LC_ALL=C sort)
+          published="$RUNNER_TEMP/published-assets"
+          mkdir -m 0700 "$published"
+          while IFS= read -r file; do
+            name="$(basename "$file")"
+            release_download "$name" "$published"
+            cmp "$file" "$published/$name"
+          done < <(find "$evidence" -maxdepth 1 -type f -print | LC_ALL=C sort)
+          {
+            printf '## Durable publication\n\n'
+            printf -- '- release: `%s`\n' "$BQ_RELEASE_TAG"
+            printf -- '- workflow tree: `%s`\n' "$workflow_tree"
+            printf -- '- destination byte comparison: `passed`\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  replay:
+    needs: [submit, publish]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      BQ_ASSET_BASE: ${{ needs.submit.outputs.asset_base }}
+      BQ_RELEASE_TAG: ${{ needs.submit.outputs.release_tag }}
+      BQ_REPLAY_TRANSPORT_NAME: validate-buster-v1-replay-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out the exact reviewed replay implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download exact durable release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          release_download() {
+            local name=$1
+            local destination=$2
+            local delay
+            for delay in 0 2 5; do
+              (( delay == 0 )) || sleep "$delay"
+              rm -f "$destination/$name"
+              if gh release download "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --pattern "$name" --dir "$destination" >/dev/null 2>&1; then
+                test -f "$destination/$name"
+                return 0
+              fi
+            done
+            return 1
+          }
+          release="$RUNNER_TEMP/release"
+          mkdir -m 0700 "$release"
+          for suffix in \
+            admission-receipt.txt bench-service bqexport capabilities.txt \
+            export-receipt.txt installed-service.txt local-replay.txt metadata release-publication.txt \
+            service-result-receipt.txt SHA256SUMS; do
+            release_download "$BQ_ASSET_BASE.$suffix" "$release"
+          done
+
+      - name: Independently rebuild and replay without a write token
+        id: replay_receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -z "${GH_TOKEN-}"
+          release="$RUNNER_TEMP/release"
+          (
+            cd "$release"
+            sha256sum -c "$BQ_ASSET_BASE.SHA256SUMS"
+          )
+          metadata="$release/$BQ_ASSET_BASE.metadata"
+          publication="$release/$BQ_ASSET_BASE.release-publication.txt"
+          field() {
+            local file=$1
+            local key=$2
+            [[ "$(grep -c "^${key}=" "$file")" == 1 ]]
+            sed -n "s/^${key}=//p" "$file"
+          }
+          workflow_commit="$(field "$publication" workflow_commit)"
+          workflow_tree="$(field "$publication" workflow_tree)"
+          [[ "$workflow_commit" == "$GITHUB_SHA" ]]
+          [[ "$(field "$publication" repository)" == "$GITHUB_REPOSITORY" ]]
+          [[ "$(field "$publication" workflow_run_id)" == "$GITHUB_RUN_ID" ]]
+          [[ "$(field "$publication" benchmark_job_id)" =~ ^[1-9][0-9]*$ ]]
+          [[ "$(field "$publication" release_id)" =~ ^[1-9][0-9]*$ ]]
+          [[ "$(field "$publication" release_tag)" == "$BQ_RELEASE_TAG" ]]
+          [[ "$(field "$publication" asset_base)" == "$BQ_ASSET_BASE" ]]
+          [[ "$(field "$publication" result)" == passed ]]
+          test "$(git rev-parse HEAD)" = "$workflow_commit"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$workflow_tree"
+          export_receipt_sha256="$(field "$metadata" export_receipt_sha256)"
+          export_file_sha256="$(field "$metadata" export_file_sha256)"
+          released_service_sha256="$(field "$metadata" service_binary_sha256)"
+          [[ "$export_receipt_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$export_file_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$released_service_sha256" =~ ^[0-9a-f]{64}$ ]]
+          actual_export_sha256="$(sha256sum "$release/$BQ_ASSET_BASE.bqexport" | sed 's/[[:space:]].*$//')"
+          [[ "$actual_export_sha256" == "$export_file_sha256" ]]
+          actual_released_service_sha256="$(sha256sum "$release/$BQ_ASSET_BASE.bench-service" | sed 's/[[:space:]].*$//')"
+          [[ "$actual_released_service_sha256" == "$released_service_sha256" ]]
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c \
+            -o "$RUNNER_TEMP/replay-build"
+          "$RUNNER_TEMP/replay-build" bench_service capabilities
+          replay_tool="$GITHUB_WORKSPACE/build/bench-service-tools/service"
+          test -x "$replay_tool"
+          replay_tool_sha256="$(sha256sum "$replay_tool" | sed 's/[[:space:]].*$//')"
+          replay_parent="$(mktemp -d "$RUNNER_TEMP/replay.XXXXXX")"
+          replay_dir="$replay_parent/result"
+          trap 'rm -rf -- "$replay_parent"' EXIT
+          "$replay_tool" unpack-export "$release/$BQ_ASSET_BASE.bqexport" \
+            "$replay_dir" "$export_receipt_sha256"
+          test -d "$replay_dir"
+          test -z "$(find "$replay_dir" -name .lease-handoff -print -quit)"
+          replay_receipt="$RUNNER_TEMP/$BQ_ASSET_BASE.release-replay-run-attempt-$GITHUB_RUN_ATTEMPT.txt"
+          publication_sha256="$(sha256sum "$publication" | sed 's/[[:space:]].*$//')"
+          cat > "$replay_receipt" <<REPLAY
+          schema=validate-buster-v1-release-replay-v1
+          repository=$GITHUB_REPOSITORY
+          workflow_commit=$workflow_commit
+          workflow_tree=$workflow_tree
+          workflow_run_id=$GITHUB_RUN_ID
+          workflow_run_attempt=$GITHUB_RUN_ATTEMPT
+          release_tag=$BQ_RELEASE_TAG
+          asset_base=$BQ_ASSET_BASE
+          publication_receipt_sha256=$publication_sha256
+          export_receipt_sha256=$export_receipt_sha256
+          export_file_sha256=$export_file_sha256
+          released_service_binary_sha256=$released_service_sha256
+          replay_tool_sha256=$replay_tool_sha256
+          result=passed
+          lease_handoff_absent=passed
+          REPLAY
+          rm -rf -- "$replay_parent"
+          trap - EXIT
+          printf 'path=%s\n' "$replay_receipt" >> "$GITHUB_OUTPUT"
+          {
+            printf '## Independent release replay\n\n'
+            printf -- '- exact release download: `passed`\n'
+            printf -- '- exact workflow commit/tree checkout: `passed`\n'
+            printf -- '- exhaustive unpack/result validation: `passed`\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand off the independently generated replay receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ env.BQ_REPLAY_TRANSPORT_NAME }}
+          path: ${{ steps.replay_receipt.outputs.path }}
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: false
+
+  publish_replay:
+    needs: [submit, publish, replay]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BQ_ASSET_BASE: ${{ needs.submit.outputs.asset_base }}
+      BQ_RELEASE_TAG: ${{ needs.submit.outputs.release_tag }}
+      BQ_REPLAY_TRANSPORT_NAME: validate-buster-v1-replay-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Publish replay receipt and seal the release inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          release_download() {
+            local name=$1
+            local destination=$2
+            local delay
+            for delay in 0 2 5; do
+              (( delay == 0 )) || sleep "$delay"
+              rm -f "$destination/$name"
+              if gh release download "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --pattern "$name" --dir "$destination" >/dev/null 2>&1; then
+                test -f "$destination/$name"
+                return 0
+              fi
+            done
+            return 1
+          }
+          release_download_all() {
+            local destination=$1
+            local delay
+            for delay in 0 2 5; do
+              (( delay == 0 )) || sleep "$delay"
+              rm -rf -- "$destination"
+              mkdir -m 0700 "$destination"
+              if gh release download "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --dir "$destination" >/dev/null 2>&1; then
+                return 0
+              fi
+            done
+            return 1
+          }
+          receipt_dir="$RUNNER_TEMP/replay-receipt"
+          release="$RUNNER_TEMP/release"
+          mkdir -m 0700 "$release"
+          for delay in 0 2 5; do
+            (( delay == 0 )) || sleep "$delay"
+            rm -rf -- "$receipt_dir"
+            mkdir -m 0700 "$receipt_dir"
+            if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "$BQ_REPLAY_TRANSPORT_NAME" --dir "$receipt_dir"; then
+              break
+            fi
+          done
+          replay_receipt="$receipt_dir/$BQ_ASSET_BASE.release-replay-run-attempt-$GITHUB_RUN_ATTEMPT.txt"
+          test -f "$replay_receipt"
+          release_download_all "$release"
+          for suffix in \
+            admission-receipt.txt bench-service bqexport capabilities.txt \
+            export-receipt.txt installed-service.txt local-replay.txt metadata release-publication.txt \
+            service-result-receipt.txt SHA256SUMS; do
+            test -f "$release/$BQ_ASSET_BASE.$suffix"
+          done
+          while IFS= read -r file; do
+            name="$(basename "$file")"
+            case "$name" in
+              "$BQ_ASSET_BASE.admission-receipt.txt"|"$BQ_ASSET_BASE.bench-service"|\
+              "$BQ_ASSET_BASE.bqexport"|"$BQ_ASSET_BASE.capabilities.txt"|\
+              "$BQ_ASSET_BASE.export-receipt.txt"|"$BQ_ASSET_BASE.installed-service.txt"|\
+              "$BQ_ASSET_BASE.local-replay.txt"|"$BQ_ASSET_BASE.metadata"|\
+              "$BQ_ASSET_BASE.release-publication.txt"|\
+              "$BQ_ASSET_BASE.service-result-receipt.txt"|"$BQ_ASSET_BASE.SHA256SUMS")
+                ;;
+              *)
+                if [[ ! "$name" =~ ^${BQ_ASSET_BASE}\.release-(replay|manifest)-run-attempt-[1-9][0-9]*\.txt$ ]]; then
+                  printf 'unexpected release asset: %s\n' "$name" >&2
+                  exit 1
+                fi
+                ;;
+            esac
+          done < <(find "$release" -maxdepth 1 -type f -print | LC_ALL=C sort)
+          metadata="$release/$BQ_ASSET_BASE.metadata"
+          publication="$release/$BQ_ASSET_BASE.release-publication.txt"
+          field() {
+            local file=$1
+            local key=$2
+            [[ "$(grep -c "^${key}=" "$file")" == 1 ]]
+            sed -n "s/^${key}=//p" "$file"
+          }
+          [[ "$(field "$replay_receipt" schema)" == validate-buster-v1-release-replay-v1 ]]
+          [[ "$(field "$replay_receipt" repository)" == "$GITHUB_REPOSITORY" ]]
+          [[ "$(field "$replay_receipt" workflow_commit)" == "$GITHUB_SHA" ]]
+          [[ "$(field "$replay_receipt" workflow_commit)" == "$(field "$publication" workflow_commit)" ]]
+          [[ "$(field "$replay_receipt" workflow_tree)" == "$(field "$publication" workflow_tree)" ]]
+          [[ "$(field "$replay_receipt" workflow_run_id)" == "$GITHUB_RUN_ID" ]]
+          [[ "$(field "$replay_receipt" workflow_run_attempt)" == "$GITHUB_RUN_ATTEMPT" ]]
+          [[ "$(field "$replay_receipt" release_tag)" == "$BQ_RELEASE_TAG" ]]
+          [[ "$(field "$replay_receipt" asset_base)" == "$BQ_ASSET_BASE" ]]
+          [[ "$(field "$replay_receipt" result)" == passed ]]
+          [[ "$(field "$replay_receipt" lease_handoff_absent)" == passed ]]
+          [[ "$(field "$replay_receipt" publication_receipt_sha256)" == \
+             "$(sha256sum "$publication" | sed 's/[[:space:]].*$//')" ]]
+          [[ "$(field "$replay_receipt" export_receipt_sha256)" == \
+             "$(field "$metadata" export_receipt_sha256)" ]]
+          [[ "$(field "$replay_receipt" export_file_sha256)" == \
+             "$(field "$metadata" export_file_sha256)" ]]
+          existing="$RUNNER_TEMP/existing-replay"
+          mkdir -m 0700 "$existing"
+          name="$(basename "$replay_receipt")"
+          if release_download "$name" "$existing"; then
+            cmp "$replay_receipt" "$existing/$name"
+          elif ! gh release upload "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$replay_receipt"; then
+            release_download "$name" "$existing"
+            cmp "$replay_receipt" "$existing/$name"
+          fi
+          release_download "$name" "$existing"
+          cmp "$replay_receipt" "$existing/$name"
+          cp "$replay_receipt" "$release/$name"
+          manifest="$RUNNER_TEMP/$BQ_ASSET_BASE.release-manifest-run-attempt-$GITHUB_RUN_ATTEMPT.txt"
+          {
+            printf 'schema=validate-buster-v1-release-manifest-v1\n'
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'workflow_commit=%s\n' "$(field "$publication" workflow_commit)"
+            printf 'workflow_tree=%s\n' "$(field "$publication" workflow_tree)"
+            printf 'workflow_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'workflow_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'release_tag=%s\n' "$BQ_RELEASE_TAG"
+            printf 'asset_base=%s\n' "$BQ_ASSET_BASE"
+            while IFS= read -r file; do
+              file_name="$(basename "$file")"
+              file_bytes="$(stat -c '%s' "$file")"
+              file_sha256="$(sha256sum "$file" | sed 's/[[:space:]].*$//')"
+              printf 'asset=%s %s %s\n' "$file_sha256" "$file_bytes" "$file_name"
+            done < <(find "$release" -maxdepth 1 -type f -print | LC_ALL=C sort)
+            printf 'result=passed\n'
+          } > "$manifest"
+          manifest_name="$(basename "$manifest")"
+          if release_download "$manifest_name" "$existing"; then
+            cmp "$manifest" "$existing/$manifest_name"
+          elif ! gh release upload "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$manifest"; then
+            release_download "$manifest_name" "$existing"
+            cmp "$manifest" "$existing/$manifest_name"
+          fi
+          release_download "$manifest_name" "$existing"
+          cmp "$manifest" "$existing/$manifest_name"
+          actual_assets="$RUNNER_TEMP/final-assets"
+          expected_assets="$RUNNER_TEMP/final-expected-assets"
+          gh release view "$BQ_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' | LC_ALL=C sort -u > "$actual_assets"
+          {
+            find "$release" -maxdepth 1 -type f -printf '%f\n'
+            printf '%s\n' "$manifest_name"
+          } | LC_ALL=C sort -u > "$expected_assets"
+          cmp "$expected_assets" "$actual_assets"
+          verified="$RUNNER_TEMP/final-verified"
+          mkdir -m 0700 "$verified"
+          while read -r digest_field bytes asset; do
+            [[ "$digest_field" == asset=* ]] || continue
+            sha256="${digest_field#asset=}"
+            rm -f "$verified/$asset"
+            release_download "$asset" "$verified"
+            [[ "$(stat -c '%s' "$verified/$asset")" == "$bytes" ]]
+            [[ "$(sha256sum "$verified/$asset" | sed 's/[[:space:]].*$//')" == "$sha256" ]]
+          done < "$manifest"
+          {
+            printf '## Sealed release replay\n\n'
+            printf -- '- replay receipt publication: `passed`\n'
+            printf -- '- final release inventory: `passed`\n'
+            printf -- '- release manifest: `%s`\n' "$manifest_name"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verdict:
+    if: ${{ always() }}
+    needs: [submit, publish, replay, publish_replay]
+    runs-on: ubuntu-26.04
+    permissions: {}
+    env:
+      BQ_SUBMIT_RESULT: ${{ needs.submit.result }}
+      BQ_PUBLISH_RESULT: ${{ needs.publish.result }}
+      BQ_REPLAY_RESULT: ${{ needs.replay.result }}
+      BQ_PUBLISH_REPLAY_RESULT: ${{ needs.publish_replay.result }}
+      BQ_TERMINAL_OUTCOME: ${{ needs.submit.outputs.terminal_outcome }}
+    steps:
+      - name: Preserve failure semantics after evidence publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BQ_SUBMIT_RESULT" == success ]]
+          [[ "$BQ_PUBLISH_RESULT" == success ]]
+          [[ "$BQ_REPLAY_RESULT" == success ]]
+          [[ "$BQ_PUBLISH_REPLAY_RESULT" == success ]]
+          if [[ "$BQ_TERMINAL_OUTCOME" != succeeded ]]; then
+            printf 'service terminal outcome: %s\n' "$BQ_TERMINAL_OUTCOME" >&2
+            exit 1
+          fi
