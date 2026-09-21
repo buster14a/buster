@@ -37,6 +37,8 @@ env:
   # PRs validate GitHub's exact integration commit. A manual run validates the
   # exact revision selected in the workflow-dispatch UI.
   BUSTER_RETIREMENT_CANDIDATE: ${{ github.sha }}
+  TRUSTED_REF: ${{ github.event.pull_request.base.sha || github.sha }}
+  CANDIDATE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   census:
@@ -56,6 +58,15 @@ jobs:
         with:
           ref: ${{ env.BUSTER_RETIREMENT_CANDIDATE }}
           path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out previously trusted rebinding implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.TRUSTED_REF }}
+          path: trusted
+          fetch-depth: 1
           persist-credentials: false
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -116,11 +127,31 @@ jobs:
       - name: Bootstrap candidate build driver
         working-directory: candidate
         run: |
+          set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"
-          python3 tools/native_retirement_sdks.py --source-root "$(pwd)"
-          python3 tools/native_retirement_external.py prepare \
+          if [[ '${{ github.event_name }}' == pull_request ]]; then
+            python3 ../trusted/tools/native_retirement_integration.py classify \
+              --repo-root "$(pwd)" --base "$TRUSTED_REF" --head "$CANDIDATE_HEAD"
+          fi
+          python3 ../trusted/tools/native_retirement_sdks.py --source-root "$(pwd)"
+          python3 ../trusted/tools/native_retirement_external.py prepare \
             --manifest docs/native-retirement-dependencies-v1.json \
             --source-root "$(pwd)"
+          mkdir -p evidence/rebinding
+          if [[ '${{ github.event_name }}' == pull_request ]]; then
+            python3 ../trusted/tools/native_retirement_rebind.py refresh \
+              --repo-root "$(pwd)" | tee evidence/rebinding/refresh.json
+          fi
+          python3 ../trusted/tools/native_retirement_rebind.py check \
+            --repo-root "$(pwd)" | tee evidence/rebinding/check.json
+          unexpected=$(git diff --name-only -- . \
+            ':(exclude)docs/native-retirement-repository-sources-v1.json' \
+            ':(exclude)tools/native_retirement_dependency_binding.generated.h')
+          test -z "$unexpected"
+          # The independent validators use the identical checked-out source
+          # revision and must consume the same trusted temporary authority.
+          cp docs/native-retirement-repository-sources-v1.json ../validation/docs/
+          cp tools/native_retirement_dependency_binding.generated.h ../validation/tools/
           python3 tools/native_retirement_materializer.py self-test
           python3 tools/native_retirement_materializer.py materialize \
             --manifest docs/native-retirement-dependencies-v1.json \
