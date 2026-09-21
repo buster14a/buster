@@ -596,6 +596,20 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("environment: native-retirement-integration", text)
         self.assertNotIn("continue-on-error", text)
 
+    def test_pr_publication_attests_before_leased_head_update(self):
+        text = (self.workflows / "native-retirement-integration.yml").read_text()
+        publish = text.split("\n  publish:\n", 1)[1]
+        self.assertIn("statuses: write", publish)
+        self.assertIn('test "$head_repo" = "$GITHUB_REPOSITORY"', publish)
+        self.assertIn('commit-tree "$final_tree" -p "$base" -p "$head"', publish)
+        self.assertIn('--force-with-lease="refs/heads/$head_ref:$head"', publish)
+        self.assertIn('test "$main_remote" = "$base"', publish)
+        self.assertIn('test "$pull_remote" = "$head"', publish)
+        self.assertLess(publish.index("Native retirement trusted integration"),
+                        publish.index('--force-with-lease="refs/heads/$head_ref:$head"'))
+        self.assertNotIn('"$commit:refs/heads/main"', publish)
+        self.assertNotIn('native_retirement_integration.py publish', publish)
+
     def test_write_job_never_executes_candidate_tests(self):
         text = (self.workflows / "native-retirement-integration.yml").read_text()
         publish = text.split("\n  publish:\n", 1)[1]
