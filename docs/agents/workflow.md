@@ -245,3 +245,21 @@ with `--force-with-lease`, never a bare `--force`, so a branch someone else
 advanced is not overwritten. This is a rebase rule, not a general one: a branch
 whose content is still changing waits for the local pass, because a red CI run
 on a commit you already know is incomplete tells nobody anything.
+
+## Serialized main integration rollout
+
+`Main integration admission` distinguishes PR readiness from exact merge-group
+admission. The group checker executes from the immutable trusted base, binds
+all six required workflows to the group SHA and latest attempt, and rejects
+stale main/group identities. It delegates retirement admission to the existing
+trusted gate; it is neither another writer nor a replacement queue.
+
+The checked-in queue ruleset is a desired configuration, not an enabled live
+policy. Keep `strict_required_status_checks_policy: false`: a conflict-free
+branch does not need a manual update just because main advanced. Do not enable
+the queue until the existing retirement writer/admission supports exact final
+merge groups and its current-main repair has landed. The required-check audit,
+fork and cancellation policy, activation/read-back steps, remaining live
+acceptance tests, and emergency restrictions are in
+[serialized main integration](../merge-queue-admission.md). No manual success
+status or temporary bypass is authorized by that guide.
