@@ -1,0 +1,46 @@
+name: PR 926 repair diagnostics
+on:
+  push:
+    branches: [codex/926-ci-repair]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 4e62d4104dab6c4c85025bd2eee4da520099790f
+          persist-credentials: false
+      - name: Export exact source and reproduce external oracle
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr926"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/pr926/source.tar.gz"
+          python3 - <<'PY'
+          import ast, pathlib, re, subprocess, os
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr926'
+          text = pathlib.Path('src/buster/tests/compiler/frontend/c/c_test.c').read_text()
+          fixture = text.split('String8 const c_test_enumerator_type_source = S8_INITIALIZER(', 1)[1].split('BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types', 1)[0]
+          source = ''.join(ast.literal_eval(s) for s in re.findall(r'"(?:\\.|[^"\\])*"', fixture))
+          for compiler, dialect, c23 in [('clang', 'gnu17', 0), ('clang', 'gnu2x', 1), ('gcc', 'gnu17', 0), ('gcc', 'gnu2x', 1)]:
+              for opt in ['0', '2']:
+                  prefix = root / f'{compiler}-{dialect}-O{opt}'
+                  src = prefix.with_suffix('.c')
+                  src.write_text(f'#define ENUM_C23 {c23}\n' + source)
+                  cmd = [compiler, f'-std={dialect}', f'-O{opt}', str(src), '-o', str(prefix)]
+                  result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                  report = subprocess.run([compiler, '--version'], capture_output=True, text=True).stdout + '\n' + ' '.join(cmd) + '\n' + result.stdout + result.stderr + f'\ncompile_exit={result.returncode}\n'
+                  if result.returncode == 0:
+                      run = subprocess.run([str(prefix)], capture_output=True, text=True, timeout=30)
+                      report += run.stdout + run.stderr + f'\nrun_exit={run.returncode}\n'
+                      prefix.unlink()
+                  prefix.with_suffix('.txt').write_text(report)
+                  print(report)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: pr926-diagnostic-source
+          path: ${{ runner.temp }}/pr926
+          retention-days: 2
