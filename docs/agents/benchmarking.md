@@ -4,6 +4,17 @@
 
 ## Benchmarking and diagnostics
 
+Performance comparisons must control build provenance as well as runtime noise.
+Build compared revisions serially in the same configured path, freezing each
+trusted binary before changing sources. If separate roots are necessary, verify
+path normalization and run same-source cross-build controls; identical compiler
+flags alone are insufficient. Record source and binary hashes, complete compile
+commands, and investigate code/section placement when small effects change across
+builds. An A/A test of one immutable binary measures runtime noise, not build-root
+sensitivity. Matching paths does not eliminate source-induced layout sensitivity;
+keep conclusions scoped to the measured binaries and workloads. See the
+[matched-build #791 audit](../performance-audits/2026-09-20T050606Z.md).
+
 - **`./build.sh bench_throughput`** provides deterministic startup, scaling,
   symbol, CFG, backend and frozen-source self-host workloads with raw paired
   timing/RSS, separate PMU/allocation probes and a conservative CI guard.

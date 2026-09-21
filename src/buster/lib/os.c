@@ -2536,109 +2536,581 @@ BUSTER_GLOBAL_LOCAL bool os_windows_job_wait_empty(HANDLE job, u64 timeout_micro
 }
 #endif
 
+#if BUSTER_INCLUDE_TESTS
+typedef struct OsProcessSpawnTestState OsProcessSpawnTestState;
+struct OsProcessSpawnTestState
+{
+    u64 call_count;
+    u64 fail_call;
+    OsProcessSpawnTestOperation operation;
+    bool armed;
+    bool failed;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessSpawnTestState os_process_spawn_test_state;
+
+void os_process_spawn_test_fail_on_call(OsProcessSpawnTestOperation operation, u64 call_index)
+{
+    BUSTER_VALIDATE(operation < OS_PROCESS_SPAWN_TEST_OPERATION_COUNT);
+    os_process_spawn_test_state = (OsProcessSpawnTestState){
+        .fail_call = call_index,
+        .operation = operation,
+        .armed = true,
+    };
+}
+
+bool os_process_spawn_test_end(void)
+{
+    bool result = os_process_spawn_test_state.armed && os_process_spawn_test_state.failed;
+    os_process_spawn_test_state = (OsProcessSpawnTestState){0};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL bool os_process_spawn_test_should_fail(OsProcessSpawnTestOperation operation)
+{
+    bool result = false;
+    if (os_process_spawn_test_state.armed && os_process_spawn_test_state.operation == operation)
+    {
+        u64 call = os_process_spawn_test_state.call_count;
+        os_process_spawn_test_state.call_count += 1;
+        if (call == os_process_spawn_test_state.fail_call)
+        {
+            os_process_spawn_test_state.failed = true;
+            result = true;
+        }
+    }
+    return result;
+}
+
+u64 os_process_spawn_test_resource_count(void)
+{
+    u64 result = 0;
+#if defined(_WIN32)
+    DWORD count = 0;
+    if (GetProcessHandleCount(GetCurrentProcess(), &count))
+    {
+        result = count;
+    }
+#else
+#if defined(__linux__)
+    char const* directory_path = "/proc/self/fd";
+#else
+    char const* directory_path = "/dev/fd";
+#endif
+    DIR* directory = opendir(directory_path);
+    if (directory)
+    {
+        struct dirent* entry;
+        while ((entry = readdir(directory)) != 0)
+        {
+            result += entry->d_name[0] != '.';
+        }
+        closedir(directory);
+        // The directory used for the census is itself visible in fd directories.
+        result -= result != 0;
+    }
+#endif
+    return result;
+}
+#define OS_PROCESS_SPAWN_TEST_FAIL(operation) os_process_spawn_test_should_fail(operation)
+#else
+#define OS_PROCESS_SPAWN_TEST_FAIL(operation) false
+#endif
+
+BUSTER_GLOBAL_LOCAL void os_process_spawn_fail(ProcessSpawnResult* result, ProcessSpawnFailure failure, OsError error)
+{
+    if (result->failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        result->failure = failure;
+        result->error = error;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL OsError os_process_spawn_invalid_error(void)
+{
+#if defined(_WIN32)
+    return (OsError){ERROR_INVALID_PARAMETER};
+#else
+    return (OsError){EINVAL};
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL OsError os_process_spawn_not_found_error(void)
+{
+#if defined(_WIN32)
+    return (OsError){ERROR_FILE_NOT_FOUND};
+#else
+    return (OsError){ENOENT};
+#endif
+}
+
+#if defined(_WIN32)
+BUSTER_GLOBAL_LOCAL OsError os_process_spawn_injected_error(void)
+{
+    return (OsError){ERROR_GEN_FAILURE};
+}
+#endif
+
+#if BUSTER_ANDROID
+BUSTER_GLOBAL_LOCAL OsError os_process_spawn_unsupported_error(void)
+{
+    return (OsError){ENOSYS};
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL bool os_process_spawn_string_valid(String8 string, bool allow_empty)
+{
+    bool result = (string.pointer != 0 || string.length == 0) && (allow_empty || string.length != 0);
+    for (u64 index = 0; result && index < string.length; index += 1)
+    {
+        result = string.pointer[index] != 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_spawn_inputs_valid(SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values,
+                                                        ProcessSpawnOptions options, ProcessSpawnFailure* failure)
+{
+    bool result = arguments.length && arguments.pointer && os_process_spawn_string_valid(arguments.pointer[0], false);
+    for (u64 index = 1; result && index < arguments.length; index += 1)
+    {
+        result = os_process_spawn_string_valid(arguments.pointer[index], true);
+    }
+    if (!result)
+    {
+        *failure = PROCESS_SPAWN_FAILURE_INVALID_ARGUMENTS;
+    }
+    else
+    {
+        result = environment_keys.length == environment_values.length &&
+                 (!environment_keys.length || (environment_keys.pointer && environment_values.pointer)) &&
+                 (!options.use_process_environment || !environment_keys.length);
+        for (u64 index = 0; result && index < environment_keys.length; index += 1)
+        {
+            String8 key = environment_keys.pointer[index];
+            String8 value = environment_values.pointer[index];
+            result = os_process_spawn_string_valid(key, false) && os_process_spawn_string_valid(value, true);
+            for (u64 code_unit = 0; result && code_unit < key.length; code_unit += 1)
+            {
+                result = key.pointer[code_unit] != '=';
+            }
+        }
+        if (!result)
+        {
+            *failure = PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_spawn_path_is_explicit(String8 path)
+{
+    bool result = false;
+    for (u64 index = 0; !result && index < path.length; index += 1)
+    {
+#if defined(_WIN32)
+        result = path.pointer[index] == '/' || path.pointer[index] == '\\' || path.pointer[index] == ':';
+#else
+        result = path.pointer[index] == '/';
+#endif
+    }
+    return result;
+}
+
+#if !defined(_WIN32) && !BUSTER_ANDROID
+#if !defined(__linux__) || !defined(F_DUPFD_CLOEXEC)
+BUSTER_GLOBAL_LOCAL int os_process_spawn_set_cloexec(int descriptor)
+{
+    int result = 0;
+    int flags;
+    do
+    {
+        flags = fcntl(descriptor, F_GETFD);
+    } while (flags < 0 && errno == EINTR);
+    if (flags < 0)
+    {
+        result = errno;
+    }
+    else
+    {
+        int status;
+        do
+        {
+            status = fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC);
+        } while (status < 0 && errno == EINTR);
+        if (status < 0)
+        {
+            result = errno;
+        }
+    }
+    return result;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL int os_process_spawn_duplicate_above_standard(int descriptor)
+{
+    int result;
+#ifdef F_DUPFD_CLOEXEC
+    do
+    {
+        result = fcntl(descriptor, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+    } while (result < 0 && errno == EINTR);
+#else
+    do
+    {
+        result = fcntl(descriptor, F_DUPFD, STDERR_FILENO + 1);
+    } while (result < 0 && errno == EINTR);
+    if (result >= 0)
+    {
+        int error = os_process_spawn_set_cloexec(result);
+        if (error)
+        {
+            close(result);
+            errno = error;
+            result = -1;
+        }
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL int os_process_spawn_pipe_create(int descriptors[2], ProcessSpawnFailure* failure)
+{
+    descriptors[0] = -1;
+    descriptors[1] = -1;
+    *failure = PROCESS_SPAWN_FAILURE_PIPE;
+    int result = 0;
+#if defined(__linux__)
+    // Create the descriptors with close-on-exec atomically. A pipe() followed
+    // by F_SETFD has a window in which another thread can spawn and inherit
+    // either endpoint.
+    if (pipe2(descriptors, O_CLOEXEC) != 0)
+#else
+    if (pipe(descriptors) != 0)
+#endif
+    {
+        result = errno;
+    }
+    if (!result)
+    {
+        *failure = PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION;
+        if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION))
+        {
+            result = EIO;
+        }
+    }
+    for (u32 index = 0; !result && index < 2; index += 1)
+    {
+        if (descriptors[index] <= STDERR_FILENO)
+        {
+            int replacement = os_process_spawn_duplicate_above_standard(descriptors[index]);
+            if (replacement < 0)
+            {
+                result = errno;
+            }
+            else
+            {
+                close(descriptors[index]);
+                descriptors[index] = replacement;
+            }
+        }
+#if !defined(__linux__)
+        else
+        {
+            result = os_process_spawn_set_cloexec(descriptors[index]);
+        }
+#endif
+    }
+    if (result)
+    {
+        for (u32 index = 0; index < 2; index += 1)
+        {
+            if (descriptors[index] >= 0)
+            {
+                close(descriptors[index]);
+                descriptors[index] = -1;
+            }
+        }
+    }
+    return result;
+}
+
+#if !defined(__APPLE__) && !defined(__GLIBC__)
+BUSTER_GLOBAL_LOCAL int os_process_spawn_add_open_descriptor_closes(posix_spawn_file_actions_t* file_actions)
+{
+    int result = 0;
+#if defined(__linux__)
+    char const* directory_path = "/proc/self/fd";
+#else
+    char const* directory_path = "/dev/fd";
+#endif
+    DIR* directory = opendir(directory_path);
+    if (!directory)
+    {
+        result = errno;
+    }
+    else
+    {
+        int directory_descriptor = dirfd(directory);
+        struct dirent* entry;
+        while (!result && (entry = readdir(directory)) != 0)
+        {
+            u64 descriptor = 0;
+            bool numeric = entry->d_name[0] != 0;
+            for (u64 index = 0; numeric && entry->d_name[index]; index += 1)
+            {
+                numeric = entry->d_name[index] >= '0' && entry->d_name[index] <= '9';
+                if (numeric)
+                {
+                    descriptor = descriptor * 10 + (u64)(entry->d_name[index] - '0');
+                    numeric = descriptor <= INT_MAX;
+                }
+            }
+            if (numeric && descriptor > STDERR_FILENO && (int)descriptor != directory_descriptor)
+            {
+                if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_FILE_ACTION))
+                {
+                    result = EIO;
+                }
+                else
+                {
+                    result = posix_spawn_file_actions_addclose(file_actions, (int)descriptor);
+                }
+            }
+        }
+        closedir(directory);
+    }
+    return result;
+}
+#endif
+#endif
+
 ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environment_keys, SliceString8 environment_values, ProcessSpawnOptions options)
 {
     TemporalArena temp = scratch_begin(0, 0);
     ProcessSpawnResult result = {0};
-    bool pipe_creation_results[(u64)STANDARD_STREAM_COUNT] = {0};
-    bool pipe_result = true;
+    ProcessSpawnFailure validation_failure = PROCESS_SPAWN_FAILURE_NONE;
+    bool inputs_valid = os_process_spawn_inputs_valid(arguments, environment_keys, environment_values, options, &validation_failure);
+    String8 executable = {0};
+
     result.capture_limits = options.capture_limits;
     result.capture_overflow_policy = options.capture_overflow_policy;
     memcpy(result.capture_overflow_files, options.capture_overflow_files, sizeof(result.capture_overflow_files));
     if (options.capture_overflow_policy >= PROCESS_CAPTURE_OVERFLOW_COUNT)
     {
-        string_print(S8("Invalid process capture overflow policy: {u32}\n"), (u32)options.capture_overflow_policy);
-        pipe_result = false;
+        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_INVALID_ARGUMENTS, os_process_spawn_invalid_error());
     }
+    else if (!inputs_valid)
+    {
+        os_process_spawn_fail(&result, validation_failure, os_process_spawn_invalid_error());
+    }
+    else
+    {
+        String8 requested = arguments.pointer[0];
+        if (options.search_path && !os_process_spawn_path_is_explicit(requested))
+        {
+            requested = executable_resolve_in_path(temp.arena, requested);
+            if (!requested.length)
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_EXECUTABLE_LOOKUP, os_process_spawn_not_found_error());
+            }
+        }
+        if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+        {
+            executable = os_path_absolute_lexical(temp.arena, requested, true);
+            if (!executable.length)
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_EXECUTABLE_LOOKUP, os_process_spawn_not_found_error());
+            }
+        }
+    }
+
 #if defined(_WIN32)
-    bool any_capture = false;
-    for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+    HANDLE duplicated_standard[STANDARD_STREAM_COUNT] = {0};
+    HANDLE inherited_handles[STANDARD_STREAM_COUNT] = {0};
+    u32 inherited_handle_count = 0;
+    bool pipe_created[STANDARD_STREAM_COUNT] = {0};
+    LPPROC_THREAD_ATTRIBUTE_LIST attribute_list = 0;
+    bool attribute_list_ready = false;
+    PROCESS_INFORMATION process_information = {0};
+
+    for (StandardStream stream = 0; result.failure == PROCESS_SPAWN_FAILURE_NONE && stream < STANDARD_STREAM_COUNT; stream += 1)
     {
         if (options.capture & ((u64)1 << stream))
         {
-            SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, TRUE};
-            BUSTER_CT_CHECK(sizeof(HANDLE) == sizeof(OsFileDescriptor*));
-            BOOL pipe_creation_result = CreatePipe((PHANDLE)&result.pipes[stream][0], (PHANDLE)&result.pipes[stream][1], &security_attributes, 0) != 0;
-            pipe_creation_results[stream] = pipe_creation_result;
-
-            if (pipe_creation_result)
+            SECURITY_ATTRIBUTES attributes = {sizeof(attributes), 0, TRUE};
+            if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_PIPE))
             {
-                any_capture = true;
-                // The child must inherit the read end for stdin and the write
-                // end for stdout/stderr; only the parent's end may be made
-                // non-inheritable.
-                u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
-                if (!os_windows_pipe_disable_inheritance(result.pipes[stream][parent_side]))
-                {
-                    string_print(S8("Error configuring a process pipe: \"{EOs}\"\n"), os_get_last_error());
-                    pipe_result = false;
-                }
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE, os_process_spawn_injected_error());
             }
             else
             {
-                pipe_result = false;
+                BUSTER_CT_CHECK(sizeof(HANDLE) == sizeof(OsFileDescriptor*));
+                BOOL created = CreatePipe((PHANDLE)&result.pipes[stream][0], (PHANDLE)&result.pipes[stream][1], &attributes, 0);
+                if (!created)
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE, os_get_last_error());
+                }
+                else
+                {
+                    pipe_created[stream] = true;
+                    u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
+                    if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION))
+                    {
+                        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION, os_process_spawn_injected_error());
+                    }
+                    else if (!os_windows_pipe_disable_inheritance(result.pipes[stream][parent_side]))
+                    {
+                        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION, os_get_last_error());
+                    }
+                }
             }
         }
     }
 
-    if (pipe_result && options.new_process_group)
+    STARTUPINFOEXW startup_info = {0};
+    startup_info.StartupInfo.cb = sizeof(startup_info);
+    startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    DWORD standard_ids[STANDARD_STREAM_COUNT] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+    for (StandardStream stream = 0; result.failure == PROCESS_SPAWN_FAILURE_NONE && stream < STANDARD_STREAM_COUNT; stream += 1)
     {
-        HANDLE job = CreateJobObjectW(0, 0);
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (job && SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+        HANDLE child_handle = 0;
+        if (options.capture & ((u64)1 << stream))
         {
-            result.process_tree = (OsProcessHandle*)job;
+            u32 child_side = stream == STANDARD_STREAM_INPUT ? 0 : 1;
+            child_handle = (HANDLE)result.pipes[stream][child_side];
         }
         else
         {
-            string_print(S8("Error creating a process Job Object: \"{EOs}\"\n"), os_get_last_error());
-            if (job)
+            HANDLE source = GetStdHandle(standard_ids[stream]);
+            if (source && source != INVALID_HANDLE_VALUE)
             {
-                CloseHandle(job);
+                if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_HANDLE_DUPLICATION))
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_DUPLICATION, os_process_spawn_injected_error());
+                }
+                else if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &duplicated_standard[stream], 0, TRUE, DUPLICATE_SAME_ACCESS))
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_DUPLICATION, os_get_last_error());
+                }
+                else
+                {
+                    child_handle = duplicated_standard[stream];
+                }
             }
-            pipe_result = false;
+        }
+        if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+        {
+            if (stream == STANDARD_STREAM_INPUT) startup_info.StartupInfo.hStdInput = child_handle;
+            if (stream == STANDARD_STREAM_OUTPUT) startup_info.StartupInfo.hStdOutput = child_handle;
+            if (stream == STANDARD_STREAM_ERROR) startup_info.StartupInfo.hStdError = child_handle;
+            if (child_handle)
+            {
+                inherited_handles[inherited_handle_count++] = child_handle;
+            }
         }
     }
 
-    if (pipe_result)
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE && options.new_process_group)
     {
-        PROCESS_INFORMATION process_information = {0};
-        STARTUPINFOW startup_info = {.cb = sizeof(startup_info)};
-
-        if (any_capture)
+        HANDLE job = CreateJobObjectW(0, 0);
+        if (!job)
         {
-            startup_info.dwFlags |= STARTF_USESTDHANDLES;
-            startup_info.hStdInput = options.capture & (1 << STANDARD_STREAM_INPUT) ? result.pipes[STANDARD_STREAM_INPUT][0] : GetStdHandle(STD_INPUT_HANDLE);
-            startup_info.hStdOutput =
-                options.capture & (1 << STANDARD_STREAM_OUTPUT) ? result.pipes[STANDARD_STREAM_OUTPUT][1] : GetStdHandle(STD_OUTPUT_HANDLE);
-            startup_info.hStdError = options.capture & (1 << STANDARD_STREAM_ERROR) ? result.pipes[STANDARD_STREAM_ERROR][1] : GetStdHandle(STD_ERROR_HANDLE);
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_ATTRIBUTE, os_get_last_error());
         }
-
-        String16 first_argument = {0};
-        if (arguments.length > 0)
+        else
         {
-            first_argument = string16_from_string8(temp.arena, arguments.pointer[0], true);
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+            {
+                OsError error = os_get_last_error();
+                CloseHandle(job);
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_ATTRIBUTE, error);
+            }
+            else
+            {
+                result.process_tree = (OsProcessHandle*)job;
+            }
         }
+    }
 
-        WindowsStringList argv = windows_string_list_from_slice_string(temp.arena, arguments);
-        WindowsStringList envp = options.use_process_environment ? program_state->input.raw_environment
-                                                                 : windows_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
-        DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT | (options.new_process_group ? CREATE_SUSPENDED : 0);
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE && inherited_handle_count)
+    {
+        SIZE_T attribute_bytes = 0;
+        (void)InitializeProcThreadAttributeList(0, 1, 0, &attribute_bytes);
+        if (!attribute_bytes)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_LIST, os_get_last_error());
+        }
+        else
+        {
+            u64 word_count = (attribute_bytes + sizeof(u64) - 1) / sizeof(u64);
+            attribute_list = (LPPROC_THREAD_ATTRIBUTE_LIST)arena_allocate(temp.arena, u64, word_count);
+            if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_HANDLE_LIST))
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_LIST, os_process_spawn_injected_error());
+            }
+            else if (!InitializeProcThreadAttributeList(attribute_list, 1, 0, &attribute_bytes))
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_LIST, os_get_last_error());
+            }
+            else
+            {
+                attribute_list_ready = true;
+                startup_info.lpAttributeList = attribute_list;
+                if (!UpdateProcThreadAttribute(attribute_list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited_handles,
+                                               inherited_handle_count * sizeof(inherited_handles[0]), 0, 0))
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_HANDLE_LIST, os_get_last_error());
+                }
+            }
+        }
+    }
 
-        if (CreateProcessW(first_argument.pointer, argv, 0, 0, 1, creation_flags, envp, 0, &startup_info, &process_information))
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        String16 application = string16_from_string8(temp.arena, executable, true);
+        WindowsStringList command_line = windows_string_list_from_slice_string(temp.arena, arguments);
+        WindowsStringList environment = options.use_process_environment
+                                            ? program_state->input.raw_environment
+                                            : windows_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
+        DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT;
+        if (attribute_list_ready)
+        {
+            creation_flags |= EXTENDED_STARTUPINFO_PRESENT;
+        }
+        if (result.process_tree)
+        {
+            creation_flags |= CREATE_SUSPENDED;
+        }
+        BOOL created = FALSE;
+        if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN))
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_process_spawn_injected_error());
+        }
+        else
+        {
+            created = CreateProcessW(application.pointer, command_line, 0, 0, inherited_handle_count != 0, creation_flags, environment, 0,
+                                     &startup_info.StartupInfo, &process_information);
+            if (!created)
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_get_last_error());
+            }
+        }
+        if (created)
         {
             bool child_ready = true;
             if (result.process_tree)
             {
                 if (!AssignProcessToJobObject((HANDLE)result.process_tree, process_information.hProcess))
                 {
-                    string_print(S8("Error assigning process to Job Object: \"{EOs}\"\n"), os_get_last_error());
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_get_last_error());
                     child_ready = false;
                 }
                 else if (ResumeThread(process_information.hThread) == (DWORD)-1)
                 {
-                    string_print(S8("Error resuming contained process: \"{EOs}\"\n"), os_get_last_error());
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_get_last_error());
                     child_ready = false;
                 }
             }
@@ -2650,32 +3122,31 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             {
                 if (result.process_tree)
                 {
-                    TerminateJobObject((HANDLE)result.process_tree, 1);
+                    (void)TerminateJobObject((HANDLE)result.process_tree, 1);
                 }
-                TerminateProcess(process_information.hProcess, 1);
-                WaitForSingleObject(process_information.hProcess, INFINITE);
+                (void)TerminateProcess(process_information.hProcess, 1);
+                (void)WaitForSingleObject(process_information.hProcess, INFINITE);
                 CloseHandle(process_information.hProcess);
             }
             CloseHandle(process_information.hThread);
         }
-        else
-        {
-            string_print(S8("Error creating a process: \"{EOs}\" => {[]S8}\n"), os_get_last_error(), arguments);
-        }
     }
-
+    if (attribute_list_ready)
+    {
+        DeleteProcThreadAttributeList(attribute_list);
+    }
     for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
     {
-        if (options.capture & ((u64)1 << stream) && pipe_creation_results[stream])
+        if (duplicated_standard[stream])
         {
-            // The child inherits the write end for stdout/stderr capture, or the read end for
-            // stdin capture; the parent only ever needs to keep the other end for itself.
+            CloseHandle(duplicated_standard[stream]);
+        }
+        if (pipe_created[stream])
+        {
             u32 child_side = stream == STANDARD_STREAM_INPUT ? 0 : 1;
             u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
-
             CloseHandle(result.pipes[stream][child_side]);
             result.pipes[stream][child_side] = 0;
-
             if (!result.handle)
             {
                 CloseHandle(result.pipes[stream][parent_side]);
@@ -2690,138 +3161,223 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     }
     result.process_group = result.handle != 0 && result.process_tree != 0;
 #elif BUSTER_ANDROID
-    BUSTER_UNUSED(environment_keys);
-    BUSTER_UNUSED(environment_values);
-    BUSTER_UNUSED(options);
-    BUSTER_UNUSED(pipe_creation_results);
-    BUSTER_UNUSED(pipe_result);
-    string_print(S8("Process spawning is not supported on Android: {[]S8}\n"), arguments);
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_UNSUPPORTED, os_process_spawn_unsupported_error());
+    }
 #else
     pid_t pid = -1;
-    posix_spawn_file_actions_t file_actions;
-    posix_spawnattr_t attributes;
-    int file_actions_init = posix_spawn_file_actions_init(&file_actions);
-    int attribute_init = posix_spawnattr_init(&attributes);
-
-    int pipes[(u64)STANDARD_STREAM_COUNT][2];
-
+    int pipes[STANDARD_STREAM_COUNT][2];
+    bool pipe_created[STANDARD_STREAM_COUNT] = {0};
     for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
     {
         pipes[stream][0] = -1;
         pipes[stream][1] = -1;
     }
 
-    for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+    posix_spawn_file_actions_t file_actions;
+    posix_spawnattr_t attributes;
+    bool file_actions_ready = false;
+    bool attributes_ready = false;
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_FILE_ACTIONS_INIT) ? EIO : posix_spawn_file_actions_init(&file_actions);
+        if (status)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_FILE_ACTIONS_INIT, (OsError){(u32)status});
+        }
+        else
+        {
+            file_actions_ready = true;
+        }
+    }
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_ATTRIBUTES_INIT) ? EIO : posix_spawnattr_init(&attributes);
+        if (status)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_ATTRIBUTES_INIT, (OsError){(u32)status});
+        }
+        else
+        {
+            attributes_ready = true;
+        }
+    }
+
+    for (StandardStream stream = 0; result.failure == PROCESS_SPAWN_FAILURE_NONE && stream < STANDARD_STREAM_COUNT; stream += 1)
     {
         if (options.capture & ((u64)1 << stream))
         {
-            int pipe_creation_result = pipe(pipes[stream]) == 0;
-            pipe_creation_results[stream] = pipe_creation_result;
-            if (pipe_creation_result)
+            int status;
+            if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_PIPE))
             {
-                // For stdin, the child reads from the pipe, so it gets the read end dup2'd onto
-                // its fd and the write end closed; for stdout/stderr it's the other way around.
-                bool is_input = (StandardStream)stream == STANDARD_STREAM_INPUT;
-                int child_end = is_input ? pipes[stream][0] : pipes[stream][1];
-                int other_end = is_input ? pipes[stream][1] : pipes[stream][0];
-
-                if (posix_spawn_file_actions_addclose(&file_actions, other_end) != 0)
-                {
-                    pipe_result = false;
-                }
-
-                int fd = generic_fd_to_posix(os_get_standard_stream((StandardStream)stream));
-
-                if (posix_spawn_file_actions_adddup2(&file_actions, child_end, fd) != 0)
-                {
-                    pipe_result = false;
-                }
-
-                if (posix_spawn_file_actions_addclose(&file_actions, child_end) != 0)
-                {
-                    pipe_result = false;
-                }
+                status = EIO;
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE, (OsError){(u32)status});
             }
             else
             {
-                pipe_result = false;
+                ProcessSpawnFailure pipe_failure = PROCESS_SPAWN_FAILURE_PIPE;
+                status = os_process_spawn_pipe_create(pipes[stream], &pipe_failure);
+                if (status)
+                {
+                    os_process_spawn_fail(&result, pipe_failure, (OsError){(u32)status});
+                }
+                else
+                {
+                    pipe_created[stream] = true;
+                }
+            }
+            if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+            {
+                bool input = stream == STANDARD_STREAM_INPUT;
+                int child_end = input ? pipes[stream][0] : pipes[stream][1];
+                int action_status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_FILE_ACTION)
+                                        ? EIO
+                                        : posix_spawn_file_actions_adddup2(&file_actions, child_end, (int)stream);
+                if (action_status)
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_FILE_ACTION, (OsError){(u32)action_status});
+                }
             }
         }
     }
 
-    if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
+    short attribute_flags = 0;
+#if defined(__APPLE__)
+    attribute_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+    for (StandardStream stream = 0; result.failure == PROCESS_SPAWN_FAILURE_NONE && stream < STANDARD_STREAM_COUNT; stream += 1)
     {
-        if (options.new_process_group)
+        if (!(options.capture & ((u64)1 << stream)))
         {
-            short flags = 0;
-            pipe_result = posix_spawnattr_getflags(&attributes, &flags) == 0 &&
-                          posix_spawnattr_setpgroup(&attributes, 0) == 0 &&
-                          posix_spawnattr_setflags(&attributes, (short)(flags | POSIX_SPAWN_SETPGROUP)) == 0;
+            errno = 0;
+            int descriptor_flags = fcntl((int)stream, F_GETFD);
+            if (descriptor_flags >= 0)
+            {
+                int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_FILE_ACTION)
+                                 ? EIO
+                                 : posix_spawn_file_actions_addinherit_np(&file_actions, (int)stream);
+                if (status)
+                {
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_FILE_ACTION, (OsError){(u32)status});
+                }
+            }
+            else if (errno != EBADF)
+            {
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION, (OsError){(u32)errno});
+            }
+        }
+    }
+#elif defined(__GLIBC__)
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_FILE_ACTION)
+                         ? EIO
+                         : posix_spawn_file_actions_addclosefrom_np(&file_actions, STDERR_FILENO + 1);
+        if (status)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_FILE_ACTION, (OsError){(u32)status});
+        }
+    }
+#else
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        int status = os_process_spawn_add_open_descriptor_closes(&file_actions);
+        if (status)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_FILE_ACTION, (OsError){(u32)status});
+        }
+    }
+#endif
+
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE && options.new_process_group)
+    {
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_ATTRIBUTE) ? EIO : posix_spawnattr_setpgroup(&attributes, 0);
+        if (status)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_ATTRIBUTE, (OsError){(u32)status});
+        }
+        else
+        {
+            attribute_flags |= POSIX_SPAWN_SETPGROUP;
+        }
+    }
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE && attribute_flags)
+    {
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_ATTRIBUTE)
+                         ? EIO
+                         : posix_spawnattr_setflags(&attributes, attribute_flags);
+        if (status)
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_ATTRIBUTE, (OsError){(u32)status});
         }
     }
 
-    if (file_actions_init == 0 && attribute_init == 0 && pipe_result)
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
     {
         PosixStringList argv = slice_string8_to_null_terminated_array_char(temp.arena, arguments);
-        PosixStringList envp = options.use_process_environment ? program_state->input.raw_environment
-                                                               : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
-        int spawn_result = posix_spawnp(&pid, argv[0], &file_actions, &attributes, argv, envp);
-
-        if (spawn_result != 0)
+        PosixStringList envp = options.use_process_environment
+                                  ? program_state->input.raw_environment
+                                  : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
+        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN)
+                         ? EIO
+                         : posix_spawn(&pid, executable.pointer, &file_actions, &attributes, argv, envp);
+        if (status)
         {
             pid = -1;
-            // Report unconditionally, like the Windows branch: a spawn failure
-            // that only surfaces under --verbose is undebuggable.
-            errno = spawn_result;
-            string_print(S8("Error creating a process: \"{EOs}\" => {[]S8}\n"), os_get_last_error(), arguments);
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, (OsError){(u32)status});
         }
     }
 
-    for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+    for (StandardStream stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
     {
-        if (options.capture & ((u64)1 << stream) && pipe_creation_results[stream])
+        if (pipe_created[stream])
         {
-            bool is_input = (StandardStream)stream == STANDARD_STREAM_INPUT;
-            int child_side = is_input ? 0 : 1;
-            int parent_side = is_input ? 1 : 0;
-
+            bool input = stream == STANDARD_STREAM_INPUT;
+            u32 child_side = input ? 0 : 1;
+            u32 parent_side = input ? 1 : 0;
             close(pipes[stream][child_side]);
             pipes[stream][child_side] = -1;
-
             if (pid == -1)
             {
                 close(pipes[stream][parent_side]);
                 pipes[stream][parent_side] = -1;
             }
         }
-
-        for (int i = 0; i < 2; i += 1)
+        for (u32 side = 0; side < 2; side += 1)
         {
-            result.pipes[stream][i] = pipes[stream][i] >= 0 ? posix_fd_to_generic_fd(pipes[stream][i]) : 0;
+            result.pipes[stream][side] = pipes[stream][side] >= 0 ? posix_fd_to_generic_fd(pipes[stream][side]) : 0;
         }
     }
-
-    // Destroying an object whose _init failed is undefined behavior.
-    if (file_actions_init == 0)
-    {
-        posix_spawn_file_actions_destroy(&file_actions);
-    }
-    if (attribute_init == 0)
+    if (attributes_ready)
     {
         posix_spawnattr_destroy(&attributes);
     }
-
-    result.handle = (OsProcessHandle*)(pid == -1 ? 0 : (u64)pid);
-    result.process_group = pid != -1 && options.new_process_group;
+    if (file_actions_ready)
+    {
+        posix_spawn_file_actions_destroy(&file_actions);
+    }
+    if (pid != -1)
+    {
+        result.handle = (OsProcessHandle*)(u64)pid;
+        result.process_group = options.new_process_group;
+    }
 #endif
 
     if (program_flag_get(PROGRAM_FLAG_VERBOSE))
     {
-        string_print(S8("{S8} [{u64}]: \"{[]S8}\" \n"), result.handle ? S8("Launched") : S8("Failed to launch"), result.handle, arguments);
+        if (result.handle)
+        {
+            string_print(S8("Launched [{u64}]: \"{[]S8}\"\n"), result.handle, arguments);
+        }
+        else
+        {
+            SliceString8 printable_arguments = arguments.pointer ? arguments : (SliceString8){0};
+            string_print(S8("Failed to launch stage={u32} error=\"{EOs}\": \"{[]S8}\"\n"), (u32)result.failure, result.error,
+                         printable_arguments);
+        }
     }
 
     scratch_end(temp);
-
     return result;
 }
 

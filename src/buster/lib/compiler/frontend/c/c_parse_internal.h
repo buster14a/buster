@@ -17,5 +17,4 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKi
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                      u32 start, u32 end, CTypeId* type_out);
-BUSTER_F_DECL bool c_test_parse_generic_constant_tokens_alias(CPreprocessResult preprocess, u32 start, u32 end);
 #endif
