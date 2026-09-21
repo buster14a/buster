@@ -360,7 +360,7 @@ class AuthorizationTests(unittest.TestCase):
     def test_workflow_reauthorizes_same_explicit_policy_and_retains_both_records(self):
         root = Path(__file__).resolve().parents[1]
         workflow = (root / ".github/workflows/native-retirement-integration.yml").read_text()
-        self.assertIn("default: independent-review", workflow)
+        self.assertIn("default: configured", workflow)
         self.assertIn("${{ vars.NATIVE_RETIREMENT_SOLO_MAINTAINER }}", workflow)
         prepare, publish = workflow.split("  publish:\n", 1)
         for job in (prepare, publish):
@@ -368,6 +368,52 @@ class AuthorizationTests(unittest.TestCase):
             self.assertIn('--expected-base "$EXPECTED_BASE"', job)
             self.assertIn('tee "$RUNNER_TEMP/native-retirement/authorization.json"', job)
             self.assertIn("${{ runner.temp }}/native-retirement/authorization.json", job)
+
+
+class DispatchResolutionTests(unittest.TestCase):
+    def resolve(self, **changes):
+        args = dict(base="b" * 40, head="a" * 40, kind="bootstrap",
+                    expected_base="", expected_head="", requested_kind="auto",
+                    requested_mode="configured", workflow_sha="b" * 40,
+                    configured_login="author", actor="author")
+        args.update(changes)
+        return integration.resolve_dispatch(**args)
+
+    def test_configured_owner_resolves_exact_inputs(self):
+        self.assertEqual(self.resolve(), dict(base="b" * 40, head="a" * 40,
+                         classification="bootstrap", authorization_mode="solo-maintainer"))
+
+    def test_unconfigured_or_other_actor_keeps_independent_review(self):
+        for changes in ({"configured_login": ""}, {"actor": "dispatcher"},
+                        {"kind": "ordinary"}, {"requested_mode": "independent-review"}):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.resolve(**changes)["authorization_mode"], "independent-review")
+
+    def test_explicit_pins_and_class_remain_binding(self):
+        for changes in ({"expected_base": "c" * 40}, {"expected_head": "c" * 40},
+                        {"workflow_sha": "c" * 40}, {"requested_kind": "ordinary"},
+                        {"kind": "split-required"}, {"requested_mode": "invalid"}):
+            with self.subTest(changes=changes), self.assertRaises(integration.IntegrationError):
+                self.resolve(**changes)
+
+    def test_resolved_solo_mode_still_requires_existing_admin_authorization(self):
+        api = FakeGitHub("a" * 40)
+        api.permissions["author"] = "write"
+        with self.assertRaises(integration.IntegrationError):
+            integration.authorize(api, 864, "a" * 40, "bootstrap", "author",
+                                  authorization_mode=self.resolve()["authorization_mode"])
+
+    def test_downstream_jobs_use_resolved_inputs_and_secret_is_publish_only(self):
+        root = Path(__file__).resolve().parents[1]
+        text = (root / ".github/workflows/native-retirement-integration.yml").read_text()
+        prepare, publish = text.split("  publish:\n", 1)
+        self.assertNotIn("secrets.NATIVE_RETIREMENT_PUBLICATION_TOKEN", prepare)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", publish)
+        self.assertIn("secrets.NATIVE_RETIREMENT_PUBLICATION_TOKEN", publish)
+        for job in (prepare.split("  validate:\n", 1)[1], publish):
+            self.assertIn("EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}", job)
+            self.assertIn("EXPECTED_BASE: ${{ needs.prepare.outputs.base }}", job)
+            self.assertIn("AUTHORIZATION_MODE: ${{ needs.prepare.outputs.authorization_mode }}", job)
 
 
 class IntegrationTests(unittest.TestCase):

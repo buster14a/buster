@@ -81,8 +81,9 @@ the first lands.
 path. It is a default-branch `workflow_dispatch` workflow with one fixed,
 non-cancelling concurrency group. Protect the
 `native-retirement-integration` environment with the intended reviewers.
-Dispatch it with an open non-draft PR number, its exact reviewed 40-hex head,
-and the trusted transition class.
+Dispatch it with an open non-draft PR number. The default `auto` class and
+`configured` authorization mode resolve the immutable request from trusted main.
+Optional SHA and class overrides remain strict assertions.
 
 The workflow has three separately permissioned jobs:
 
@@ -117,10 +118,23 @@ a failure or cancellation cannot leave a partially published generated state
 on the PR head. A failure after staging can leave a temporary
 `native-retirement-staging/` branch; it does not authorize another commit.
 
-Workflow-token pushes do not automatically trigger PR workflows. After a
-successful publication, close and reopen the unmerged PR through GitHub to
-request fresh checks on its new head. Verify the checks belong to the published
-SHA before merging; old-head checks are not evidence for the new commit.
+Configure `NATIVE_RETIREMENT_PUBLICATION_TOKEN` as an Actions secret in the
+protected `native-retirement-integration` environment to trigger PR CI from
+the publication push automatically. Use a fine-grained personal access token
+restricted to this repository with Contents read/write and Workflows read/write
+(for candidates changing workflow files). Give it an expiry and rotate it.
+Never paste the token into a PR, workflow input, log, or chat.
+
+The secret is exposed only to the final publication step, after independent
+read-only validation and reauthorization. The attestation API uses the built-in
+GitHub Actions token so the admission gate still verifies the bot creator.
+The publication credential does not grant permission to skip required checks.
+
+Without the secret, publication remains compatible with the built-in token,
+but emits a warning: approve the new PR workflow runs in GitHub. GitHub may
+require this additional approval for PR updates using its built-in token.
+See [GitHub workflow triggering](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow). Verify checks belong
+to the published SHA before merging; old-head checks are not evidence for it.
 
 ## Trust transitions
 
@@ -150,8 +164,10 @@ separate policy transition after that bootstrap is trusted.
 
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
 bootstrap or policy transition. It is recorded separately from independent
-review; `maintainer_approvals` remains empty. The default is still
-`independent-review`, and missing reviews never silently select the solo route.
+review; `maintainer_approvals` remains empty. The CLI default remains `independent-review`. The workflow default `configured`
+selects solo mode only for a trust transition dispatched by the explicitly
+configured account; all other dispatchers retain independent-review policy.
+Missing reviews never select the solo route.
 Ordinary integrations retain their existing dispatcher authorization.
 
 After this implementation is installed on trusted `main`, configure the
@@ -163,16 +179,19 @@ disables future dispatches, so cancel any already-running solo dispatch when
 revoking the configuration. Current admin permission is checked again before
 publication.
 
-To authorize a transition, open **Actions -> Native retirement trusted
-integration -> Run workflow**, select `main`, and supply:
+To authorize an integration, open **Actions -> Native retirement trusted
+integration -> Run workflow**, select `main`, enter the PR number, and run.
+Leave `expected_head` and `expected_base` blank, `transition_kind` at `auto`,
+and `authorization_mode` at `configured`. No SHA copying is needed.
 
-| Input | Value |
-| --- | --- |
-| `pull_request` | The open, non-draft, same-repository PR number |
-| `expected_head` | Its full reviewed 40-character head SHA |
-| `transition_kind` | `bootstrap` or `policy`, matching the trusted classifier |
-| `authorization_mode` | `solo-maintainer` |
-| `expected_base` | The full current `main` SHA you approve as the base |
+The run checks out its immutable workflow revision, resolves the current PR
+head once, classifies it with trusted tools, records both SHAs/class/mode in
+the job summary, and reuses them across validation and publication. If you
+need to approve a specific head rather than the current head when preparation
+starts, fill the optional exact-head override. Explicit overrides must match.
+The configured account must still have current admin permission, use attempt 1,
+and pass the existing fresh-dispatch checks. Main/head movement fails closed;
+start a new run for the changed request. No background process renews approval.
 
 This manual dispatch is the approval action. It must originate from the
 configured admin account, use the default-branch writer at the approved base,
