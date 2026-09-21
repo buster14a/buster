@@ -18,6 +18,9 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
+
+import native_retirement_merge_gate as retirement_gate
 from typing import Sequence
 import urllib.error
 import urllib.parse
@@ -50,6 +53,7 @@ RETIREMENT_TRUST_PATHS = frozenset((
     "tools/native_retirement_dependency_binding.py",
     "tools/native_retirement_external.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_materializer.py",
     "tools/native_retirement_rebind.py",
     "tools/native_retirement_rebind_contract.py",
@@ -176,6 +180,19 @@ class GitHubApi:
         if not isinstance(value, dict):
             raise PreflightError(f"GitHub pull request #{number} response is not an object")
         return value
+
+    def retirement_status(self, head: str) -> dict:
+        rows = []
+        for page in range(1, MAX_API_PAGES + 1):
+            value = self._request("GET", f"/repos/{self.repository}/statuses/{head}?per_page=100&page={page}")
+            if not isinstance(value, list):
+                raise PreflightError("GitHub retirement status response is not a list")
+            rows.extend(value)
+            if len(value) < 100:
+                break
+        else:
+            raise PreflightError("retirement status pagination limit reached")
+        return {"sha": head, "statuses": rows}
 
     def previous_status(self, head: str, context: str) -> PreviousResult | None:
         value = self._request("GET", f"/repos/{self.repository}/commits/{head}/status")
@@ -483,7 +500,7 @@ def _previous_state(repo: Path, previous: PreviousResult | None, main: str, head
 
 
 def analyze(repo: Path, main_revision: str, head_revision: str,
-            previous: PreviousResult | None = None) -> dict:
+            previous: PreviousResult | None = None, retirement_status: dict | None = None) -> dict:
     started = time.monotonic_ns()
     repo = repo.resolve()
     main = _commit(repo, main_revision)
@@ -509,7 +526,22 @@ def analyze(repo: Path, main_revision: str, head_revision: str,
         record["path"] for record in conflict_paths if record["genuine_source_overlap"]
     )
     stale = not _is_ancestor(repo, main, head)
-    if generated_changed or generated_conflicts:
+    attestation = {"verified": False, "reason": "No live trusted integration evidence supplied"}
+    if generated_changed and merge.clean and retirement_status is not None:
+        try:
+            # This module is loaded beside the trusted preflight, never from the PR tree.
+            with tempfile.TemporaryDirectory(prefix="preflight-attestation-") as temporary:
+                status_path = Path(temporary) / "status.json"
+                status_path.write_text(json.dumps(retirement_status))
+                verified = retirement_gate.check_pull_request(
+                    repo, main, head, main, status_path, False)
+            if verified.get("mode") != "trusted-integration":
+                raise retirement_gate.AdmissionError("head is not a trusted integration")
+            attestation = {"verified": True, "record": verified}
+        except (retirement_gate.AdmissionError, retirement_gate.integration.IntegrationError,
+                ValueError, KeyError, TypeError) as error:
+            attestation = {"verified": False, "reason": str(error)}
+    if (generated_changed and not attestation["verified"]) or generated_conflicts:
         outcome_number = OUTCOME_GENERATED
         outcome_kind = "generated-integration-owned-workflow-violation"
         action = (
@@ -559,6 +591,7 @@ def analyze(repo: Path, main_revision: str, head_revision: str,
             "conflicts": conflict_records,
             "path_details": conflict_paths,
         },
+        "trusted_retirement_integration": attestation,
         "candidate_changes": {
             "paths": [
                 {"path": path, "statuses": list(statuses), **_path_flags(path)}
@@ -632,7 +665,7 @@ def report_markdown(report: dict, title: str | None = None) -> str:
                 f"{', '.join(ownership)} |"
             )
     generated = report["candidate_changes"]["generated_or_integration_owned_retirement_paths"]
-    if generated:
+    if generated and not report["trusted_retirement_integration"]["verified"]:
         lines.extend(("", "Candidate-owned generated paths: " + ", ".join(f"`{path}`" for path in generated) + "."))
     lines.extend((
         "",
@@ -707,6 +740,8 @@ def _analyze_stable_pull(repo: Path, api: GitHubApi, number: int, context: str) 
             continue
         previous = api.previous_status(head, context)
         candidate = analyze(repo, main, head, previous)
+        if candidate["candidate_changes"]["generated_or_integration_owned_retirement_paths"]:
+            candidate = analyze(repo, main, head, previous, api.retirement_status(head))
         pull_after = api.pull_request(number)
         _, current_head, current_base = _pull_identity(pull_after)
         current_main = _fetch_ref(repo, f"refs/heads/{current_base}", main_ref)
