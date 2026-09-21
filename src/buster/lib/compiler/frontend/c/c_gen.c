@@ -6810,7 +6810,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_storage_address(CIntegerIrBuilde
 
 // One piece of that span as a place of its own width, at `offset` bytes in.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_piece_place(CIntegerIrBuilder* builder, IrValueId byte_address, u32 offset, IrTypeId piece_type,
-                                                            IrSourceRange source)
+                                                            bool is_volatile, IrSourceRange source)
 {
     IrTypeId byte_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_CHAR);
     IrValueId address = byte_address;
@@ -6824,7 +6824,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_piece_place(CIntegerIrBuilder* b
     IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID && piece_pointer_type.value != IR_ID_UNDERLYING_INVALID
                          ? c_ir_emit_cast(builder, address, piece_pointer_type, source)
                          : IR_VALUE_ID_INVALID;
-    return cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    IrValueId result = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    if (result.value < builder->function->value_count)
+    {
+        // The unsigned piece type describes storage, not the qualifications
+        // of the original field. Preserve its volatile access on every piece.
+        builder->function->values[result.value].is_volatile |= is_volatile;
+    }
+    return result;
 }
 
 // The bits of `field` that lie in one piece of its span, as the half-open
@@ -6873,7 +6880,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
         }
         IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
         IrValueId piece_place =
-            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type,
+                                                                                            builder->function->values[place.value].is_volatile, source)
                                                          : IR_VALUE_ID_INVALID;
         IrValueId loaded = piece_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, piece_place, piece_type, source)
                                                                         : IR_VALUE_ID_INVALID;
@@ -6957,7 +6965,8 @@ BUSTER_C_INTERNAL bool c_ir_emit_split_bit_field_store(CIntegerIrBuilder* builde
         u32 piece_bits = (u32)pieces[index].size * 8;
         IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
         IrValueId piece_place =
-            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type,
+                                                                                            builder->function->values[place.value].is_volatile, source)
                                                          : IR_VALUE_ID_INVALID;
         if (piece_place.value == IR_ID_UNDERLYING_INVALID)
         {

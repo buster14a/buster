@@ -164,6 +164,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   objects in every native allocator. The registered enum differential runs
   the same field source through Clang GNU17 and GCC GNU2x at `-O0`/`-O2`, with
   fixed expectations rather than oracle-derived values (GitHub #902).
+  Split storage pieces also retain the original place's `volatile` flag on
+  every load and store. Casting the access address to an unsigned piece
+  pointer must not erase that semantic qualification. The regression
+  checks both volatile accesses and a nonvolatile packed control.
   **Integer promotion uses the bit-field width, not its storage width.** An
   `unsigned int : 3` promotes to `int`, while an `unsigned int : 32` remains
   unsigned. `c_ir_mark_unsigned_bit_field_value` keeps this distinction in a

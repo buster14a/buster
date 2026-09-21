@@ -849,6 +849,12 @@ BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
     "volatile union PackedS40 packed_s[2]={{S40_NEG},{S40_NEG}};\n"
     "enum EU40 read_PackedU40(void) { return packed_u[0].field; }\n"
     "enum ES40 read_PackedS40(void) { return packed_s[0].field; }\n"
+    "void write_PackedU40(void) { packed_u[0].field=7; }\n"
+    "void write_PackedS40(void) { packed_s[0].field=S40_POS; }\n"
+    "union __attribute__((packed)) PlainPackedU40 { enum EU40 field:40; };\n"
+    "union PlainPackedU40 plain_packed_u={U40_HIGH};\n"
+    "enum EU40 read_PlainPackedU40(void) { return plain_packed_u.field; }\n"
+    "void write_PlainPackedU40(void) { plain_packed_u.field=9; }\n"
     "_Static_assert(sizeof(enum EU32)==4 && sizeof(enum EU40)==8 && sizeof(enum ES40)==8, \"enum representation\");\n"
     "_Static_assert(sizeof(enum EU64)==8 && sizeof(enum ES64)==8, \"full width representation\");\n"
     "_Static_assert(sizeof(union PackedU40)==5 && sizeof(union PackedS40)==5, \"storage is not the enum type\");\n"
@@ -885,10 +891,13 @@ BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
     "    result |= object_QualifiedBox.field!=0 || object_QualifiedBox.ordinary!=U40_HIGH;\n"
     "    result |= object_FixedSBox.field!=-1 || object_FixedUBox.field!=0x8000000000000000ULL;\n"
     "    result |= packed_u[0].field!=U40_HIGH || packed_s[0].field!=S40_NEG;\n"
-    "    packed_u[0].field=7;\n"
-    "    packed_s[0].field=S40_POS;\n"
+    "    write_PackedU40();\n"
+    "    write_PackedS40();\n"
     "    result |= packed_u[0].field!=7 || packed_u[1].field!=U40_HIGH;\n"
     "    result |= packed_s[0].field!=S40_POS || packed_s[1].field!=S40_NEG;\n"
+    "    result |= read_PlainPackedU40()!=U40_HIGH;\n"
+    "    write_PlainPackedU40();\n"
+    "    result |= read_PlainPackedU40()!=9;\n"
     "    struct U40Box local_u={U40_HIGH,U40_HIGH};\n"
     "    struct S40Box local_s={S40_NEG,S40_NEG};\n"
     "    local_u.field=3;\n"
@@ -919,6 +928,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
         u32 field_width;
         bool is_signed;
         bool packed;
+        bool is_volatile;
     };
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
@@ -926,18 +936,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
         CTypeKind unsigned_wide = target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
         CTypeKind signed_wide = target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_LONG_LONG : C_TYPE_LONG;
         CEnumBitFieldCase cases[] = {
-        {S8("U32Box"), C_TYPE_UNSIGNED_INT, 32, 32, false, false},
-        {S8("S32Box"), C_TYPE_INT, 32, 6, true, false},
-        {S8("SmallBox"), C_TYPE_UNSIGNED_INT, 32, 3, false, false},
-        {S8("U40Box"), unsigned_wide, 64, 40, false, false},
-        {S8("S40Box"), signed_wide, 64, 40, true, false},
-        {S8("U64Box"), unsigned_wide, 64, 64, false, false},
-        {S8("S64Box"), signed_wide, 64, 64, true, false},
-        {S8("FixedUBox"), C_TYPE_UNSIGNED_LONG_LONG, 64, 64, false, false},
-        {S8("FixedSBox"), C_TYPE_LONG_LONG, 64, 64, true, false},
-        {S8("QualifiedBox"), unsigned_wide, 64, 40, false, false},
-        {S8("PackedU40"), unsigned_wide, 64, 40, false, true},
-        {S8("PackedS40"), signed_wide, 64, 40, true, true},
+        {S8("U32Box"), C_TYPE_UNSIGNED_INT, 32, 32, false, false, true},
+        {S8("S32Box"), C_TYPE_INT, 32, 6, true, false, true},
+        {S8("SmallBox"), C_TYPE_UNSIGNED_INT, 32, 3, false, false, true},
+        {S8("U40Box"), unsigned_wide, 64, 40, false, false, true},
+        {S8("S40Box"), signed_wide, 64, 40, true, false, true},
+        {S8("U64Box"), unsigned_wide, 64, 64, false, false, true},
+        {S8("S64Box"), signed_wide, 64, 64, true, false, true},
+        {S8("FixedUBox"), C_TYPE_UNSIGNED_LONG_LONG, 64, 64, false, false, true},
+        {S8("FixedSBox"), C_TYPE_LONG_LONG, 64, 64, true, false, true},
+        {S8("QualifiedBox"), unsigned_wide, 64, 40, false, false, true},
+        {S8("PackedU40"), unsigned_wide, 64, 40, false, true, true},
+        {S8("PackedS40"), signed_wide, 64, 40, true, true, true},
+        {S8("PlainPackedU40"), unsigned_wide, 64, 40, false, true, false},
         };
         for (u32 dialect = 0; dialect < 2; dialect += 1)
         {
@@ -1033,12 +1044,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arg
                                                 if (BUSTER_REQUIRE(arguments, loaded != 0))
                                                 {
                                                     BUSTER_TEST(arguments, loaded->bit_width <= (expected.packed ? 32u : expected.semantic_width));
-                                                    BUSTER_TEST(arguments, instruction->volatile_access);
+                                                    BUSTER_TEST(arguments, instruction->volatile_access == expected.is_volatile);
                                                 }
                                                 loads += 1;
                                             }
                                         }
                                         BUSTER_TEST(arguments, loads == (expected.packed ? 2u : 1u));
+                                        if (expected.packed)
+                                        {
+                                            IrFunction* writer = c_test_find_ir_function(module,
+                                                string_format(temporary.arena, S8("write_{S8}"), expected.record));
+                                            if (BUSTER_REQUIRE(arguments, writer != 0))
+                                            {
+                                                u32 stores = 0;
+                                                for (u32 index = 0; index < writer->instruction_count; index += 1)
+                                                {
+                                                    IrInstruction* instruction = writer->instructions + index;
+                                                    if (instruction->opcode == IR_OPCODE_STORE)
+                                                    {
+                                                        BUSTER_TEST(arguments, instruction->volatile_access == expected.is_volatile);
+                                                        stores += 1;
+                                                    }
+                                                }
+                                                BUSTER_TEST(arguments, stores == 2);
+                                            }
+                                        }
                                     }
                                 }
                             }
