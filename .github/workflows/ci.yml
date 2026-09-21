@@ -237,6 +237,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
           "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
+          "$BUSTER_CI_PYTHON" tools/ci_admission_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/ci-admission.log"
           "$BUSTER_CI_PYTHON" tools/ci_zig_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-installer-test.log"
           "$BUSTER_CI_PYTHON" tools/ci_zig_cache_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-cache-policy-test.log"
           "$BUSTER_CI_PYTHON" tools/ci_android_sdk_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/android-sdk-installer-test.log"
@@ -1219,7 +1220,7 @@ jobs:
       contents: read
       actions: read
     needs: [lint, test, native, mobile, uefi, analyzer]
-    if: ${{ always() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:

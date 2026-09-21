@@ -663,6 +663,42 @@ void os_test_process_child_run(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
 
+#if !BUSTER_SINGLE_THREADED && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 resource_failure_mode = os_get_environment_variable(S8("BUSTER_OS_RESOURCE_FAILURE_MODE"));
+    if (resource_failure_mode.length)
+    {
+        os_resource_test_clear();
+        if (string_equal(resource_failure_mode, S8("barrier")) || string_equal(resource_failure_mode, S8("thread")))
+        {
+            ThreadContext* owner = thread_context_allocate();
+            BUSTER_VALIDATE(owner != 0);
+            thread_context_select(owner);
+            if (string_equal(resource_failure_mode, S8("barrier")))
+            {
+                os_resource_test_fail_on_call(OS_RESOURCE_TEST_BARRIER_CREATE, 0);
+            }
+            else
+            {
+                // Lane 1 starts successfully; lane 2 fails while lane 1 is
+                // still held behind the constructor's startup gate.
+                os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_CREATE, 1);
+            }
+            lane_run(3, &os_test_resource_noop, 0);
+        }
+        else if (string_equal(resource_failure_mode, S8("join")))
+        {
+            OsThreadHandle* handle = os_thread_create((ThreadCreateOptions){
+                .callback = &os_test_resource_noop,
+                .argument = 0,
+            });
+            BUSTER_VALIDATE(handle != 0);
+            os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_JOIN, 0);
+            BUSTER_VALIDATE(os_thread_join(handle));
+        }
+        os_fail_message(S8("resource failure injection was not observed"));
+    }
+#endif
+
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 process_test_mode = os_get_environment_variable(S8("BUSTER_OS_PROCESS_TEST_MODE"));
     if (string_starts_with_sequence(process_test_mode, S8("flood")))
@@ -737,41 +773,6 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     UnitTestResult result = {0};
 
-#if !BUSTER_SINGLE_THREADED && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 resource_failure_mode = os_get_environment_variable(S8("BUSTER_OS_RESOURCE_FAILURE_MODE"));
-    if (resource_failure_mode.length)
-    {
-        os_resource_test_clear();
-        if (string_equal(resource_failure_mode, S8("barrier")) || string_equal(resource_failure_mode, S8("thread")))
-        {
-            ThreadContext* owner = thread_context_allocate();
-            BUSTER_VALIDATE(owner != 0);
-            thread_context_select(owner);
-            if (string_equal(resource_failure_mode, S8("barrier")))
-            {
-                os_resource_test_fail_on_call(OS_RESOURCE_TEST_BARRIER_CREATE, 0);
-            }
-            else
-            {
-                // Lane 1 starts successfully; lane 2 fails while lane 1 is
-                // still held behind the constructor's startup gate.
-                os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_CREATE, 1);
-            }
-            lane_run(3, &os_test_resource_noop, 0);
-        }
-        else if (string_equal(resource_failure_mode, S8("join")))
-        {
-            OsThreadHandle* handle = os_thread_create((ThreadCreateOptions){
-                .callback = &os_test_resource_noop,
-                .argument = 0,
-            });
-            BUSTER_VALIDATE(handle != 0);
-            os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_JOIN, 0);
-            BUSTER_VALIDATE(os_thread_join(handle));
-        }
-        os_fail_message(S8("resource failure injection was not observed"));
-    }
-#endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));

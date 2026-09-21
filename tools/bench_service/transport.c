@@ -169,7 +169,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_operation(u32 operation)
 {
     bool public_operation = operation == BQ_OP_CAPABILITIES || operation == BQ_OP_SUBMIT ||
                             operation == BQ_OP_SUBMIT_EXCLUSIVE || operation == BQ_OP_STATUS ||
-                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS;
+                            operation == BQ_OP_RESULT || operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS || operation == BQ_OP_EXPORT;
     BqError error = public_operation ? BQ_OK : BQ_BAD_REQUEST;
     return error;
 }
@@ -180,7 +180,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
     u32 operation = error == BQ_OK ? bq_u32(input + 8) : 0;
     u32 schema = error == BQ_OK ? bq_u32(input + 4) : 0;
     u32 length = error == BQ_OK ? bq_u32(input + 12) : 0;
-    if (error == BQ_OK && (schema != BQ_CONTROL_SCHEMA || bq_transport_public_operation(operation) != BQ_OK))
+    if (error == BQ_OK && (schema != BQ_CONTROL_SCHEMA || length != size - BQ_CONTROL_HEADER ||
+                          bq_transport_public_operation(operation) != BQ_OK))
     {
         error = BQ_BAD_REQUEST;
     }
@@ -194,8 +195,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
         else
         {
             memcpy(request.bytes, input + BQ_CONTROL_HEADER, length);
-            error = !bq_request_valid(&request) ? BQ_BAD_REQUEST : !bq_recipe_real(&request) ? BQ_UNSUPPORTED : BQ_OK;
+            error = !bq_request_valid(&request) ? BQ_BAD_REQUEST : !bq_recipe_real(&request) ? BQ_UNSUPPORTED :
+                    !string_equal(bq_field(&request, 0), S8(BQ_EXPORT_PRINCIPAL)) ? BQ_EXPORT_UNAUTHORIZED : BQ_OK;
         }
+    }
+    if (error == BQ_OK && operation == BQ_OP_EXPORT)
+    {
+        u8 const* arguments = input + BQ_CONTROL_HEADER;
+        bool valid = length == BQ_EXPORT_REQUEST_CAP && bq_u64(arguments) && bq_u64(arguments + 8) &&
+                     bq_result_digest_valid(arguments + 16);
+        if (valid && bq_u64(arguments + 80) == UINT64_MAX)
+        {
+            for (u32 i = 88; valid && i < BQ_EXPORT_REQUEST_CAP; i += 1) valid = arguments[i] == 0;
+        }
+        else if (valid) valid = bq_result_digest_valid(arguments + 88);
+        if (!valid) error = BQ_BAD_REQUEST;
     }
     return error;
 }
@@ -214,13 +228,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_wait(int descriptor, short events)
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_transport_receive_timeout(int client, u8 bytes[BQ_CONTROL_CAP], u32* size, int milliseconds)
+BUSTER_GLOBAL_LOCAL BqError bq_transport_receive_timeout(int client, u8* bytes, u32* size, int milliseconds, u32 capacity)
 {
-    char packet[BQ_CONTROL_CAP + 1];
+    char packet[BQ_PACKET_CAP + 1];
     BqError wait_error = bq_transport_wait_for(client, POLLIN, milliseconds);
-    ssize_t received = wait_error == BQ_OK ? recv(client, packet, sizeof(packet), MSG_TRUNC | MSG_DONTWAIT) : -1;
+    ssize_t received = wait_error == BQ_OK ? recv(client, packet, capacity + 1, MSG_TRUNC | MSG_DONTWAIT) : -1;
     BqError error = wait_error != BQ_OK ? wait_error : received < 0 ? BQ_IO :
-                    received > BQ_CONTROL_CAP ? BQ_BAD_REQUEST : received < BQ_CONTROL_HEADER ? BQ_BAD_REQUEST : BQ_OK;
+                    received > capacity ? BQ_BAD_REQUEST : received < BQ_CONTROL_HEADER ? BQ_BAD_REQUEST : BQ_OK;
     if (error == BQ_OK)
     {
         memcpy(bytes, packet, (size_t)received);
@@ -235,7 +249,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_receive_timeout(int client, u8 bytes[BQ
 
 BUSTER_GLOBAL_LOCAL BqError bq_transport_receive(int client, u8 bytes[BQ_CONTROL_CAP], u32* size)
 {
-    BqError error = bq_transport_receive_timeout(client, bytes, size, BQ_TRANSPORT_IO_MILLISECONDS);
+    BqError error = bq_transport_receive_timeout(client, bytes, size, BQ_TRANSPORT_IO_MILLISECONDS, BQ_CONTROL_CAP);
     return error;
 }
 
@@ -336,12 +350,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
             {
                 u32 received = 0;
                 BqError receive_error = bq_transport_receive_timeout(client, response->bytes, &received,
-                                                                      BQ_TRANSPORT_CLIENT_MILLISECONDS);
+                                                                      bq_u32(request + 8) == BQ_OP_EXPORT && request_size == BQ_CONTROL_HEADER + BQ_EXPORT_REQUEST_CAP &&
+                                                                      bq_u64(request + BQ_CONTROL_HEADER + 80) == UINT64_MAX ?
+                                                                      BQ_EXPORT_PREPARE_MILLISECONDS + 5000 : BQ_TRANSPORT_CLIENT_MILLISECONDS,
+                                                                      BQ_PACKET_CAP);
                 bool response_valid = receive_error == BQ_OK && received >= BQ_CONTROL_HEADER + 4 &&
                                       !memcmp(response->bytes, "BQP1", 4) &&
                                       bq_u32(response->bytes + 12) == received - BQ_CONTROL_HEADER;
                 u32 peer_error = response_valid ? bq_u32(response->bytes + BQ_CONTROL_HEADER) : UINT32_MAX;
-                if (response_valid && peer_error <= BQ_WORKER_CANCEL_SIGNAL)
+                if (response_valid && peer_error <= BQ_EXPORT_TIMEOUT)
                 {
                     response->size = received;
                     error = (BqError)peer_error;
@@ -416,6 +433,87 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_client(char const* socket_path, FILE* i
     return error;
 }
 
+/* Authentication has already established the installed UID/GID. That identity
+ * maps to one fixed principal. Other logical principals remain local/operator
+ * queue users; public callers cannot select or enumerate them. */
+BUSTER_GLOBAL_LOCAL BqError bq_transport_dispatch(BqQueue* queue, u8 const* request, u32 size, BqPacket* response)
+{
+    BqError error = bq_transport_public_request(request, size);
+    u32 operation = error == BQ_OK ? bq_u32(request + 8) : 0;
+    u8 const* body = request + BQ_CONTROL_HEADER;
+    if (error == BQ_OK && (operation == BQ_OP_STATUS || operation == BQ_OP_RESULT ||
+        operation == BQ_OP_CANCEL || operation == BQ_OP_LOGS))
+    {
+        if (size < BQ_CONTROL_HEADER + 8) error = BQ_BAD_REQUEST;
+        else
+        {
+            BqJob* job = bq_job(&queue->state, bq_u64(body));
+            if (!job || !string_equal(bq_field(&job->request, 0), S8(BQ_EXPORT_PRINCIPAL))) error = BQ_NOT_FOUND;
+        }
+    }
+    if (error == BQ_OK && operation == BQ_OP_LOGS && size == BQ_CONTROL_HEADER + 16)
+    {
+        u64 id = bq_u64(body), after = bq_u64(body + 8), ordinal = 0, next = after;
+        u8 output[20 + BQ_LOG_PAGE * 32] = {0};
+        u32 count = 0;
+        bool more = false;
+        for (u32 i = 0; i < queue->state.event_count; i += 1)
+        {
+            BqEvent const* event = queue->state.events + i;
+            if (event->job_id == id)
+            {
+                ordinal += 1;
+                if (ordinal > after && count == BQ_LOG_PAGE) more = true;
+                else if (ordinal > after)
+                {
+                    u8* record = output + 20 + count * 32;
+                    bq_put64(record, ordinal);
+                    bq_put64(record + 8, id);
+                    bq_put32(record + 16, (u32)event->kind);
+                    bq_put32(record + 20, (u32)event->phase);
+                    bq_put32(record + 24, (u32)event->outcome);
+                    bq_put32(record + 28, BQ_NOT_EVALUATED);
+                    next = ordinal;
+                    count += 1;
+                }
+            }
+        }
+        error = after > ordinal ? BQ_BAD_REQUEST : BQ_OK;
+        bq_put32(output, (u32)error);
+        bq_put32(output + 4, count);
+        bq_put64(output + 8, next);
+        bq_put32(output + 16, more);
+        bq_packet(response, operation | 0x80000000u, bq_u64(request + 16), output, 20 + count * 32);
+    }
+    else if (error == BQ_OK && operation == BQ_OP_EXPORT)
+    {
+        BqJob* job = NULL;
+        error = queue->poisoned || queue->journal_fd < 0 ? BQ_IO :
+                bq_export_authorize(queue, body, S8(BQ_EXPORT_PRINCIPAL), &job);
+        u64 cursor = bq_u64(body + 80);
+        if (error == BQ_OK && cursor == UINT64_MAX) error = bq_export_prepare(queue, job);
+        if (error == BQ_OK)
+        {
+            u8 output[BQ_EXPORT_BODY_CAP];
+            u32 output_size = 0;
+            error = bq_export_read(queue, job, cursor, body + 88, output, &output_size);
+            bq_packet(response, operation | 0x80000000u, bq_u64(request + 16), output, output_size);
+        }
+    }
+    else if (error == BQ_OK)
+    {
+        error = bq_dispatch(queue, request, size, response);
+        if (error == BQ_OK && operation != BQ_OP_CAPABILITIES && operation != BQ_OP_LOGS)
+        {
+            /* Public receipts do not reveal global queue occupancy/sequence. */
+            memset(response->bytes + BQ_CONTROL_HEADER + 20, 0, 8);
+            memset(response->bytes + BQ_CONTROL_HEADER + 44, 0, 12);
+        }
+    }
+    if (error != BQ_OK) bq_transport_peer_error(request, size, response, error);
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_transport_serve(char const* state_path, char const* socket_path,
                                                 BqWorkerConfig const* config)
 {
@@ -482,7 +580,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_serve(char const* state_path, char cons
                 BqError request_error = bq_transport_receive(client, request, &request_size);
                 if (request_error == BQ_OK && !bq_transport_peer_allowed(client))
                 {
-                    request_error = BQ_BAD_REQUEST;
+                    request_error = BQ_EXPORT_UNAUTHORIZED;
                 }
                 if (request_error == BQ_OK)
                 {
@@ -490,7 +588,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_serve(char const* state_path, char cons
                 }
                 if (request_error == BQ_OK)
                 {
-                    BqError dispatch_error = bq_dispatch(&queue, request, request_size, &response);
+                    BqError dispatch_error = bq_transport_dispatch(&queue, request, request_size, &response);
                     if (dispatch_error == BQ_IO && queue.poisoned)
                     {
                         error = BQ_IO;

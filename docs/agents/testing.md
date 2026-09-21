@@ -173,11 +173,11 @@
   bounded stop verification; sending SIGKILL alone is not a failure, but an
   owned process that remains live after it is.
 
-The private OS flood and process-tree child modes dispatch at the start of
-`library_tests`, before compiler prewarming and other test modules. They must
-not recursively run the suite before producing their pipe payload or readiness
-marker. Capture limits, byte-count assertions, and process deadlines remain
-identical for these child modes.
+The private OS resource-failure, flood and process-tree child modes dispatch at
+the start of `library_tests`, before compiler prewarming and other test modules.
+They must not recursively run the suite before triggering the injected failure
+or producing their pipe payload or readiness marker. Capture limits, exit and
+diagnostic assertions, and process deadlines remain identical for these modes.
 
 ## Throughput runner integration
 

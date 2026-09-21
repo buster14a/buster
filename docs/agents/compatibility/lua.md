@@ -35,3 +35,19 @@ are excluded), and records compile/runtime timings. Generated objects, metrics, 
 `build/lua-v5.4.8-<pid>/`; `test_lua` is opt-in because it consumes an external
 checkout and reports the first unsupported frontend construct without altering
 upstream sources.
+
+## Host-tool staging regression
+
+The harness resolves `cp` once against the PATH captured at driver entry, just
+as it selects Git and Clang. Generated compiler/interpreter binaries retain
+literal executable selection; enabling PATH search globally is not required.
+Missing `cp`, a failed copy, or a copied tree without `all.lua` fails staging
+without publishing an output path or admitting a functional receipt.
+
+`./build.sh lua_staging_self_test` exercises the production staging helper with
+a synthetic tree on Linux and macOS; it needs no Lua checkout or built compiler.
+It verifies nested and hidden file bytes, source preservation, spaces in paths,
+missing sources, missing `all.lua`, and absent captured PATH. The native POSIX
+matrix runs it in the existing serial preflight before compiler builds. These
+controls test staging only; the full pinned `test_lua` oracle remains mandatory
+for real-source admission.

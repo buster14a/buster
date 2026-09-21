@@ -1911,7 +1911,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
     bq_worker_transport_stop_signal = 0;
     BQ_CHECK(bq_transport_queue_admissible(&(BqQueue){0}));
     BqRequest fake = bq_test_request(7, false), real = {0};
-    String8 fields[BQ_FIELD_COUNT] = {S8("test-principal"), S8("request-7"), S8("validate-buster-v1"),
+    String8 fields[BQ_FIELD_COUNT] = {S8(BQ_EXPORT_PRINCIPAL), S8("request-7"), S8("validate-buster-v1"),
                                       S8("1111111111111111111111111111111111111111"),
                                       S8("2222222222222222222222222222222222222222")};
     BQ_CHECK(bq_request_make(fields, &real) == BQ_OK);
@@ -2103,6 +2103,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
     char root[] = "/tmp/buster-lease-handoff-XXXXXX";
     char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1];
     int result_directory = -1;
+    int phase_descriptor = -1;
     int ready_pipe[2] = {-1, -1}, release_pipe[2] = {-1, -1};
     pid_t child = -1;
     BqWorkerLease lease = {.descriptor = -1};
@@ -2133,12 +2134,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
         BqWorkerLease transferred = {.descriptor = -1};
         BqError received = bq_worker_lease_handoff_receive(string_from_pointer(lease_path), string_from_pointer(result_root),
                                                             S8("1"), S8("2"),
-                                                            &transferred);
-        u8 state = received == BQ_OK ? 1 : 0;
+                                                            &transferred, &phase_descriptor);
+        u8 state = received == BQ_OK && phase_descriptor >= 3 &&
+                   (fcntl(phase_descriptor, F_GETFD) & FD_CLOEXEC) ? 1 : 0;
         ssize_t written = write(ready_pipe[1], &state, sizeof(state));
         char release = 0;
         ssize_t released = written == sizeof(state) ? read(release_pipe[0], &release, sizeof(release)) : -1;
         if (released == sizeof(release)) bq_worker_lease_release(&transferred);
+        if (phase_descriptor >= 0) close(phase_descriptor);
         close(ready_pipe[1]);
         close(release_pipe[0]);
         _exit(received == BQ_OK && released == sizeof(release) ? 0 : 1);
@@ -2147,12 +2150,13 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
     {
         close(ready_pipe[1]);
         close(release_pipe[0]);
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2, &phase_descriptor);
         if (sent == BQ_OK) bq_worker_lease_release(&lease);
         u8 state = 0;
         ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
         BQ_CHECK(sent == BQ_OK && read_state == sizeof(state) && state == 1 && bq_test_worker_probe_locked(lease_path));
         BQ_CHECK(handoff.listener < 0 && handoff.parent < 0);
+        BQ_CHECK(phase_descriptor >= 3 && (fcntl(phase_descriptor, F_GETFD) & FD_CLOEXEC));
         struct stat missing = {0};
         BQ_CHECK(fstatat(result_directory, BQ_WORKER_LEASE_HANDOFF_NAME, &missing, AT_SYMLINK_NOFOLLOW) != 0 &&
                  errno == ENOENT);
@@ -2183,6 +2187,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
     if (release_pipe[1] >= 0) close(release_pipe[1]);
     bq_worker_lease_handoff_close(&handoff);
     bq_worker_lease_release(&lease);
+    if (phase_descriptor >= 0) close(phase_descriptor);
     if (result_directory >= 0) close(result_directory);
     unlink(lease_path);
     rmdir(result_root);
@@ -2284,7 +2289,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
         close(ready_pipe[1]);
         close(hold_pipe[0]);
         hold_pipe[0] = -1;
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2, NULL);
         u8 state = 0;
         ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
         bool coordinator_valid = lease.descriptor >= 0 && fcntl(lease.descriptor, F_GETFD) >= 0;
@@ -2346,7 +2351,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_cleanup_failure(u32 mode)
         lease.descriptor = -1;
         BqWorkerLease transferred = {.descriptor = -1};
         BqError received = bq_worker_lease_handoff_receive(string_from_pointer(lease_path), string_from_pointer(result_root),
-                                                            S8("1"), S8("2"), &transferred);
+                                                            S8("1"), S8("2"), &transferred, NULL);
         u8 state = received == BQ_OK ? 1 : 0;
         ssize_t written = write(ready_pipe[1], &state, sizeof(state));
         char hold = 0;
@@ -2366,7 +2371,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_cleanup_failure(u32 mode)
         bq_worker_test_handoff_fsync_failure = mode == 1;
         bq_worker_test_handoff_listener_close_failure = mode == 2;
         bq_worker_test_handoff_parent_close_failure = mode == 3;
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2, NULL);
         bq_worker_test_handoff_unlink_failure = false;
         bq_worker_test_handoff_fsync_failure = false;
         bq_worker_test_handoff_listener_close_failure = false;
@@ -2995,6 +3000,8 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_make_success_result(BqWorkerFixture* fix
              bq_worker_result_validate(&fixture->config, job, finalization) == BQ_OK;
     return ok;
 }
+
+#include "phase_channel_tests.h"
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_success_and_tree_cleanup(void)
 {
@@ -4563,6 +4570,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_large_source_manifest(void)
 #endif
 #endif
 
+#include "export_tests.c"
+
 BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 {
 #ifdef __linux__
@@ -4615,6 +4624,11 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lease_handoff_cleanup_failure(1);
     bq_test_worker_lease_handoff_cleanup_failure(2);
     bq_test_worker_lease_handoff_cleanup_failure(3);
+    bq_test_phase_packets();
+    for (unsigned defect = 0; defect < 6; ++defect) bq_test_phase_run(defect, NULL);
+    if (argc > 2) bq_test_phase_run(6, argv[2]);
+    bq_test_phase_run(7, NULL);
+    bq_test_phase_run(8, NULL);
     bq_test_worker_success_and_tree_cleanup();
     bq_test_worker_term_grace();
     bq_test_worker_child_survives_parent_kill();
@@ -4635,6 +4649,9 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lock_precedes_materialization();
     bq_test_transport_worker_retries_after_busy();
     bq_test_transport_worker_signal_handoff();
+    bq_test_export_inventory();
+    bq_test_export(true);
+    bq_test_export(false);
     bq_test_worker_result_bundle_and_evidence();
     bq_test_worker_failure_bundle_replay();
     bq_test_worker_failure_bundle_coverage();
@@ -4658,7 +4675,15 @@ int main(int argc, char** argv)
     int result;
 #ifdef __linux__
     bool helper = argc == 10 && !strcmp(argv[1], "fixed-recipe-helper");
-    result = helper ? bq_test_fixed_recipe_helper(argc, argv) : bq_test_run_all(argc, argv);
+    if (argc == 2 && !strcmp(argv[1], "--export-only"))
+    {
+        bq_test_export_inventory();
+        bq_test_export(true);
+        bq_test_export(false);
+        printf("EXPORT_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
+        result = bq_test_failures ? 1 : 0;
+    }
+    else result = helper ? bq_test_fixed_recipe_helper(argc, argv) : bq_test_run_all(argc, argv);
 #else
     result = bq_test_run_all(argc, argv);
 #endif

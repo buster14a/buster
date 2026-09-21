@@ -93,6 +93,15 @@ String8 bq_field(BqRequest const* request, u32 index)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL void bq_request_digest(BqRequest const* request, char8 digest[SHA256_HEX_CAPACITY])
+{
+    Sha256 hash;
+    sha256_init(&hash);
+    sha256_add(&hash, "BQ-request-v1", 13);
+    sha256_add(&hash, request->bytes, request->size);
+    sha256_finish_hex(&hash, digest);
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_name(String8 value, u64 capacity)
 {
     bool ok = value.length > 0 && value.length <= capacity;
@@ -365,11 +374,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_apply(BqState* state, u32 schema, BqRecordKind ki
                 job = state->jobs + state->job_count;
                 state->job_count += 1;
                 *job = (BqJob){.id = sequence, .request = request, .validity = BQ_NOT_EVALUATED};
-                Sha256 hash;
-                sha256_init(&hash);
-                sha256_add(&hash, "BQ-request-v1", 13);
-                sha256_add(&hash, body, size);
-                sha256_finish_hex(&hash, job->digest);
+                bq_request_digest(&request, job->digest);
             }
         }
     }
@@ -989,7 +994,9 @@ char const* bq_error_name(BqError error)
                            "corrupt-journal", "reconciliation-required", "not-found", "unsupported", "invalid-transition",
                            "recipe-mismatch", "source-mismatch", "workspace-mismatch", "cleanup-failed", "configuration-mismatch",
                            "worker-mismatch", "resource-mismatch", "worker-failed", "worker-oom", "worker-timeout",
-                           "worker-interrupted", "boot-interrupted", "worker-cancel-signal"};
+                           "worker-interrupted", "boot-interrupted", "worker-cancel-signal",
+                           "export-not-finalized", "export-invalid", "export-missing", "export-unauthorized",
+                           "export-oversized", "export-interrupted", "export-corrupt", "export-timeout"};
     char const* result = (u32)error < sizeof(names) / sizeof(names[0]) ? names[error] : "unknown-error";
     return result;
 }

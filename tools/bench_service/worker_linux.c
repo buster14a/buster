@@ -1,4 +1,5 @@
 #include "worker_linux.h"
+#include "phase_channel.h"
 
 #ifdef __linux__
 #include <dirent.h>
@@ -11,6 +12,7 @@
 #include <sys/un.h>
 #include <sys/vfs.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 
 #define BQ_WORKER_EXECUTABLE "/usr/local/libexec/buster-bench-service"
 #define BQ_RECIPE_EXECUTABLE "/usr/local/libexec/buster-bench-build"
@@ -514,8 +516,9 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_lease_handoff_poll(int descriptor, short even
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* handoff, int lease_fd,
                                                           char const* lease_path, u64 job_id,
-                                                          u64 attempt_token)
+                                                          u64 attempt_token, int* phase_descriptor)
 {
+    if (phase_descriptor) *phase_descriptor = -1;
     BqError error = BQ_IO;
     u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_WORKER_LEASE_HANDOFF_MILLISECONDS);
     bool transferred = false;
@@ -581,7 +584,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* h
                                                               (u64)lease_info.st_ino);
             }
             transferred = request_ok;
-            close(client);
+            if (transferred && phase_descriptor) *phase_descriptor = client;
+            else close(client);
             if (!transferred) break;
         }
     }
@@ -591,8 +595,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* h
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, String8 result_root,
                                                               String8 job_id_text, String8 attempt_token_text,
-                                                              BqWorkerLease* lease)
+                                                              BqWorkerLease* lease, int* phase_descriptor)
 {
+    if (phase_descriptor) *phase_descriptor = -1;
     char lease_path[BQ_PATH_CAP + 1], result_path[BQ_PATH_CAP + 1], socket_path[BQ_PATH_CAP + 1];
     IntegerParsingU64 job_value = string8_parse_u64_decimal(job_id_text);
     IntegerParsingU64 token_value = string8_parse_u64_decimal(attempt_token_text);
@@ -702,7 +707,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, 
     }
     if (adopted.descriptor >= 0) bq_worker_lease_release(&adopted);
     else if (received_fd >= 0) close(received_fd);
-    if (client >= 0) close(client);
+    if (error == BQ_OK && phase_descriptor) *phase_descriptor = client;
+    else if (client >= 0) close(client);
     return error;
 }
 
@@ -1663,6 +1669,7 @@ struct BqWorkerFinalization
     ino_t result_inode;
     char result_root[BQ_PATH_CAP + 1];
     bool result_bound;
+    bool phases_required;
     char result_digest[SHA256_HEX_CAPACITY];
     char bundle_digest[SHA256_HEX_CAPACITY];
     char full_digest[SHA256_HEX_CAPACITY];
@@ -2408,15 +2415,14 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
     return ok;
 }
 
-BqError bq_worker_result_binding_validate(BqJob const* job)
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_at(BqJob const* job, int result_directory)
 {
-    char path[BQ_PATH_CAP + 1];
+    char path[BQ_PATH_CAP + 1] = {0};
     BqRecipeFiles recipe;
     BqRecipe selected = job ? bq_request_recipe(&job->request) : BQ_RECIPE_UNKNOWN;
     BqError error = job && job->result_bound && bq_recipe_service(selected) && bq_recipe_files(selected, &recipe) &&
                     bq_worker_text(string_from_pointer(job->result_root), path, sizeof(path)) &&
                     path[0] == '/' ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
-    int result_directory = error == BQ_OK ? bq_worker_open_trusted_directory(string_from_pointer(path), true, false) : -1;
     struct stat directory_info = {0};
     if (error == BQ_OK)
     {
@@ -2500,7 +2506,15 @@ BqError bq_worker_result_binding_validate(BqJob const* job)
         error = !memcmp(expected_bundle, job->result_bundle_digest, SHA256_HEX_CAPACITY) &&
                 !memcmp(actual_full, job->result_full_digest, SHA256_HEX_CAPACITY) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     }
-    if (result_directory >= 0 && close(result_directory) != 0 && error == BQ_OK) error = BQ_IO;
+    return error;
+}
+
+BqError bq_worker_result_binding_validate(BqJob const* job)
+{
+    int directory = job && job->result_bound ?
+        bq_worker_open_trusted_directory(string_from_pointer(job->result_root), true, false) : -1;
+    BqError error = bq_worker_result_binding_validate_at(job, directory);
+    if (directory >= 0 && close(directory) != 0 && error == BQ_OK) error = BQ_IO;
     return error;
 }
 
@@ -2804,6 +2818,124 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_result_control_publish(BqWorkerFinalizatio
     if (parent >= 0 && temporary_ready && !published) bq_worker_unlink_if_same(parent, temporary, &temporary_info);
     if (parent >= 0 && close(parent) != 0) ok = false;
     return ok ? BQ_OK : BQ_IO;
+}
+
+/* Each request is a one-way state transition. Persist both the queue authority
+ * and exported evidence, then acknowledge. A crash between either write or the
+ * acknowledgement leaves an interrupted attempt, never a resumable sample set. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_accept(BqQueue* queue, BqPhaseChannel* channel,
+                                                   unsigned char message[BQ_PHASE_MESSAGE_BYTES],
+                                                   BqWorkerFinalization* finalization)
+{
+    BqJob* job = channel ? bq_job(&queue->state, channel->job) : NULL;
+    BqError error = job && job->token == channel->attempt && job->id == queue->state.active_id &&
+                    !job->cancel_requested && !bq_worker_cancel_signal && bq_phase_check(channel, message) ?
+                    BQ_OK : BQ_WORKER_MISMATCH;
+    unsigned phase = error == BQ_OK ? (unsigned)bq_phase_get(message + 24) : 0;
+    BqPhase expected = phase <= BQ_PHASE_SETTLING ? BQ_PREPARING :
+                       phase == BQ_PHASE_MEASURING ? BQ_SETTLING : BQ_MEASURING;
+    if (error == BQ_OK && job->phase != expected) error = BQ_WORKER_MISMATCH;
+    char name[48], body[512], record[48];
+    int length = -1;
+    if (error == BQ_OK)
+    {
+        snprintf(name, sizeof(name), "worker-phase-%u", phase);
+        bool named = bq_record_name(record, name, job->id);
+        length = snprintf(body, sizeof(body),
+            "schema=1\nprotocol=BQPHASE1\njob-id=%" PRIu64 "\nattempt-token=%" PRIu64
+            "\nrequest-sha256=%s\nphase=%u\nrecipe-request-monotonic-ns=%" PRIu64
+            "\nsupervisor-observed-monotonic-ns=%" PRIu64 "\n",
+            (uint64_t)job->id, (uint64_t)job->token, job->digest, phase,
+            bq_phase_get(message + 32), bq_phase_clock());
+        error = named && length > 0 && (u32)length < sizeof(body) ?
+                bq_record_write(queue, record, (u8 const*)body, (u32)length, false) : BQ_IO;
+    }
+    if (error == BQ_OK)
+        error = bq_worker_result_control_publish(finalization, name, body, (u32)length, 0400);
+    if (error == BQ_OK && (phase == BQ_PHASE_SETTLING || phase == BQ_PHASE_MEASURING))
+        error = bq_real_advance(queue, job, phase == BQ_PHASE_SETTLING ? BQ_SETTLING : BQ_MEASURING, BQ_NO_OUTCOME);
+    if (error == BQ_OK && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
+    if (error == BQ_OK)
+    {
+        channel->sequence = phase;
+        channel->last_time = bq_phase_get(message + 32);
+        bq_phase_put(message + 40, 1);
+        if (send(channel->descriptor, message, BQ_PHASE_MESSAGE_BYTES, MSG_NOSIGNAL | MSG_DONTWAIT) != BQ_PHASE_MESSAGE_BYTES)
+            error = BQ_IO;
+    }
+    if (error != BQ_OK && channel) channel->failed = 1;
+    return error;
+}
+
+/* The admitted worker sleeps in poll throughout measurement. No timer polling,
+ * manager query, journal write, control request or reconnect runs while the
+ * recipe holds the measuring phase. pidfd gives prompt death/deadline handling
+ * without replacing whole-cgroup cleanup or the final manager identity checks. */
+BUSTER_GLOBAL_LOCAL BqError bq_worker_phases_validate(BqQueue* queue, BqJob const* job,
+                                                       BqWorkerFinalization* finalization)
+{
+    BqError error = job && job->phase >= BQ_MEASURING ? BQ_OK : BQ_WORKER_MISMATCH;
+    for (unsigned phase = 1; error == BQ_OK && phase <= BQ_PHASE_MEASURED; ++phase)
+    {
+        char name[48], record[48], exported[512];
+        u8 authoritative[512];
+        u32 source_bytes = 0, exported_bytes = 0;
+        snprintf(name, sizeof(name), "worker-phase-%u", phase);
+        error = bq_record_name(record, name, job->id) ?
+                bq_record_read(queue, record, authoritative, sizeof(authoritative), &source_bytes) : BQ_IO;
+        if (error == BQ_OK && (!bq_worker_result_control_read(finalization->result_directory, name,
+                                exported, sizeof(exported), &exported_bytes) || source_bytes != exported_bytes ||
+                              memcmp(authoritative, exported, source_bytes))) error = BQ_WORKER_MISMATCH;
+    }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_join(BqQueue* queue, BqSystemdContext* context,
+                                                 BqPhaseChannel* channel, int* status, u64 deadline,
+                                                 BqWorkerFinalization* finalization)
+{
+    int process = -1;
+#ifdef SYS_pidfd_open
+    if (context->pid > 0) process = (int)syscall(SYS_pidfd_open, context->pid, 0);
+#endif
+    BqError error = process >= 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
+    bool finished = false;
+    while (error == BQ_OK && !finished && !bq_worker_cancel_signal)
+    {
+        struct pollfd waiting[] = {{channel->sequence < BQ_PHASE_MEASURED ? channel->descriptor : -1, POLLIN, 0},
+                                   {process, POLLIN, 0}};
+        u32 remaining = bq_worker_remaining(deadline);
+        int timeout = remaining > INT_MAX ? INT_MAX : (int)remaining;
+        int ready = timeout ? poll(waiting, 2, timeout) : 0;
+        if (ready < 0) error = errno == EINTR && bq_worker_cancel_signal ? BQ_WORKER_CANCEL_SIGNAL : BQ_IO;
+        else if (!ready) error = BQ_WORKER_TIMEOUT;
+        else
+        {
+            if (waiting[0].revents & POLLIN)
+            {
+                unsigned char message[BQ_PHASE_MESSAGE_BYTES] = {0};
+                error = bq_phase_receive(channel->descriptor, message) ?
+                        bq_worker_phase_accept(queue, channel, message, finalization) : BQ_WORKER_MISMATCH;
+            }
+            else if (waiting[0].revents & (POLLHUP | POLLERR | POLLNVAL)) error = BQ_WORKER_MISMATCH;
+            if (error == BQ_OK && (waiting[1].revents & POLLIN))
+            {
+                pid_t waited = waitpid(context->pid, status, WNOHANG);
+                if (waited == context->pid)
+                {
+                    context->pid = -1;
+                    finished = true;
+                    if (channel->sequence != BQ_PHASE_MEASURED) error = BQ_WORKER_MISMATCH;
+                }
+                else if (waited < 0 && errno != EINTR) error = BQ_IO;
+            }
+            else if (waiting[1].revents & (POLLERR | POLLHUP | POLLNVAL)) error = BQ_IO;
+        }
+    }
+    if (bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
+    if (process >= 0 && close(process) != 0 && error == BQ_OK) error = BQ_IO;
+    if (error != BQ_OK) channel->failed = 1;
+    return error;
 }
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalization* finalization,
@@ -3151,6 +3283,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig cons
     if (error == BQ_OK && production && outcome == BQ_SUCCEEDED &&
         (!finalization || finalization->result_directory < 0 || finalization->result_root[0] == 0))
         error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK && finalization && finalization->phases_required && outcome == BQ_SUCCEEDED)
+        error = bq_worker_phases_validate(queue, job, finalization);
     if (error == BQ_OK && production && outcome == BQ_SUCCEEDED) error = bq_worker_result_validate(config, job, finalization);
     if (production && outcome == BQ_SUCCEEDED && error != BQ_OK)
     {
@@ -3596,6 +3730,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     BqWorkerLease lease = {.descriptor = -1};
     BqWorkerFinalization finalization = {.config = config, .result_directory = -1};
     BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
+    int phase_descriptor = -1;
+    BqPhaseChannel phases = {.descriptor = -1};
     bool launched = false;
     bool instance_bound = false;
     BqJob* job = *id ? bq_job(&queue->state, *id) : NULL;
@@ -3731,7 +3867,10 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     }
     if (error == BQ_OK && !recovering && handoff.listener >= 0)
     {
-        error = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, job->id, job->token);
+        error = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, job->id, job->token,
+                                              &phase_descriptor);
+        finalization.phases_required = true;
+        if (error == BQ_OK && !bq_phase_init(&phases, phase_descriptor, job->id, job->token)) error = BQ_IO;
         if (error == BQ_OK) bq_worker_lease_release(&lease);
     }
     if (!bq_worker_lease_handoff_close(&handoff) && error == BQ_OK) error = BQ_IO;
@@ -3765,7 +3904,10 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     {
         u64 wait = config->limits.runtime_max_usec / 1000;
         wait = wait <= UINT64_MAX - BQ_WORKER_STOP_MILLISECONDS ? wait + BQ_WORKER_STOP_MILLISECONDS : UINT64_MAX;
-        error = backend->join(backend, &status, bq_worker_deadline(backend->clock(backend), wait));
+        u64 deadline = bq_worker_deadline(backend->clock(backend), wait);
+        error = phase_descriptor >= 0 ? bq_worker_phase_join(queue, backend->context, &phases, &status,
+                                                              deadline, &finalization) :
+                                        backend->join(backend, &status, deadline);
     }
     bool interrupted_join = error == BQ_WORKER_CANCEL_SIGNAL;
     bool signal_cancelled = interrupted_join || (production && bq_worker_cancel_signal);
@@ -3894,6 +4036,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     }
     if (!bq_worker_lease_handoff_close(&handoff) && error == BQ_OK) error = BQ_IO;
     bq_worker_lease_release(&lease);
+    if (phase_descriptor >= 0 && close(phase_descriptor) != 0 && error == BQ_OK) error = BQ_IO;
     if (finalization.result_directory >= 0) close(finalization.result_directory);
     if (handoff_blocked && sigprocmask(SIG_SETMASK, &prior_signals, NULL) != 0) error = BQ_IO;
     return error;
@@ -3909,6 +4052,7 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
     BqRecipe recipe = bq_recipe_from_name(recipe_name);
     BqRecipeFiles files = {0};
     BqWorkerLease lease = {.descriptor = -1};
+    int phase_descriptor = -1;
     BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' ||
                     !bq_worker_text(job_id, job_id_text, sizeof(job_id_text)) || !bq_worker_text(attempt_token, attempt_token_text, sizeof(attempt_token_text)) ||
                     !bq_worker_text(recipe_name, recipe_text, sizeof(recipe_text)) ||
@@ -3917,7 +4061,8 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
                     !bq_worker_text(workspace_root, workspace_text, sizeof(workspace_text)) || workspace_text[0] != '/' ||
                     !bq_worker_text(base_revision, base_text, sizeof(base_text)) || !bq_worker_text(candidate_revision, candidate_text, sizeof(candidate_text)) ||
                     !bq_worker_text(result_root, result_text, sizeof(result_text)) || result_text[0] != '/' ? BQ_BAD_REQUEST : BQ_OK;
-    if (error == BQ_OK && bq_worker_lease_handoff_receive(lease_file, result_root, job_id, attempt_token, &lease) != BQ_OK)
+    if (error == BQ_OK && bq_worker_lease_handoff_receive(lease_file, result_root, job_id, attempt_token,
+                                                         &lease, &phase_descriptor) != BQ_OK)
         error = BQ_CONFIGURATION_MISMATCH;
     if (error == BQ_OK)
     {
@@ -3929,13 +4074,21 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
     }
     if (error == BQ_OK)
     {
+        int flags = fcntl(phase_descriptor, F_GETFD);
+        if (flags < 0 || fcntl(phase_descriptor, F_SETFD, flags & ~FD_CLOEXEC) != 0) error = BQ_IO;
+    }
+    if (error == BQ_OK)
+    {
         raise(SIGSTOP);
+        char phase_text[32];
+        snprintf(phase_text, sizeof(phase_text), "%d", phase_descriptor);
         char const* arguments[] = {BQ_RECIPE_EXECUTABLE, files.command, job_id_text, attempt_token_text,
-                                   workspace_text, base_text, candidate_text, result_text, NULL};
+                                   workspace_text, base_text, candidate_text, result_text, phase_text, NULL};
         execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
         error = BQ_CONFIGURATION_MISMATCH;
     }
     bq_worker_lease_release(&lease);
+    if (phase_descriptor >= 0) close(phase_descriptor);
     return error;
 }
 
