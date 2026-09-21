@@ -139,8 +139,16 @@ jobs:
           [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
           status_args=()
           if [[ "$EVENT_NAME" == pull_request ]]; then
-            gh api "repos/$GITHUB_REPOSITORY/commits/$CANDIDATE_HEAD/status" \
-              > "$RUNNER_TEMP/native-retirement-status.json"
+            rows="$RUNNER_TEMP/native-retirement-status-rows.json"
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$CANDIDATE_HEAD" > "$rows"
+            python3 - "$CANDIDATE_HEAD" "$rows" "$RUNNER_TEMP/native-retirement-status.json" <<'PY_STATUS'
+          import json, pathlib, sys
+          head, rows_path, output_path = sys.argv[1:]
+          rows = json.loads(pathlib.Path(rows_path).read_text())
+          if not isinstance(rows, list):
+              raise SystemExit("commit status list is not an array")
+          pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
+          PY_STATUS
             status_args=(--status-json "$RUNNER_TEMP/native-retirement-status.json")
           fi
           python3 "$gate" check \

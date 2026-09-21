@@ -21,10 +21,19 @@ concurrency:
 jobs:
   policy:
     name: API migration policy
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
+      - name: Require CI admission to be enabled
+        shell: bash
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: |
+          if [[ "$CI_ENABLED" != true ]]; then
+            echo '::error::Required validation is disabled; refusing a skipped admission check.'
+            exit 1
+          fi
       - name: Check out exact candidate
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -68,8 +77,16 @@ jobs:
           fi
           status_args=()
           if [[ "$EVENT_NAME" == pull_request ]]; then
-            gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/status" \
-              > "$RUNNER_TEMP/native-retirement-status.json"
+            rows="$RUNNER_TEMP/native-retirement-status-rows.json"
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" > "$rows"
+            python3 - "$HEAD_SHA" "$rows" "$RUNNER_TEMP/native-retirement-status.json" <<'PY_STATUS'
+          import json, pathlib, sys
+          head, rows_path, output_path = sys.argv[1:]
+          rows = json.loads(pathlib.Path(rows_path).read_text())
+          if not isinstance(rows, list):
+              raise SystemExit("commit status list is not an array")
+          pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
+          PY_STATUS
             status_args=(--status-json "$RUNNER_TEMP/native-retirement-status.json")
           fi
           python3 "$tool" check \

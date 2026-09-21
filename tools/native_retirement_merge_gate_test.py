@@ -195,6 +195,17 @@ class AdmissionTests(unittest.TestCase):
                 False,
             )
 
+    def test_workflows_fetch_creator_bearing_status_rows(self):
+        root = Path(__file__).resolve().parents[1]
+        for relative, head in (
+            (".github/workflows/api-migration-policy.yml", "HEAD_SHA"),
+            (".github/workflows/native-retirement-rebind.yml", "CANDIDATE_HEAD"),
+        ):
+            with self.subTest(workflow=relative):
+                content = (root / relative).read_text()
+                self.assertIn(f"statuses/${head}", content)
+                self.assertNotIn(f"commits/${head}/status", content)
+
     def test_sensitive_merge_group_fails_closed(self):
         head = self.repository.branch(
             "bound", {"src/buster/lib/value.c": "int value = 6;\n"}

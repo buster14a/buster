@@ -453,6 +453,8 @@ jobs:
               git -C trusted commit-tree "$final_tree" -p "$base" -p "$head"
           )
           askpass="$RUNNER_TEMP/native-retirement-askpass.sh"
+          # Literal lines for the child script; expansion there is intentional.
+          # shellcheck disable=SC2016
           printf '%s\n' \
             '#!/bin/sh' \
             'case "$1" in' \
