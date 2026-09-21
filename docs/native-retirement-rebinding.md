@@ -92,14 +92,13 @@ The workflow has three separately permissioned jobs:
 - **validate** independently reconstructs the same final tree with read-only
   permissions, proves byte equality with prepare, and only then executes the
   candidate's affected tests and census self-test.
-- **publish** is the sole write job. It independently reconstructs and compares
-  the same tree but never executes candidate code. It reauthorizes the PR
-  immediately before one lease-guarded update of the same-repository PR branch.
-  The resulting head is a two-parent integration commit whose first parent is
-  exact current `main`, whose second parent is the reviewed candidate, and
-  whose tree contains the trusted generated state. It then posts the
-  `Native retirement trusted integration` status for that exact head. The
-  normal protected pull-request path, not this workflow, merges `main`.
+- **publish** is the sole `contents: write` job. It independently reconstructs
+  and compares the same tree but never executes candidate code. It reauthorizes
+  the PR immediately before a leased update of its same-repository head branch.
+  The two-parent commit contains current main, the candidate, and generated
+  state. A temporary branch makes the commit available for the bot-authored
+  `Native retirement trusted integration` status before the PR head moves.
+  Publication leaves main unchanged; normal merge admission follows.
 
 The required `Native retirement merge admission` check refuses ordinary merge
 for a candidate that changes an admitted repository source, trusted implementation,
@@ -124,8 +123,17 @@ The writer rechecks both `main` and the PR head immediately before publication.
 A moved PR head fails closed. A moved `main` discards the prepared result and
 fails closed before any branch update. A maintainer/admin must start a fresh
 trusted dispatch, which reconstructs from the new current `main`; no previous
-snapshot or quartet is reused. Publication is one leased PR-branch update, so
-a failure or cancellation cannot leave a partially published generated state.
+snapshot or quartet is reused. The workflow deliberately has no
+`actions: write` permission, so stale recovery cannot silently continue under
+the identity of `github-actions[bot]`. Publication is one leased ref update, so
+a failure or cancellation cannot leave a partially published generated state
+on the PR head. A failure after staging can leave a temporary
+`native-retirement-staging/` branch; it does not authorize another commit.
+
+Workflow-token pushes do not automatically trigger PR workflows. After a
+successful publication, close and reopen the unmerged PR through GitHub to
+request fresh checks on its new head. Verify the checks belong to the published
+SHA before merging; old-head checks are not evidence for the new commit.
 
 ## Trust transitions
 
@@ -224,3 +232,12 @@ is treated as legacy only when all frozen previous identities match exactly.
 
 The required admission gate is selective to retirement-sensitive PRs. General
 multi-PR serialization remains #867, and conflict preflight remains #869.
+
+### PR-head publisher bootstrap for #927
+
+Install the publisher-only prerequisite on main before dispatching retirement
+integration for #927. This prerequisite changes publication and its status
+permission without installing the new merge-admission gate or changing
+generated artifacts. Once installed, update #927 against current main and
+start a fresh authorized dispatch for its exact head and base. A successful
+run attests the new PR head; it does not itself merge the PR.
