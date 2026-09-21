@@ -1222,13 +1222,8 @@ printf '%s\n' "$checked"
                              for parent in Path(git).resolve().parents
                              if (parent / "bin/bash.exe").is_file()), None)
             self.assertIsNotNone(bash, "Bash is a CI prerequisite")
-            # All 633 cases execute the real gate in isolated subshells. Git
-            # Bash's emulated fork on hosted Windows AArch64 exceeded 30s in
-            # run 35602155760. Keep full coverage and a bounded Windows budget;
-            # this does not change the production gate or retry a failed case.
-            aggregate_timeout_seconds = 120 if os.name == "nt" else 30
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
-                                    capture_output=True, text=True, timeout=aggregate_timeout_seconds)
+                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stdout.strip(), "633")
 
