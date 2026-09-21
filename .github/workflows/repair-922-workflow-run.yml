@@ -26,10 +26,35 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Apply, test, commit, and publish the repair
+      - name: Apply, test, and publish non-workflow changes
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
           git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          script = Path("tools/repair_pr922_workflow_run.py")
+          text = script.read_text(encoding="utf-8")
+          start = text.index('    run(\n        "git", "add", "--",\n')
+          end = text.index('    actual = set(', start)
+          replacement = '''    run(
+              "git", "add", "--",
+              "docs/native-retirement-support-v1.tsv",
+              "tests/ci_tools_test.py",
+              "tools/merge_conflict_preflight.py",
+              "tools/merge_conflict_preflight_test.py",
+          )
+              run("git", "rm", "--", "tools/repair_pr922_workflow_run.py")
+              expected = {
+                  "docs/native-retirement-support-v1.tsv",
+                  "tests/ci_tools_test.py",
+                  "tools/merge_conflict_preflight.py",
+                  "tools/merge_conflict_preflight_test.py",
+                  "tools/repair_pr922_workflow_run.py",
+              }
+          '''
+          script.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+          PY
           python3 -B tools/repair_pr922_workflow_run.py
