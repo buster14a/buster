@@ -2,22 +2,34 @@ name: Issue 901 workbench
 on:
   push:
     branches: [codex/901-source-workbench]
+    paths: [.github/issue-901.patch.b64, .github/workflows/issue-901-workbench.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  export:
+  apply:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-          ref: f09ea4859875c7836e2a61b64242d2ede09d0d2d
-      - name: Export exact source
-        run: git archive --format=tar.gz --output=source-901.tar.gz HEAD
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: source-901
-          path: source-901.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+      - name: Verify and apply the reviewed source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_parse.c)" = a84f5c34c0ca21b9c10b14c06623dbc991dcb5de
+          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = e47740122236aa3eb1b2cbafc66f5b29e775d6db
+          test "$(git hash-object docs/agents/frontend/foundations.md)" = d0313e9682427c88646f08551f973cec9faf3af4
+          # Correct a verified single-character transport transcription; the full
+          # decoded patch and all resulting source blobs must match their digests.
+          sed 's/79aU4G4hg/79aU4Ghg/' .github/issue-901.patch.b64 | base64 --decode | gzip -dc > "$RUNNER_TEMP/issue-901.patch"
+          echo "31b089e80be09ce38cf1a52d257aefed564ed9b72d1c9f24343cf5bd74f1fe49  $RUNNER_TEMP/issue-901.patch" | sha256sum --check
+          git apply --check "$RUNNER_TEMP/issue-901.patch"
+          git apply "$RUNNER_TEMP/issue-901.patch"
+          git diff --check
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_parse.c)" = d682a5e7e4a1b17b9eebd7def6d946517a2af37b
+          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = 87f9a97848363771ee65117dd2d9be284456d3eb
+          test "$(git hash-object docs/agents/frontend/foundations.md)" = ba799f84d343cb5d14e2020096e9caec1ca304d9
+          git add src/buster/lib/compiler/frontend/c/c_parse.c src/buster/tests/compiler/frontend/c/c_test.c docs/agents/frontend/foundations.md
+          git -c user.name='Buster issue 901 workbench' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(c): preserve typed enum successor boundary transitions'
+          git push origin HEAD:refs/heads/codex/901-source-workbench
+          git rev-parse HEAD
+          git ls-tree HEAD src/buster/lib/compiler/frontend/c/c_parse.c src/buster/tests/compiler/frontend/c/c_test.c docs/agents/frontend/foundations.md
