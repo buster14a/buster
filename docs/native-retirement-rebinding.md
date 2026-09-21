@@ -247,3 +247,18 @@ permission without installing the new merge-admission gate or changing
 generated artifacts. Once installed, update #927 against current main and
 start a fresh authorized dispatch for its exact head and base. A successful
 run attests the new PR head; it does not itself merge the PR.
+
+### Merge-conflict preflight and generated output
+
+Preflight keeps reporting generated paths, but a live GitHub PR check accepts
+those paths only when the trusted retirement verifier validates the exact head:
+current-main first parent, candidate second parent, matching tree/evidence
+trailers, no manual generated edits in the source candidate, generated-only
+post-candidate changes, and the bot-authored evidence status. It loads the
+verifier from the trusted checkout, never the candidate. Missing, stale, or
+invalid attestation retains the generated-ownership failure; merge conflicts
+remain blocking. Offline checks without live status evidence stay conservative.
+
+Install this compatibility bootstrap on main before relying on the exception.
+Landing it advances main, so existing attested heads need fresh trusted
+integration. Do not hand-edit generated artifacts or post replacement statuses.
