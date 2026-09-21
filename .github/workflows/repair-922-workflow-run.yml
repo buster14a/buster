@@ -1,0 +1,273 @@
+name: Repair PR 922 workflow handoff
+
+on:
+  push:
+    branches:
+      - codex/869-merge-conflict-preflight
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-pr-922-workflow-handoff
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/869-merge-conflict-preflight' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact repair commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Replace privileged PR event with trusted workflow handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git checkout 52d018e2c39097eabccb696b7569b1a4407e8d59 -- \
+            tests/ci_tools_test.py \
+            docs/native-retirement-support-v1.tsv
+
+          cat > .github/workflows/merge-conflict-preflight.yml <<'YAML'
+          name: Merge conflict preflight
+
+          on:
+            workflow_run:
+              workflows: [Merge conflict preflight regression]
+              types: [completed]
+            push:
+              branches: [main]
+            merge_group:
+              types: [checks_requested]
+            workflow_dispatch:
+
+          permissions:
+            contents: read
+
+          concurrency:
+            group: merge-conflict-preflight-${{ github.event_name }}-${{ github.event.workflow_run.id || github.ref }}
+            cancel-in-progress: true
+
+          jobs:
+            preflight:
+              name: Exact merge-tree preflight
+              if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+              permissions:
+                contents: read
+                pull-requests: read
+                statuses: write
+              runs-on: ubuntu-latest
+              timeout-minutes: 5
+              steps:
+                # workflow_run and push execute the workflow definition from trusted
+                # current main. Candidate bytes are fetched only into private refs and
+                # consumed by read-only git plumbing; candidate code is never run.
+                - name: Check out trusted current main
+                  uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+                  with:
+                    ref: ${{ github.event.repository.default_branch }}
+                    fetch-depth: 0
+                    persist-credentials: false
+                - name: Analyze exact main/head identities
+                  env:
+                    GITHUB_TOKEN: ${{ github.token }}
+                  run: >-
+                    python3 -B tools/merge_conflict_preflight.py github-event
+                    --repo .
+                    --event-path "$GITHUB_EVENT_PATH"
+                    --repository "$GITHUB_REPOSITORY"
+                    --report-dir evidence/merge-conflict-preflight
+                    --summary "$GITHUB_STEP_SUMMARY"
+                - name: Retain exact machine-readable reports
+                  if: ${{ always() }}
+                  uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+                  with:
+                    name: merge-conflict-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+                    path: evidence/merge-conflict-preflight/*.json
+                    if-no-files-found: ignore
+                    retention-days: 14
+          YAML
+
+          cat > .github/workflows/merge-conflict-preflight-regression.yml <<'YAML'
+          name: Merge conflict preflight regression
+
+          on:
+            pull_request:
+              branches: [main]
+              types: [opened, reopened, synchronize, ready_for_review, edited]
+
+          permissions:
+            contents: read
+
+          concurrency:
+            group: merge-conflict-preflight-regression-${{ github.event.pull_request.number || github.ref }}
+            cancel-in-progress: true
+
+          jobs:
+            regression:
+              name: Preflight regression tests
+              if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+              permissions:
+                contents: read
+              runs-on: ubuntu-latest
+              timeout-minutes: 2
+              steps:
+                - name: Check out candidate for unprivileged tests
+                  uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+                  with:
+                    persist-credentials: false
+                - name: Exercise merge-tree fixtures and workflow policy
+                  run: python3 -B tools/merge_conflict_preflight_test.py -v
+          YAML
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path("tools/merge_conflict_preflight.py")
+          text = source.read_text(encoding="utf-8")
+          old = 'raise PreflightError("pull_request_target event omits pull_request.number")'
+          new = 'raise PreflightError("pull request event omits pull_request.number")'
+          if text.count(old) != 1:
+              raise SystemExit(f"expected one pull-event diagnostic, found {text.count(old)}")
+          text = text.replace(old, new)
+
+          marker = '''def _github_push_event(repo: Path, api: GitHubApi, event: dict, report_dir: Path,
+                             summary: Path | None, context: str) -> bool:
+          '''
+          insertion = '''def _workflow_run_pull_number(event: dict) -> int:
+              run = event.get("workflow_run")
+              if not isinstance(run, dict) or run.get("event") != "pull_request":
+                  raise PreflightError("workflow_run event is not for a pull_request workflow")
+              pulls = run.get("pull_requests")
+              if (not isinstance(pulls, list) or len(pulls) != 1 or
+                      not isinstance(pulls[0], dict)):
+                  raise PreflightError("workflow_run event must identify exactly one pull request")
+              number = pulls[0].get("number")
+              if not isinstance(number, int) or number <= 0:
+                  raise PreflightError("workflow_run pull request has an invalid number")
+              return number
+
+
+          def _github_workflow_run_event(repo: Path, api: GitHubApi, event: dict,
+                                         report_dir: Path, summary: Path | None,
+                                         context: str) -> bool:
+              number = _workflow_run_pull_number(event)
+              report, head = _analyze_stable_pull(repo, api, number, context)
+              output = report_dir / f"pr-{number}-{head}.json"
+              _write_report(report, output, summary, f"PR #{number} merge-conflict preflight")
+              api.publish_status(head, report, context, _target_url())
+              return bool(report["outcome"]["blocking"])
+
+
+          ''' + marker
+          if text.count(marker) != 1:
+              raise SystemExit(f"expected one push-event marker, found {text.count(marker)}")
+          text = text.replace(marker, insertion)
+
+          old_dispatch = '''    if event_name == "pull_request_target":
+                  blocking = _github_pull_event(repo, api, event, report_dir, summary, context)
+              elif event_name in ("push", "workflow_dispatch"):
+          '''
+          new_dispatch = '''    if event_name == "workflow_run":
+                  blocking = _github_workflow_run_event(repo, api, event, report_dir, summary, context)
+              elif event_name in ("push", "workflow_dispatch"):
+          '''
+          if text.count(old_dispatch) != 1:
+              raise SystemExit(f"expected one event-dispatch block, found {text.count(old_dispatch)}")
+          source.write_text(text.replace(old_dispatch, new_dispatch), encoding="utf-8")
+
+          tests = Path("tools/merge_conflict_preflight_test.py")
+          text = tests.read_text(encoding="utf-8")
+          old_constant = 'WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "merge-conflict-preflight.yml"\n'
+          new_constant = old_constant + (
+              'REGRESSION_WORKFLOW_PATH = (REPO_ROOT / ".github" / "workflows" /\n'
+              '                            "merge-conflict-preflight-regression.yml")\n'
+          )
+          if text.count(old_constant) != 1:
+              raise SystemExit("workflow path constant changed unexpectedly")
+          text = text.replace(old_constant, new_constant)
+
+          start = text.index("    def test_workflow_separates_untrusted_tests_from_trusted_status_publication(self) -> None:\n")
+          end = text.index("    def test_workflow_guidance_prescribes_each_classification_response(self) -> None:\n", start)
+          replacement = '''    def test_workflow_separates_untrusted_tests_from_trusted_status_publication(self) -> None:
+              trusted = WORKFLOW_PATH.read_text(encoding="utf-8")
+              regression = REGRESSION_WORKFLOW_PATH.read_text(encoding="utf-8")
+              self.assertIn("workflow_run:\\n", trusted)
+              self.assertIn("workflows: [Merge conflict preflight regression]", trusted)
+              self.assertIn("push:\\n    branches: [main]", trusted)
+              self.assertIn("merge_group:\\n    types: [checks_requested]", trusted)
+              self.assertIn("pull-requests: read\\n      statuses: write", trusted)
+              self.assertIn("ref: ${{ github.event.repository.default_branch }}", trusted)
+              self.assertIn("persist-credentials: false", trusted)
+              self.assertNotIn("pull_request_target", trusted)
+              self.assertNotIn("python3 -B tools/merge_conflict_preflight_test.py -v", trusted)
+
+              self.assertIn("pull_request:\\n", regression)
+              self.assertIn("python3 -B tools/merge_conflict_preflight_test.py -v", regression)
+              self.assertIn("persist-credentials: false", regression)
+              self.assertNotIn("statuses: write", regression)
+              self.assertNotIn("GITHUB_TOKEN", regression)
+              self.assertNotIn("tools/merge_conflict_preflight.py github-event", regression)
+
+          def test_workflow_run_payload_requires_one_pull_request(self) -> None:
+              event = {
+                  "workflow_run": {
+                      "event": "pull_request",
+                      "pull_requests": [{"number": 922}],
+                  },
+              }
+              self.assertEqual(PREFLIGHT._workflow_run_pull_number(event), 922)
+              invalid = (
+                  {},
+                  {"workflow_run": {"event": "push", "pull_requests": [{"number": 922}]}},
+                  {"workflow_run": {"event": "pull_request", "pull_requests": []}},
+                  {"workflow_run": {"event": "pull_request", "pull_requests": [{"number": 0}]}},
+                  {"workflow_run": {"event": "pull_request", "pull_requests": [{"number": 1}, {"number": 2}]}},
+              )
+              for payload in invalid:
+                  with self.subTest(payload=payload), self.assertRaises(PREFLIGHT.PreflightError):
+                      PREFLIGHT._workflow_run_pull_number(payload)
+
+          '''
+          text = text[:start] + replacement + text[end:]
+          tests.write_text(text, encoding="utf-8")
+          PY
+
+          python3 -B tools/merge_conflict_preflight_test.py -v
+          python3 -B tests/ci_tools_test.py -v
+          git diff --check
+          git status --short
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- \
+            .github/workflows/merge-conflict-preflight.yml \
+            .github/workflows/merge-conflict-preflight-regression.yml \
+            docs/native-retirement-support-v1.tsv \
+            tests/ci_tools_test.py \
+            tools/merge_conflict_preflight.py \
+            tools/merge_conflict_preflight_test.py
+          git rm -- .github/workflows/repair-922-workflow-run.yml
+          python3 - <<'PY'
+          import subprocess
+          expected = {
+              ".github/workflows/merge-conflict-preflight-regression.yml",
+              ".github/workflows/merge-conflict-preflight.yml",
+              ".github/workflows/repair-922-workflow-run.yml",
+              "docs/native-retirement-support-v1.tsv",
+              "tests/ci_tools_test.py",
+              "tools/merge_conflict_preflight.py",
+              "tools/merge_conflict_preflight_test.py",
+          }
+          actual = set(subprocess.check_output(
+              ["git", "diff", "--cached", "--name-only"], text=True).splitlines())
+          if actual != expected:
+              raise SystemExit(f"unexpected staged paths: {sorted(actual ^ expected)}")
+          PY
+          git commit -m 'ci: hand off privileged preflight through workflow_run'
+          git push --force-with-lease="$GITHUB_REF:$GITHUB_SHA" origin "HEAD:$GITHUB_REF"
