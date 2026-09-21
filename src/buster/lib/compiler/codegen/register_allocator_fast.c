@@ -1404,7 +1404,9 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         }
                     }
                 }
-                if (opcode_row.flags & MACHINE_OPCODE_ROW_INDIRECT_BRANCH)
+                bool has_case_successors = instruction->opcode == description->switch_opcode ||
+                                           (opcode_row.flags & MACHINE_OPCODE_ROW_INDIRECT_BRANCH);
+                if (has_case_successors)
                 {
                     if (instruction->payload > function->switch_case_count ||
                         instruction->flags > function->switch_case_count - instruction->payload)
@@ -1506,7 +1508,8 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
                         }
                     }
                 }
-                if (instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
+                if (instruction->opcode == description->switch_opcode ||
+                    instruction->opcode == MACHINE_X64_INDIRECT_BRANCH || instruction->opcode == MACHINE_A64_INDIRECT_BRANCH)
                 {
                     for (u32 target_index = 0; target_index < instruction->flags; target_index += 1)
                     {

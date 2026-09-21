@@ -5,6 +5,7 @@ import copy, hashlib, json
 from pathlib import Path
 import tempfile, unittest
 import native_retirement_dependency_binding as authority
+import native_retirement_external as external
 import native_retirement_rebind as rebind
 from native_retirement_rebind_contract import RebindError
 
@@ -41,6 +42,19 @@ class NativeRetirementRebindTest(unittest.TestCase):
         rebind.run("refresh",self.root); policy=(self.root/authority.POLICY_PATH).read_bytes()
         (self.root/"src/alpha.h").write_bytes(self.alpha.replace(b"LEFT 1",b"LEFT 30").replace(b"RIGHT 1",b"RIGHT 40")); (self.root/"src/beta.h").write_bytes(b"#define BETA 2\n")
         report=rebind.run("refresh",self.root); self.assertEqual([row["source"] for row in report["source_changes"]],["src/alpha.h","src/beta.h"]); self.assertEqual((self.root/authority.POLICY_PATH).read_bytes(),policy)
+
+    def test_external_preparation_precedes_repository_refresh_without_writes(self):
+        rebind.run("refresh", self.root)
+        old_generated = self.generated()
+        policy = (self.root / authority.POLICY_PATH).read_bytes()
+        (self.root / "src/alpha.h").write_bytes(b"#define LEFT 2\n")
+        prepared = external.prepare(self.root / authority.POLICY_PATH, self.root)
+        self.assertEqual(prepared["records"], 2)
+        self.assertEqual(self.generated(), old_generated)
+        self.assertEqual((self.root / authority.POLICY_PATH).read_bytes(), policy)
+        self.assertEqual(rebind.run("check", self.root)["status"], "stale")
+        self.assertEqual(rebind.run("refresh", self.root)["status"], "refreshed")
+        self.assertEqual(rebind.run("check", self.root)["status"], "current")
 
     def test_missing_malformed_duplicate_snapshot_and_truncated_binding_repair(self):
         rebind.run("refresh",self.root); (self.root/authority.SNAPSHOT_PATH).write_text('{"records":[],"records":[]}\n'); (self.root/authority.BINDING_PATH).write_text("truncated\n")

@@ -9,8 +9,8 @@
 // sources, extras and builder side data. Label-bearing functions are skipped.
 // ir_prepare_canonical_module owns the input/output validation boundaries;
 // a producer certificate never certifies rows mutated by this pass.
-// ir_promote_function checks type eligibility during its existing discovery
-// scan, before allocating promotion scratch for aggregate-only functions.
+// ir_promote_function defers value maps and events until its existing local
+// classification finds an eligible candidate; barrier discovery is unchanged.
 
 #define IR_PROMOTE_NONE UINT32_MAX
 
@@ -704,7 +704,6 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     statistics->instructions_before += function->instruction_count;
     statistics->values_before += function->value_count;
     u32 local_count = 0;
-    bool has_promotable_type = false;
     bool barrier = function->label_metadata_count != 0;
     // Direct frontend SSA emits no LOCAL rows for promoted owners. Use the
     // producer's conservative opcode summary to avoid a redundant FAST-path
@@ -713,11 +712,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     for (u32 index = 0; may_have_locals && index < function->instruction_count && !barrier; index += 1)
     {
         IrInstruction* row = function->instructions + index;
-        if (row->opcode == IR_OPCODE_LOCAL)
-        {
-            local_count += 1;
-            if (!has_promotable_type) has_promotable_type = ir_local_type_promotable(program, row->canonical_type);
-        }
+        local_count += row->opcode == IR_OPCODE_LOCAL;
         barrier = row->opcode == IR_OPCODE_INLINE_ASSEMBLY || row->opcode == IR_OPCODE_INDIRECT_BRANCH ||
                   row->opcode == IR_OPCODE_LABEL_ADDRESS || row->opcode == IR_OPCODE_STACK_ALLOCATE ||
                   row->opcode == IR_OPCODE_STACK_SAVE || row->opcode == IR_OPCODE_STACK_RESTORE ||
@@ -727,26 +722,12 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
     {
         statistics->barrier_functions += 1;
     }
-    else
-    {
-        statistics->candidate_locals += local_count;
-    }
-    if (local_count && !barrier && has_promotable_type)
+    if (local_count && !barrier)
     {
         TemporalArena scratch = scratch_begin(&program->arena, 1);
         Arena* arena = scratch.arena;
-        u32 old_value_count = function->value_count;
-        u32* local_by_value = arena_allocate(arena, u32, old_value_count);
-        u32* replacements = arena_allocate(arena, u32, old_value_count);
-        u8* removed = arena_allocate(arena, u8, function->instruction_count);
         IrPromoteLocal* locals = arena_allocate(arena, IrPromoteLocal, local_count);
-        IrPromoteEvent* events = arena_allocate(arena, IrPromoteEvent, function->instruction_count);
-        memset(local_by_value, 0xff, sizeof(u32) * old_value_count);
-        memset(removed, 0, function->instruction_count);
-        for (u32 value = 0; value < old_value_count; value += 1)
-        {
-            replacements[value] = value;
-        }
+        bool has_eligible_local = false;
         u32 local_index = 0;
         for (u32 index = 0; index < function->instruction_count; index += 1)
         {
@@ -759,129 +740,153 @@ BUSTER_GLOBAL_LOCAL void ir_promote_function(IrProgram* program, IrFunction* fun
                     .eligible = value->category == IR_VALUE_PLACE && !value->is_volatile && !row->volatile_access &&
                                 row->operand_count == 0 && ir_local_type_promotable(program, row->canonical_type),
                 };
-                local_by_value[row->result.value] = local_index++;
+                has_eligible_local |= locals[local_index].eligible;
+                local_index += 1;
             }
         }
-        u32 event_count = 0;
-        for (u32 block = 0; block < function->block_count; block += 1)
+        statistics->candidate_locals += local_count;
+        // Eligibility is already needed for promotion. Reuse that decision
+        // instead of adding type lookups to the discovery scan or collecting
+        // events when no local can ever use them. Keep all local descriptors
+        // and their row order when any candidate remains eligible.
+        if (has_eligible_local)
         {
-            IrBlock* source = function->blocks + block;
-            for (u32 index = source->first_instruction.value; index != IR_PROMOTE_NONE; index = function->instructions[index].next.value)
+            u32 old_value_count = function->value_count;
+            u32* local_by_value = arena_allocate(arena, u32, old_value_count);
+            u32* replacements = arena_allocate(arena, u32, old_value_count);
+            u8* removed = arena_allocate(arena, u8, function->instruction_count);
+            IrPromoteEvent* events = arena_allocate(arena, IrPromoteEvent, function->instruction_count);
+            memset(local_by_value, 0xff, sizeof(u32) * old_value_count);
+            memset(removed, 0, function->instruction_count);
+            for (u32 value = 0; value < old_value_count; value += 1)
             {
-                IrInstruction* row = function->instructions + index;
-                u32 owner = row->opcode == IR_OPCODE_LOCAL ? local_by_value[row->result.value] : IR_PROMOTE_NONE;
-                for (u32 operand = 0; operand < row->operand_count; operand += 1)
+                replacements[value] = value;
+            }
+            for (u32 index = 0; index < local_count; index += 1)
+            {
+                local_by_value[locals[index].value] = index;
+            }
+            u32 event_count = 0;
+            for (u32 block = 0; block < function->block_count; block += 1)
+            {
+                IrBlock* source = function->blocks + block;
+                for (u32 index = source->first_instruction.value; index != IR_PROMOTE_NONE; index = function->instructions[index].next.value)
                 {
-                    u32 local = local_by_value[row->operands[operand].value];
-                    if (local != IR_PROMOTE_NONE)
+                    IrInstruction* row = function->instructions + index;
+                    u32 owner = row->opcode == IR_OPCODE_LOCAL ? local_by_value[row->result.value] : IR_PROMOTE_NONE;
+                    for (u32 operand = 0; operand < row->operand_count; operand += 1)
                     {
-                        IrPromoteLocal* candidate = locals + local;
-                        IrTypeId type = function->values[candidate->value].canonical_type;
-                        bool load = row->opcode == IR_OPCODE_LOAD && row->operand_count == 1 && operand == 0 &&
-                                    row->canonical_type.value == type.value;
-                        bool store = row->opcode == IR_OPCODE_STORE && row->operand_count == 2 && operand == 0 &&
-                                     function->values[row->operands[1].value].canonical_type.value == type.value &&
-                                     function->values[row->operands[1].value].category == IR_VALUE_VALUE;
-                        candidate->eligible &= (load || store) && !row->volatile_access;
-                        if (load || store)
+                        u32 local = local_by_value[row->operands[operand].value];
+                        if (local != IR_PROMOTE_NONE)
                         {
-                            owner = local;
+                            IrPromoteLocal* candidate = locals + local;
+                            IrTypeId type = function->values[candidate->value].canonical_type;
+                            bool load = row->opcode == IR_OPCODE_LOAD && row->operand_count == 1 && operand == 0 &&
+                                        row->canonical_type.value == type.value;
+                            bool store = row->opcode == IR_OPCODE_STORE && row->operand_count == 2 && operand == 0 &&
+                                         function->values[row->operands[1].value].canonical_type.value == type.value &&
+                                         function->values[row->operands[1].value].category == IR_VALUE_VALUE;
+                            candidate->eligible &= (load || store) && !row->volatile_access;
+                            if (load || store)
+                            {
+                                owner = local;
+                            }
+                        }
+                    }
+                    if (owner != IR_PROMOTE_NONE)
+                    {
+                        IrPromoteLocal* local = locals + owner;
+                        events[event_count] = (IrPromoteEvent){.instruction = index, .block = block, .next = IR_PROMOTE_NONE};
+                        if (local->last != IR_PROMOTE_NONE)
+                        {
+                            events[local->last].next = event_count;
+                        }
+                        else
+                        {
+                            local->first = event_count;
+                        }
+                        local->last = event_count++;
+                    }
+                }
+                for (IrBlockParameter* parameter = source->first_parameter; parameter; parameter = parameter->next)
+                {
+                    for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                    {
+                        u32 local = local_by_value[incoming->value.value];
+                        if (local != IR_PROMOTE_NONE)
+                        {
+                            locals[local].eligible = false;
                         }
                     }
                 }
-                if (owner != IR_PROMOTE_NONE)
+            }
+            IrPromoteCfg cfg = {0};
+            bool cfg_built = false;
+            bool cfg_valid = false;
+            u8* effects = 0;
+            u8* live = 0;
+            u8* bad_in = 0;
+            u8* bad_out = 0;
+            u32* entries = 0;
+            u32* exits = 0;
+            u64 promoted_before = statistics->promoted_locals;
+            for (u32 index = 0; index < local_count; index += 1)
+            {
+                IrPromoteLocal* local = locals + index;
+                if (local->eligible)
                 {
-                    IrPromoteLocal* local = locals + owner;
-                    events[event_count] = (IrPromoteEvent){.instruction = index, .block = block, .next = IR_PROMOTE_NONE};
-                    if (local->last != IR_PROMOTE_NONE)
+                    // Each block may independently define the local before reading
+                    // it. Those cases (including write-only locals) need no CFG.
+                    bool block_local = true;
+                    bool defined = false;
+                    u32 block = IR_PROMOTE_NONE;
+                    for (u32 event = local->first; event != IR_PROMOTE_NONE && block_local; event = events[event].next)
                     {
-                        events[local->last].next = event_count;
+                        IrPromoteEvent access = events[event];
+                        IrInstruction* row = function->instructions + access.instruction;
+                        if (access.block != block)
+                        {
+                            defined = false;
+                            block = access.block;
+                        }
+                        if (row->opcode == IR_OPCODE_LOAD)
+                        {
+                            block_local &= defined;
+                        }
+                        else
+                        {
+                            defined = row->opcode == IR_OPCODE_STORE;
+                        }
+                    }
+                    if (block_local)
+                    {
+                        ir_promote_remove_events(function, local, events, removed, replacements, 0, statistics);
                     }
                     else
                     {
-                        local->first = event_count;
+                        if (!cfg_built)
+                        {
+                            cfg_built = true;
+                            cfg_valid = ir_promote_cfg(arena, program, function, &cfg);
+                            effects = arena_allocate(arena, u8, function->block_count);
+                            live = arena_allocate(arena, u8, function->block_count);
+                            bad_in = arena_allocate(arena, u8, function->block_count);
+                            bad_out = arena_allocate(arena, u8, function->block_count);
+                            entries = arena_allocate(arena, u32, function->block_count);
+                            exits = arena_allocate(arena, u32, function->block_count);
+                        }
+                        if (cfg_valid)
+                        {
+                            ir_promote_global(arena, program, function, local, events, &cfg, effects, live, bad_in, bad_out,
+                                              entries, exits, replacements, removed, statistics);
+                        }
                     }
-                    local->last = event_count++;
                 }
             }
-            for (IrBlockParameter* parameter = source->first_parameter; parameter; parameter = parameter->next)
+            if (statistics->promoted_locals != promoted_before)
             {
-                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
-                {
-                    u32 local = local_by_value[incoming->value.value];
-                    if (local != IR_PROMOTE_NONE)
-                    {
-                        locals[local].eligible = false;
-                    }
-                }
+                ir_promote_compact(arena, program, function, old_value_count, replacements, removed, statistics);
             }
-        }
-        IrPromoteCfg cfg = {0};
-        bool cfg_built = false;
-        bool cfg_valid = false;
-        u8* effects = 0;
-        u8* live = 0;
-        u8* bad_in = 0;
-        u8* bad_out = 0;
-        u32* entries = 0;
-        u32* exits = 0;
-        u64 promoted_before = statistics->promoted_locals;
-        for (u32 index = 0; index < local_count; index += 1)
-        {
-            IrPromoteLocal* local = locals + index;
-            if (local->eligible)
-            {
-                // Each block may independently define the local before reading
-                // it. Those cases (including write-only locals) need no CFG.
-                bool block_local = true;
-                bool defined = false;
-                u32 block = IR_PROMOTE_NONE;
-                for (u32 event = local->first; event != IR_PROMOTE_NONE && block_local; event = events[event].next)
-                {
-                    IrPromoteEvent access = events[event];
-                    IrInstruction* row = function->instructions + access.instruction;
-                    if (access.block != block)
-                    {
-                        defined = false;
-                        block = access.block;
-                    }
-                    if (row->opcode == IR_OPCODE_LOAD)
-                    {
-                        block_local &= defined;
-                    }
-                    else
-                    {
-                        defined = row->opcode == IR_OPCODE_STORE;
-                    }
-                }
-                if (block_local)
-                {
-                    ir_promote_remove_events(function, local, events, removed, replacements, 0, statistics);
-                }
-                else
-                {
-                    if (!cfg_built)
-                    {
-                        cfg_built = true;
-                        cfg_valid = ir_promote_cfg(arena, program, function, &cfg);
-                        effects = arena_allocate(arena, u8, function->block_count);
-                        live = arena_allocate(arena, u8, function->block_count);
-                        bad_in = arena_allocate(arena, u8, function->block_count);
-                        bad_out = arena_allocate(arena, u8, function->block_count);
-                        entries = arena_allocate(arena, u32, function->block_count);
-                        exits = arena_allocate(arena, u32, function->block_count);
-                    }
-                    if (cfg_valid)
-                    {
-                        ir_promote_global(arena, program, function, local, events, &cfg, effects, live, bad_in, bad_out,
-                                          entries, exits, replacements, removed, statistics);
-                    }
-                }
-            }
-        }
-        if (statistics->promoted_locals != promoted_before)
-        {
-            ir_promote_compact(arena, program, function, old_value_count, replacements, removed, statistics);
         }
         scratch_end(scratch);
     }

@@ -158,6 +158,25 @@ and caller groups that can still migrate independently. “One logical change”
 retain unsafe process, descriptor, handle, environment, path, privilege or
 validation behavior merely to create a compatibility window.
 
+## Native-retirement generated-state ownership
+
+Ordinary feature branches do not own
+`docs/native-retirement-repository-sources-v1.json` or
+`tools/native_retirement_dependency_binding.generated.h`. Do not run
+`native_retirement_rebind.py refresh` and commit its output merely because
+an admitted source changed. The read-only rebinding workflow reconstructs the
+exact candidate state in a disposable checkout; only the serialized trusted
+integration workflow may publish it.
+
+Changes to rebinder/materializer/validator/workflow implementation are a
+`bootstrap` transition. Changes to reviewed policy, generated schema, or
+consumers are a `policy` transition. Never combine those two classes in one
+candidate: land a backwards-compatible bootstrap first. Its new authority
+must accept the exact state produced by the old trusted authority before it
+can become trusted; then dispatch the separate policy transition. Manual
+generated-file edits are rejected for every class. See
+[native-retirement rebinding](../native-retirement-rebinding.md).
+
 **Push a rebase before you re-verify it.** A rebase onto a moved `main` is
 followed by a full local pass — `test_all`, `test_self_host`, whichever compat
 harness the change touches — and that pass takes longer than CI takes to start.

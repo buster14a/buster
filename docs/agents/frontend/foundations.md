@@ -106,9 +106,6 @@ IDs, scopes and source ranges are preserved; frontend entity IDs do not escape.
 The existing conservative opcode summary also tracks `LOCAL`, so shared
 promotion skips its discovery scan for certified functions with no memory
 locals. Unknown summaries still scan and the shared algorithm stays independent.
-The existing discovery scan also checks whether any local has a promotable type.
-Aggregate-only functions bypass value maps and event collection; candidate and
-barrier statistics remain unchanged, including indirect/returns-twice calls.
 
 `c_lower_to_ir_with_options` and `c_analyze_with_options` expose the memory-form
 reference through `CIRLowerOptions.disable_direct_ssa`. `ide cc
@@ -208,12 +205,11 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `C_DIAGNOSTIC_INVALID_INTEGER_LITERAL`; preprocessing keeps the conditional
   directive diagnostic. `c_test_integer_spelling_consistency` and
   `tests/basic_c_integer_literals.c` cover these contracts (GitHub #148).
-- Enumerator integer evaluation keeps an ordinary expression as a view of the
-  original preprocessed token stream. `c_parse_generic_constant_tokens` only
-  materializes a stream when the expression contains a `_Generic` selection
-  whose selected association must be flattened; it must not copy the complete
-  translation unit for every ordinary enumerator. The private alias regression
-  and the nested generic-constant cases cover both paths (GitHub #797).
+- Enumerator integer evaluation uses the typed semantic constant evaluator
+  directly over the original preprocessed token stream. `_Generic` selects its
+  association by token range without flattening or copying the translation
+  unit, and unselected associations are never evaluated. The nested
+  generic-constant cases cover this path (GitHub #797).
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
@@ -659,3 +655,5 @@ expansion from exceeding Windows ARM64's unwind function-size limit.
   capacity grows monotonically; unused capacity is never read. Frontend SSA
   and canonical compaction remap or invalidate its place IDs before later
   promotion and selection consume it. No frontend entity IDs enter the map.
+
+Enum initializer lookup includes pending members of earlier enum definitions: file-scope enumerators become ordinary entities only after the declaration pass. The typed integer-constant evaluator retains their existing `int` binding until #900 selects dialect-correct declaration-point types.

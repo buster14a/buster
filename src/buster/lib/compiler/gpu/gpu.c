@@ -896,6 +896,86 @@ BUSTER_GLOBAL_LOCAL void gpu_plan_copy(GpuPlanBuilder* builder, String8 source, 
     };
 }
 
+#define GPU_SPAWN_ENVIRONMENT_CAPACITY 32
+
+typedef struct GpuSpawnEnvironment GpuSpawnEnvironment;
+struct GpuSpawnEnvironment
+{
+    String8 keys[GPU_SPAWN_ENVIRONMENT_CAPACITY];
+    String8 values[GPU_SPAWN_ENVIRONMENT_CAPACITY];
+    u32 count;
+};
+
+BUSTER_GLOBAL_LOCAL bool gpu_spawn_environment_key_equal(String8 left, String8 right)
+{
+    bool result = left.length == right.length;
+    for (u64 index = 0; result && index < left.length; index += 1)
+    {
+        char8 a = left.pointer[index];
+        char8 b = right.pointer[index];
+#if BUSTER_WINDOWS
+        if (a >= 'a' && a <= 'z') a = (char8)(a - ('a' - 'A'));
+        if (b >= 'a' && b <= 'z') b = (char8)(b - ('a' - 'A'));
+#endif
+        result = a == b;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL GpuSpawnEnvironment gpu_spawn_environment(void)
+{
+    static String8 allowed[] = {
+        S8_INITIALIZER("PATH"),
+        S8_INITIALIZER("SystemRoot"),
+        S8_INITIALIZER("WINDIR"),
+        S8_INITIALIZER("COMSPEC"),
+        S8_INITIALIZER("PATHEXT"),
+        S8_INITIALIZER("HOME"),
+        S8_INITIALIZER("USERPROFILE"),
+        S8_INITIALIZER("TMPDIR"),
+        S8_INITIALIZER("TMP"),
+        S8_INITIALIZER("TEMP"),
+        S8_INITIALIZER("LANG"),
+        S8_INITIALIZER("LC_ALL"),
+        S8_INITIALIZER("LC_CTYPE"),
+        S8_INITIALIZER("SDKROOT"),
+        S8_INITIALIZER("DEVELOPER_DIR"),
+        S8_INITIALIZER("CUDA_PATH"),
+        S8_INITIALIZER("CUDA_HOME"),
+        S8_INITIALIZER("HIP_PATH"),
+        S8_INITIALIZER("ROCM_PATH"),
+        S8_INITIALIZER("VULKAN_SDK"),
+        S8_INITIALIZER("INCLUDE"),
+        S8_INITIALIZER("LIB"),
+        S8_INITIALIZER("LIBPATH"),
+        S8_INITIALIZER("LD_LIBRARY_PATH"),
+        S8_INITIALIZER("DYLD_LIBRARY_PATH"),
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(allowed) <= GPU_SPAWN_ENVIRONMENT_CAPACITY);
+    GpuSpawnEnvironment result = {0};
+    for (u64 input_index = 0; input_index < program_state->input.environment_keys.length; input_index += 1)
+    {
+        String8 key = program_state->input.environment_keys.pointer[input_index];
+        bool admitted = false;
+        for (u32 allowed_index = 0; !admitted && allowed_index < BUSTER_ARRAY_LENGTH(allowed); allowed_index += 1)
+        {
+            admitted = gpu_spawn_environment_key_equal(key, allowed[allowed_index]);
+        }
+        bool duplicate = false;
+        for (u32 existing = 0; admitted && !duplicate && existing < result.count; existing += 1)
+        {
+            duplicate = gpu_spawn_environment_key_equal(key, result.keys[existing]);
+        }
+        if (admitted && !duplicate)
+        {
+            result.keys[result.count] = key;
+            result.values[result.count] = program_state->input.environment_values.pointer[input_index];
+            result.count += 1;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL String8 gpu_tool_path(String8 explicit_path, String8 environment_name, String8 fallback)
 {
     String8 result;
@@ -2381,10 +2461,13 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                 else
                 {
                     result.command = gpu_command_to_string(arena, step.arguments);
-                    ProcessSpawnResult spawn = os_process_spawn(step.arguments, (SliceString8){0}, (SliceString8){0},
+                    GpuSpawnEnvironment environment = gpu_spawn_environment();
+                    ProcessSpawnResult spawn = os_process_spawn(step.arguments,
+                                                                (SliceString8){.pointer = environment.keys, .length = environment.count},
+                                                                (SliceString8){.pointer = environment.values, .length = environment.count},
                                                                 (ProcessSpawnOptions){
                                                                     .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
-                                                                    .use_process_environment = true,
+                                                                    .search_path = true,
                                                                     .new_process_group = true,
                                                                 });
                     if (!spawn.handle)
@@ -2392,7 +2475,9 @@ GpuPipelineResult gpu_pipeline_execute(Arena* arena, GpuPipelineOptions options)
                         result.error = GPU_PIPELINE_ERROR_TOOL_NOT_FOUND;
                         result.process_result = PROCESS_RESULT_NOT_EXISTENT;
                         result.failed_step = step_index;
-                        result.diagnostic = string_format(arena, S8("could not launch GPU tool: {S8}"), result.command);
+                        String8 spawn_error = spawn.error.v ? string8_from_os_error(arena, spawn.error, false) : S8("unknown error");
+                        result.diagnostic = string_format(arena, S8("could not launch GPU tool (spawn stage {u32}: {S8}): {S8}"),
+                                                          (u32)spawn.failure, spawn_error, result.command);
                     }
                     else
                     {

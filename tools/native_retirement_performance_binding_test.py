@@ -2,6 +2,7 @@
 """Offline tests for the fail-closed native-retirement binding validator."""
 
 import copy
+from contextlib import contextmanager
 import csv
 import hashlib
 import importlib.util
@@ -31,6 +32,21 @@ class BindingTests(unittest.TestCase):
 
     _full_record = None
     _full_contents = None
+
+    @contextmanager
+    def _adapter_checkout(self):
+        """Keep immutable-source controls separate from ephemeral rebinding."""
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                                check=True, capture_output=True,
+                                text=True).stdout.strip()
+        with tempfile.TemporaryDirectory(prefix="retirement-adapter-source-") as directory:
+            repository = Path(directory) / "repository"
+            subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout",
+                            str(ROOT), str(repository)], check=True,
+                           capture_output=True)
+            subprocess.run(["git", "-C", str(repository), "checkout", "--quiet",
+                            "--detach", commit], check=True, capture_output=True)
+            yield repository
 
     @staticmethod
     def _artifact(contents, path, data):
@@ -1517,33 +1533,36 @@ class BindingTests(unittest.TestCase):
         return record, contents, support_output
 
     def test_bounded_validate_evidence_path_replays_sealed_workflow(self):
-        record, contents, support_output = self._build_small_evidence_fixture()
-        trusted_receipt = hashlib.sha256(contents["execution/invocation-receipt.json"]).hexdigest()
-        with tempfile.TemporaryDirectory(prefix="retirement-binding-e2e-") as directory:
-            root = Path(directory)
-            path = self.write_record(root, record)
-            evidence = root / "evidence"
-            self.write_evidence(evidence, record, contents)
-            with mock.patch.object(binding, "_check_support_output",
-                                   return_value=support_output), \
-                    mock.patch.object(binding, "_population",
-                                      return_value=record["population"]):
-                result = binding.validate(path, evidence, trusted_execution_receipt_sha256=trusted_receipt)
-            self.assertEqual(result["proof"],
-                             "evidence-and-receipts-checked-without-independent-git")
-            self.assertTrue(result["rows_recomputed"])
-            self.assertTrue(result["invocations_checked"])
-            # The success path must not be merely a descriptor check: mutate a
-            # sealed output byte and retain the original descriptor to prove
-            # the sealed result's content/address binding is exercised.
-            tampered = evidence / "results" / "statistics-replay.json"
-            tampered.write_bytes(tampered.read_bytes() + b"\n")
-            with mock.patch.object(binding, "_check_support_output",
-                                   return_value=support_output), \
-                    mock.patch.object(binding, "_population",
-                                      return_value=record["population"]):
-                with self.assertRaises(ValueError):
-                    binding.validate(path, evidence, trusted_execution_receipt_sha256=trusted_receipt)
+        with self._adapter_checkout() as repository, \
+                mock.patch.object(binding, "__file__", str(
+                    repository / "tools" / "native_retirement_performance_binding.py")):
+            record, contents, support_output = self._build_small_evidence_fixture()
+            trusted_receipt = hashlib.sha256(contents["execution/invocation-receipt.json"]).hexdigest()
+            with tempfile.TemporaryDirectory(prefix="retirement-binding-e2e-") as directory:
+                root = Path(directory)
+                path = self.write_record(root, record)
+                evidence = root / "evidence"
+                self.write_evidence(evidence, record, contents)
+                with mock.patch.object(binding, "_check_support_output",
+                                       return_value=support_output), \
+                        mock.patch.object(binding, "_population",
+                                          return_value=record["population"]):
+                    result = binding.validate(path, evidence, trusted_execution_receipt_sha256=trusted_receipt)
+                self.assertEqual(result["proof"],
+                                 "evidence-and-receipts-checked-without-independent-git")
+                self.assertTrue(result["rows_recomputed"])
+                self.assertTrue(result["invocations_checked"])
+                # The success path must not be merely a descriptor check: mutate a
+                # sealed output byte and retain the original descriptor to prove
+                # the sealed result's content/address binding is exercised.
+                tampered = evidence / "results" / "statistics-replay.json"
+                tampered.write_bytes(tampered.read_bytes() + b"\n")
+                with mock.patch.object(binding, "_check_support_output",
+                                       return_value=support_output), \
+                        mock.patch.object(binding, "_population",
+                                          return_value=record["population"]):
+                    with self.assertRaises(ValueError):
+                        binding.validate(path, evidence, trusted_execution_receipt_sha256=trusted_receipt)
 
     def test_adapter_series_join_rejects_widened_limit_and_raw_mismatch(self):
         parsed, family, rules = self._series_join_fixture()
@@ -1897,74 +1916,77 @@ class BindingTests(unittest.TestCase):
                 self.assertRegex(workflow, rf"(?m)^\s+- {re.escape(path)}\s*$")
 
     def test_trusted_adapter_rejects_unbound_source_identity(self):
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                                check=True, capture_output=True,
-                                text=True).stdout.strip()
-        tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT,
-                              check=True, capture_output=True,
-                              text=True).stdout.strip()
-        with tempfile.TemporaryDirectory(prefix="retirement-adapter-identity-") as directory:
-            with self.assertRaises(ValueError):
-                binding._compile_trusted_retirement_adapter(
-                    directory, ROOT, "0" * 40, tree)
-            with self.assertRaises(ValueError):
-                binding._compile_trusted_retirement_adapter(
-                    directory, ROOT, commit, "f" * 40)
+        with self._adapter_checkout() as repository:
+            commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository,
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repository,
+                                  check=True, capture_output=True,
+                                  text=True).stdout.strip()
+            with tempfile.TemporaryDirectory(prefix="retirement-adapter-identity-") as directory:
+                with self.assertRaises(ValueError):
+                    binding._compile_trusted_retirement_adapter(
+                        directory, repository, "0" * 40, tree)
+                with self.assertRaises(ValueError):
+                    binding._compile_trusted_retirement_adapter(
+                        directory, repository, commit, "f" * 40)
 
     def test_trusted_adapter_allows_untracked_evidence_but_rejects_tracked_drift(self):
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                                check=True, capture_output=True,
-                                text=True).stdout.strip()
-        tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT,
-                              check=True, capture_output=True,
-                              text=True).stdout.strip()
-        source = ROOT / "tools" / "throughput" / "throughput.c"
-        original = source.read_bytes()
-        with tempfile.TemporaryDirectory(prefix="retirement-untracked-evidence-",
-                                         dir=ROOT) as evidence:
-            Path(evidence, "result.json").write_text("{}\n", encoding="utf-8")
-            with tempfile.TemporaryDirectory(prefix="retirement-adapter-clean-") as directory:
-                executable, _binary, _source, _toolchain, _command = \
-                    binding._compile_trusted_retirement_adapter(
-                        directory, ROOT, commit, tree)
-                self.assertTrue(executable.is_file())
-            try:
-                source.write_bytes(original + b"\n#error tracked drift must fail\n")
-                with tempfile.TemporaryDirectory(prefix="retirement-adapter-dirty-") as directory:
-                    with self.assertRaises(ValueError):
+        with self._adapter_checkout() as repository:
+            commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository,
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repository,
+                                  check=True, capture_output=True,
+                                  text=True).stdout.strip()
+            source = repository / "tools" / "throughput" / "throughput.c"
+            original = source.read_bytes()
+            with tempfile.TemporaryDirectory(prefix="retirement-untracked-evidence-",
+                                             dir=repository) as evidence:
+                Path(evidence, "result.json").write_text("{}\n", encoding="utf-8")
+                with tempfile.TemporaryDirectory(prefix="retirement-adapter-clean-") as directory:
+                    executable, _binary, _source, _toolchain, _command = \
                         binding._compile_trusted_retirement_adapter(
-                            directory, ROOT, commit, tree)
-            finally:
-                source.write_bytes(original)
+                            directory, repository, commit, tree)
+                    self.assertTrue(executable.is_file())
+                try:
+                    source.write_bytes(original + b"\n#error tracked drift must fail\n")
+                    with tempfile.TemporaryDirectory(prefix="retirement-adapter-dirty-") as directory:
+                        with self.assertRaises(ValueError):
+                            binding._compile_trusted_retirement_adapter(
+                                directory, repository, commit, tree)
+                finally:
+                    source.write_bytes(original)
 
     def test_trusted_adapter_materializes_verified_commit_after_checkout_race(self):
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                                check=True, capture_output=True,
-                                text=True).stdout.strip()
-        tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT,
-                              check=True, capture_output=True,
-                              text=True).stdout.strip()
-        source = ROOT / "tools" / "throughput" / "throughput.c"
-        original = source.read_bytes()
-        original_git_run = binding._git_run
+        with self._adapter_checkout() as repository:
+            commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repository,
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repository,
+                                  check=True, capture_output=True,
+                                  text=True).stdout.strip()
+            source = repository / "tools" / "throughput" / "throughput.c"
+            original = source.read_bytes()
+            original_git_run = binding._git_run
 
-        def mutate_after_tree(repository, arguments, name):
-            result = original_git_run(repository, arguments, name)
-            if arguments == ["rev-parse", "HEAD^{tree}"]:
-                source.write_bytes(original + b"\n#error uncommitted source race\n")
-            return result
+            def mutate_after_tree(repository, arguments, name):
+                result = original_git_run(repository, arguments, name)
+                if arguments == ["rev-parse", "HEAD^{tree}"]:
+                    source.write_bytes(original + b"\n#error uncommitted source race\n")
+                return result
 
-        try:
-            with tempfile.TemporaryDirectory(prefix="retirement-adapter-race-") as directory:
-                with mock.patch.object(binding, "_git_run",
-                                       side_effect=mutate_after_tree):
-                    executable, _binary, source_digest, _toolchain, _command = \
-                        binding._compile_trusted_retirement_adapter(
-                            directory, ROOT, commit, tree)
-                self.assertTrue(executable.is_file())
-                self.assertEqual(len(source_digest), 64)
-        finally:
-            source.write_bytes(original)
+            try:
+                with tempfile.TemporaryDirectory(prefix="retirement-adapter-race-") as directory:
+                    with mock.patch.object(binding, "_git_run",
+                                           side_effect=mutate_after_tree):
+                        executable, _binary, source_digest, _toolchain, _command = \
+                            binding._compile_trusted_retirement_adapter(
+                                directory, repository, commit, tree)
+                    self.assertTrue(executable.is_file())
+                    self.assertEqual(len(source_digest), 64)
+            finally:
+                source.write_bytes(original)
 
     def test_trusted_adapter_ignores_git_replacement_objects(self):
         commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,

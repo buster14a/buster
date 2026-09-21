@@ -162,32 +162,38 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
         bool uninitialized;
         bool barrier;
         bool trivial;
+        bool partial;
     } fixtures[] = {
-        {S8("int test(void){return 7;}"), true, false, false, false, false},
-        {S8("int test(void){int x=3;x+=4;return x;}"), true, false, false, false, false},
-        {S8("int test(int c){int v;if(c)v=11;else v=29;return v;}"), true, true, false, false, false},
-        {S8("int test(int n){int a=1,b=2;while(n-->0){int t=a;a=b;b=t;}return a*10+b;}"), true, true, false, false, false},
-        {S8("int test(int c,int x){int v=x;if(c)c+=1;return v;}"), true, false, false, false, true},
-        {S8("int test(int c){int v=1;if(c)v=2;else v=3;v=4;return v;}"), true, false, false, false, false},
-        {S8("double test(int c,double x){double v=x;if(c)v=3.5;return v;}"), true, true, false, false, false},
-        {S8("int* test(int c,int* a,int* b){int* p=a;if(c)p=b;return p;}"), true, true, false, false, false},
-        {S8("int test(int c,signed char x){signed char v=x;if(c)v=-7;return v;}"), false, false, false, false, false},
-        {S8("typedef int V __attribute__((vector_size(16)));V test(int c,V a,V b){V v=a;if(c)v=b;return v;}"), true, true, false, false, false},
-        {S8("int test(int n,int c){int v=1;if(c)goto b;a:v+=2;if(--n>0)goto b;return v;b:v+=3;if(--n>0)goto a;return v;}"), true, true, false, false, false},
-        {S8("void side(int*);int test(void){int v=3;side(&v);return v;}"), false, false, false, false, false},
-        {S8("int test(void){volatile int v=3;v=4;return v;}"), false, false, false, false, false},
-        {S8("struct A{int x[4];};int test(void){struct A a={{3,4,5,6}};return a.x[2];}"), false, false, false, false, false},
-        {S8("struct A{int x[4];};void side(struct A*);int test(void){struct A a={{3,4,5,6}};side(&a);return a.x[2];}"), false, false, false, false, false},
-        {S8("struct A{int x[4];};int setjmp(void*);int test(void){struct A a={{3,4,5,6}};setjmp(&a);return a.x[2];}"), false, false, false, true, false},
-        {S8("int test(void){_Atomic int v=3;v+=4;return v;}"), false, false, false, false, false},
-        {S8("int test(int c){int v;if(c)v=1;return v;}"), false, false, true, false, false},
-        {S8("int test(void){int v;int x=v;v=2;return x;}"), false, false, true, false, false},
-        {S8("int test(int n){int a[n];a[0]=2;return a[0];}"), false, false, false, true, false},
-        {S8("int test(int c){int v=c;__asm__ __volatile__(\"\" ::: \"memory\");v++;return v;}"), false, false, false, true, false},
-        {S8("int setjmp(void*);int test(void* p){int v=1;if(setjmp(p))v=2;return v;}"), false, false, false, true, false},
-        {S8("int test(int (*p)(int)){int v=1;return p(v);}"), false, false, false, true, false},
-        {S8("int test(int c){void* p=c?&&a:&&b;goto *p;a:return 3;b:return 4;}"), false, false, false, true, false},
-        {S8("__attribute__((noreturn))void stop(int);void test(int n){int x=n;stop(x);}"), true, false, false, false, false},
+        {S8("int test(void){return 7;}"), true, false, false, false, false, false},
+        {S8("int test(void){int x=3;x+=4;return x;}"), true, false, false, false, false, false},
+        {S8("int test(int c){int v;if(c)v=11;else v=29;return v;}"), true, true, false, false, false, false},
+        {S8("int test(int n){int a=1,b=2;while(n-->0){int t=a;a=b;b=t;}return a*10+b;}"), true, true, false, false, false, false},
+        {S8("int test(int c,int x){int v=x;if(c)c+=1;return v;}"), true, false, false, false, true, false},
+        {S8("int test(int c){int v=1;if(c)v=2;else v=3;v=4;return v;}"), true, false, false, false, false, false},
+        {S8("double test(int c,double x){double v=x;if(c)v=3.5;return v;}"), true, true, false, false, false, false},
+        {S8("int* test(int c,int* a,int* b){int* p=a;if(c)p=b;return p;}"), true, true, false, false, false, false},
+        {S8("int test(int c,signed char x){signed char v=x;if(c)v=-7;return v;}"), false, false, false, false, false, false},
+        {S8("typedef int V __attribute__((vector_size(16)));V test(int c,V a,V b){V v=a;if(c)v=b;return v;}"), true, true, false, false, false, false},
+        {S8("int test(int n,int c){int v=1;if(c)goto b;a:v+=2;if(--n>0)goto b;return v;b:v+=3;if(--n>0)goto a;return v;}"), true, true, false, false, false, false},
+        {S8("void side(int*);int test(void){int v=3;side(&v);return v;}"), false, false, false, false, false, false},
+        {S8("int test(void){volatile int v=3;v=4;return v;}"), false, false, false, false, false, false},
+        {S8("struct A{int x[4];};int test(void){struct A a={{3,4,5,6}};return a.x[2];}"), false, false, false, false, false, false},
+        {S8("struct A{int x[4];};void side(struct A*);int test(void){struct A a={{3,4,5,6}};side(&a);return a.x[2];}"), false, false, false, false, false, false},
+        {S8("struct A{int x[4];};int setjmp(void*);int test(void){struct A a={{3,4,5,6}};setjmp(&a);return a.x[2];}"), false, false, false, true, false, false},
+        {S8("int test(void){_Atomic int v=3;v+=4;return v;}"), false, false, false, false, false, false},
+        {S8("int test(int c){int v;if(c)v=1;return v;}"), false, false, true, false, false, false},
+        {S8("int test(void){int v;int x=v;v=2;return x;}"), false, false, true, false, false, false},
+        {S8("int test(int n){int a[n];a[0]=2;return a[0];}"), false, false, false, true, false, false},
+        {S8("int test(int c){int v=c;__asm__ __volatile__(\"\" ::: \"memory\");v++;return v;}"), false, false, false, true, false, false},
+        {S8("int setjmp(void*);int test(void* p){int v=1;if(setjmp(p))v=2;return v;}"), false, false, false, true, false, false},
+        {S8("int test(int (*p)(int)){int v=1;return p(v);}"), false, false, false, true, false, false},
+        {S8("int test(int c){void* p=c?&&a:&&b;goto *p;a:return 3;b:return 4;}"), false, false, false, true, false, false},
+        {S8("__attribute__((noreturn))void stop(int);void test(int n){int x=n;stop(x);}"), true, false, false, false, false, false},
+        // Neither declaration order may hide an independently promotable scalar.
+        {S8("struct A{int x[4];};int test(void){struct A a={{3,4,5,6}};int v=7;v+=2;return a.x[2]+v;}"), false, false, false, false, false, true},
+        {S8("struct A{int x[4];};int test(void){int v=7;struct A a={{3,4,5,6}};v+=2;return a.x[2]+v;}"), false, false, false, false, false, true},
+        {S8("struct A{int x[4];};void side(struct A*);int test(void){struct A a={{3,4,5,6}};int v=7;side(&a);return a.x[2]+v;}"), false, false, false, false, false, true},
+        {S8("int test(void){signed char v=7;return v;}"), false, false, false, false, false, false},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixtures) * 2; index += 1)
     {
@@ -259,6 +265,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, fixture.all_locals ? locals == 0 : locals != 0);
                 BUSTER_TEST(arguments, (module->local_promotion.uninitialized_locals != 0) == fixture.uninitialized);
                 BUSTER_TEST(arguments, (module->local_promotion.barrier_functions != 0) == fixture.barrier);
+                BUSTER_TEST(arguments, module->local_promotion.candidate_locals == (fixture.barrier ? 0 : old_locals));
+                if (fixture.partial)
+                {
+                    BUSTER_TEST(arguments, module->local_promotion.promoted_locals > 0);
+                    BUSTER_TEST(arguments, module->local_promotion.promoted_locals < old_locals);
+                }
                 if (fixture.all_locals)
                 {
                     BUSTER_TEST(arguments, ir_test_opcode_count(function, IR_OPCODE_LOAD) == 0);

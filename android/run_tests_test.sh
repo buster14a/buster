@@ -877,6 +877,177 @@ PYTHON
     echo "Android zombie cleanup evidence passed"
 )
 
+# Reproduce #917 deterministically: after adb shutdown the owned emulator is a
+# zombie. Two terminal-state probes succeed, then ps becomes unavailable while
+# kill -0 still sees the unreaped child. The stop path must treat the first
+# stopped observation as terminal instead of probing again and manufacturing a
+# live PID from the later ambiguous query.
+test_android_terminal_state_is_monotonic() (
+    set -euo pipefail
+    local state="$test_root/android-terminal-state-monotonic"
+    setup_android_fixture "$state"
+    python3 -S - "$repo_root/android/start_emulator_ci.sh" <<'PYTHON'
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+
+marker = Path(os.environ['BUSTER_ANDROID_EMULATOR_STARTED_MARKER'])
+state = Path(os.environ['FAKE_ANDROID_STATE_DIR'])
+fake_bin = state / 'race-bin'
+fake_bin.mkdir(parents=True, exist_ok=True)
+real_ps = shutil.which('ps')
+assert real_ps is not None
+
+child = os.fork()
+if child == 0:
+    while True:
+        time.sleep(60)
+
+try:
+    marker.write_text(str(child) + '\n')
+    env = os.environ.copy()
+    env['FAKE_ANDROID_RACE_PID'] = str(child)
+    env['FAKE_ANDROID_RACE_STATE'] = str(state)
+    env['FAKE_ANDROID_REAL_PS'] = real_ps
+    env['BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS'] = '2'
+    env['PATH'] = str(fake_bin) + os.pathsep + env['PATH']
+
+    (fake_bin / 'adb').write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+state=${FAKE_ANDROID_RACE_STATE:?}
+pid=${FAKE_ANDROID_RACE_PID:?}
+real_ps=${FAKE_ANDROID_REAL_PS:?}
+if [[ ${1:-} == emu && ${2:-} == kill ]]; then
+    : >"$state/shutdown"
+    kill -TERM "$pid"
+    deadline=$((SECONDS + 5))
+    while :; do
+        process_state=$("$real_ps" -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        if [[ $process_state == Z* || $process_state == X* ]]; then
+            break
+        fi
+        if (( SECONDS >= deadline )); then
+            echo "fake adb could not observe the emulator zombie" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    printf 'OK: killing emulator, bye bye\nOK\n'
+    exit 0
+fi
+exit 0
+''')
+    (fake_bin / 'ps').write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+state=${FAKE_ANDROID_RACE_STATE:?}
+pid=${FAKE_ANDROID_RACE_PID:?}
+real_ps=${FAKE_ANDROID_REAL_PS:?}
+if [[ -f "$state/shutdown" && " $* " == *" -p $pid "* ]]; then
+    count=0
+    if [[ -f "$state/post-shutdown-ps-count" ]]; then
+        count=$(<"$state/post-shutdown-ps-count")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$state/post-shutdown-ps-count"
+    if (( count >= 3 )); then
+        exit 1
+    fi
+fi
+exec "$real_ps" "$@"
+''')
+    (fake_bin / 'adb').chmod(0o755)
+    (fake_bin / 'ps').chmod(0o755)
+
+    result = subprocess.run(['bash', sys.argv[1], 'stop'], env=env,
+                            capture_output=True, text=True, timeout=15)
+    log = result.stdout + result.stderr
+    (state / 'run.log').write_text(log)
+    print(log, end='')
+    assert result.returncode == 0, result.returncode
+    assert 'still exists; sending SIGKILL' not in log
+    assert not marker.exists()
+    count_path = state / 'post-shutdown-ps-count'
+    assert count_path.read_text().strip() == '1', count_path.read_text()
+finally:
+    marker.unlink(missing_ok=True)
+    try:
+        os.kill(child, 9)
+    except ProcessLookupError:
+        pass
+    os.waitpid(child, 0)
+PYTHON
+    echo "Android monotonic terminal-state evidence passed"
+)
+
+# Requiring SIGKILL is not itself a cleanup failure. Verify the final owned
+# process state after the forced signal and fail only if the process survives.
+test_android_sigkill_final_verification() (
+    set -euo pipefail
+    local state="$test_root/android-sigkill-final-verification"
+    setup_android_fixture "$state"
+    python3 -S - "$repo_root/android/start_emulator_ci.sh" <<'PYTHON'
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+marker = Path(os.environ['BUSTER_ANDROID_EMULATOR_STARTED_MARKER'])
+state = Path(os.environ['FAKE_ANDROID_STATE_DIR'])
+fake_bin = state / 'sigkill-bin'
+fake_bin.mkdir(parents=True, exist_ok=True)
+read_fd, write_fd = os.pipe()
+child = os.fork()
+if child == 0:
+    os.close(read_fd)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.write(write_fd, b'1')
+    os.close(write_fd)
+    while True:
+        time.sleep(60)
+
+os.close(write_fd)
+try:
+    assert os.read(read_fd, 1) == b'1'
+    os.close(read_fd)
+    marker.write_text(str(child) + '\n')
+    (fake_bin / 'adb').write_text(r'''#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == emu && ${2:-} == kill ]]; then
+    printf 'OK: killing emulator, bye bye\nOK\n'
+fi
+exit 0
+''')
+    (fake_bin / 'adb').chmod(0o755)
+    env = os.environ.copy()
+    env['BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS'] = '1'
+    env['PATH'] = str(fake_bin) + os.pathsep + env['PATH']
+
+    result = subprocess.run(['bash', sys.argv[1], 'stop'], env=env,
+                            capture_output=True, text=True, timeout=15)
+    log = result.stdout + result.stderr
+    (state / 'run.log').write_text(log)
+    print(log, end='')
+    assert result.returncode == 0, result.returncode
+    assert 'did not exit; sending SIGTERM' in log
+    assert 'still exists; sending SIGKILL' in log
+    assert 'survived SIGKILL' not in log
+    assert not marker.exists()
+finally:
+    marker.unlink(missing_ok=True)
+    try:
+        os.kill(child, 9)
+    except ProcessLookupError:
+        pass
+    os.waitpid(child, 0)
+PYTHON
+    echo "Android SIGKILL final verification evidence passed"
+)
+
 android_workflow_body="$test_root/android-workflow.sh"
 android_workflow_interrupt_body="$test_root/android-workflow-interrupt.sh"
 android_workflow_exit23_body="$test_root/android-workflow-exit23.sh"
@@ -893,6 +1064,8 @@ for workflow_case in all-pass debug-failure debug-timeout missing-marker cleanup
 done
 
 test_android_zombie_cleanup
+test_android_terminal_state_is_monotonic
+test_android_sigkill_final_verification
 test_android_batch_interruption debug-int 130 0 130 Debug 0
 test_android_batch_interruption debug-term 143 0 143 Debug 0
 test_android_batch_interruption debug-term-cleanup-failure 143 0 143 Debug 1

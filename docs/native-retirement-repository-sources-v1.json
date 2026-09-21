@@ -71,8 +71,8 @@
     },
     {
       "source": "src/buster/lib/compiler/ir/ir_promote.c",
-      "bytes": 38861,
-      "sha256": "15049d9028290171f0402a060eb8ca356d22790e36e3757f956105ea413d1fa9"
+      "bytes": 38472,
+      "sha256": "f1db1d52089b3c9edca13696aeecbebfaafa66e62becaed324fb02bb5da283e9"
     },
     {
       "source": "src/buster/lib/compiler/ir/model.h",

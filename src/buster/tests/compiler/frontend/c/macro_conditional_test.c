@@ -116,7 +116,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
                                                         (ProcessSpawnOptions){
                                                             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-                                                            .use_process_environment = true,
+                                                            .use_process_environment = true, .search_path = true,
                                                         });
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
@@ -229,7 +229,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         {
             String8 run[] = {output_path};
             ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                                                        (ProcessSpawnOptions){.use_process_environment = true});
+                                                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
             BUSTER_TEST(arguments, spawn.handle != 0);
             if (spawn.handle)
             {
