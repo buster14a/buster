@@ -22,18 +22,17 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Materialize and verify exact workflow
+      - name: Materialize and verify exact non-workflow blob
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/repair-880/*.b64 | base64 --decode > .github/workflows/9700x-service-dispatch.yml
-          test "$(sha256sum .github/workflows/9700x-service-dispatch.yml | cut -d' ' -f1)" = \
+          cat .github/repair-880/[0-9][0-9][0-9].b64 | base64 --decode > .github/repair-880/materialized.yml
+          test "$(sha256sum .github/repair-880/materialized.yml | cut -d' ' -f1)" = \
             "727ead6f1e751553ba72ffa903b738a1ba4062bf0d1e95754ab96a57ec043708"
-          test "$(git hash-object .github/workflows/9700x-service-dispatch.yml)" = \
+          test "$(git hash-object .github/repair-880/materialized.yml)" = \
             "796f20fdd0f6bb0b58bd2bed29a39f00b7e9f915"
-          rm -rf .github/repair-880 .github/workflows/repair-880.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git commit -m "bench: materialize durable evidence workflow"
+          git add .github/repair-880/materialized.yml
+          git commit -m "chore: publish verified issue 880 workflow blob"
           git push origin HEAD:fix/880-9700x-durable-evidence
