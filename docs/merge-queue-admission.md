@@ -1,0 +1,153 @@
+# Serialized main integration (#867)
+
+## Rollout state: not enabled
+
+Implementation baseline: `46ed5e141baed17dfc1e977691ac73e08be5b9f5`.
+The live ruleset read during this work was `22537199`: six required GitHub
+Actions checks, non-strict branch freshness, no bypass, and no merge queue.
+`.github/main-merge-queue.ruleset.json` is a **desired configuration**, not an
+assertion that those settings have been applied. The checker has no write API.
+
+Do not activate that configuration yet. #925/#927 must first repair current
+main, land the trusted retirement admission gate, and support retirement-bound
+merge groups. The observed #927 implementation rejects every retirement-sensitive
+merge group, including one carrying an attested integration head. This change
+preserves that rejection instead of manufacturing a green queue result. Thus
+this PR is an independently testable #867 prerequisite, not completion of #867.
+
+## One admission owner, no branch-freshness requirement
+
+GitHub's native merge queue owns order, synthetic heads and rebuilding. Configure
+`max_entries_to_build: 1`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`grouping_strategy: ALLGREEN`, and `merge_method: MERGE`. Retain
+`strict_required_status_checks_policy: false`. A clean feature branch does not
+need to be manually updated merely because main advanced. The queue, not the
+feature author, constructs and validates the combined candidate.
+
+Build concurrency and merge batch size are distinct controls; both are one.
+The 360-minute queue timeout exceeds the admission workflow's 310-minute job
+limit and its five-hour bounded wait. A timeout is a failure, not permission to
+merge. Cancellation only coalesces the same PR or merge-group ref; main-push
+policy runs use unique run-ID groups. Workflow concurrency is not a FIFO queue
+and is never used as a replacement for GitHub queue enforcement.
+
+There is no second retirement publisher. The existing protected
+`native-retirement-integration.yml` writer remains the sole authority allowed
+to regenerate and publish the generated pair. This read-only gate neither
+regenerates state nor changes PR branches, main, statuses or rulesets.
+
+## Required-check inventory
+
+The six existing checks remain separately required from GitHub Actions app
+15368. Add `Main integration admission` from the same app only as part of the
+reviewed rollout; never remove one of the existing requirements.
+
+| Required check | Workflow | PR revision | Merge-group revision |
+| --- | --- | --- | --- |
+| CI complete | ci.yml | GitHub PR merge revision | Exact synthetic group |
+| Linux x86-64 bootstrap evidence | self-host-audit.yml | GitHub PR merge revision | Exact synthetic group |
+| Canonical TCC bootstrap | tcc-bootstrap.yml | Explicit PR head (existing #245 policy) | Exact synthetic group |
+| GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
+| Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
+| API migration policy | api-migration-policy.yml | Existing policy/trusted admission rules | Exact synthetic group |
+| Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
+
+`CI complete` retains desktop x86-64/AArch64, mobile, native-mode, UEFI, lint and
+static-analysis ownership. The independent self-host and canonical bootstrap
+checks are not replaced by it. GPU Metal remains optional; a failed optional
+job does not itself replace the required GPU Linux result. A cancelled workflow
+is nevertheless rejected even if its required job had previously succeeded.
+Private-runner and physical throughput qualification are not new requirements.
+
+All six workflows already declare unfiltered `pull_request` and
+`merge_group: checks_requested` triggers. `audit-workflows` checks that small
+contract and the exact required job names; existing actionlint owns general
+YAML/expression validation. This does not broaden #245 fork semantics. Fork PR
+readiness uses hosted runners, read-only permissions, no secrets, and no
+persisted checkout credentials. GitHub's normal fork approval rules still apply.
+
+## Exact identities and fail-closed evidence
+
+For a group, the admission workflow checks out `merge_group.base_sha`, never
+candidate-modified authority code. It fetches the immutable group object without
+checking out or executing it. It requires `GITHUB_SHA == merge_group.head_sha`,
+main as the base ref, a main queue ref, the expected repository, and base ancestry.
+The report binds base SHA/tree, group SHA/tree and queue ref.
+
+Before waiting for CI it invokes the trusted base's
+`native_retirement_merge_gate.py check --event merge_group` without
+`--allow-pending`. An absent gate, pending result, rejected candidate or mismatched
+base/head fails. The retirement integration owner must extend that gate for the
+final attested group; this checker cannot bless it independently.
+
+The collector reads workflow runs by exact group SHA and `merge_group` event,
+then resolves each of the six workflow **paths**, latest run and latest attempt.
+It reads jobs from that attempt-specific endpoint and requires one unambiguous
+required job with the same head, run ID and attempt and conclusion `success`.
+Wrong-workflow same-name jobs, PR-head greens, old successful attempts, missing
+jobs, skipped/neutral jobs and cancelled workflows do not count. Missing or
+running workflows remain pending until the bounded timeout. API errors,
+truncation and ambiguous results fail closed.
+
+Immediately before admission, the collector repeats the six-result read,
+requires the same evidence, rechecks live main and the queue ref, and validates
+the active ruleset again. The ruleset validator retains the six original checks,
+adds only the exact-group gate, rejects bypasses/strict branch updates, and
+requires the single-build/single-merge policy. The success artifact records each
+required workflow's run ID, run attempt and job ID. These are read-only checks;
+GitHub's enforced queue still owns the final atomic admission/rebuild decision.
+
+A PR readiness success is not combined-head authorization. Neither a reused
+artifact nor a manually posted status may authorize another SHA/tree. A newer
+main/group invalidates the current attempt. GitHub must build a fresh group and
+rerun required workflows. Content conflicts use #869's exact-path explanation;
+the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge.
+
+## Activation and acceptance still required
+
+Before editing repository settings, complete and retain evidence for all of:
+
+1. Land #925/#927's repaired, exact-head-attested bootstrap. Extend its
+   merge-group retirement gate to recognize only an exact final generated tree
+   from the existing trusted writer, including main-advance rebuilding. Keep
+   writer authorization, trust transitions, fork disposition and cancellation
+   fail-closed. Do not create another writer/queue to work around that gate.
+2. Merge this prerequisite and run its policy tests on actual main. Resolve
+   any newly added required checks by auditing and extending the inventory;
+   never overwrite a newer live ruleset with the historical desired JSON.
+3. Have an authorized repository administrator apply the reviewed queue and
+   required-check changes, preserving other live protections. Read back
+   `GET /repos/buster14a/buster/rulesets/22537199` and the effective branch rules;
+   run `check-ruleset` against the saved current response. Contents/PR write
+   access does not imply permission to edit repository rulesets.
+4. Queue two nonconflicting PRs from the same old base and retain both exact
+   group reports. After the first lands, prove the second was rebuilt against
+   the new main. Repeat with different retirement-bound sources and attestations.
+5. Inject a controlled combined-candidate check failure despite green PR heads;
+   prove no merge. Exercise cancellation/rerun, main advance during preparation,
+   fork approval, and genuine conflict removal with exact path diagnostics.
+6. Verify UI merge, API merge, squash/rebase and every automation are subject to
+   the effective queue/retirement controls. No live production rejection or
+   queue experiment is claimed by the offline fixtures.
+
+Useful read-only commands:
+
+```sh
+python3 -B tools/merge_queue_admission_test.py -v
+python3 -B tools/merge_queue_admission.py audit-workflows .
+python3 -B tools/merge_queue_admission.py check-ruleset .github/main-merge-queue.ruleset.json
+python3 -B tools/merge_queue_admission.py check-ruleset /tmp/live-main-ruleset.json
+```
+
+## Emergency policy
+
+There is no standing bypass and this work changes no live settings. A repair PR
+with genuine passing checks is preferred. Any emergency settings change needs
+explicit administrator authorization, a recorded reason and exact before/after
+settings, followed by restoration and read-back verification. Never mint a green
+check for cancelled, missing, failed or stale validation. Do not run a post-merge
+rebinding repair as the normal publication path.
+
+GitHub references: [merge queue behavior](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue),
+[ruleset API](https://docs.github.com/en/rest/repos/rules),
+[attempt-specific jobs](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt).
