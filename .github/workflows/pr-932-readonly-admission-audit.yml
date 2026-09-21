@@ -1,0 +1,144 @@
+name: PR 932 read-only current-main admission audit
+
+on:
+  push:
+    branches: [audit/pr-932-admission-1d64654d-22734af9]
+    paths: [.github/workflows/pr-932-readonly-admission-audit.yml]
+
+# Diagnostic evidence only: no publication, status writes, or PR branch updates.
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
+
+env:
+  BASE_SHA: 1d64654d72b259485dbac6ddc36c784fe2bac6c3
+  HEAD_SHA: 22734af9b965dd531cb8d0f49f8c180645f3ac9a
+  PR_NUMBER: '932'
+
+jobs:
+  audit:
+    name: Exact-base read-only admission evidence
+    runs-on: ubuntu-26.04
+    timeout-minutes: 12
+    steps:
+      - name: Check out the immutable current-main authority
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 1d64654d72b259485dbac6ddc36c784fe2bac6c3
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the unchanged PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 22734af9b965dd531cb8d0f49f8c180645f3ac9a
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify live main and PR identities and collect real status evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          test "$(git -C trusted rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$BASE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > evidence/pull-before.json
+          jq -e --arg head "$HEAD_SHA" '.state == "open" and .head.sha == $head and .base.ref == "main"' evidence/pull-before.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA?per_page=100" > evidence/status-pages.json
+          python3 - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path('evidence')
+          pages = json.loads((root / 'status-pages.json').read_text())
+          if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+              raise SystemExit('status pagination did not return arrays')
+          (root / 'status.json').write_text(json.dumps({'sha': os.environ['HEAD_SHA'], 'statuses': [row for page in pages for row in page]}))
+          PY
+      - name: Exercise the unmodified trusted gate and integration regressions
+        working-directory: trusted
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B tools/native_retirement_merge_gate_test.py -v 2>&1 | tee ../evidence/trusted-gate-tests.log
+          python3 -B tools/native_retirement_integration_test.py -v 2>&1 | tee ../evidence/trusted-integration-tests.log
+      - name: Evaluate actual PR admission using exact current-main authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B trusted/tools/native_retirement_merge_gate.py check \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            --base "$BASE_SHA" --head "$HEAD_SHA" --current-main "$BASE_SHA" \
+            --event pull_request --status-json "$GITHUB_WORKSPACE/evidence/status.json" \
+            | tee evidence/admission.json
+          jq -e --arg base "$BASE_SHA" --arg head "$HEAD_SHA" \
+            '.status == "admitted" and .mode == "ordinary" and .base == $base and .head == $head' evidence/admission.json
+      - name: Prove exact combined-tree ownership and retain source-review inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path('evidence')
+          base, head = os.environ['BASE_SHA'], os.environ['HEAD_SHA']
+          paths = ['docs/agents/frontend/layout.md', 'src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/compiler/frontend/c/c_test.c']
+          generated = ['docs/native-retirement-repository-sources-v1.json', 'tools/native_retirement_dependency_binding.generated.h']
+          def git(*args):
+              return subprocess.check_output(['git', '-C', 'candidate', *args])
+          merge_base = git('merge-base', base, head).decode().strip()
+          if merge_base != 'd27127fb83808feb7d3249c3bada7b1c19bdcbbb':
+              raise SystemExit('unexpected merge base')
+          changed = git('diff', '--name-only', '--no-renames', base + '...' + head).decode().splitlines()
+          if sorted(changed) != paths:
+              raise SystemExit('PR-owned delta changed: ' + repr(changed))
+          git('diff', '--check', base + '...' + head)
+          combined = git('merge-tree', '--write-tree', base, head).decode().splitlines()[0].strip()
+          combined_changed = git('diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-r', base + '^{tree}', combined).decode().splitlines()
+          if sorted(combined_changed) != paths:
+              raise SystemExit('combined tree is not exactly the intended three-file delta')
+          blobs = {}
+          for path in paths:
+              current_blob = git('rev-parse', base + ':' + path).decode().strip()
+              ancestor_blob = git('rev-parse', merge_base + ':' + path).decode().strip()
+              candidate_blob = git('rev-parse', head + ':' + path).decode().strip()
+              combined_blob = git('rev-parse', combined + ':' + path).decode().strip()
+              if current_blob != ancestor_blob or candidate_blob != combined_blob:
+                  raise SystemExit('unexpected main-side overlap or combined contents at ' + path)
+              blobs[path] = {'base': current_blob, 'head': candidate_blob, 'combined': combined_blob}
+              for label, revision in [('base', base), ('candidate', head)]:
+                  output = root / label / path
+                  output.parent.mkdir(parents=True, exist_ok=True)
+                  output.write_bytes(git('show', revision + ':' + path))
+          for path in generated:
+              if git('rev-parse', base + ':' + path) != git('rev-parse', combined + ':' + path):
+                  raise SystemExit('integration-owned artifact changed: ' + path)
+          patch = git('diff', '--binary', base + '...' + head, '--', *paths)
+          (root / 'three-file.diff').write_bytes(patch)
+          report = {'base': base, 'head': head, 'merge_base': merge_base, 'base_tree': git('rev-parse', base + '^{tree}').decode().strip(), 'head_tree': git('rev-parse', head + '^{tree}').decode().strip(), 'combined_tree': combined, 'changed_paths': paths, 'blobs': blobs, 'generated_unchanged': generated, 'patch_sha256': hashlib.sha256(patch).hexdigest()}
+          (root / 'combined-tree.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(report, indent=2, sort_keys=True))
+          PY
+      - name: Recheck live identities before accepting diagnostic evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$BASE_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > evidence/pull-after.json
+          jq -e --arg head "$HEAD_SHA" '.state == "open" and .head.sha == $head and .base.ref == "main"' evidence/pull-after.json
+          git -C trusted diff --exit-code
+          git -C candidate diff --exit-code
+          printf '## Read-only PR 932 admission evidence\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'No status was posted, no generated artifact was published, and no PR ref was updated.\n\n' >> "$GITHUB_STEP_SUMMARY"
+          cat evidence/admission.json evidence/combined-tree.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain exact-input diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr-932-current-main-admission-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
