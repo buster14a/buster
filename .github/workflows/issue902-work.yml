@@ -6,13 +6,13 @@ on:
 permissions:
   contents: read
 jobs:
-  validate:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-26.04, ubuntu-26.04-arm]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -21,16 +21,14 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 5186833693f7de58092c3933c4429a6cf8080459
+          ref: 6612ac99d248ed1b129e5888360517ea0ca4cb92
           path: payload
           persist-credentials: false
-      - name: Verify patch and prepare frontend-only diagnostic dispatch
+      - name: Construct and verify exact candidate
         working-directory: source
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/evidence"
-          cp ../payload/issue902.patch.gz.b64 "$RUNNER_TEMP/evidence/transport.b64"
           python3 - <<'PY'
           from pathlib import Path
           import base64, gzip, hashlib
@@ -40,9 +38,55 @@ jobs:
           assert hashlib.sha256(p).hexdigest() == '8d4b5a4e1ba24e99d03abc78332a7915713920c990936581514de6210e7bfdcf'
           Path('../issue902.patch').write_bytes(p)
           PY
-          sha256sum ../issue902.patch | tee "$RUNNER_TEMP/evidence/patch.sha256"
           git apply --check ../issue902.patch
-          git apply --exclude=src/buster/lib/compiler/frontend/c/c_gen.c ../issue902.patch
+          git apply ../issue902.patch
+          python3 ../payload/issue902-repair.py
+          git diff --check
+          git diff --binary > "$RUNNER_TEMP/validated.patch"
+          echo 'c62ec218a6bc8acf24cdbf17a138a3374eede54650bfacd219160ee48d1ae0f4  '"$RUNNER_TEMP/validated.patch" | sha256sum -c -
+          python3 - <<'PY'
+          import subprocess
+          names = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert names == {'docs/agents/frontend/layout.md', 'src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/compiler/frontend/c/c_test.c'}, names
+          PY
+      - name: Publish focused feature branch
+        id: publish
+        working-directory: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git switch -c codex/902-wide-enum-bit-fields
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/agents/frontend/layout.md src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c
+          git commit -m 'fix(c): use resolved semantic types for enum bit-fields'
+          header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=$header" push origin HEAD:refs/heads/codex/902-wide-enum-bit-fields
+          git show --stat --oneline HEAD
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prepare baseline production and frontend-only diagnostic dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/candidate.sha"
+          git show HEAD^:src/buster/lib/compiler/frontend/c/c_gen.c > src/buster/lib/compiler/frontend/c/c_gen.c
           python3 - <<'PY'
           from pathlib import Path
           p = Path('src/buster/tests/test.c')
@@ -50,12 +94,10 @@ jobs:
           old = 'buster_test_run_parallel_descriptors(arguments, test_descriptors, BUSTER_ARRAY_LENGTH(test_descriptors), timing_enabled, &timing_record_count)'
           assert s.count(old) == 1
           s = s.replace(old, 'buster_test_run_parallel_descriptors(arguments, test_descriptors + TEST_ID_C_FRONTEND, 1, timing_enabled, &timing_record_count)')
-          s = s.replace('timing_record_count == expected_timing_records', 'timing_record_count == 1')
+          s = s.replace('expected_timing_records += !test_descriptors[index].table_audit || buster_test_table_audits_enabled();', 'expected_timing_records += index == TEST_ID_C_FRONTEND;')
           p.write_text(s)
           PY
-          git diff --check
       - name: Build baseline production with the added regressions
-        working-directory: source
         shell: bash
         run: |
           set -euo pipefail
@@ -65,15 +107,13 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/driver"
           "$RUNNER_TEMP/driver" generate --cc clang --config Debug --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_DEBUG_INFO=OFF
           "$RUNNER_TEMP/driver" build --config Debug -t ide
-      - name: Baseline frontend suite including new enum bit-field regressions
-        working-directory: source
+      - name: Baseline complete frontend suite including new regressions
         shell: bash
         run: |
           set -euo pipefail
           BUSTER_TEST_JOBS=2 timeout 600 build/Debug/ide test --ci=1 2>&1 | tee "$RUNNER_TEMP/evidence/baseline-frontend.log"
       - name: Baseline Debug-seeded fixed point
         if: ${{ matrix.runner == 'ubuntu-26.04' }}
-        working-directory: source
         shell: bash
         run: |
           set -euo pipefail
@@ -83,21 +123,18 @@ jobs:
           cmp "$RUNNER_TEMP/baseline-stage1" "$RUNNER_TEMP/baseline-stage2"
           sha256sum "$RUNNER_TEMP/baseline-stage1" "$RUNNER_TEMP/baseline-stage2"
       - name: Build candidate
-        working-directory: source
         shell: bash
         run: |
           set -euo pipefail
-          git apply --include=src/buster/lib/compiler/frontend/c/c_gen.c ../issue902.patch
+          git restore src/buster/lib/compiler/frontend/c/c_gen.c
           "$RUNNER_TEMP/driver" build --config Debug -t ide 2>&1 | tee "$RUNNER_TEMP/evidence/candidate-build.log"
       - name: Candidate complete frontend suite
-        working-directory: source
         shell: bash
         run: |
           set -euo pipefail
           BUSTER_TEST_JOBS=2 timeout 600 build/Debug/ide test --ci=1 2>&1 | tee "$RUNNER_TEMP/evidence/candidate-frontend.log"
       - name: Candidate Debug-seeded fixed point
         if: ${{ matrix.runner == 'ubuntu-26.04' }}
-        working-directory: source
         shell: bash
         run: |
           set -euo pipefail
@@ -106,16 +143,14 @@ jobs:
           timeout 300 "$RUNNER_TEMP/candidate-stage1" cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g src/buster/apps/ide/ide.c -lm -o "$RUNNER_TEMP/candidate-stage2"
           cmp "$RUNNER_TEMP/candidate-stage1" "$RUNNER_TEMP/candidate-stage2"
           sha256sum "$RUNNER_TEMP/candidate-stage1" "$RUNNER_TEMP/candidate-stage2"
-      - name: Verify production patch has no test dispatch changes
-        working-directory: source
+      - name: Verify diagnostic dispatch is absent from candidate
         shell: bash
         run: |
           set -euo pipefail
           git restore src/buster/tests/test.c
-          git diff --check
-          git diff --binary > "$RUNNER_TEMP/evidence/validated.patch"
-          echo '8d4b5a4e1ba24e99d03abc78332a7915713920c990936581514de6210e7bfdcf  '"$RUNNER_TEMP/evidence/validated.patch" | sha256sum -c -
-          git diff --stat | tee "$RUNNER_TEMP/evidence/diff-stat.txt"
+          git diff --exit-code
+          git diff HEAD^ HEAD --binary > "$RUNNER_TEMP/evidence/validated.patch"
+          echo 'c62ec218a6bc8acf24cdbf17a138a3374eede54650bfacd219160ee48d1ae0f4  '"$RUNNER_TEMP/evidence/validated.patch" | sha256sum -c -
       - name: Retain validation evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
