@@ -1,6 +1,6 @@
 # Forge, issues, and pull requests
 
-[Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
+[Agent instructions](../../AGENTS.md) · [Research lifecycle](research.md) · Paths and commands below are relative to the repository root.
 
 ## Forge, issues, and pull requests
 
@@ -59,6 +59,13 @@ validate the fix (which oracle, which harness, which counters), and a
 definition of done. State what was measured and when, so a stale claim is
 recognisable as stale; the tree moves fast enough that a count quoted without
 a date is a trap. Issues #537-#549 are examples of the form.
+
+Research, performance, experiment, and architecture issues also carry at most
+one primary lifecycle label for their immediate evidence gate. Keep area,
+architecture, kind, and priority labels orthogonal; preserve historical bodies
+and update the live state in issue metadata plus a compact comment. See the
+[research lifecycle](research.md) for the vocabulary, transition rules, and
+required evidence/disposition fields.
 
 ## Cross-cutting internal API migrations
 
