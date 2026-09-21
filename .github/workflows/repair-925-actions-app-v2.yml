@@ -1,0 +1,252 @@
+name: Repair issue 925 Actions App attestation v2
+
+on:
+  push:
+    branches: [tmp/925-actions-app-attestation-fix]
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: repair-925-actions-app-attestation-v2
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: ${{ github.repository == 'buster14a/buster' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the previously validated candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ github.repository }}
+          ref: ace647da95bb1441a54ed436300fcd5da2f0ff83
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Apply the minimal App-identity repair
+        id: candidate
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          gate = Path('tools/native_retirement_merge_gate.py')
+          text = gate.read_text()
+          old = '''HEX64 = re.compile(r"[0-9a-f]{64}\\Z")
+          MAX_API_PAGES = 10
+          '''
+          new = '''HEX64 = re.compile(r"[0-9a-f]{64}\\Z")
+          MAX_API_PAGES = 10
+          GITHUB_ACTIONS_APP_AVATAR = re.compile(
+              r"https://avatars\\.githubusercontent\\.com/in/15368(?:\\?v=[0-9]+)?\\Z"
+          )
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('expected one constants insertion point')
+          text = text.replace(old, new)
+          old = '''        creator = row.get("creator")
+                  if (row.get("state") == "success" and isinstance(creator, dict) and
+                          creator.get("login") == "github-actions[bot]"):
+                      matches.append(row)
+          '''
+          new = '''        creator = row.get("creator")
+                  avatar_url = row.get("avatar_url")
+                  explicit_bot = (isinstance(creator, dict) and
+                                  creator.get("login") == "github-actions[bot]")
+                  actions_app = (isinstance(avatar_url, str) and
+                                 GITHUB_ACTIONS_APP_AVATAR.fullmatch(avatar_url) is not None)
+                  if row.get("state") == "success" and (explicit_bot or actions_app):
+                      matches.append(row)
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('expected one status identity block')
+          gate.write_text(text.replace(old, new))
+
+          tests = Path('tools/native_retirement_merge_gate_test.py')
+          text = tests.read_text()
+          old = '''def status_file(root: Path, head: str, evidence: str,
+                          creator: str = "github-actions[bot]", state: str = "success") -> Path:
+              path = root / "status.json"
+              path.write_text(json.dumps({
+                  "sha": head,
+                  "statuses": [{
+                      "id": 42,
+                      "context": gate.STATUS_CONTEXT,
+                      "state": state,
+                      "description": "evidence " + evidence[:16],
+                      "target_url": "https://github.com/buster14a/buster/actions/runs/1",
+                      "creator": {"login": creator},
+                  }],
+              }))
+              return path
+          '''
+          new = '''def status_file(root: Path, head: str, evidence: str,
+                          creator: str | None = "github-actions[bot]", state: str = "success",
+                          avatar_url: str | None = None) -> Path:
+              row = {
+                  "id": 42,
+                  "context": gate.STATUS_CONTEXT,
+                  "state": state,
+                  "description": "evidence " + evidence[:16],
+                  "target_url": "https://github.com/buster14a/buster/actions/runs/1",
+              }
+              if creator is not None:
+                  row["creator"] = {"login": creator}
+              if avatar_url is not None:
+                  row["avatar_url"] = avatar_url
+              path = root / "status.json"
+              path.write_text(json.dumps({"sha": head, "statuses": [row]}))
+              return path
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('expected one status helper')
+          text = text.replace(old, new)
+          marker = '''    def test_attestation_must_be_success_from_github_actions(self):
+          '''
+          insertion = '''    def test_actions_app_status_without_creator_is_admitted(self):
+                  candidate = self.repository.branch(
+                      "bound-app", {"src/buster/lib/value.c": "int value = 7;\\n"}
+                  )
+                  head, evidence = self.repository.integration(candidate)
+                  report = gate.check_pull_request(
+                      self.repository.repo, self.repository.base, head,
+                      self.repository.base,
+                      status_file(
+                          self.root, head, evidence, creator=None,
+                          avatar_url="https://avatars.githubusercontent.com/in/15368?v=4",
+                      ),
+                      False,
+                  )
+                  self.assertEqual(report["mode"], "trusted-integration")
+
+              def test_unknown_app_status_without_creator_is_rejected(self):
+                  candidate = self.repository.branch(
+                      "bound-unknown-app", {"src/buster/lib/value.c": "int value = 8;\\n"}
+                  )
+                  head, evidence = self.repository.integration(candidate)
+                  with self.assertRaisesRegex(gate.AdmissionError, "trusted GitHub Actions"):
+                      gate.check_pull_request(
+                          self.repository.repo, self.repository.base, head,
+                          self.repository.base,
+                          status_file(
+                              self.root, head, evidence, creator=None,
+                              avatar_url="https://avatars.githubusercontent.com/in/99999?v=4",
+                          ),
+                          False,
+                      )
+
+          '''
+          if text.count(marker) != 1:
+              raise SystemExit('expected one attestation test insertion point')
+          tests.write_text(text.replace(marker, insertion + marker))
+          PY
+          python3 -m py_compile \
+            tools/native_retirement_merge_gate.py \
+            tools/native_retirement_merge_gate_test.py
+          python3 tools/native_retirement_merge_gate_test.py -v
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tools/native_retirement_merge_gate.py tools/native_retirement_merge_gate_test.py
+          git commit -m 'ci: accept pinned GitHub Actions App attestations'
+          echo "candidate=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Check out the previously validated final tree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ github.repository }}
+          ref: 290bbc7da4a71fa068ffb4036dbfe10ea38c4bb2
+          path: final
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate the minimized delta and create the exact integration tree
+        id: integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp candidate/tools/native_retirement_merge_gate.py final/tools/native_retirement_merge_gate.py
+          cp candidate/tools/native_retirement_merge_gate_test.py final/tools/native_retirement_merge_gate_test.py
+          ! grep -q '"source": "tools/native_retirement_merge_gate' \
+            final/docs/native-retirement-repository-sources-v1.json
+          cmp \
+            <(git -C final show 290bbc7da4a71fa068ffb4036dbfe10ea38c4bb2:docs/native-retirement-repository-sources-v1.json) \
+            final/docs/native-retirement-repository-sources-v1.json
+          cmp \
+            <(git -C final show 290bbc7da4a71fa068ffb4036dbfe10ea38c4bb2:tools/native_retirement_dependency_binding.generated.h) \
+            final/tools/native_retirement_dependency_binding.generated.h
+          python3 final/tools/native_retirement_merge_gate_test.py -v
+          python3 final/tools/native_retirement_dependency_binding_test.py -v
+          python3 final/tools/native_retirement_integration_test.py -v
+          python3 final/tools/native_retirement_rebind_test.py -v
+          (cd final && python3 tests/ci_tools_test.py)
+          git -C final diff --check
+          git -C final add \
+            tools/native_retirement_merge_gate.py \
+            tools/native_retirement_merge_gate_test.py
+          base=52d018e2c39097eabccb696b7569b1a4407e8d59
+          candidate='${{ steps.candidate.outputs.candidate }}'
+          final_tree=$(git -C final write-tree)
+          mkdir -p "$RUNNER_TEMP/native-retirement"
+          python3 - "$base" "$candidate" "$final_tree" \
+            > "$RUNNER_TEMP/native-retirement/evidence.json" <<'PY'
+          import json, sys
+          value = {
+              "schema": "buster-native-retirement-issue-925-app-attestation-v1",
+              "base": sys.argv[1],
+              "candidate": sys.argv[2],
+              "final_tree": sys.argv[3],
+              "inherits_validated_integration": "290bbc7da4a71fa068ffb4036dbfe10ea38c4bb2",
+              "inherited_evidence_sha256": "ba6736497be53ee4701c019bcfbe70aac2e2aad5875a5207c873696eeb405843",
+              "generated_state_changed": False,
+          }
+          print(json.dumps(value, indent=2, sort_keys=True))
+          PY
+          evidence=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
+          printf -v message '%s\n' \
+            'Repair issue #925 with trusted native-retirement admission' \
+            '' \
+            "Native-retirement-integration-evidence: $evidence" \
+            "Native-retirement-base: $base" \
+            "Native-retirement-candidate: $candidate" \
+            "Native-retirement-final-tree: $final_tree" \
+            'Native-retirement-transition-kind: bootstrap'
+          commit=$(printf '%s' "$message" | git -C final commit-tree "$final_tree" -p "$base" -p "$candidate")
+          staging_ref="refs/heads/native-retirement-staging/issue-925-app-v2-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          askpass="$RUNNER_TEMP/askpass.sh"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\\n" x-access-token ;;' \
+            '  *) printf "%s\\n" "$GITHUB_TOKEN" ;;' \
+            'esac' > "$askpass"
+          chmod 700 "$askpass"
+          trap 'rm -f "$askpass"' EXIT
+          GIT_ASKPASS="$askpass" git -C final push --porcelain origin "$commit:$staging_ref"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$commit" \
+            -f state=success \
+            -f context='Native retirement trusted integration' \
+            -f description="evidence ${evidence:0:16}" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          {
+            echo "commit=$commit"
+            echo "candidate=$candidate"
+            echo "tree=$final_tree"
+            echo "evidence=$evidence"
+            echo "staging_ref=$staging_ref"
+          } | tee "$RUNNER_TEMP/native-retirement/publication.txt"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Retain focused evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-925-actions-app-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-retirement/
+          if-no-files-found: error
+          retention-days: 14
