@@ -220,7 +220,9 @@ Respond to its numbered classification exactly as follows:
    bootstrap/policy transition procedure. Do not let candidate-modified trust
    code approve its own output, and do not combine a trust implementation
    bootstrap with its dependent policy/schema transition. Resolve ordering and
-   independent review before running expensive acceptance again.
+   the applicable exact-head authorization before running expensive acceptance
+   again: independent review by default, or the explicitly configured admin
+   dispatch in the documented solo-maintainer policy.
 
 For a local diagnosis with already-fetched immutable commits, run:
 
