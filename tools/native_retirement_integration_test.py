@@ -188,6 +188,7 @@ class FakeGitHub:
 
     def __init__(self, head: str, reviews=()):
         self.head = head
+        self.base = "b" * 40
         self.reviews = list(reviews)
         self.permissions = {
             "dispatcher": "admin",
@@ -196,6 +197,8 @@ class FakeGitHub:
         }
 
     def request(self, path: str):
+        if path == "git/ref/heads/main":
+            return {"object": {"sha": self.base}}
         if path != "pulls/864":
             raise AssertionError(path)
         return {
@@ -249,6 +252,122 @@ class AuthorizationTests(unittest.TestCase):
         report = integration.authorize(current, 864, head, "bootstrap",
                                        "dispatcher")
         self.assertEqual(report["maintainer_approvals"], ["reviewer"])
+
+    def solo_context(self):
+        return {
+            "configured_login": "author",
+            "expected_base": "b" * 40,
+            "event_name": "workflow_dispatch",
+            "workflow_ref": "buster14a/buster/.github/workflows/native-retirement-integration.yml@refs/heads/main",
+            "workflow_sha": "b" * 40,
+            "triggering_actor": "author",
+            "run_attempt": "1",
+            "run_id": "123",
+        }
+
+    def test_solo_admin_can_authorize_own_exact_candidate_without_claiming_review(self):
+        for kind in ("bootstrap", "policy"):
+            with self.subTest(kind=kind):
+                head = "a" * 40
+                report = integration.authorize(
+                    FakeGitHub(head), 864, head, kind, "author",
+                    authorization_mode="solo-maintainer", solo_context=self.solo_context(),
+                )
+                self.assertEqual(report["head"], head)
+                self.assertEqual(report["maintainer_approvals"], [])
+                self.assertEqual(report["authorization"]["mode"], "solo-maintainer")
+                self.assertEqual(report["authorization"]["base"], "b" * 40)
+                self.assertEqual(report["authorization"]["run_id"], "123")
+
+    def test_solo_configuration_never_implicitly_replaces_independent_review(self):
+        with self.assertRaisesRegex(integration.IntegrationError, "approving maintainer"):
+            integration.authorize(FakeGitHub("a" * 40), 864, "a" * 40,
+                                  "bootstrap", "author", solo_context=self.solo_context())
+
+    def test_solo_rejects_missing_opt_in_wrong_actor_ref_reruns_and_bad_identities(self):
+        cases = (
+            ("configured_login", ""), ("configured_login", "dispatcher"),
+            ("event_name", "pull_request"), ("event_name", "pull_request_target"),
+            ("workflow_ref", "buster14a/buster/.github/workflows/native-retirement-integration.yml@refs/heads/feature"),
+            ("workflow_ref", "elsewhere/repo/.github/workflows/native-retirement-integration.yml@refs/heads/main"),
+            ("triggering_actor", "dispatcher"), ("triggering_actor", ""),
+            ("run_attempt", "2"), ("run_attempt", ""),
+            ("expected_base", "main"), ("expected_base", ""),
+            ("workflow_sha", "c" * 40), ("workflow_sha", ""),
+            ("run_id", ""), ("run_id", "0"), ("run_id", "12x"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                context = dict(self.solo_context(), **{field: value})
+                with self.assertRaises(integration.IntegrationError):
+                    integration.authorize(
+                        FakeGitHub("a" * 40), 864, "a" * 40, "bootstrap", "author",
+                        authorization_mode="solo-maintainer", solo_context=context,
+                    )
+
+    def test_solo_rechecks_current_main_head_and_admin_permission_before_publication(self):
+        for change in ("main", "head", "permission"):
+            with self.subTest(change=change):
+                api = FakeGitHub("a" * 40)
+                arguments = dict(authorization_mode="solo-maintainer", solo_context=self.solo_context())
+                integration.authorize(api, 864, "a" * 40, "bootstrap", "author", **arguments)
+                if change == "main":
+                    api.base = "c" * 40
+                elif change == "head":
+                    api.head = "c" * 40
+                else:
+                    api.permissions["author"] = "maintain"
+                with self.assertRaises(integration.IntegrationError):
+                    integration.authorize(api, 864, "a" * 40, "bootstrap", "author", **arguments)
+
+    def test_solo_rejects_missing_context_and_ordinary_or_unknown_modes(self):
+        for kind, mode, context in (
+            ("bootstrap", "solo-maintainer", None),
+            ("ordinary", "solo-maintainer", self.solo_context()),
+            ("unknown", "solo-maintainer", self.solo_context()),
+            ("bootstrap", "unknown", self.solo_context()),
+        ):
+            with self.subTest(kind=kind, mode=mode, context=context):
+                with self.assertRaises(integration.IntegrationError):
+                    integration.authorize(
+                        FakeGitHub("a" * 40), 864, "a" * 40, kind, "author",
+                        authorization_mode=mode, solo_context=context,
+                    )
+
+    def test_solo_cli_uses_github_runtime_context(self):
+        context = self.solo_context()
+        environment = {
+            "GITHUB_REPOSITORY": "buster14a/buster", "GH_TOKEN": "fixture",
+            "GITHUB_ACTOR": "author",
+            "NATIVE_RETIREMENT_SOLO_MAINTAINER": context["configured_login"],
+            "GITHUB_EVENT_NAME": context["event_name"],
+            "GITHUB_WORKFLOW_REF": context["workflow_ref"],
+            "GITHUB_WORKFLOW_SHA": context["workflow_sha"],
+            "GITHUB_TRIGGERING_ACTOR": context["triggering_actor"],
+            "GITHUB_RUN_ATTEMPT": context["run_attempt"],
+            "GITHUB_RUN_ID": context["run_id"],
+        }
+        args = ["authorize", "--pull-request", "864", "--expected-head", "a" * 40,
+                "--transition-kind", "bootstrap", "--authorization-mode", "solo-maintainer",
+                "--expected-base", context["expected_base"]]
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(integration, "GitHub", return_value=FakeGitHub("a" * 40)), \
+                mock.patch("builtins.print") as output:
+            self.assertEqual(integration.main(args), 0)
+            report = json.loads(output.call_args.args[0])
+            self.assertEqual(report["authorization"]["mode"], "solo-maintainer")
+
+    def test_workflow_reauthorizes_same_explicit_policy_and_retains_both_records(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/native-retirement-integration.yml").read_text()
+        self.assertIn("default: independent-review", workflow)
+        self.assertIn("${{ vars.NATIVE_RETIREMENT_SOLO_MAINTAINER }}", workflow)
+        prepare, publish = workflow.split("  publish:\n", 1)
+        for job in (prepare, publish):
+            self.assertIn('--authorization-mode "$AUTHORIZATION_MODE"', job)
+            self.assertIn('--expected-base "$EXPECTED_BASE"', job)
+            self.assertIn('tee "$RUNNER_TEMP/native-retirement/authorization.json"', job)
+            self.assertIn("${{ runner.temp }}/native-retirement/authorization.json", job)
 
 
 class IntegrationTests(unittest.TestCase):

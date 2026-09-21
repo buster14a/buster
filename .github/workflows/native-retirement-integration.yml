@@ -17,6 +17,16 @@ on:
         default: ordinary
         type: choice
         options: [ordinary, bootstrap, policy]
+      authorization_mode:
+        description: Explicit authorization policy for this exact candidate
+        required: true
+        default: independent-review
+        type: choice
+        options: [independent-review, solo-maintainer]
+      expected_base:
+        description: Exact approved main SHA (required for solo-maintainer)
+        required: false
+        type: string
 
 permissions: {}
 
@@ -28,6 +38,9 @@ env:
   PR_NUMBER: ${{ inputs.pull_request }}
   EXPECTED_HEAD: ${{ inputs.expected_head }}
   TRANSITION_KIND: ${{ inputs.transition_kind }}
+  AUTHORIZATION_MODE: ${{ inputs.authorization_mode }}
+  EXPECTED_BASE: ${{ inputs.expected_base }}
+  NATIVE_RETIREMENT_SOLO_MAINTAINER: ${{ vars.NATIVE_RETIREMENT_SOLO_MAINTAINER }}
 
 jobs:
   prepare:
@@ -69,10 +82,17 @@ jobs:
             "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/native-retirement-candidate"
           head=$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)
           test "$head" = "$EXPECTED_HEAD"
+          if [[ "$AUTHORIZATION_MODE" == solo-maintainer ]]; then
+            test "$base" = "$EXPECTED_BASE"
+          fi
+          mkdir -p "$RUNNER_TEMP/native-retirement"
           python3 trusted/tools/native_retirement_integration.py authorize \
             --pull-request "$PR_NUMBER" \
             --expected-head "$head" \
-            --transition-kind "$TRANSITION_KIND"
+            --transition-kind "$TRANSITION_KIND" \
+            --authorization-mode "$AUTHORIZATION_MODE" \
+            --expected-base "$EXPECTED_BASE" \
+            | tee "$RUNNER_TEMP/native-retirement/authorization.json"
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "head=$head" >> "$GITHUB_OUTPUT"
       - name: Construct exact current-main plus candidate tree
@@ -171,7 +191,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-retirement-integration-prepared-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/native-retirement/evidence.json
+          path: |
+            ${{ runner.temp }}/native-retirement/evidence.json
+            ${{ runner.temp }}/native-retirement/authorization.json
           if-no-files-found: error
           retention-days: 7
 
@@ -402,13 +424,18 @@ jobs:
           test "$actual" = '${{ needs.prepare.outputs.evidence_sha256 }}'
           test "$(git -C integration write-tree)" = '${{ needs.prepare.outputs.final_tree }}'
       - name: Reauthorize immediately before the only mutation
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           python3 trusted/tools/native_retirement_integration.py authorize \
             --pull-request "$PR_NUMBER" \
             --expected-head "$EXPECTED_HEAD" \
-            --transition-kind "$TRANSITION_KIND"
+            --transition-kind "$TRANSITION_KIND" \
+            --authorization-mode "$AUTHORIZATION_MODE" \
+            --expected-base "$EXPECTED_BASE" \
+            | tee "$RUNNER_TEMP/native-retirement/authorization.json"
       - name: Atomically publish or fail closed on stale main
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -438,5 +465,6 @@ jobs:
           path: |
             ${{ runner.temp }}/native-retirement/evidence.json
             ${{ runner.temp }}/native-retirement/publication.json
+            ${{ runner.temp }}/native-retirement/authorization.json
           if-no-files-found: error
           retention-days: 7
