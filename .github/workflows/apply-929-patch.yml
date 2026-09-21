@@ -36,11 +36,10 @@ jobs:
           git config user.name "openai-codex"
           git config user.email "openai-codex@users.noreply.github.com"
           git add -f apply-929-error.txt
-          if git diff --cached --quiet; then
-            exit 0
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: retain issue 929 patch diagnostic"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
-          git commit -m "ci: retain issue 929 patch diagnostic"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Stop after patch diagnostic
         if: steps.apply.outputs.status != '0'
@@ -48,23 +47,48 @@ jobs:
 
       - name: Validate syntax and focused contracts
         if: steps.apply.outputs.status == '0'
+        id: validate
+        shell: bash
         run: |
-          python3 -m py_compile \
-            tools/native_retirement_performance_schema.py \
-            tools/native_retirement_contract.py \
-            tools/native_retirement_performance_binding.py \
-            tools/native_retirement_performance_binding_test.py \
-            tools/native_retirement_performance_identity_test.py \
-            tools/native_retirement_performance_eligibility_test.py
-          python3 -W error::ResourceWarning tools/native_retirement_performance_eligibility_test.py -v
-          python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
-          python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
+          set +e
+          {
+            python3 -m py_compile \
+              tools/native_retirement_performance_schema.py \
+              tools/native_retirement_contract.py \
+              tools/native_retirement_performance_binding.py \
+              tools/native_retirement_performance_binding_test.py \
+              tools/native_retirement_performance_identity_test.py \
+              tools/native_retirement_performance_eligibility_test.py &&
+            python3 -W error::ResourceWarning tools/native_retirement_performance_eligibility_test.py -v &&
+            python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v &&
+            python3 -W error::ResourceWarning tools/native_retirement_performance_identity_test.py -v
+          } >validate-929-error.txt 2>&1
+          status=$?
+          cat validate-929-error.txt
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
 
-      - name: Commit applied patch
-        if: steps.apply.outputs.status == '0'
+      - name: Publish validation diagnostic
+        if: steps.apply.outputs.status == '0' && steps.validate.outputs.status != '0'
         run: |
           git config user.name "openai-codex"
           git config user.email "openai-codex@users.noreply.github.com"
+          git add -f validate-929-error.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: retain issue 929 validation diagnostic"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Stop after validation diagnostic
+        if: steps.apply.outputs.status == '0' && steps.validate.outputs.status != '0'
+        run: exit 1
+
+      - name: Commit applied patch
+        if: steps.apply.outputs.status == '0' && steps.validate.outputs.status == '0'
+        run: |
+          git config user.name "openai-codex"
+          git config user.email "openai-codex@users.noreply.github.com"
+          rm -f validate-929-error.txt
           git add -A
           git diff --cached --check
           git commit -m "bench: reconcile retirement performance eligibility"
