@@ -1,0 +1,44 @@
+name: PR 923 source-only workspace
+
+on:
+  push:
+    branches:
+      - work/923-881-recipe-20260921
+    paths:
+      - .github/workflows/923-source-snapshot.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the inspected main revision without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 1d64654d72b259485dbac6ddc36c784fe2bac6c3
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export only tracked Git objects for the inspected source revisions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git update-ref refs/heads/workspace-main 1d64654d72b259485dbac6ddc36c784fe2bac6c3
+          git cat-file -e 358a6ae9219833dce9b4e7d1be15c1471c8f7422^{commit}
+          git update-ref refs/heads/workspace-pr923 358a6ae9219833dce9b4e7d1be15c1471c8f7422
+          git bundle create "$RUNNER_TEMP/buster-923-sources.bundle" refs/heads/workspace-main refs/heads/workspace-pr923
+          git bundle verify "$RUNNER_TEMP/buster-923-sources.bundle"
+          sha256sum "$RUNNER_TEMP/buster-923-sources.bundle" > "$RUNNER_TEMP/buster-923-sources.sha256"
+      - name: Retain source bundle for the authorized implementation workspace
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: buster-923-source-only
+          path: |
+            ${{ runner.temp }}/buster-923-sources.bundle
+            ${{ runner.temp }}/buster-923-sources.sha256
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
