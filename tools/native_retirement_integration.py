@@ -701,6 +701,28 @@ def authorize(api: GitHub, pull_request: int, expected_head: str, transition_kin
     }
 
 
+def resolve_dispatch(base: str, head: str, kind: str, *, expected_base: str,
+                     expected_head: str, requested_kind: str, requested_mode: str,
+                     workflow_sha: str, configured_login: str, actor: str) -> dict:
+    """Resolve convenience inputs once; authorize() still enforces permission."""
+    _require_hex(base, HEX40, "resolved main")
+    _require_hex(head, HEX40, "resolved candidate")
+    if base != workflow_sha or (expected_base and expected_base != base):
+        raise StaleMain("main moved since dispatch; start a fresh run")
+    if expected_head and expected_head != head:
+        raise StaleHead("candidate differs from the explicitly requested head")
+    if kind not in TRANSITION_KINDS or requested_kind not in ("auto", kind):
+        raise IntegrationError("requested transition differs from trusted classification")
+    mode = requested_mode
+    if mode == "configured":
+        mode = ("solo-maintainer" if kind != "ordinary" and configured_login and
+                configured_login == actor else "independent-review")
+    if mode not in AUTHORIZATION_MODES:
+        raise IntegrationError("unknown authorization mode")
+    return {"base": base, "head": head, "classification": kind,
+            "authorization_mode": mode}
+
+
 def _read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text())
@@ -752,6 +774,15 @@ def _parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--evidence", type=Path, required=True)
     publish_parser.add_argument("--message", required=True)
 
+    resolve = subparsers.add_parser("resolve-dispatch")
+    resolve.add_argument("--repo-root", type=Path, required=True)
+    resolve.add_argument("--base", required=True)
+    resolve.add_argument("--head", required=True)
+    resolve.add_argument("--expected-base", default="")
+    resolve.add_argument("--expected-head", default="")
+    resolve.add_argument("--transition-kind", default="auto")
+    resolve.add_argument("--authorization-mode", default="configured")
+
     authorize_parser = subparsers.add_parser("authorize")
     authorize_parser.add_argument("--pull-request", type=int, required=True)
     authorize_parser.add_argument("--expected-head", required=True)
@@ -766,7 +797,19 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        if arguments.command == "classify":
+        if arguments.command == "resolve-dispatch":
+            classification = classify_candidate(arguments.repo_root, arguments.base, arguments.head)
+            enforce_classification(classification, classification.kind, True)
+            report = resolve_dispatch(
+                arguments.base, arguments.head, classification.kind,
+                expected_base=arguments.expected_base, expected_head=arguments.expected_head,
+                requested_kind=arguments.transition_kind,
+                requested_mode=arguments.authorization_mode,
+                workflow_sha=os.environ.get("GITHUB_WORKFLOW_SHA", ""),
+                configured_login=os.environ.get("NATIVE_RETIREMENT_SOLO_MAINTAINER", ""),
+                actor=os.environ.get("GITHUB_ACTOR", ""))
+            print(canonical_json(report), end="")
+        elif arguments.command == "classify":
             reject_reserved_materialization_roots(arguments.repo_root)
             classification = classify_candidate(
                 arguments.repo_root, arguments.base, arguments.head
