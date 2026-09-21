@@ -1,0 +1,222 @@
+name: Repair issue 925 bootstrap
+
+on:
+  push:
+    branches: [fix/925-native-retirement-admission]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: repair-925-native-retirement-admission
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: ${{ github.repository == 'buster14a/buster' && ((github.event_name == 'push' && github.ref == 'refs/heads/fix/925-native-retirement-admission') || (github.event_name == 'pull_request' && github.head_ref == 'fix/925-native-retirement-admission')) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out bootstrap branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          fetch-depth: 0
+      - name: Apply the reviewed bootstrap and create the ungenerated candidate
+        id: candidate
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse 'HEAD^')
+          seed=$(git rev-parse HEAD)
+          python3 tools/repair_925_apply.py
+          rm tools/repair_925_apply.py .github/workflows/repair-925-bootstrap.yml
+          python3 -m py_compile \
+            tools/native_retirement_merge_gate.py \
+            tools/native_retirement_merge_gate_test.py \
+            tools/native_retirement_integration.py
+          python3 tools/native_retirement_merge_gate_test.py -v
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'ci: enforce trusted native-retirement merge admission'
+          candidate=$(git rev-parse HEAD)
+          {
+            echo "base=$base"
+            echo "seed=$seed"
+            echo "candidate=$candidate"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check out the previous main authority
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ steps.candidate.outputs.base }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned cJSON closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: DaveGamble/cJSON
+          ref: c859b25da02955fef659d658b8f324b5cde87be3
+          path: candidate/external/cjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned DoomGeneric closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ozkl/doomgeneric
+          ref: dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284
+          path: candidate/external/doom
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned LZ4 closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lz4/lz4
+          ref: ebb370ca83af193212df4dcbadcc5d87bc0de2f0
+          path: candidate/external/lz4
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned yyjson closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ibireme/yyjson
+          ref: 8b4a38dc994a110abaec8a400615567bd996105f
+          path: candidate/external/yyjson
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned stb closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: nothings/stb
+          ref: 2c980bb59875b0d32144a71867fbdebb2f77cd20
+          path: candidate/external/stb
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned zlib closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: madler/zlib
+          ref: 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+          path: candidate/external/zlib
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out pinned musl closure
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ifduyue/musl
+          ref: 9fa28ece75d8a2191de7c5bb53bed224c5947417
+          path: candidate/external/musl
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reconstruct current main with the previous trusted authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 trusted/tools/native_retirement_sdks.py \
+            --source-root "$GITHUB_WORKSPACE/candidate"
+          python3 trusted/tools/native_retirement_external.py prepare \
+            --manifest "$GITHUB_WORKSPACE/candidate/docs/native-retirement-dependencies-v1.json" \
+            --source-root "$GITHUB_WORKSPACE/candidate"
+          mkdir -p "$RUNNER_TEMP/native-retirement"
+          python3 trusted/tools/native_retirement_rebind.py refresh \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            | tee "$RUNNER_TEMP/native-retirement/refresh.json"
+          python3 trusted/tools/native_retirement_rebind.py check \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            | tee "$RUNNER_TEMP/native-retirement/trusted-check.json"
+          python3 candidate/tools/native_retirement_rebind.py check \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            | tee "$RUNNER_TEMP/native-retirement/candidate-check.json"
+          python3 trusted/tools/native_retirement_rebind.py refresh \
+            --repo-root "$GITHUB_WORKSPACE/candidate" \
+            | tee "$RUNNER_TEMP/native-retirement/idempotence.json"
+      - name: Validate the exact repaired tree
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/native_retirement_dependency_binding_test.py -v
+          python3 tools/native_retirement_integration_test.py -v
+          python3 tools/native_retirement_merge_gate_test.py -v
+          python3 tools/native_retirement_rebind_test.py -v
+          python3 tools/native_retirement_materializer.py self-test
+          python3 tools/native_retirement_materializer_test.py -v
+          python3 tools/native_retirement_contract.py self-test
+          python3 tools/native_retirement_contract_test.py -v
+          python3 tests/ci_tools_test.py
+          git diff --check
+      - name: Publish the attested bootstrap integration head
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='${{ steps.candidate.outputs.base }}'
+          seed='${{ steps.candidate.outputs.seed }}'
+          candidate='${{ steps.candidate.outputs.candidate }}'
+          git add \
+            docs/native-retirement-repository-sources-v1.json \
+            tools/native_retirement_dependency_binding.generated.h
+          unexpected=$(git diff --name-only)
+          test -z "$unexpected"
+          final_tree=$(git write-tree)
+          python3 - "$base" "$candidate" "$final_tree" \
+            "$RUNNER_TEMP/native-retirement/refresh.json" \
+            > "$RUNNER_TEMP/native-retirement/evidence.json" <<'PY'
+          import hashlib, json, pathlib, sys
+          refresh = json.loads(pathlib.Path(sys.argv[4]).read_text())
+          value = {
+              "schema": "buster-native-retirement-issue-925-bootstrap-v1",
+              "base": sys.argv[1],
+              "candidate": sys.argv[2],
+              "final_tree": sys.argv[3],
+              "rebind": refresh,
+          }
+          raw = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+          pathlib.Path(sys.argv[4]).with_name("evidence.json").write_bytes(raw)
+          PY
+          evidence=$(sha256sum "$RUNNER_TEMP/native-retirement/evidence.json" | cut -d' ' -f1)
+          message=$(cat <<EOF
+          Repair issue #925 with trusted native-retirement admission
+
+          Native-retirement-integration-evidence: $evidence
+          Native-retirement-base: $base
+          Native-retirement-candidate: $candidate
+          Native-retirement-final-tree: $final_tree
+          Native-retirement-transition-kind: bootstrap
+          EOF
+          )
+          commit=$(printf '%s\n' "$message" | git commit-tree "$final_tree" -p "$base" -p "$candidate")
+          staging_ref="refs/heads/native-retirement-staging/issue-925-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          git push --porcelain origin "$commit:$staging_ref"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$commit" \
+            -f state=success \
+            -f context='Native retirement trusted integration' \
+            -f description="evidence ${evidence:0:16}" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          git push --porcelain \
+            --force-with-lease="refs/heads/fix/925-native-retirement-admission:$seed" \
+            origin "$commit:refs/heads/fix/925-native-retirement-admission"
+          git push --porcelain --delete origin "$staging_ref"
+          {
+            echo "commit=$commit"
+            echo "tree=$final_tree"
+            echo "evidence=$evidence"
+          } | tee "$RUNNER_TEMP/native-retirement/publication.txt"
+      - name: Retain bootstrap evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-925-bootstrap-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-retirement/
+          if-no-files-found: warn
+          retention-days: 14
