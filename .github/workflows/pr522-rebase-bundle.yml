@@ -14,32 +14,37 @@ jobs:
   export:
     if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Export exact main and PR history
+      - name: Export immutable reconciliation inputs
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --no-tags origin \
-            +refs/heads/main:refs/remotes/origin/main \
-            +refs/heads/codex/513-mir-only-native:refs/remotes/origin/codex/513-mir-only-native
-          test "$(git rev-parse refs/remotes/origin/main)" = "82a63c5110aa63c3fb0e03d045a49343148ca787"
-          test "$(git rev-parse refs/remotes/origin/codex/513-mir-only-native)" = "460c48e9c9bcbd292e10b2b4627ee281718479aa"
-          git bundle create "$RUNNER_TEMP/pr522-rebase.bundle" \
-            refs/remotes/origin/main \
+          test "$(git rev-parse refs/remotes/origin/main)" = "1d64654d72b259485dbac6ddc36c784fe2bac6c3"
+          test "$(git rev-parse refs/remotes/origin/codex/513-mir-only-native)" = "abda0f3bbea9cb7b8bac21ae9d20cc57b589c808"
+          refs=(
+            refs/remotes/origin/main
             refs/remotes/origin/codex/513-mir-only-native
+            refs/remotes/origin/codex/513-reconciled-candidate
+            refs/remotes/origin/codex/513-f-exact-native-candidate
+            refs/remotes/origin/codex/522-f-exact-retirement-candidate
+          )
+          git show-ref "${refs[@]}" | tee "$RUNNER_TEMP/pr522-input-refs.txt"
+          git bundle create "$RUNNER_TEMP/pr522-rebase.bundle" "${refs[@]}"
           git bundle verify "$RUNNER_TEMP/pr522-rebase.bundle"
-          sha256sum "$RUNNER_TEMP/pr522-rebase.bundle" | tee "$RUNNER_TEMP/pr522-rebase.bundle.sha256"
+          cd "$RUNNER_TEMP"
+          sha256sum pr522-rebase.bundle | tee pr522-rebase.bundle.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pr522-rebase-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/pr522-rebase.bundle
             ${{ runner.temp }}/pr522-rebase.bundle.sha256
+            ${{ runner.temp }}/pr522-input-refs.txt
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
