@@ -3,7 +3,7 @@
 This checklist is for the first real `validate-buster-v1` execution on
 `buster-zen5-9700x`. It is not an installer or a deployment approval. Stop before
 submission if an identity, authorization, host fact or cleanup proof is missing.
-Keep #437, #512 and #36 open. Keep `native-retirement-performance-v1` blocked.
+Keep #437, #880, #512 and #36 open. Keep `native-retirement-performance-v1` blocked.
 One-pair smoke observations are not A/A qualification or a performance verdict.
 
 Read [the service contract](../README.md), [deployment references](README.md),
@@ -32,11 +32,13 @@ full commit and tree and check active service PRs before changing the inventory.
   export JOB ATTEMPT FULL_SHA`. It selects only the authenticated finalized
   job/attempt and expected full-result digest, never a caller-supplied path,
   and returns a digest-bound receipt plus the complete immutable result archive.
-  Capture stdout as binary only after a successful exit; `gateway result` and
+  Capture stdout as binary, check the exit status before publishing it, and
+  retain the `export-receipt-sha256` printed on stderr. `gateway result` and
   journal logs are receipts, not downloaded result bytes. See
   [the export contract](../EXPORT.md).
 - Reconstruct an exported archive in a new private destination with
-  `bench_service unpack-export ARCHIVE DESTINATION RECEIPT_SHA`. That command
+  `bench_service unpack-export ARCHIVE DESTINATION RECEIPT_SHA`. Use a new
+  absolute destination whose parent is private and trusted. That command
   reruns the exhaustive manifest, bundle and full-result validators without
   opening the original host path or executing downloaded content. Retain the
   sealed service export, the exact downloaded copy, the exporting/replay tool
