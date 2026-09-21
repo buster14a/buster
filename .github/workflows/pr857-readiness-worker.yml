@@ -1,0 +1,123 @@
+name: PR 857 readiness preparation
+
+on:
+  push:
+    branches: [codex/857-readiness-worker-20260920]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr857-readiness-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Prepare test-only integration without changing the PR branch
+        shell: bash
+        env:
+          EXPECTED_HEAD: fc5de3f3848e8cde2e03047cdb1e61f2ed739a6c
+          SOURCE_BRANCH: codex/791-ownership-publication-handoff
+          CANDIDATE_BRANCH: codex/857-ready-tests-20260920
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD^)
+          git fetch origin "refs/heads/$SOURCE_BRANCH:refs/remotes/origin/pr857-source"
+          test "$(git rev-parse refs/remotes/origin/pr857-source)" = "$EXPECTED_HEAD"
+          export BASE_SHA="$base"
+          git switch --detach "$base"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+
+          root = pathlib.Path('.')
+          head = os.environ['EXPECTED_HEAD']
+          base = os.environ['BASE_SHA']
+          def original(path):
+              return subprocess.check_output(['git', 'show', f'{head}:{path}'], text=True)
+
+          fast_path = 'src/buster/tests/compiler/ir/ir_fast_test.c'
+          previous = original(fast_path)
+          start = previous.index('BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(')
+          end = previous.index('BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(', start)
+          helper = previous[start:end]
+          old = '                        row->next.value = UINT32_MAX - 1;'
+          new = ('                        BUSTER_TEST(arguments, row->next.value == IR_ID_UNDERLYING_INVALID);\n'
+                 '                        row->next.value = UINT32_MAX - 1;')
+          assert helper.count(old) == 1
+          helper = helper.replace(old, new, 1)
+          # Keep the clearing contract explicit before deliberately corrupting
+          # inactive metadata. This is not the rejected store-elision change.
+          text = (root / fast_path).read_text()
+          signature = 'BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)\n{\n    UnitTestResult result = {0};'
+          assert text.count(signature) == 1
+          assert 'ir_publication_span_tests(' not in text
+          replacement = (helper + 'BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)\n{\n'
+                         '    UnitTestResult result = ir_publication_span_tests(arguments);')
+          (root / fast_path).write_text(text.replace(signature, replacement, 1))
+
+          cfg_path = 'src/buster/tests/compiler/ir/ir_cfg_test.c'
+          text = (root / cfg_path).read_text()
+          needle = '            BUSTER_TEST(arguments, rows[index].next.value == IR_ID_UNDERLYING_INVALID);'
+          assert text.count(needle) == 1
+          added = (needle + '\n'
+                   '            // Spans stay authoritative even if inactive construction links are poisoned.\n'
+                   '            rows[index].next.value = UINT32_MAX - 1;\n'
+                   '            IrInstructionId published_next = ir_block_next_instruction(&function, blocks + (index < 3 ? 0 : 1), (IrInstructionId){.value = index});\n'
+                   '            BUSTER_TEST(arguments, published_next.value == (index == 2 || index == 4 ? UINT32_MAX : index + 1));')
+          (root / cfg_path).write_text(text.replace(needle, added, 1))
+
+          # Preserve this PR's historical negative experiment and raw evidence
+          # byte-for-byte; never rewrite an existing audit or the closed index.
+          audit = 'docs/performance-audits/2026-09-19T153920Z.md'
+          prefix = 'docs/performance-audits/evidence/2026-09-19T153920Z/'
+          paths = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', head, '--', audit, prefix], text=True).splitlines()
+          assert len(paths) == 7, paths
+          for path in paths:
+              prior = subprocess.check_output(['git', 'show', f'{head}:{path}'])
+              target = root / path
+              if target.exists():
+                  assert target.read_bytes() == prior, path
+              else:
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(prior)
+          expected = set(paths) | {fast_path, cfg_path}
+          subprocess.run(['git', 'add', '--', *sorted(expected)], check=True)
+          changed = set(subprocess.check_output(['git', 'diff', '--cached', '--name-only', base], text=True).splitlines())
+          assert changed <= expected and {fast_path, cfg_path} <= changed, changed
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          # An exact production/build/generated-state identity check, not a
+          # timing proxy or a fabricated performance-acceptance verdict.
+          subprocess.run(['git', 'diff', '--cached', '--exit-code', base, '--', 'src/buster/lib', 'src/buster/apps', 'build.c', 'build.sh', 'build.ps1', 'CMakeLists.txt', '.github', 'tools', 'docs/native-retirement-repository-sources-v1.json'], check=True)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          tree=$(git write-tree)
+          candidate=$(printf '%s\n\n%s\n' 'test(ir): retain publication regressions without rejected optimization' 'Integrate current main, restore its exact production/build/generated state, and preserve the historical negative audit. Keep span/permutation/reopening/cycle tests while retaining all original link-clearing assertions. No performance improvement or completion of #791 is claimed.' | git commit-tree "$tree" -p "$EXPECTED_HEAD" -p "$base")
+          git merge-base --is-ancestor "$EXPECTED_HEAD" "$candidate"
+          git merge-base --is-ancestor "$base" "$candidate"
+          git push origin "$candidate:refs/heads/$CANDIDATE_BRANCH"
+          mkdir -p "$RUNNER_TEMP/pr857-evidence"
+          {
+            printf 'PRIOR_HEAD=%s\nBASE_SHA=%s\nCANDIDATE_SHA=%s\nTREE_SHA=%s\n' "$EXPECTED_HEAD" "$base" "$candidate" "$tree"
+            git diff --stat "$base" "$candidate"
+            git diff --check "$base" "$candidate"
+          } | tee "$RUNNER_TEMP/pr857-evidence/identity.txt"
+          git diff "$base" "$candidate" -- src/buster/tests > "$RUNNER_TEMP/pr857-evidence/tests.patch"
+          git archive "$candidate" | gzip > "$RUNNER_TEMP/pr857-evidence/source.tar.gz"
+          cat "$RUNNER_TEMP/pr857-evidence/identity.txt" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr857-prepared-source-${{ github.run_id }}
+          path: ${{ runner.temp }}/pr857-evidence
+          if-no-files-found: error
+          retention-days: 7
