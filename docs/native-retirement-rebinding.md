@@ -101,15 +101,28 @@ The workflow has three separately permissioned jobs:
   `Native retirement trusted integration` status before the PR head moves.
   Publication leaves main unchanged; normal merge admission follows.
 
+The required `Native retirement merge admission` check refuses ordinary merge
+for a candidate that changes an admitted repository source, trusted implementation,
+or reviewed policy/schema. It admits the writer-produced head only after
+checking the exact parents, evidence trailers, generated-only post-candidate
+delta, current-main identity, and GitHub Actions attestation. A main-push run
+invalidates every open integration head whose recorded base no longer equals
+current `main`; dispatching the writer again reconstructs it without requiring
+a manual feature-branch rebase. The independent `API migration policy` check
+continues to enforce bounded API compatibility. Configure admission as a
+required GitHub Actions check (integration ID `15368`) without enabling strict
+required-status-check policy or removing any existing required check.
+
 Evidence records base/head commits and trees, the pre-generation combined tree,
 the final tree, the old trusted rebinder revision/tree and file digests, the
 exact next-trusted file digests in the final tree, both generated artifact
-digests, and the policy/receipt/project/ledger identities. The merge commit
-records the evidence digest, base, candidate, and final tree.
+digests, and the policy/receipt/project/ledger identities. The integration
+commit records the evidence digest, base, candidate, transition kind, and final
+tree.
 
 The writer rechecks both `main` and the PR head immediately before publication.
 A moved PR head fails closed. A moved `main` discards the prepared result and
-fails closed before any ref update. A maintainer/admin must start a fresh
+fails closed before any branch update. A maintainer/admin must start a fresh
 trusted dispatch, which reconstructs from the new current `main`; no previous
 snapshot or quartet is reused. The workflow deliberately has no
 `actions: write` permission, so stale recovery cannot silently continue under
@@ -236,8 +249,8 @@ recomputes the materializer ledger, and cross-checks the receipt/project closure
 rather than trusting producer output. Evidence without the generated snapshot
 is treated as legacy only when all frozen previous identities match exactly.
 
-This ownership cutover does not enable a GitHub merge queue/ruleset (#867) and
-does not implement the general conflict-preflight mechanism (#869).
+The required admission gate is selective to retirement-sensitive PRs. General
+multi-PR serialization remains #867, and conflict preflight remains #869.
 
 ### PR-head publisher bootstrap for #927
 

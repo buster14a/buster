@@ -331,6 +331,7 @@ jobs:
         run: |
           python3 tools/native_retirement_dependency_binding_test.py -v
           python3 tools/native_retirement_integration_test.py -v
+          python3 tools/native_retirement_merge_gate_test.py -v
           python3 tools/merge_conflict_preflight_test.py -v
           python3 tools/native_retirement_rebind_test.py -v
           python3 tools/native_retirement_materializer.py self-test
