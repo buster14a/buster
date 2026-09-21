@@ -1974,6 +1974,7 @@ static void test_process_observations(char const* executable, char const* root)
 #include "qualification_test.h"
 
 #include "retirement_samples_test.h"
+#include "retirement_artifact_test.h"
 #include "retirement_measurement_test.h"
 
 int main(int argc, char** argv)
@@ -2042,6 +2043,7 @@ int main(int argc, char** argv)
         test_retirement_execution();
         test_retirement_records(root);
         test_retirement_samples(root);
+        test_retirement_artifact(executable, root);
 #ifdef __linux__
         test_retirement_measurement(executable, root);
 #endif

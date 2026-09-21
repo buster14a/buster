@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import struct
 import sys
 import tempfile
 import unittest
@@ -53,6 +54,12 @@ class NativeExecutionTests(unittest.TestCase):
         schedule = binding._execution_schedule([{"row": 0, "metrics": {"generated_runtime": True}}],
             {"seed": 1, "rounds": 2, "pairs_per_round": 60, "warmups_per_variant": 2})
         output_digest = hashlib.sha256(b"fixture-code\n").hexdigest()
+        artifact = (self.root / "retirement-artifact-1-1.bin").read_bytes()
+        self.assertEqual(artifact[:7], b"\x7fELF\x02\x01\x01")
+        section_table = struct.unpack_from("<Q", artifact, 40)[0]
+        code_offset, code_bytes = struct.unpack_from("<QQ", artifact, section_table + 64 + 24)
+        self.assertEqual(artifact[code_offset:code_offset + code_bytes], b"fixture-code\n")
+        artifact_digest = hashlib.sha256(artifact).hexdigest()
         measured = {}
         identities = set()
         previous_end = 0
@@ -60,7 +67,7 @@ class NativeExecutionTests(unittest.TestCase):
             for key, value in expected.items():
                 self.assertEqual(event[key], value)
             self.assertEqual(event["command_sha256"], commands[event["kind"]])
-            self.assertEqual(event["output_sha256"], output_digest)
+            self.assertEqual(event["output_sha256"], artifact_digest if event["kind"] == "compiler" else output_digest)
             self.assertEqual(event["code_section_bytes"], 13 if event["kind"] == "compiler" else None)
             self.assertEqual(event["code_section_sha256"], output_digest if event["kind"] == "compiler" else None)
             self.assertGreater(event["started_ns"], previous_end)
@@ -86,6 +93,30 @@ class NativeExecutionTests(unittest.TestCase):
                 self.assertEqual(metrics["compiler_peak_rss"][variant], compiler["peak_rss_bytes"])
                 self.assertEqual(metrics["generated_code_bytes"][variant], compiler["code_section_bytes"])
                 self.assertEqual(metrics["generated_runtime"][variant], runtime["wall_seconds"])
+
+    def test_independent_artifact_payloads(self):
+        """Decode the C fixtures without importing the producer's parser."""
+        for machine in (1, 2):
+            for format_id in (1, 2, 3, 4):
+                with self.subTest(machine=machine, format=format_id):
+                    data = (self.root / f"retirement-artifact-{format_id}-{machine}.bin").read_bytes()
+                    if format_id == 1:
+                        self.assertEqual(struct.unpack_from("<H", data, 18)[0], 62 if machine == 1 else 183)
+                        table = struct.unpack_from("<Q", data, 40)[0]
+                        offset, size = struct.unpack_from("<QQ", data, table + 64 + 24)
+                    elif format_id in (2, 3):
+                        header = struct.unpack_from("<I", data, 60)[0] + 4 if format_id == 3 else 0
+                        self.assertEqual(struct.unpack_from("<H", data, header)[0], 0x8664 if machine == 1 else 0xaa64)
+                        section = header + 20 + struct.unpack_from("<H", data, header + 16)[0]
+                        size, offset = struct.unpack_from("<II", data, section + 16)
+                        if format_id == 3:
+                            virtual_size = struct.unpack_from("<I", data, section + 8)[0]
+                            self.assertGreater(size, virtual_size)
+                            size = virtual_size
+                    else:
+                        self.assertEqual(struct.unpack_from("<I", data, 4)[0], 0x01000007 if machine == 1 else 0x0100000c)
+                        size, offset = struct.unpack_from("<QI", data, 32 + 72 + 40)
+                    self.assertEqual(data[offset:offset + size], b"fixture-code\n")
 
     def test_exact_native_bytes_pass_canonical_reader(self):
         events = list(binding._execution_trace_records(self.root, [self.shard], 1220))

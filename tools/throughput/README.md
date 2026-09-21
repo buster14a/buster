@@ -675,10 +675,25 @@ private output directory. Afterwards, the producer opens it relative to that
 descriptor without following links. Runtime output is read from the actual
 child's log descriptor. Both paths hash a regular, single-link file, bounded to
 1 GiB, with identity/size/metadata checks around the read. The observed digest
-must equal the independently prepared oracle. Compiler code-section facts
-come from that oracle's separately parsed artifact: exact whole-artifact byte
-equality establishes the same code payload, without treating file size as code
-size. The caller cannot use this helper to establish the oracle's correctness.
+must equal the independently prepared oracle. After timing, an independent
+reader in `retirement_artifact.h` parses each compiler artifact and checks the
+code count and digest against the frozen plan. Correct whole-file hashes cannot
+authorize incorrect code metrics. This structural check does not establish
+semantic correctness or native-runtime eligibility.
+
+The reader handles little-endian x86-64/AArch64 ELF64 objects and executables,
+COFF objects, PE32+ images and Mach-O64 objects and images. It counts ELF
+`SHF_EXECINSTR`, COFF/PE code or executable sections, and Mach-O instruction or
+symbol-stub sections. Code digests concatenate payloads in ascending file-offset
+order. PE file-alignment padding beyond a nonzero virtual size is excluded;
+headers, relocations and data sections are excluded in every format. Zero code
+bytes remain an explicit empty-code fact. Unsupported formats, missing section
+tables, truncated/overflowing ranges, overlapping payloads or metadata, and
+executable zero-fill sections fail closed. Parsing has a 1 GiB artifact limit
+and 65,535-section limit, uses bounded iteration without recursion, and reads
+descriptor input into owned memory so truncation cannot fault a mapping. Census
+validation uses the same reader and additionally checks object format and CPU
+against the declared target before accepting a supported row.
 
 Only successful execution and output verification advance the attached sample
 collector. `TpRetirementMeasurementResult` retains the process identity, wait
@@ -698,6 +713,11 @@ schedule, process instances, and all numeric joins. Failure controls cover
 nonzero exit, timeout, wrong/missing compiler and runtime output, stale output,
 symlinks/hard links, changed binaries, command/cwd mismatch, inherited handles,
 ambient environment, and retry after failure.
+Artifact cases also reject incorrect code sizes/digests and malformed output
+whose whole-file hash nevertheless matches the supplied oracle. Format tests
+cover both architectures, every truncated fixture prefix, reversed section
+order, overlap, empty code, PE padding and the actual host test executable.
+Independent Python checks decode the saved fixtures without this C reader.
 
 The encoder emits the existing canonical JSONL invocation schema in at most
 8,192 bytes. It checks successful child status, required hashes, exact interval

@@ -9,12 +9,12 @@
 #ifndef BUSTER_THROUGHPUT_RETIREMENT_MEASUREMENT_H
 #define BUSTER_THROUGHPUT_RETIREMENT_MEASUREMENT_H
 #include "retirement_samples.h"
+#include "retirement_artifact.h"
 
 #ifdef __linux__
 #define TP_RETIREMENT_COMMAND_ARGUMENTS 256u
 #define TP_RETIREMENT_COMMAND_ENVIRONMENT 128u
 #define TP_RETIREMENT_COMMAND_BYTES 65536u
-#define TP_RETIREMENT_ARTIFACT_BYTES UINT64_C(1073741824)
 
 typedef struct TpRetirementExecutable
 {
@@ -127,6 +127,36 @@ static int tp_retirement_executable_init(TpRetirementExecutable* executable, int
     return ok;
 }
 
+/* Read into owned memory instead of mapping a potentially mutable file: a
+ * concurrent truncation must fail this invocation, never SIGBUS the collector.
+ * Metadata and the independently computed full digest join this inspection to
+ * the bytes hashed by measurement_run. No code count supplied by a command is
+ * accepted unless it equals the parsed payload below. */
+static int tp_retirement_artifact_file(int descriptor, TpRetirementArtifact* facts)
+{
+    struct stat before, after;
+    int ok = facts && descriptor >= 3 && fstat(descriptor, &before) == 0 &&
+        S_ISREG(before.st_mode) && before.st_nlink == 1 && before.st_size > 0 &&
+        (uint64_t)before.st_size <= TP_RETIREMENT_ARTIFACT_BYTES;
+    unsigned char* bytes = ok ? (unsigned char*)malloc((size_t)before.st_size) : NULL;
+    ok = ok && bytes;
+    uint64_t offset = 0;
+    while (ok && offset < (uint64_t)before.st_size)
+    {
+        uint64_t remaining = (uint64_t)before.st_size - offset;
+        size_t wanted = remaining < 32768 ? (size_t)remaining : 32768;
+        ssize_t count = pread(descriptor, bytes + offset, wanted, (off_t)offset);
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0 && (size_t)count <= wanted;
+        if (ok) offset += (uint64_t)count;
+    }
+    if (ok) ok = fstat(descriptor, &after) == 0 && tp_retirement_file_same(&before, &after) &&
+        tp_retirement_artifact(bytes, offset, facts);
+    if (!ok && facts) *facts = (TpRetirementArtifact){0};
+    free(bytes);
+    return ok;
+}
+
 /* Frozen command identity: canonical ASCII JSON with sorted keys argv, cwd,
  * environment. Environment entries are sorted, unique NAME=value strings.
  * No ambient environment participates. All lengths are checked before launch. */
@@ -208,8 +238,8 @@ static int tp_retirement_artifact_leaf(char const* name)
  * output is the fresh log descriptor, which must be empty and positioned at 0.
  * Nothing is removed on either outcome: the caller retains failure evidence
  * and retires successful scratch output before the next invocation.
- * Code metrics come from a separately parsed trusted correctness artifact;
- * exact full-artifact equality proves those same payload bytes were produced.
+ * Independent inspection checks actual code-section metrics after timing;
+ * full-artifact equality also binds these bytes to the correctness preflight.
  */
 static int tp_retirement_measurement_run(TpRetirementSamples* samples,
     TpRetirementMeasuredCommand const* command, TpRetirementExecutable const* executable,
@@ -274,6 +304,13 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
         ok = (invocation.kind || bytes) && command->code_section_bytes <= bytes &&
             !strcmp(output_digest, command->output_sha256) &&
             fstat(executable->descriptor, &binary) == 0 && tp_retirement_file_same(&binary, &executable->identity);
+    }
+    if (ok && !invocation.kind)
+    {
+        TpRetirementArtifact facts;
+        ok = tp_retirement_artifact_file(output, &facts) && facts.file_bytes == bytes &&
+            !strcmp(facts.file_sha256, output_digest) && facts.code_bytes == command->code_section_bytes &&
+            (!facts.code_bytes || !strcmp(facts.code_sha256, command->code_section_sha256));
     }
     if (output >= 0 && close(output) != 0) ok = 0;
     if (ok)

@@ -30,7 +30,10 @@ static int test_retirement_measurement_child(int argc, char** argv)
                 else
                 {
                     FILE* output = fopen(argv[3], "wb");
-                    ok = output && fputs(bytes, output) >= 0;
+                    unsigned char artifact[1024];
+                    unsigned count = test_artifact_fixture(artifact, 1, 1);
+                    ok = output && (!strcmp(argv[4], "wrong") ? fputs(bytes, output) >= 0 :
+                        fwrite(artifact, 1, count, output) == count);
                     if (output && fclose(output) != 0) ok = 0;
                 }
             }
@@ -85,7 +88,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
     char leak_text[32];
     snprintf(leak_text, sizeof(leak_text), "%d", leak);
     CHECK(binary >= 3 && cwd >= 3 && leak >= 3);
-    char digest[65], expected_output[65];
+    char digest[65], expected_output[65], expected_artifact[65], malformed_digest[65];
     uint64_t bytes = 0;
     CHECK(tp_retirement_file_hash(binary, digest, &bytes));
     CHECK(bytes > 0);
@@ -103,13 +106,17 @@ static void test_retirement_measurement(char const* executable_path, char const*
     CHECK(tp_retirement_executable_init(&executable, binary, digest));
     Sha256 hash;
     sha256_init(&hash); sha256_add(&hash, "fixture-code\n", 13); sha256_finish_hex(&hash, expected_output);
+    unsigned char artifact[1024];
+    unsigned artifact_bytes = test_artifact_fixture(artifact, 1, 1);
+    sha256_init(&hash); sha256_add(&hash, artifact, artifact_bytes); sha256_finish_hex(&hash, expected_artifact);
+    sha256_init(&hash); sha256_add(&hash, "wrong\n", 6); sha256_finish_hex(&hash, malformed_digest);
     char* environment[] = {"LC_ALL=C", "TP_RETIREMENT_TEST=explicit", NULL};
     char* arguments[] = {executable_copy, "retirement-child", "compiler", "artifact.bin", "ok", leak_text, NULL};
     char command_digest[65];
     TpRetirementMeasuredCommand command = {.arguments = arguments, .argument_count = 6,
         .environment = environment, .environment_count = 2, .directory = directory,
         .artifact = "artifact.bin", .timeout_seconds = 2, .command_sha256 = command_digest,
-        .output_sha256 = expected_output, .code_section_sha256 = expected_output, .code_section_bytes = 13};
+        .output_sha256 = expected_artifact, .code_section_sha256 = expected_output, .code_section_bytes = 13};
     CHECK(tp_retirement_command_hash(&command, command_digest));
     test_retirement_measurement_command_file(root, "retirement-measured-command-compiler.json", &command);
     arguments[4] = "literal \\ and \"quotes\"";
@@ -156,6 +163,7 @@ static void test_retirement_measurement(char const* executable_path, char const*
         command.artifact = invocation.kind ? NULL : "artifact.bin";
         command.code_section_bytes = invocation.kind ? 0 : 13;
         command.code_section_sha256 = invocation.kind ? NULL : expected_output;
+        command.output_sha256 = invocation.kind ? expected_output : expected_artifact;
         CHECK(tp_retirement_command_hash(&command, command_digest));
         if (invocation.kind && !invocation.phase && !invocation.warmup && !invocation.variant)
             test_retirement_measurement_command_file(root, "retirement-measured-command-runtime.json", &command);
@@ -165,7 +173,8 @@ static void test_retirement_measurement(char const* executable_path, char const*
         TpRetirementMeasurementResult result;
         ok = tp_retirement_measurement_run(&test.samples, &command, &executable, &inputs, cwd, &result);
         CHECK(ok);
-        CHECK(result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE && result.output_bytes == 13);
+        CHECK(result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE &&
+              result.output_bytes == (invocation.kind ? 13 : artifact_bytes));
         if (log >= 0) CHECK(close(log) == 0);
         if (ok)
         {
@@ -199,19 +208,23 @@ static void test_retirement_measurement(char const* executable_path, char const*
 
     /* A failed command cannot advance or restart the same attempt. All output
      * remains present for the service's failure retention/sealing path. */
-    for (unsigned failure = 0; failure < 20; ++failure)
+    for (unsigned failure = 0; failure < 23; ++failure)
     {
         CHECK(test_sample_open(&test, 1));
         test.transcript.cpu = tp_first_allowed_cpu();
         unsigned behavior = failure >= 16 ? failure - 16 : failure;
-        command.kind = failure >= 16;
+        command.kind = failure >= 16 && failure < 20;
         command.variant = 0;
         command.artifact = command.kind ? NULL : "artifact.bin";
         command.code_section_bytes = command.kind ? 0 : 13;
         command.code_section_sha256 = command.kind ? NULL : expected_output;
+        command.output_sha256 = command.kind ? expected_output : expected_artifact;
         arguments[2] = command.kind ? "runtime" : "compiler";
         arguments[4] = behavior == 0 ? "fail" : behavior == 1 ? "wrong" : behavior == 2 ? "missing" :
                        behavior == 3 ? "timeout" : behavior == 14 ? "symlink" : behavior == 15 ? "hardlink" : "ok";
+        if (failure == 20) command.code_section_bytes = 12;
+        if (failure == 21) command.code_section_sha256 = expected_artifact;
+        if (failure == 22) { arguments[4] = "wrong"; command.output_sha256 = malformed_digest; }
         command.timeout_seconds = behavior == 3 ? 1 : 2;
         if (command.kind)
         {
