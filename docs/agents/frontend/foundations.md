@@ -684,9 +684,27 @@ signed type when negative values occur, trying int, long, long long and the
 supported 128-bit extension in rank order. Widths come from the target, not the
 host: the same 2^32 value therefore selects unsigned long on LP64 and unsigned
 long long on LLP64. A range no available integer type represents is diagnosed.
-Successors carry the same two-limb representation without host signed overflow;
-fixed-base representability diagnostics and the wider successor-boundary
-conformance campaign remain the separate #903 and #901 work.
+Implicit successors retain the predecessor's **declaration-point** type, not
+its original initializer ICE type or its eventual completed symbol type. This
+applies even when a negative wide value increments back into the int range;
+only an explicit int-representable initializer resets the declaration type to
+int. Both the supported GNU17 extension and C23 use the same transition rule.
+On overflow of that type, the existing range policy selects a suitably sized
+integer with the same signedness: INT_MAX advances to signed long on LP64 or
+signed long long on LLP64, UINT_MAX to the corresponding unsigned type,
+LLONG_MAX to signed 128-bit, and UINT64_MAX to unsigned 128-bit. Completion
+still chooses one compatible type from the entire enum's range, independently
+of these intermediate types.
+
+`c_parse_enum_successor` uses two unsigned limbs and signed magnitude. It
+handles low-limb carry, negative borrow and normalization of negative zero,
+and diagnoses the signed/unsigned 128-bit terminal boundaries instead of
+switching signedness or wrapping to zero. An invalid predecessor stays invalid
+through following implicit members; an explicit initializer can reset the
+sequence. Explicit initializers never speculatively compute a successor, so an
+explicit reset immediately after the largest supported constant is valid.
+Fixed-base successors use the same arithmetic but must fit their declared base
+and never widen. General explicit fixed-base range validation remains #903.
 
 Pending lookup respects lexical scope and declaration order, including a nearer
 ordinary identifier shadowing an outer enumerator. Published names use ordinary
@@ -724,3 +742,30 @@ writes never launch a compiler against an earlier temporary file.
 
 Specification: [WG14 N3029](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3029.htm)
 and [N3030 fixed enums](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3030.htm).
+
+## Implicit successor boundary regressions (#901)
+
+`c_test_enum_successors` checks exact low/high limbs, signed magnitude, width,
+rank, immutable declaration type, later initializer observations and completed
+types. It parses and validates canonical IR in GNU17/GNU23, both frontend SSA
+forms, and Linux/Windows x86-64/AArch64 target data models. Its assertion-bearing
+sources cover chained crossings at INT_MAX, UINT_MAX, LLONG_MAX and UINT64_MAX,
+negative wide values entering the int range, a 128-bit borrow, explicit resets,
+and constants observed through globals and runtime functions.
+`c_test_enum_successor_limits` checks diagnostic kind, message and source
+location for consecutive invalid successors at both 128-bit terminal limits
+and signed/unsigned fixed 8/64-bit limits, without changing the declared base.
+
+The Linux x86-64 `c_test_enumerator_type_differential` also executes the new
+sources at O0/O2: Clang in GNU17/GNU2x for the 32-bit transitions and negative
+int-range reentry, and GCC in both modes for the 64-to-128-bit transitions.
+Local Clang 17.0.0 preserves the negative declaration type, while GCC 14.2.0
+narrows that case to int; conversely Clang 17 does not support the required
+implicit 128-bit transitions, which GCC 14.2.0 does. These are deliberately
+separate, fixed oracle contracts, not a probe that adapts Buster's expected
+values to whichever compiler happens to be installed. The existing versioned
+Clang completion prefix stays reference-only; Buster always receives the
+unconditional completion contract selected by its requested dialect.
+
+The implicit declaration rule is specified by C23 draft N3096, 6.7.2.2p11
+([WG14 draft](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)).
