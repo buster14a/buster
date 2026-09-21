@@ -23,6 +23,7 @@ import urllib.request
 
 SCHEMA = "buster-merge-queue-admission-v1"
 CONTEXT = "Main integration admission"
+RETIREMENT_CONTEXT = "Native retirement merge admission"
 RULESET_ID = 22537199
 CHECKS = {
     "ci.yml": "CI complete",
@@ -164,9 +165,9 @@ def validate_ruleset(data: dict) -> None:
             "do not require feature-branch updates")
     require(checks.get("do_not_enforce_on_create") is False, "checks must apply on creation")
     actual = checks.get("required_status_checks", [])
-    expected = set(CHECKS.values()) | {CONTEXT}
+    expected = set(CHECKS.values()) | {CONTEXT, RETIREMENT_CONTEXT}
     require(len(actual) == len(expected) and {item.get("context") for item in actual} == expected,
-            "all six original checks and exact-group admission must remain required")
+            "all six original checks, retirement admission and exact-group admission must remain required")
     require(all(item.get("integration_id") == 15368 for item in actual),
             "required check source must be GitHub Actions")
     require("deletion" in by_type and "non_fast_forward" in by_type,
