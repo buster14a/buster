@@ -5,15 +5,15 @@ import runpy
 path = Path(__file__).with_name("apply_929_patch.py")
 text = path.read_text(encoding="utf-8")
 
-old_import = """tests = replace_once(
-    tests,
-    "import native_retirement_performance_binding as binding\\n",
-    "import native_retirement_performance_binding as binding\\n"
-    "import native_retirement_performance_schema as RETIREMENT_SCHEMA\\n",
-    "test schema import",
-)
-"""
-new_import = """tests = replace_once(
+start_marker = 'path_test = "tools/native_retirement_performance_binding_test.py"\n'
+end_marker = "old_report_start = "
+start = text.find(start_marker)
+end = text.find(end_marker, start + 1)
+if start < 0 or end < 0:
+    raise RuntimeError("staged patch driver has an unexpected fixture section")
+replacement = """path_test = "tools/native_retirement_performance_binding_test.py"
+tests = read(path_test)
+tests = replace_once(
     tests,
     "SPEC.loader.exec_module(binding)\\n\\n\\nclass BindingTests",
     "SPEC.loader.exec_module(binding)\\n"
@@ -21,14 +21,12 @@ new_import = """tests = replace_once(
     "test schema import",
 )
 """
-if text.count(old_import) != 1:
-    raise RuntimeError("staged patch driver has an unexpected test-import edit")
-text = text.replace(old_import, new_import, 1)
+text = text[:start] + replacement + text[end:]
 
-old_cleanup = 'for relative in ("tools/apply_929_patch.py", ".github/workflows/apply-929-patch.yml"):\\n'
+old_cleanup = 'for relative in ("tools/apply_929_patch.py", ".github/workflows/apply-929-patch.yml"):\n'
 new_cleanup = (
     'for relative in ("tools/apply_929_patch.py", ".github/workflows/apply-929-patch.yml", '
-    '"tools/run_929_patch.py", "apply-929-error.txt"):\\n'
+    '"tools/run_929_patch.py", "apply-929-error.txt"):\n'
 )
 if text.count(old_cleanup) != 1:
     raise RuntimeError("staged patch driver has an unexpected cleanup edit")
