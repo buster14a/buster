@@ -1,0 +1,4 @@
+  File "tools/native_retirement_performance_binding_test.py", line 207
+    b"line	column
+    ^
+SyntaxError: unterminated string literal (detected at line 207)
