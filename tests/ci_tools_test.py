@@ -865,11 +865,71 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^\s*continue-on-error:")
         self.assertNotIn("BUSTER_INCLUDE_TESTS=OFF", text.split("\n  uefi:", 1)[0])
 
+    def assert_pull_request_target_policy(self, path, text):
+        if path.name == "merge-conflict-preflight.yml":
+            # The sole exception is the exact reviewed workflow, not a filename
+            # allowlist. Its candidate tests are read-only and PR-only; the
+            # status-writing job executes only the trusted default-branch tool.
+            # Any workflow edit must be reviewed against that boundary before
+            # this literal is updated, including otherwise harmless formatting.
+            # read_text normalizes checkout CRLF before hashing on Windows.
+            self.assertEqual(
+                hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "57f6a146c26eacdf3449dea0ef988f9f0abcbac2faa3cb48def81eaa9e02be87",
+                "preflight workflow changed: review event guards, permissions, "
+                "trusted checkout, and every executed step before renewing approval",
+            )
+        else:
+            self.assertNotIn("pull_request_target", text)
+
+    def test_preflight_target_exception_is_not_a_general_event_allowlist(self):
+        workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+        text = workflow.read_text(encoding="utf-8")
+        self.assert_pull_request_target_policy(workflow, text)
+        for name in ("ci.yml", "unreviewed.yml", "merge-conflict-preflight.yaml"):
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                self.assert_pull_request_target_policy(workflow.with_name(name), text)
+
+    def test_preflight_target_exception_rejects_privilege_and_execution_changes(self):
+        workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+        text = workflow.read_text(encoding="utf-8")
+        changes = (
+            ("contents: read", "contents: write"),
+            ("persist-credentials: false", "persist-credentials: true"),
+            ("ref: ${{ github.event.repository.default_branch }}",
+             "ref: ${{ github.event.pull_request.head.sha }}"),
+            ("github.event_name == 'pull_request'", "always()"),
+            ("github.event_name != 'pull_request'", "always()"),
+            ("statuses: write", "statuses: write\n      contents: write"),
+            ("run: python3 -B tools/merge_conflict_preflight_test.py -v",
+             "env:\n          GITHUB_TOKEN: ${{ github.token }}\n"
+             "        run: python3 -B tools/merge_conflict_preflight_test.py -v"),
+            ("python3 -B tools/merge_conflict_preflight.py github-event",
+             "python3 -B tools/merge_conflict_preflight_test.py -v"),
+            ("retention-days: 14", "retention-days: 14\n"
+             "      - name: Unreviewed execution\n        run: echo unreviewed"),
+        )
+        for before, after in changes:
+            with self.subTest(change=before):
+                self.assertIn(before, text)
+                changed = text.replace(before, after)
+                self.assertNotEqual(changed, text)
+                with self.assertRaises(AssertionError):
+                    self.assert_pull_request_target_policy(workflow, changed)
+
+    def test_preflight_target_approval_normalizes_checkout_line_endings(self):
+        workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+        text = workflow.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory) / workflow.name
+            copy.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+            self.assert_pull_request_target_policy(copy, copy.read_text(encoding="utf-8"))
+
     def test_integrity_and_security_policy(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             with self.subTest(path=path.name):
-                text = path.read_text()
-                self.assertNotIn("pull_request_target", text)
+                text = path.read_text(encoding="utf-8")
+                self.assert_pull_request_target_policy(path, text)
                 self.assertIn("contents: read", text)
                 self.assertIn("persist-credentials: false", text)
                 self.assertIn("concurrency:", text)
