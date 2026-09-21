@@ -345,7 +345,7 @@ BUSTER_GLOBAL_LOCAL ProcessSpawnResult clang_analyze_spawn(Arena* arena, SliceSt
     ProcessSpawnResult result = {0};
     if (changed)
     {
-        result = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1,
+        result = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1,
                                   .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR)});
 #if BUSTER_WINDOWS
         BUSTER_CHECK(SetCurrentDirectoryW(previous));
@@ -646,7 +646,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_baseline(Arena* arena, ClangAnalyzeOption
     }
     u64 start = os_now_microseconds();
     ProcessSpawnResult spawn = os_process_spawn(os_argument_builder_flush(&builder), (SliceString8){0}, (SliceString8){0},
-        (ProcessSpawnOptions){.use_process_environment = 1});
+        (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
     ClangAnalyzeResources resources = {0};
     while (!clang_analyze_finished(spawn) && os_now_microseconds() - start < 3600ull * 1000000)
     {
@@ -705,7 +705,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_run(Arena* arena, ClangAnalyzeOptions opt
                 while (next_shard < options.shards && pending < options.jobs)
                 {
                     SliceString8 command = clang_analyze_worker_command(arena, options, next_shard);
-                    spawns[next_shard] = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1});
+                    spawns[next_shard] = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
                     active[next_shard++] = true;
                     pending += 1;
                 }
@@ -878,7 +878,7 @@ BUSTER_GLOBAL_LOCAL bool clang_analyze_self_test(Arena* arena)
     if (ready)
     {
         spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0}, (SliceString8){0},
-                                 (ProcessSpawnOptions){.use_process_environment = 1});
+                                 (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
     }
     ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, 60000000);
     ready = ready && wait.result == PROCESS_RESULT_SUCCESS;

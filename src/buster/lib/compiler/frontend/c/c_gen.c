@@ -13023,10 +13023,19 @@ struct CIrNestedInitializerTask
     u32 close;
 };
 
+typedef struct CIrNestedInitializerCursor CIrNestedInitializerCursor;
+struct CIrNestedInitializerCursor
+{
+    IrValueId place;
+    IrTypeId type;
+    u32 next_index;
+};
+
 typedef struct CIrNestedCompoundLiteralState CIrNestedCompoundLiteralState;
 struct CIrNestedCompoundLiteralState
 {
     CIrNestedInitializerTask* tasks;
+    CIrNestedInitializerCursor* cursors;
     CIrNestedInitializerTask task;
     IrValueId root_place;
     IrValueId child_place;
@@ -13036,14 +13045,17 @@ struct CIrNestedCompoundLiteralState
     u32 root_open;
     u32 root_close;
     u32 capacity;
+    u32 cursor_capacity;
+    u32 cursor_count;
     u32 task_count;
     u32 item_start;
     u32 index;
     u32 next_index;
     u32 selected_index;
     bool task_active;
+    bool cursor_item;
     bool promoted_designator;
-    u8 reserved[2];
+    u8 reserved[1];
 };
 
 typedef enum CIrPreparedCallContinuation
@@ -24441,7 +24453,8 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        if (!frame->as.nested_compound_literal.state->promoted_designator)
+        if (!frame->as.nested_compound_literal.state->cursor_item &&
+            !frame->as.nested_compound_literal.state->promoted_designator)
         {
             frame->as.nested_compound_literal.state->next_index = frame->as.nested_compound_literal.state->selected_index + 1;
         }
@@ -24483,6 +24496,9 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         }
         u32 capacity = root_close - root_open + 1;
         frame->as.nested_compound_literal.state->tasks = arena_allocate(builder->temporary_arena, CIrNestedInitializerTask, capacity);
+        u32 cursor_capacity = builder->program->types.count ? builder->program->types.count : 1;
+        frame->as.nested_compound_literal.state->cursors =
+            arena_allocate(builder->temporary_arena, CIrNestedInitializerCursor, cursor_capacity);
         frame->as.nested_compound_literal.state->tasks[0] = (CIrNestedInitializerTask){
             .place = root_place,
             .type = root_type,
@@ -24491,6 +24507,8 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         };
         frame->as.nested_compound_literal.state->root_place = root_place;
         frame->as.nested_compound_literal.state->capacity = capacity;
+        frame->as.nested_compound_literal.state->cursor_capacity = cursor_capacity;
+        frame->as.nested_compound_literal.state->cursor_count = 0;
         frame->as.nested_compound_literal.state->task_count = 1;
         frame->as.nested_compound_literal.state->task_active = false;
         frame->stage = C_IR_LOWER_STAGE_FINISH;
@@ -24504,6 +24522,11 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             frame->as.nested_compound_literal.state->next_index = 0;
             frame->as.nested_compound_literal.state->item_start = frame->as.nested_compound_literal.state->task.open + 1;
             frame->as.nested_compound_literal.state->index = frame->as.nested_compound_literal.state->item_start;
+            frame->as.nested_compound_literal.state->cursors[0] = (CIrNestedInitializerCursor){
+                .place = frame->as.nested_compound_literal.state->task.place,
+                .type = frame->as.nested_compound_literal.state->task.type,
+            };
+            frame->as.nested_compound_literal.state->cursor_count = 1;
             frame->as.nested_compound_literal.state->task_active = true;
         }
         CIrNestedInitializerTask task = frame->as.nested_compound_literal.state->task;
@@ -24593,16 +24616,19 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 goto c_ir_nested_compound_failed;
             }
             u32 selected_index = next_index;
-            if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
-            {
-                selected_index = c_ir_initializer_next_field_index(type, selected_index);
-            }
             u32 value_start = item_start;
             u32 nested_designator_start = UINT32_MAX;
             u32 designator_equals = UINT32_MAX;
             CToken promoted_member = {0};
+            IrType* owner_type = type;
+            IrValueId owner_place = task.place;
+            bool cursor_item = false;
             bool promoted_designator = false;
-            if ((type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_LEFT_BRACKET))
+            bool array_designator = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) &&
+                                    c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_LEFT_BRACKET);
+            bool member_designator = type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR &&
+                                     c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_DOT);
+            if (array_designator)
             {
                 u32 close = c_ir_matching_delimiter_cached(builder, item_start, index, C_PUNCTUATOR_LEFT_BRACKET, C_PUNCTUATOR_RIGHT_BRACKET);
                 u64 designated = UINT64_MAX;
@@ -24646,7 +24672,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 }
                 value_start = designator_equals + 1;
             }
-            else if (type->kind != IR_TYPE_ARRAY && type->kind != IR_TYPE_VECTOR && c_token_is_punctuator(&builder->preprocess.tokens[item_start], C_PUNCTUATOR_DOT))
+            else if (member_designator)
             {
                 if (item_start + 2 >= index || builder->preprocess.tokens[item_start + 1].kind != C_TOKEN_IDENTIFIER)
                 {
@@ -24675,17 +24701,52 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 }
                 value_start = designator_equals + 1;
             }
-            u64 child_count = (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_count : type->field_count;
+            else
+            {
+                while (frame->as.nested_compound_literal.state->cursor_count)
+                {
+                    CIrNestedInitializerCursor* cursor = frame->as.nested_compound_literal.state->cursors +
+                                                         frame->as.nested_compound_literal.state->cursor_count - 1;
+                    IrType* cursor_type = ir_type_from_id(&builder->program->types, cursor->type);
+                    if (!cursor_type)
+                    {
+                        goto c_ir_nested_compound_failed;
+                    }
+                    u32 candidate = cursor->next_index;
+                    if (cursor_type->kind == IR_TYPE_STRUCT || cursor_type->kind == IR_TYPE_UNION)
+                    {
+                        candidate = c_ir_initializer_next_field_index(cursor_type, candidate);
+                    }
+                    u64 cursor_children = (cursor_type->kind == IR_TYPE_ARRAY || cursor_type->kind == IR_TYPE_VECTOR)
+                                              ? cursor_type->element_count
+                                              : cursor_type->field_count;
+                    bool union_exhausted = cursor_type->kind == IR_TYPE_UNION && cursor->next_index != 0;
+                    if (!union_exhausted && candidate < cursor_children)
+                    {
+                        owner_type = cursor_type;
+                        owner_place = cursor->place;
+                        selected_index = candidate;
+                        cursor->next_index = candidate + 1;
+                        cursor_item = true;
+                        break;
+                    }
+                    frame->as.nested_compound_literal.state->cursor_count -= 1;
+                }
+                if (!cursor_item)
+                {
+                    goto c_ir_nested_compound_failed;
+                }
+            }
+            u64 child_count = (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR) ? owner_type->element_count : owner_type->field_count;
             if ((!promoted_designator && selected_index >= child_count) || value_start >= index)
             {
                 goto c_ir_nested_compound_failed;
             }
-            IrTypeId child_type = promoted_designator                                              ? IR_TYPE_ID_INVALID
-                                  : (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR) ? type->element_type
-                                                                                                  : type->fields[selected_index].type;
+            IrTypeId child_type = promoted_designator                                                    ? IR_TYPE_ID_INVALID
+                                  : (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR) ? owner_type->element_type
+                                                                                                            : owner_type->fields[selected_index].type;
             IrValueId child_place = IR_VALUE_ID_INVALID;
-            IrSourceRange source =
-                c_ir_token_source_range(builder, builder->preprocess.tokens[value_start]);
+            IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[value_start]);
             if (promoted_designator)
             {
                 child_place = c_ir_emit_field_place_from_value(builder, task.place,
@@ -24701,18 +24762,27 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                     child_type = builder->function->values[child_place.value].canonical_type;
                 }
             }
-            else if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+            else if (owner_type->kind == IR_TYPE_ARRAY || owner_type->kind == IR_TYPE_VECTOR)
             {
                 IrValueId subscript = c_ir_emit_integer_value(builder, selected_index, false, builder->preprocess.tokens[value_start]);
-                child_place = c_ir_emit_index_place(builder, task.place, subscript, source);
+                child_place = c_ir_emit_index_place(builder, owner_place, subscript, source);
             }
             else
             {
-                child_place = c_ir_emit_field_index_place(builder, task.place, selected_index, source);
+                child_place = c_ir_emit_field_index_place(builder, owner_place, selected_index, source);
             }
             if (child_place.value == IR_ID_UNDERLYING_INVALID)
             {
                 goto c_ir_nested_compound_failed;
+            }
+            if (!cursor_item)
+            {
+                frame->as.nested_compound_literal.state->cursors[0] = (CIrNestedInitializerCursor){
+                    .place = task.place,
+                    .type = task.type,
+                    .next_index = promoted_designator ? next_index : selected_index + 1,
+                };
+                frame->as.nested_compound_literal.state->cursor_count = 1;
             }
             for (u32 designator = nested_designator_start; designator < designator_equals;)
             {
@@ -24774,25 +24844,42 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             while (child && c_ir_initializer_type_is_aggregate(child) && !value_is_aggregate && !string_initializer &&
                    !c_token_is_punctuator(&builder->preprocess.tokens[value_start], C_PUNCTUATOR_LEFT_BRACE))
             {
-                if ((child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR) && child->element_count)
-                {
-                    IrValueId zero = c_ir_emit_integer_value(builder, 0, false, builder->preprocess.tokens[value_start]);
-                    child_place = c_ir_emit_index_place(builder, child_place, zero, source);
-                    child_type = child->element_type;
-                }
-                else if ((child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION) && child->field_count)
-                {
-                    u32 first_field = c_ir_initializer_next_field_index(child, 0);
-                    child_place = c_ir_emit_field_index_place(builder, child_place, first_field, source);
-                    if (child_place.value != IR_ID_UNDERLYING_INVALID)
-                    {
-                        child_type = child->fields[first_field].type;
-                    }
-                }
-                else
+                if (frame->as.nested_compound_literal.state->cursor_count >= frame->as.nested_compound_literal.state->cursor_capacity)
                 {
                     child_place = IR_VALUE_ID_INVALID;
                     break;
+                }
+                CIrNestedInitializerCursor* cursor = frame->as.nested_compound_literal.state->cursors +
+                                                     frame->as.nested_compound_literal.state->cursor_count++;
+                *cursor = (CIrNestedInitializerCursor){
+                    .place = child_place,
+                    .type = child_type,
+                };
+                u32 descendant_index = 0;
+                if (child->kind == IR_TYPE_STRUCT || child->kind == IR_TYPE_UNION)
+                {
+                    descendant_index = c_ir_initializer_next_field_index(child, descendant_index);
+                }
+                u64 descendant_count = (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR) ? child->element_count : child->field_count;
+                if (descendant_index >= descendant_count)
+                {
+                    child_place = IR_VALUE_ID_INVALID;
+                    break;
+                }
+                cursor->next_index = descendant_index + 1;
+                if (child->kind == IR_TYPE_ARRAY || child->kind == IR_TYPE_VECTOR)
+                {
+                    IrValueId descendant = c_ir_emit_integer_value(builder, descendant_index, false, builder->preprocess.tokens[value_start]);
+                    child_place = c_ir_emit_index_place(builder, child_place, descendant, source);
+                    child_type = child->element_type;
+                }
+                else
+                {
+                    child_place = c_ir_emit_field_index_place(builder, child_place, descendant_index, source);
+                    if (child_place.value != IR_ID_UNDERLYING_INVALID)
+                    {
+                        child_type = child->fields[descendant_index].type;
+                    }
                 }
                 if (child_place.value == IR_ID_UNDERLYING_INVALID)
                 {
@@ -24848,6 +24935,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 frame->as.nested_compound_literal.state->index = index;
                 frame->as.nested_compound_literal.state->next_index = next_index;
                 frame->as.nested_compound_literal.state->selected_index = selected_index;
+                frame->as.nested_compound_literal.state->cursor_item = cursor_item;
                 frame->as.nested_compound_literal.state->promoted_designator = promoted_designator;
                 frame->stage = C_IR_LOWER_STAGE_CHILD;
                 if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
@@ -24863,7 +24951,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
                 }
                 return;
             }
-            if (!promoted_designator)
+            if (!cursor_item && !promoted_designator)
             {
                 next_index = selected_index + 1;
             }
@@ -24899,6 +24987,38 @@ BUSTER_C_INTERNAL u32 c_ir_compound_literal_positional_field(IrType* type, u32 f
         while (result < type->field_count && type->fields[result].is_bit_field && !type->fields[result].name.length)
         {
             result += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_C_INTERNAL bool c_ir_initializer_has_aggregate_child(CIntegerIrBuilder* builder, IrType* type)
+{
+    // Vector members retain the value-based initializer path: a scalar zero
+    // becomes a vector value, rather than an addressable vector-lane place.
+    bool result = false;
+    if (type)
+    {
+        if (type->kind == IR_TYPE_ARRAY || type->kind == IR_TYPE_VECTOR)
+        {
+            IrType* child = ir_type_from_id(&builder->program->types, type->element_type);
+            result = child && child->kind != IR_TYPE_VECTOR && c_ir_initializer_type_is_aggregate(child);
+        }
+        else if (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION)
+        {
+            // An undesignated union initializer selects only its first field.
+            // Later array alternatives must not force a vector first field
+            // onto the address-based nested initializer path.
+            u32 field_count = type->kind == IR_TYPE_UNION && type->field_count ? 1 : type->field_count;
+            for (u32 field_index = 0; field_index < field_count; field_index += 1)
+            {
+                IrType* child = ir_type_from_id(&builder->program->types, type->fields[field_index].type);
+                if (child && child->kind != IR_TYPE_VECTOR && c_ir_initializer_type_is_aggregate(child))
+                {
+                    result = true;
+                    break;
+                }
+            }
         }
     }
     return result;
@@ -25015,7 +25135,7 @@ BUSTER_C_INTERNAL void c_ir_lower_compound_literal_step(CIntegerIrBuilder* build
             }
             return;
         }
-        bool nested = c_ir_zero_storage_compatible(builder, type_id);
+        bool nested = c_ir_zero_storage_compatible(builder, type_id) || c_ir_initializer_has_aggregate_child(builder, type);
         for (u32 token_index = open + 1; !nested && token_index < close; token_index += 1)
         {
             if (c_token_is_punctuator(&builder->preprocess.tokens[token_index], C_PUNCTUATOR_LEFT_BRACE) &&
