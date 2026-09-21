@@ -7,6 +7,9 @@
 #include <buster/lib/compiler/codegen/codegen.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/file.h>
+#include <buster/lib/os.h>
 
 BUSTER_GLOBAL_LOCAL void c_test_token(UnitTestArguments* arguments, UnitTestResult* outer_result, CLexResult lex, u64 index, CTokenKind kind, String8 spelling)
 {
@@ -376,6 +379,251 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typed_enum_integer_constants(UnitTestA
         }
     }
     scratch_end(temporary);
+    return result;
+}
+
+// #900 pins two deliberately different completed-enumerator contracts:
+// Clang 17 GNU17 and GCC 14 GNU2x. Do not derive the expectation from whichever
+// compiler happens to build the test runner or from __STDC_VERSION__.
+BUSTER_GLOBAL_LOCAL String8 const c_test_enumerator_type_source = S8_INITIALIZER(
+    "#define TY(v) _Generic((v), int:1,unsigned int:2,long:3,unsigned long:4,long long:5,unsigned long long:6,default:9)\n"
+    "#define SIGNED_WIDE (sizeof(long)==8?3:5)\n"
+    "#define UNSIGNED_WIDE (sizeof(long)==8?4:6)\n"
+    "enum Small { SMALL=1,NEXT };\n"
+    "enum High { HZERO=0,HIGH=0x80000000,HDECL=TY(HIGH),HSMALL=TY(HZERO),HREF=HIGH,HCOMPARE=HZERO-1<0 };\n"
+    "enum Wide { WZERO=0,WIDE=4294967296LL,WDECL=TY(WIDE),WSMALL=TY(WZERO) };\n"
+    "enum Mixed { MNEG=-1,MPOS=4294967296LL,MNDECL=TY(MNEG),MPDECL=TY(MPOS),MCMP=MNEG<MPOS };\n"
+    "enum Later { LREF=WIDE, LREF_TYPE=TY(WIDE), LREF_COMPARE=HZERO-1<0 };\n"
+    "_Static_assert(TY(SMALL)==1&&NEXT==2,\"small\");\n"
+    "_Static_assert(TY(HZERO)==(ENUM_C23?2:1)&&TY(HIGH)==2&&HDECL==2&&HSMALL==1,\"high types\");\n"
+    "_Static_assert(TY(WZERO)==(ENUM_C23?UNSIGNED_WIDE:1)&&TY(WIDE)==UNSIGNED_WIDE&&WDECL==5&&WSMALL==1,\"wide types\");\n"
+    "_Static_assert(TY(MNEG)==(ENUM_C23?SIGNED_WIDE:1)&&TY(MPOS)==SIGNED_WIDE&&MNDECL==1&&MPDECL==5,\"mixed types\");\n"
+    "_Static_assert(HREF==0x80000000&&MCMP&&HCOMPARE&&LREF_COMPARE==!ENUM_C23,\"declaration values\");\n"
+    "_Static_assert(LREF==4294967296LL&&LREF_TYPE==UNSIGNED_WIDE,\"earlier completed enum\");\n"
+    "__typeof(HIGH) high_global=HIGH;\n"
+    "__typeof(WIDE) wide_global=WIDE;\n"
+    "__typeof(MPOS) mixed_global=MNEG;\n"
+    "int main(void){\n"
+    " enum Local { LZERO=0,LBIG=4294967296LL,LDT=TY(LBIG),LST=TY(LZERO) } *pointer=0;\n"
+    " __typeof(LBIG) local=LBIG;\n"
+    " int shadow=0;\n"
+    " { enum Shadow { WIDE=2 }; shadow+=WIDE; }\n"
+    " { int WIDE=3; shadow+=WIDE; }\n"
+    " return !(TY(LZERO)==(ENUM_C23?UNSIGNED_WIDE:1)&&LDT==5&&LST==1&&local==4294967296LL&&\n"
+    " pointer==0&&shadow==5&&high_global==0x80000000&&HIGH>0&&wide_global==4294967296LL&&WIDE>HIGH&&\n"
+    " mixed_global==-1&&MNEG<MPOS&&(unsigned long long)MNEG==0xffffffffffffffffULL&&\n"
+    " sizeof(__typeof(HIGH))==4&&sizeof(__typeof(WIDE))==8&&sizeof(enum Wide)==8&&\n"
+    " sizeof(enum Small)==4&&sizeof(HIGH)==4&&sizeof(WIDE)==8);\n"
+    "}\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {target_native, target_native, target_native};
+    targets[0].cpu_arch = CPU_ARCH_X86_64;
+    targets[0].os = OPERATING_SYSTEM_LINUX;
+    targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    targets[1].os = OPERATING_SYSTEM_LINUX;
+    targets[2].cpu_arch = CPU_ARCH_X86_64;
+    targets[2].os = OPERATING_SYSTEM_WINDOWS;
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 c23 = 0; c23 < 2; c23 += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                Target target = targets[target_index];
+                String8 source = string_format(temporary.arena, S8("#define ENUM_C23 {u32}\n{S8}"), c23, c_test_enumerator_type_source);
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = c23 ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParseResult parsed = c_parse(temporary.arena, preprocess);
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+                u32 checked = 0;
+                for (u32 index = 0; index < parsed.enum_member_count; index += 1)
+                {
+                    CEnumMember const* member = parsed.enum_members + index;
+                    if (string_equal(member->name, S8("HIGH")) || string_equal(member->name, S8("WIDE")) ||
+                        string_equal(member->name, S8("HZERO")) || string_equal(member->name, S8("MNEG")))
+                    {
+                        bool high = string_equal(member->name, S8("HIGH"));
+                        bool wide = string_equal(member->name, S8("WIDE"));
+                        bool small = !high && !wide;
+                        // The block's shadow of WIDE is deliberately a small enum.
+                        bool shadow = wide && member->value == 2;
+                        CTypeKind declaration = high ? C_TYPE_UNSIGNED_INT : wide && !shadow ? C_TYPE_LONG_LONG : C_TYPE_INT;
+                        if (BUSTER_REQUIRE(arguments, member->declaration_type.value < parsed.type_count && member->type.value < parsed.type_count))
+                        {
+                            BUSTER_TEST(arguments, parsed.types[member->declaration_type.value].kind == declaration);
+                            BUSTER_TEST(arguments, parsed.types[member->type.value].kind == (shadow || (small && !c23) ? C_TYPE_INT : C_TYPE_ENUM));
+                            BUSTER_TEST(arguments, member->integer_constant.valid);
+                            BUSTER_TEST(arguments, member->integer_constant.type.value < parsed.type_count);
+                            if (member->integer_constant.type.value < parsed.type_count)
+                            {
+                                BUSTER_TEST(arguments, parsed.types[member->integer_constant.type.value].kind == declaration);
+                            }
+                        }
+                        checked += 1;
+                    }
+                }
+                BUSTER_TEST(arguments, checked == 5);
+                for (u32 index = 0; index < parsed.entity_count; index += 1)
+                {
+                    CEntity const* entity = parsed.entities + index;
+                    if (entity->kind == C_ENTITY_ENUMERATOR && BUSTER_REQUIRE(arguments, entity->enum_member_plus_one &&
+                                                                                           entity->enum_member_plus_one <= parsed.enum_member_count))
+                    {
+                        CEnumMember const* member = parsed.enum_members + entity->enum_member_plus_one - 1;
+                        BUSTER_TEST(arguments, entity->type.value == member->type.value);
+                        BUSTER_TEST(arguments, entity->constant_value == member->value);
+                        BUSTER_TEST(arguments, entity->constant_is_negative == member->is_negative);
+                    }
+                }
+                if (parsed.diagnostic_count == 0)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-types.c"), preprocess, parsed, target,
+                                                                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_and_wide_enumerator_types(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "enum Byte : unsigned char { BYTE=255, BYTE_SIZE=sizeof(BYTE) };\n"
+        "enum SignedByte : signed char { NEG=-1 };\n"
+        "enum Wide128 { BIG=(__int128)1<<100, COPY=BIG, NEGATIVE=-((__int128)1<<100) };\n"
+        "_Static_assert(sizeof(BYTE)==1 && BYTE_SIZE==1 && sizeof(NEG)==1, \"fixed member width\");\n"
+        "_Static_assert(COPY==BIG && (COPY>>100)==1 && (NEGATIVE>>100)==-1, \"full value\");\n"
+        "unsigned char read_byte(void){ return BYTE; }\n"
+        "__int128 read_positive(void){ return COPY; }\n"
+        "__int128 read_negative(void){ return NEGATIVE; }\n"
+        "__int128 global_positive=COPY,global_negative=NEGATIVE;\n");
+    for (u32 c23 = 0; c23 < 2; c23 += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            Target target = target_native;
+            target.cpu_arch = CPU_ARCH_X86_64;
+            target.os = OPERATING_SYSTEM_LINUX;
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target),
+                .dialect = c23 ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+            });
+            CParseResult parsed = c_parse(temporary.arena, preprocess);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+            BUSTER_TEST(arguments, parsed.enum_member_count == 6);
+            for (u32 index = 0; index < parsed.enum_member_count; index += 1)
+            {
+                CEnumMember const* member = parsed.enum_members + index;
+                if (BUSTER_REQUIRE(arguments, member->enum_type.value < parsed.type_count))
+                {
+                    CType const* owner = parsed.types + member->enum_type.value;
+                    BUSTER_TEST(arguments, member->type.value == member->enum_type.value);
+                    if (owner->has_fixed_underlying_type)
+                    {
+                        BUSTER_TEST(arguments, member->declaration_type.value == member->enum_type.value);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, member->integer_constant.magnitude_high == (UINT64_C(1) << 36));
+                        BUSTER_TEST(arguments, member->integer_constant.magnitude == 0);
+                    }
+                }
+            }
+            if (parsed.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-types.c"), preprocess, parsed, target,
+                                                                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    String8 reference_names[] = {S8("clang"), S8("gcc")};
+    String8 reference_dialects[] = {S8("-std=gnu17"), S8("-std=gnu2x")};
+    String8 buster_dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    String8 frontend_flags[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 c23 = 0; c23 < 2; c23 += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            String8 compiler = executable_resolve_in_path(temporary.arena, reference_names[c23]);
+            String8 source_path = buster_test_temporary_path(temporary.arena, S8("enumerator-types"), S8(".c"));
+            String8 output_path = buster_test_temporary_path(temporary.arena, S8("enumerator-reference"), S8(""));
+            String8 source = string_format(temporary.arena, S8("#define ENUM_C23 {u32}\n{S8}"), c23, c_test_enumerator_type_source);
+            BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+            BUSTER_TEST(arguments, compiler.length != 0);
+            if (compiler.length)
+            {
+                String8 command[] = {compiler, reference_dialects[c23], optimizations[form], source_path, S8("-o"), output_path};
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                          .use_process_environment = true, .search_path = true});
+                if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+                {
+                    ProcessWaitResult wait = os_process_wait_deadline(temporary.arena, spawn, 30000000);
+                    if (BUSTER_REQUIRE(arguments, !wait.timed_out && wait.result == PROCESS_RESULT_SUCCESS))
+                    {
+                        String8 run[] = {output_path};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                }
+            }
+            output_path = buster_test_temporary_path(temporary.arena, S8("enumerator-buster"), S8(""));
+            String8 command[] = {S8("-nostdinc"), buster_dialects[c23], frontend_flags[form], S8("-fverify-codegen"), S8("-o"), output_path, source_path};
+            CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena,
+                compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+            if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+            {
+                String8 run[] = {output_path};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true});
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                    BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
     return result;
 }
 
@@ -19518,6 +19766,9 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
+    BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);

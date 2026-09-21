@@ -52,6 +52,7 @@
 //   c_parse_infer_initializer_array_count_core    array-bound inference
 //   c_parse_add_type, c_parse_aggregate_lookup,   type interning and
 //   c_parse_primitive_type                        construction, attributes
+//   c_parse_enum_complete, c_parse_enum_successor enum types and full-width values
 //   c_parse_word_bits_compute,                    specifier words answered
 //   c_parse_word_bits_token                       from the interned symbol
 //                                                 id (C_WORD_* bits), with
@@ -2572,8 +2573,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult pre
         {
             entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[base_start]);
         }
-        type = entity_id.value < result->entity_count && result->entities[entity_id.value].kind != C_ENTITY_TYPEDEF &&
-                       result->entities[entity_id.value].kind != C_ENTITY_ENUMERATOR
+        type = entity_id.value < result->entity_count && result->entities[entity_id.value].kind != C_ENTITY_TYPEDEF
                    ? result->entities[entity_id.value].type
                    : C_TYPE_ID_INVALID;
         // A call base -- `_PyBaseExceptionObject_cast(self)->context` is what
@@ -3075,27 +3075,78 @@ BUSTER_C_INTERNAL CTypeKind c_parse_expression_promoted_kind(CTypeKind kind)
     return kind;
 }
 
-// File-scope enumerators are published as ordinary entities after the whole
-// declaration pass. Initializers can reference an earlier enum as well as an
-// earlier member of the current definition, so retain the existing pending view.
-// Until #900 selects each enumerator's dialect-correct declaration-point type,
-// those identifiers deliberately retain the frontend's current `int` binding.
-BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CTypeParseMachine* machine, CPreprocessResult preprocess,
-                                                                  CParseResult* result, CToken token)
+// Integer operations use the compatible type of an enum, never an implicit
+// signed-int default after completion. Qualified forward uses resolve through
+// their original tag, whose compatible type may have been selected later.
+BUSTER_C_INTERNAL CTypeKind c_parse_expression_value_kind(CParseResult* result, CTypeId id)
+{
+    CTypeKind kind = C_TYPE_INVALID;
+    if (id.value < result->type_count)
+    {
+        CType const* type = result->types + id.value;
+        if (type->kind == C_TYPE_ENUM)
+        {
+            if (type->has_unqualified_type && type->unqualified_type.value < result->type_count)
+            {
+                type = result->types + type->unqualified_type.value;
+            }
+            kind = type->element_type.value < result->type_count ? result->types[type->element_type.value].kind : C_TYPE_INT;
+        }
+        else
+        {
+            kind = type->kind;
+        }
+    }
+    return kind;
+}
+
+// File-scope entities are published after the declaration pass. Pending names
+// therefore need the same lexical scope and declaration-order rules as ordinary
+// lookup, including sizeof/typeof outside another enum's initializer. A nearer
+// ordinary binding shadows an outer enum; sibling scopes and later names do not
+// participate. `type` is provisional only while its own list is being parsed.
+BUSTER_C_INTERNAL CEnumMember const* c_parse_pending_enum_member(CPreprocessResult preprocess, CParseResult* result,
+                                                                  CScopeId scope, u32 token_index)
 {
     CEnumMember const* found = 0;
-    if (machine && machine->enum_constant_members_active && machine->enum_constant_member_start <= result->enum_member_count)
+    CToken token = preprocess.tokens[token_index];
+    String8 name = c_token_spelling(preprocess.spelling_base, token);
+    CEntityId ordinary = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token);
+    // Published identifiers are the common path. Only the in-progress list
+    // can shadow one before entity publication; do not rescan completed enums
+    // for every identifier in the translation unit.
+    u32 first = result->enum_member_count && result->enum_members[result->enum_member_count - 1].is_published
+                    ? result->enum_member_count : 0;
+    if (ordinary.value < result->entity_count)
     {
-        String8 name = c_token_spelling(preprocess.spelling_base, token);
-        for (u32 index = result->enum_member_count; !found && index; index -= 1)
+        first = result->enum_member_count;
+        if (first)
+        {
+            CTypeId owner = result->enum_members[first - 1].enum_type;
+            if (owner.value < result->type_count && !result->types[owner.value].is_complete)
+            {
+                first = result->types[owner.value].enum_member_start;
+            }
+        }
+    }
+    for (u32 depth = 0; first < result->enum_member_count && !found && scope.value < result->scope_count &&
+                        depth < result->scope_count; depth += 1)
+    {
+        for (u32 index = result->enum_member_count; !found && index > first; index -= 1)
         {
             CEnumMember const* member = result->enum_members + index - 1;
-            bool symbol_match = token.symbol && member->symbol == token.symbol;
-            if (symbol_match || string_equal(member->name, name))
+            if (member->token_index < token_index && member->enum_type.value < result->type_count &&
+                result->types[member->enum_type.value].tag_scope.value == scope.value &&
+                (token.symbol && member->symbol ? member->symbol == token.symbol : string_equal(member->name, name)))
             {
                 found = member;
             }
         }
+        if (ordinary.value < result->entity_count && result->entities[ordinary.value].scope.value == scope.value)
+        {
+            break;
+        }
+        scope = result->scopes[scope.value].parent;
     }
     return found;
 }
@@ -3106,8 +3157,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_arithmetic_type(CParseResult* resul
     {
         return C_TYPE_ID_INVALID;
     }
-    CTypeKind left = result->types[left_id.value].kind;
-    CTypeKind right = result->types[right_id.value].kind;
+    CTypeKind left = c_parse_expression_value_kind(result, left_id);
+    CTypeKind right = c_parse_expression_value_kind(result, right_id);
     bool complex = c_type_kind_is_complex(left) || c_type_kind_is_complex(right);
     if (c_type_kind_is_complex(left)) left = c_type_kind_complex_element(left);
     if (c_type_kind_is_complex(right)) right = c_type_kind_complex_element(right);
@@ -3250,7 +3301,7 @@ BUSTER_C_INTERNAL u32 c_parse_expression_operator_precedence(CToken token)
     return 0;
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
+BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(Arena* arena, CPreprocessResult preprocess,
                                                                  CParseResult* result, CScopeId scope, u32 start, u32 end)
 {
     if (start >= end)
@@ -3351,10 +3402,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_expression_leaf_without_cast(CTypeParseMachine
     }
     if (first.kind == C_TOKEN_IDENTIFIER)
     {
-        CEnumMember const* pending = end == start + 1 ? c_parse_pending_enum_member(machine, preprocess, result, first) : 0;
+        CEnumMember const* pending = end == start + 1 ? c_parse_pending_enum_member(preprocess, result, scope, start) : 0;
         if (pending)
         {
-            return c_parse_expression_scalar_type(result, C_TYPE_INT);
+            return pending->type;
         }
         if ((string_equal(c_token_spelling(preprocess.spelling_base, first), S8("sizeof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Alignof")) || string_equal(c_token_spelling(preprocess.spelling_base, first), S8("alignof"))) &&
             start + 1 < end)
@@ -3600,7 +3651,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 // A single token cannot contain a cast or an operator. Keep
                 // its existing leaf policy without another machine frame.
-                last = c_parse_expression_leaf_without_cast(machine, arena, preprocess, result, scope, task->start, task->end);
+                last = c_parse_expression_leaf_without_cast(arena, preprocess, result, scope, task->start, task->end);
                 task_count -= 1;
                 continue;
             }
@@ -3832,7 +3883,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             }
             else
             {
-                CTypeKind kind = result->types[last.value].kind;
+                CTypeKind kind = c_parse_expression_value_kind(result, last);
                 kind = c_parse_expression_promoted_kind(kind);
                 bool complement = c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_TILDE);
                 last = (c_parse_expression_integer_kind(kind) || (!complement && (kind == C_TYPE_FLOAT16 || kind == C_TYPE_BFLOAT16 || kind == C_TYPE_FLOAT ||
@@ -4009,7 +4060,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
         break;
         case C_PARSE_EXPRESSION_TYPE_SHIFT:
         {
-            CTypeKind kind = c_parse_expression_promoted_kind(left_type->kind);
+            CTypeKind kind = c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, left));
             last = c_parse_expression_integer_kind(kind) ? c_parse_expression_scalar_type(result, kind) : C_TYPE_ID_INVALID;
         }
         break;
@@ -4897,8 +4948,16 @@ BUSTER_C_SHARED void c_parse_static_assert_check(CTypeParseMachine* machine, Are
     for (u32 token_offset = 0; token_offset < declaration.token_count; token_offset += 1)
     {
         CToken token = preprocess.tokens[declaration.token_start + token_offset];
+        // The legacy token evaluator replaces identifiers with untyped u64
+        // spellings. Enum arithmetic must instead use the semantic evaluator,
+        // retaining signedness, compatible type, and both magnitude limbs.
+        CEntityId entity = token.kind == C_TOKEN_IDENTIFIER
+                               ? c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &token) : C_ENTITY_ID_INVALID;
+        bool enumerator = entity.value < result->entity_count ? result->entities[entity.value].kind == C_ENTITY_ENUMERATOR
+                          : token.kind == C_TOKEN_IDENTIFIER &&
+                            c_parse_pending_enum_member(preprocess, result, scope, declaration.token_start + token_offset) != 0;
         if (token.kind == C_TOKEN_IDENTIFIER &&
-            (string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) ||
+            (enumerator || string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__builtin_offsetof")) ||
              string_equal(c_token_spelling(preprocess.spelling_base, token), S8("_Generic"))))
         {
             deferred = true;
@@ -8306,6 +8365,168 @@ BUSTER_C_INTERNAL CTypeId c_parse_qualified_typedef_type(CParseResult* result, C
 }
 
 
+BUSTER_C_INTERNAL CIntegerRank c_parse_integer_rank(CTypeKind kind);
+
+// Test the mathematical signed magnitude, not a low-limb cast. In particular,
+// UINT64_MAX and -1 are different values even though their u64 images agree.
+BUSTER_C_INTERNAL bool c_parse_enum_value_fits(Target target, CIntegerConstant value, CTypeKind kind)
+{
+    IrTypeKind ir_kind = IR_TYPE_VOID;
+    u32 width = 0;
+    u32 alignment = 0;
+    bool sign = false;
+    bool fits = value.valid && c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) &&
+                (ir_kind == IR_TYPE_INTEGER || ir_kind == IR_TYPE_BOOLEAN) && width && width <= 128 &&
+                (!value.is_negative || sign);
+    if (fits)
+    {
+        u32 magnitude_bits = width - (sign ? 1u : 0u);
+        CIrWideInteger limit = {0};
+        if (magnitude_bits >= 64)
+        {
+            limit.low = UINT64_MAX;
+            limit.high = magnitude_bits == 128 ? UINT64_MAX
+                         : magnitude_bits == 64 ? 0 : (UINT64_C(1) << (magnitude_bits - 64)) - 1;
+        }
+        else
+        {
+            limit.low = (UINT64_C(1) << magnitude_bits) - 1;
+        }
+        if (value.is_negative)
+        {
+            limit.low += 1;
+            limit.high += limit.low == 0;
+        }
+        fits = value.magnitude_high < limit.high || (value.magnitude_high == limit.high && value.magnitude <= limit.low);
+    }
+    return fits;
+}
+
+BUSTER_C_INTERNAL CIntegerConstant c_parse_enum_value_type(CParseResult* result, Target target, CIntegerConstant value, CTypeId type)
+{
+    CTypeKind kind = c_parse_expression_value_kind(result, type);
+    IrTypeKind ir_kind = IR_TYPE_VOID;
+    u32 width = 0;
+    u32 alignment = 0;
+    bool sign = false;
+    value.type = type;
+    value.rank = c_parse_integer_rank(kind);
+    value.valid &= value.rank != C_INTEGER_RANK_INVALID &&
+                   c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment);
+    value.bit_width = (u16)width;
+    value.is_signed = sign;
+    return value;
+}
+
+BUSTER_C_INTERNAL CTypeId c_parse_enum_range_type(CParseResult* result, Target target, CIntegerConstant negative, CIntegerConstant positive)
+{
+    CTypeKind signed_kinds[] = {C_TYPE_INT, C_TYPE_LONG, C_TYPE_LONG_LONG, C_TYPE_INT128};
+    CTypeKind unsigned_kinds[] = {C_TYPE_UNSIGNED_INT, C_TYPE_UNSIGNED_LONG, C_TYPE_UNSIGNED_LONG_LONG, C_TYPE_UNSIGNED_INT128};
+    CTypeId type = C_TYPE_ID_INVALID;
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(signed_kinds) && type.value == C_ID_UNDERLYING_INVALID; index += 1)
+    {
+        CTypeKind kind = negative.is_negative ? signed_kinds[index] : unsigned_kinds[index];
+        if (c_parse_enum_value_fits(target, negative, kind) && c_parse_enum_value_fits(target, positive, kind))
+        {
+            type = c_parse_expression_scalar_type(result, kind);
+        }
+    }
+    return type;
+}
+
+// Successor values must at least retain the same full-width facts as explicit
+// initializers. Use unsigned limb arithmetic, with an explicit terminal error,
+// rather than overflowing the host's signed previous_value. The fixed-base
+// representability diagnostic remains separate from ordinary type selection.
+BUSTER_C_INTERNAL CIntegerConstant c_parse_enum_successor(CParseResult* result, CPreprocessResult preprocess,
+                                                          CEnumMember const* previous, CTypeId fixed_type)
+{
+    CTypeId type = fixed_type.value < result->type_count ? fixed_type
+                   : previous ? previous->declaration_type : c_parse_expression_scalar_type(result, C_TYPE_INT);
+    CIntegerConstant value = {.type = type, .valid = true};
+    if (previous)
+    {
+        value = previous->integer_constant;
+        if (value.is_negative)
+        {
+            value.magnitude_high -= value.magnitude == 0;
+            value.magnitude -= 1;
+            value.is_negative = value.magnitude != 0 || value.magnitude_high != 0;
+        }
+        else
+        {
+            value.magnitude += 1;
+            if (!value.magnitude)
+            {
+                value.magnitude_high += 1;
+                value.valid &= value.magnitude_high != 0;
+            }
+        }
+    }
+    if (fixed_type.value >= result->type_count)
+    {
+        if (c_preprocess_dialect_is_c23(preprocess.dialect) && c_parse_enum_value_fits(preprocess.target, value, C_TYPE_INT))
+        {
+            type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+        }
+        else if (value.valid && !c_parse_enum_value_fits(preprocess.target, value, c_parse_expression_value_kind(result, type)))
+        {
+            // Retain the predecessor's signedness when a larger type is needed.
+            CIntegerConstant lower = {.valid = true};
+            CIntegerConstant upper = value;
+            if (previous && c_parse_expression_signed_kind(c_parse_expression_value_kind(result, previous->declaration_type)))
+            {
+                lower.is_negative = true;
+                lower.magnitude = 1;
+            }
+            type = c_parse_enum_range_type(result, preprocess.target, lower, upper);
+        }
+    }
+    value = c_parse_enum_value_type(result, preprocess.target, value, type);
+    return value;
+}
+
+BUSTER_C_INTERNAL void c_parse_enum_complete(CParseResult* result, CPreprocessResult preprocess, CTypeId id)
+{
+    CType* enumeration = result->types + id.value;
+    CIntegerConstant negative = {.valid = true};
+    CIntegerConstant positive = {.valid = true};
+    bool all_int = true;
+    for (u32 index = 0; index < enumeration->enum_member_count; index += 1)
+    {
+        CIntegerConstant value = result->enum_members[enumeration->enum_member_start + index].integer_constant;
+        if (value.valid)
+        {
+            CIntegerConstant* limit = value.is_negative ? &negative : &positive;
+            if (value.magnitude_high > limit->magnitude_high ||
+                (value.magnitude_high == limit->magnitude_high && value.magnitude > limit->magnitude))
+            {
+                *limit = value;
+            }
+            all_int &= c_parse_enum_value_fits(preprocess.target, value, C_TYPE_INT);
+        }
+    }
+    if (!enumeration->has_fixed_underlying_type)
+    {
+        CTypeId compatible = c_parse_enum_range_type(result, preprocess.target, negative, positive);
+        enumeration = result->types + id.value;
+        enumeration->element_type = compatible;
+        if (compatible.value == C_ID_UNDERLYING_INVALID && enumeration->enum_member_count)
+        {
+            c_parse_diagnostic(result, result->enum_members[enumeration->enum_member_start].location,
+                               C_DIAGNOSTIC_INVALID_CONSTEXPR, S8("no integer type can represent all enumerator values"));
+        }
+    }
+    bool enum_members = enumeration->has_fixed_underlying_type || (c_preprocess_dialect_is_c23(preprocess.dialect) && !all_int);
+    CTypeId int_type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+    for (u32 index = 0; index < enumeration->enum_member_count; index += 1)
+    {
+        CEnumMember* member = result->enum_members + enumeration->enum_member_start + index;
+        member->type = enum_members || (member->integer_constant.valid &&
+                                      !c_parse_enum_value_fits(preprocess.target, member->integer_constant, C_TYPE_INT)) ? id : int_type;
+    }
+}
+
 BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* machine, CTypeParseFrame* frame, u32* declarator_start);
 
 // The dialect-independent storage/function-specifier words the atomic
@@ -8654,7 +8875,7 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
             return;
         }
     }
-    CTypeId type = c_parse_expression_leaf_without_cast(machine, frame->arena, frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
+    CTypeId type = c_parse_expression_leaf_without_cast(frame->arena, frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
     c_type_parse_frame_complete(machine, type, frame->end, type.value != C_ID_UNDERLYING_INVALID);
 }
 
@@ -10524,7 +10745,6 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
         }
     }
     CTypeId type = C_TYPE_ID_INVALID;
-    bool is_enumerator = false;
     u32 declaration_index = UINT32_MAX;
     u32 index = start;
     if (identifier_index < end && preprocess.tokens[identifier_index].kind == C_TOKEN_IDENTIFIER)
@@ -10543,7 +10763,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
             }
             else if (found->kind == C_ENTITY_ENUMERATOR)
             {
-                is_enumerator = true;
+                type = found->type;
             }
         }
         else
@@ -10551,9 +10771,10 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
             // A member of the enum still being declared is not an entity yet;
             // the member table already holds everything declared before this
             // initializer.
-            for (u32 member_index = 0; member_index < result->enum_member_count && !is_enumerator; member_index += 1)
+            CEnumMember const* pending = c_parse_pending_enum_member(preprocess, result, scope, identifier_index);
+            if (pending)
             {
-                is_enumerator = string_equal(result->enum_members[member_index].name, name);
+                type = pending->type;
             }
         }
         index = postfix_index;
@@ -10699,16 +10920,7 @@ BUSTER_C_INTERNAL bool c_parse_sizeof_operand_expression_layout(Arena* arena, CP
         }
     }
     bool resolved;
-    if (is_enumerator && index == end && !dereference_count && type.value == C_ID_UNDERLYING_INVALID)
-    {
-        // An enumerator has type int, which is 4 bytes with 4-byte alignment
-        // on every supported target; the parse holds no ready-made int type
-        // record to hand c_parse_type_layout here.
-        *size_out = 4;
-        *alignment_out = 4;
-        resolved = true;
-    }
-    else if (counted_items)
+    if (counted_items)
     {
         u64 element_size = 0;
         u32 element_alignment = 0;
@@ -10971,6 +11183,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                                                 .tag = tag,
                                                 .tag_scope = frame->scope,
                                                 .element_type = enum_underlying_type,
+                                            .has_fixed_underlying_type = enum_underlying_type.value != C_ID_UNDERLYING_INVALID,
                                                 .return_type = C_TYPE_ID_INVALID,
                                                 .array_bound = C_ARRAY_BOUND_INVALID,
                                                 .kind = kind,
@@ -11026,6 +11239,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                                             .tag = tag,
                                             .tag_scope = frame->scope,
                                             .element_type = enum_underlying_type,
+                                            .has_fixed_underlying_type = enum_underlying_type.value != C_ID_UNDERLYING_INVALID,
                                             .return_type = C_TYPE_ID_INVALID,
                                             .array_bound = C_ARRAY_BOUND_INVALID,
                                             .member_start = result->member_count,
@@ -11044,6 +11258,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             return C_TYPE_ID_INVALID;
         }
         aggregate->element_type = enum_underlying_type;
+        aggregate->has_fixed_underlying_type = true;
     }
     aggregate->member_start = result->member_count;
     aggregate->definition_start = open + 1;
@@ -11052,7 +11267,6 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     {
         aggregate->enum_member_start = result->enum_member_count;
         u32 enum_start = open + 1;
-        s64 previous_value = -1;
         // Only a top-level comma separates enumerators. An initializer may
         // group commas of its own inside parentheses, brackets or braces --
         // `enum { E = (int)sizeof (struct S){1, 2}, F }` -- and splitting on
@@ -11091,8 +11305,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             // inside an attribute list are already covered, because the
             // enumerator split above counts '[' as an opening delimiter.
             u32 enum_value_index = c_parse_skip_attributes(preprocess, enum_start + 1, token_index);
-            s64 value = previous_value + 1;
-            CIntegerConstant integer_constant = {.type = C_TYPE_ID_INVALID};
+            CEnumMember const* previous = result->enum_member_count > aggregate->enum_member_start
+                                             ? result->enum_members + result->enum_member_count - 1 : 0;
+            CTypeId fixed_type = aggregate->has_fixed_underlying_type ? type : C_TYPE_ID_INVALID;
+            CIntegerConstant integer_constant = c_parse_enum_successor(result, preprocess, previous, fixed_type);
+            CTypeId declaration_type = integer_constant.type;
             if (enum_value_index < token_index)
             {
                 if (!c_token_is_punctuator(&preprocess.tokens[enum_value_index], C_PUNCTUATOR_ASSIGN))
@@ -11116,30 +11333,33 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                         string_format(result->arena, S8("enumerator '{S8}' is not an integer constant expression"),
                                       c_token_spelling(preprocess.spelling_base, name)));
                 }
-                else
-                {
-                    CIrWideInteger bits = {
-                        .low = integer_constant.magnitude,
-                        .high = integer_constant.magnitude_high,
-                    };
-                    if (integer_constant.is_negative)
-                    {
-                        bits = c_ir_wide_negate(bits);
-                    }
-                    value = bits.low <= INT64_MAX ? (s64)bits.low : -1 - (s64)(UINT64_MAX - bits.low);
-                }
+                declaration_type = fixed_type.value < result->type_count ? fixed_type
+                                   : c_parse_enum_value_fits(preprocess.target, integer_constant, C_TYPE_INT)
+                                       ? c_parse_expression_scalar_type(result, C_TYPE_INT) : integer_constant.type;
                 scratch_end(temporary);
+            }
+            else if (!integer_constant.valid)
+            {
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                                   S8("implicit enumerator is not representable by a supported integer type"));
+            }
+            if (declaration_type.value >= result->type_count)
+            {
+                declaration_type = c_parse_expression_scalar_type(result, C_TYPE_INT);
             }
             BUSTER_VALIDATE(result->enum_member_count < result->enum_member_capacity);
             result->enum_members[result->enum_member_count++] = (CEnumMember){
                 .name = c_token_spelling(preprocess.spelling_base, name),
                 .location = c_preprocess_token_location(&preprocess, name),
                 .symbol = name.symbol,
+                .token_index = enum_start,
+                .enum_type = type,
+                .declaration_type = declaration_type,
+                .type = declaration_type,
                 .integer_constant = integer_constant,
-                .value = value < 0 ? 0 - (u64)value : (u64)value,
-                .is_negative = value < 0,
+                .value = integer_constant.magnitude,
+                .is_negative = integer_constant.is_negative,
             };
-            previous_value = value;
             enum_start = token_index + 1;
         }
     }
@@ -11203,6 +11423,8 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     aggregate = &result->types[type.value];
     aggregate->member_count = result->member_count - aggregate->member_start;
     aggregate->enum_member_count = result->enum_member_count - aggregate->enum_member_start;
+    c_parse_enum_complete(result, preprocess, type);
+    aggregate = result->types + type.value;
     aggregate->is_complete = true;
     c_parse_validate_flexible_array_members(result, aggregate);
     u32 enum_declarator_start = close + 1;
@@ -12230,6 +12452,14 @@ BUSTER_C_INTERNAL bool c_parse_types_compatible_core(Arena* result_arena, CParse
         }
         CType left_type = result->types[pair.left.value];
         CType right_type = result->types[pair.right.value];
+        if (left_type.kind == C_TYPE_ENUM && right_type.kind != C_TYPE_ENUM && c_parse_expression_integer_kind(right_type.kind))
+        {
+            left_type.kind = c_parse_expression_value_kind(result, pair.left);
+        }
+        else if (right_type.kind == C_TYPE_ENUM && left_type.kind != C_TYPE_ENUM && c_parse_expression_integer_kind(left_type.kind))
+        {
+            right_type.kind = c_parse_expression_value_kind(result, pair.right);
+        }
         if (left_type.kind != right_type.kind ||
             (!pair.ignore_qualifiers && !ignore_nested_qualifiers && (left_type.is_const != right_type.is_const || left_type.is_volatile != right_type.is_volatile ||
                                         left_type.is_restrict != right_type.is_restrict || left_type.is_atomic != right_type.is_atomic)))
@@ -14310,16 +14540,19 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
         result->entities[result->entity_count++] = (CEntity){
             .name = member->name,
             .location = member->location,
-            .type = base,
+            .type = member->type,
             .scope = scope,
             .next_in_scope = C_ENTITY_ID_INVALID,
             .declaration_index = declaration_index,
+            .declaration_token_plus_one = member->token_index + 1,
+            .enum_member_plus_one = member_index + 1,
             .kind = C_ENTITY_ENUMERATOR,
             .is_definition = true,
             .constant_is_negative = member->is_negative,
             .constant_value = member->value,
         };
         c_parse_scope_add_entity(result, scope, entity, member->symbol);
+        member->is_published = true;
     }
     u32 segment_start = declarator_start;
     while (segment_start < end)
@@ -17111,10 +17344,9 @@ BUSTER_C_INTERNAL IrType c_parse_constant_scalar_type(CParseResult* result, Targ
     u32 alignment = 0;
     if (type.value < result->type_count)
     {
-        CType source = result->types[type.value];
-        if (source.kind == C_TYPE_ENUM && source.element_type.value < result->type_count) source = result->types[source.element_type.value];
-        c_ir_scalar_type_properties(target, source.kind, &scalar.kind, &scalar.bit_width, &scalar.is_signed, &alignment);
-        scalar.float_format = source.kind == C_TYPE_BFLOAT16 ? IR_FLOAT_FORMAT_BFLOAT16 : IR_FLOAT_FORMAT_IEEE;
+        CTypeKind kind = c_parse_expression_value_kind(result, type);
+        c_ir_scalar_type_properties(target, kind, &scalar.kind, &scalar.bit_width, &scalar.is_signed, &alignment);
+        scalar.float_format = kind == C_TYPE_BFLOAT16 ? IR_FLOAT_FORMAT_BFLOAT16 : IR_FLOAT_FORMAT_IEEE;
     }
     return scalar;
 }
@@ -17282,7 +17514,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_binary(CParseResult* result, T
         CTypeId common = c_parse_expression_arithmetic_type(result, target, left.type, right.type);
         if (precedence == 11 && left.type.value < result->type_count)
         {
-            common = c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(result->types[left.type.value].kind));
+            common = c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, left.type)));
         }
         left = c_parse_constant_convert(result, target, left, common);
         right = c_parse_constant_convert(result, target, right, common);
@@ -17525,12 +17757,15 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
         }
         else if (first.kind == C_TOKEN_IDENTIFIER)
         {
-            CEnumMember const* pending = c_parse_pending_enum_member(machine, preprocess, result, first);
+            CEnumMember const* pending = c_parse_pending_enum_member(preprocess, result, scope, start);
             if (pending)
             {
-                value.valid = true;
-                value.integer = pending->is_negative ? 0 - pending->value : pending->value;
-                value.type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+                value.valid = pending->integer_constant.valid;
+                CIrWideInteger bits = {.low = pending->value, .high = pending->integer_constant.magnitude_high};
+                if (pending->is_negative) bits = c_ir_wide_negate(bits);
+                value.integer = bits.low;
+                value.integer_high = bits.high;
+                value.type = pending->type;
             }
             else
             {
@@ -17539,7 +17774,14 @@ BUSTER_C_INTERNAL CParseConstant c_parse_constant_leaf(CTypeParseMachine* machin
                 {
                     CEntity entity = result->entities[id.value];
                     value.valid = entity.kind == C_ENTITY_ENUMERATOR || (entity.is_constexpr && entity.has_constant_value);
-                    value.integer = entity.constant_is_negative ? 0 - entity.constant_value : entity.constant_value;
+                    CIrWideInteger bits = {.low = entity.constant_value};
+                    if (entity.enum_member_plus_one && entity.enum_member_plus_one <= result->enum_member_count)
+                    {
+                        bits.high = result->enum_members[entity.enum_member_plus_one - 1].integer_constant.magnitude_high;
+                    }
+                    if (entity.constant_is_negative) bits = c_ir_wide_negate(bits);
+                    value.integer = bits.low;
+                    value.integer_high = bits.high;
                     value.type = entity.type;
                 }
                 else if (c_preprocess_dialect_is_c23(preprocess.dialect) &&
@@ -17806,7 +18048,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 }
                 else
                 {
-                    CTypeKind kind = last.type.value < result->type_count ? result->types[last.type.value].kind : C_TYPE_INVALID;
+                    CTypeKind kind = c_parse_expression_value_kind(result, last.type);
                     last = c_parse_constant_convert(result, preprocess.target, last,
                                                     c_parse_expression_scalar_type(result, c_parse_expression_promoted_kind(kind)));
                     if (c_token_is_punctuator(&operation, C_PUNCTUATOR_MINUS))
@@ -19825,7 +20067,7 @@ BUSTER_C_INTERNAL void c_parse_validate_one_switch(CTypeParseMachine* machine, C
         u64 sign_bit = 0;
         if (controlling_type_resolved && controlling_type.value < result->type_count)
         {
-            controlling_kind = c_parse_expression_promoted_kind(result->types[controlling_type.value].kind);
+            controlling_kind = c_parse_expression_promoted_kind(c_parse_expression_value_kind(result, controlling_type));
             u64 size = 0;
             u32 alignment = 0;
             controlling_type_resolved = c_parse_expression_integer_kind(controlling_kind) &&
@@ -22025,13 +22267,6 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     }
     if (result.enum_member_count)
     {
-        CTypeId enum_integer_type = c_parse_add_type(&result, (CType){
-                                                                  .element_type = C_TYPE_ID_INVALID,
-                                                                  .return_type = C_TYPE_ID_INVALID,
-                                                                  .array_bound = C_ARRAY_BOUND_INVALID,
-                                                                  .kind = C_TYPE_INT,
-                                                                  .is_complete = true,
-                                                              });
         for (u32 member_index = 0; member_index < result.enum_member_count; member_index += 1)
         {
             CEnumMember* member = &result.enum_members[member_index];
@@ -22053,13 +22288,15 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             result.entities[result.entity_count++] = (CEntity){
                 .name = member->name,
                 .location = member->location,
-                .type = enum_integer_type,
+                .type = member->type,
                 .scope =
                     {
                         .value = 0,
                     },
                 .next_in_scope = C_ENTITY_ID_INVALID,
                 .declaration_index = C_ID_UNDERLYING_INVALID,
+                .declaration_token_plus_one = member->token_index + 1,
+                .enum_member_plus_one = member_index + 1,
                 .kind = C_ENTITY_ENUMERATOR,
                 .is_definition = true,
                 .constant_is_negative = member->is_negative,
@@ -22070,6 +22307,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                          .value = 0,
                                      },
                                      entity, member_symbol);
+            member->is_published = true;
         }
     }
     // A file-scope declaration's initializer may define an aggregate the same

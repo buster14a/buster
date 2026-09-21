@@ -790,6 +790,9 @@ struct CType
     // musl's `long __syscall_cp_asm();` and the eight-parameter prototype
     // beside it declare one function rather than two conflicting ones.
     bool is_unprototyped;
+    // For enums, element_type is the resolved compatible integer type. This
+    // flag distinguishes a written fixed base from ordinary range selection.
+    bool has_fixed_underlying_type;
 };
 
 typedef struct CMember CMember;
@@ -875,8 +878,8 @@ struct CTypeAlignment
 // magnitude; `is_negative` supplies its sign independently of the expression's
 // C type. `type`, `rank`, `bit_width`, and `is_signed` describe the resolved
 // semantic integer type after literal typing, casts, promotions, and the usual
-// arithmetic conversions. An implicit enumerator has no initializer ICE yet;
-// #901 supplies that operation and will populate the same representation.
+// arithmetic conversions. Explicit initializers retain their original ICE
+// type; implicit enumerators retain the value and type of their successor step.
 typedef enum CIntegerRank
 {
     C_INTEGER_RANK_INVALID,
@@ -910,17 +913,25 @@ struct CEnumMember
 {
     String8 name;
     CSourceLocation location;
-    // Interned id of `name`, carried from the declaring token so the entity
-    // filed from this record is keyed without a second intern; 0 when the
-    // parse ran without a symbol table.  It sits in the alignment hole
-    // ahead of `value`, so the record's size is unchanged.
+    // Interned id of `name`; zero when parsing without a symbol table.
     u32 symbol;
+    // The source token and owning enum retain declaration order and scope for
+    // pending lookup, before file-scope ordinary entities are published.
+    u32 token_index;
+    CTypeId enum_type;
+    // `declaration_type` never changes. `type` is initially that type and is
+    // finalized once, at the closing brace, according to the selected dialect.
+    CTypeId declaration_type;
+    CTypeId type;
     CIntegerConstant integer_constant;
     u64 value;
     bool is_negative;
-    u8 reserved[7];
+    // Once published, ordinary lookup is authoritative; this avoids scanning
+    // completed lists for unresolved non-enum identifiers and keywords.
+    bool is_published;
+    u8 reserved[6];
 };
-BUSTER_CT_CHECK(sizeof(CEnumMember) == 88);
+BUSTER_CT_CHECK(sizeof(CEnumMember) == 104);
 
 typedef struct CParameter CParameter;
 struct CParameter
@@ -989,6 +1000,9 @@ struct CEntity
     CEntityId cleanup_function;
     u32 cleanup_attribute_token;
     u32 cleanup_attribute_end;
+    // One-based member index for enumerators, zero otherwise. Wide enum values
+    // stay in their existing sparse member records, not in every entity.
+    u32 enum_member_plus_one;
     u64 constant_value;
 };
 
