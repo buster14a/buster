@@ -8434,52 +8434,53 @@ BUSTER_C_INTERNAL CTypeId c_parse_enum_range_type(CParseResult* result, Target t
     return type;
 }
 
-// Successor values must at least retain the same full-width facts as explicit
-// initializers. Use unsigned limb arithmetic, with an explicit terminal error,
-// rather than overflowing the host's signed previous_value. The fixed-base
-// representability diagnostic remains separate from ordinary type selection.
+// GNU17's extension and C23 both retain the preceding declaration-point type
+// for an implicit value. Only an explicit int-representable initializer resets
+// it to int (C23 6.7.2.2p11). Widen with the same signedness, using target widths;
+// fixed bases never widen. Two unsigned limbs preserve the mathematical value
+// without host signed overflow, including carry, borrow and the terminal limit.
 BUSTER_C_INTERNAL CIntegerConstant c_parse_enum_successor(CParseResult* result, CPreprocessResult preprocess,
                                                           CEnumMember const* previous, CTypeId fixed_type)
 {
-    CTypeId type = fixed_type.value < result->type_count ? fixed_type
+    bool fixed = fixed_type.value < result->type_count;
+    CTypeId type = fixed ? fixed_type
                    : previous ? previous->declaration_type : c_parse_expression_scalar_type(result, C_TYPE_INT);
-    CIntegerConstant value = {.type = type, .valid = true};
-    if (previous)
+    CIntegerConstant value = previous ? previous->integer_constant : (CIntegerConstant){.type = type, .valid = true};
+    if (previous && value.valid)
     {
-        value = previous->integer_constant;
         if (value.is_negative)
         {
             value.magnitude_high -= value.magnitude == 0;
             value.magnitude -= 1;
             value.is_negative = value.magnitude != 0 || value.magnitude_high != 0;
         }
+        else if (value.magnitude == UINT64_MAX && value.magnitude_high == UINT64_MAX)
+        {
+            value.valid = false;
+        }
         else
         {
             value.magnitude += 1;
-            if (!value.magnitude)
-            {
-                value.magnitude_high += 1;
-                value.valid &= value.magnitude_high != 0;
-            }
+            value.magnitude_high += value.magnitude == 0;
         }
     }
-    if (fixed_type.value >= result->type_count)
+    if (value.valid && !c_parse_enum_value_fits(preprocess.target, value, c_parse_expression_value_kind(result, type)))
     {
-        if (c_preprocess_dialect_is_c23(preprocess.dialect) && c_parse_enum_value_fits(preprocess.target, value, C_TYPE_INT))
+        if (fixed)
         {
-            type = c_parse_expression_scalar_type(result, C_TYPE_INT);
+            value.valid = false;
         }
-        else if (value.valid && !c_parse_enum_value_fits(preprocess.target, value, c_parse_expression_value_kind(result, type)))
+        else
         {
-            // Retain the predecessor's signedness when a larger type is needed.
+            // A negative lower bound selects the existing signed range policy;
+            // even a positive signed successor must not switch to unsigned.
             CIntegerConstant lower = {.valid = true};
-            CIntegerConstant upper = value;
-            if (previous && c_parse_expression_signed_kind(c_parse_expression_value_kind(result, previous->declaration_type)))
+            if (c_parse_expression_signed_kind(c_parse_expression_value_kind(result, type)))
             {
                 lower.is_negative = true;
                 lower.magnitude = 1;
             }
-            type = c_parse_enum_range_type(result, preprocess.target, lower, upper);
+            type = c_parse_enum_range_type(result, preprocess.target, lower, value);
         }
     }
     value = c_parse_enum_value_type(result, preprocess.target, value, type);
@@ -11305,11 +11306,9 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             // inside an attribute list are already covered, because the
             // enumerator split above counts '[' as an opening delimiter.
             u32 enum_value_index = c_parse_skip_attributes(preprocess, enum_start + 1, token_index);
-            CEnumMember const* previous = result->enum_member_count > aggregate->enum_member_start
-                                             ? result->enum_members + result->enum_member_count - 1 : 0;
             CTypeId fixed_type = aggregate->has_fixed_underlying_type ? type : C_TYPE_ID_INVALID;
-            CIntegerConstant integer_constant = c_parse_enum_successor(result, preprocess, previous, fixed_type);
-            CTypeId declaration_type = integer_constant.type;
+            CIntegerConstant integer_constant;
+            CTypeId declaration_type;
             if (enum_value_index < token_index)
             {
                 if (!c_token_is_punctuator(&preprocess.tokens[enum_value_index], C_PUNCTUATOR_ASSIGN))
@@ -11338,10 +11337,17 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                                        ? c_parse_expression_scalar_type(result, C_TYPE_INT) : integer_constant.type;
                 scratch_end(temporary);
             }
-            else if (!integer_constant.valid)
+            else
             {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
-                                   S8("implicit enumerator is not representable by a supported integer type"));
+                CEnumMember const* previous = result->enum_member_count > aggregate->enum_member_start
+                                                 ? result->enum_members + result->enum_member_count - 1 : 0;
+                integer_constant = c_parse_enum_successor(result, preprocess, previous, fixed_type);
+                declaration_type = integer_constant.type;
+                if (!integer_constant.valid)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                                       S8("implicit enumerator is not representable by a supported integer type"));
+                }
             }
             if (declaration_type.value >= result->type_count)
             {
