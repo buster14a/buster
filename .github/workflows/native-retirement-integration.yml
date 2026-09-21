@@ -8,23 +8,23 @@ on:
         required: true
         type: string
       expected_head:
-        description: Exact reviewed 40-hex pull-request head SHA
-        required: true
+        description: Optional exact head override; blank resolves the current PR head
+        required: false
         type: string
       transition_kind:
         description: Candidate trust class; must match the trusted classifier
         required: true
-        default: ordinary
+        default: auto
         type: choice
-        options: [ordinary, bootstrap, policy]
+        options: [auto, ordinary, bootstrap, policy]
       authorization_mode:
         description: Explicit authorization policy for this exact candidate
         required: true
-        default: independent-review
+        default: configured
         type: choice
-        options: [independent-review, solo-maintainer]
+        options: [configured, independent-review, solo-maintainer]
       expected_base:
-        description: Exact approved main SHA (required for solo-maintainer)
+        description: Optional main override; blank uses the immutable dispatch revision
         required: false
         type: string
 
@@ -35,6 +35,15 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # git merge --no-commit still requires an identity on clean hosted runners.
+  GIT_AUTHOR_NAME: >-
+    github-actions[bot]
+  GIT_AUTHOR_EMAIL: >-
+    41898282+github-actions[bot]@users.noreply.github.com
+  GIT_COMMITTER_NAME: >-
+    github-actions[bot]
+  GIT_COMMITTER_EMAIL: >-
+    41898282+github-actions[bot]@users.noreply.github.com
   PR_NUMBER: ${{ inputs.pull_request }}
   EXPECTED_HEAD: ${{ inputs.expected_head }}
   TRANSITION_KIND: ${{ inputs.transition_kind }}
@@ -60,12 +69,13 @@ jobs:
       final_tree: ${{ steps.evidence.outputs.final_tree }}
       evidence_sha256: ${{ steps.evidence.outputs.evidence_sha256 }}
       classification: ${{ steps.evidence.outputs.classification }}
+      authorization_mode: ${{ steps.identities.outputs.authorization_mode }}
     steps:
       - name: Check out current trusted main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ${{ github.repository }}
-          ref: main
+          ref: ${{ github.workflow_sha }}
           path: trusted
           fetch-depth: 0
           persist-credentials: false
@@ -75,16 +85,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
           base=$(git -C trusted rev-parse HEAD)
           git -C trusted fetch --no-tags origin \
             "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/native-retirement-candidate"
           head=$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)
-          test "$head" = "$EXPECTED_HEAD"
-          if [[ "$AUTHORIZATION_MODE" == solo-maintainer ]]; then
-            test "$base" = "$EXPECTED_BASE"
-          fi
+          resolved=$(python3 trusted/tools/native_retirement_integration.py resolve-dispatch \
+            --repo-root trusted --base "$base" --head "$head" \
+            --expected-head "$EXPECTED_HEAD" --expected-base "$EXPECTED_BASE" \
+            --transition-kind "$TRANSITION_KIND" --authorization-mode "$AUTHORIZATION_MODE")
+          TRANSITION_KIND=$(jq -r '.classification' <<<"$resolved")
+          AUTHORIZATION_MODE=$(jq -r '.authorization_mode' <<<"$resolved")
+          EXPECTED_BASE=$base
+          echo "TRANSITION_KIND=$TRANSITION_KIND" >> "$GITHUB_ENV"
+          echo "authorization_mode=$AUTHORIZATION_MODE" >> "$GITHUB_OUTPUT"
+          # shellcheck disable=SC2016
+          printf '## Resolved retirement request\n\nPR: %s\n\nBase: `%s`\n\nHead: `%s`\n\nClass: %s\n\nAuthorization: %s\n' \
+            "$PR_NUMBER" "$base" "$head" "$TRANSITION_KIND" "$AUTHORIZATION_MODE" >> "$GITHUB_STEP_SUMMARY"
           mkdir -p "$RUNNER_TEMP/native-retirement"
           python3 trusted/tools/native_retirement_integration.py authorize \
             --pull-request "$PR_NUMBER" \
@@ -198,6 +215,11 @@ jobs:
           retention-days: 7
 
   validate:
+    env:
+      EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
+      EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
+      TRANSITION_KIND: ${{ needs.prepare.outputs.classification }}
+      AUTHORIZATION_MODE: ${{ needs.prepare.outputs.authorization_mode }}
     needs: prepare
     name: Validate exact final candidate without write authority
     runs-on: ubuntu-26.04
@@ -322,6 +344,11 @@ jobs:
           "$RUNNER_TEMP/native-retirement-build" native_retirement_census --self-test
 
   publish:
+    env:
+      EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
+      EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
+      TRANSITION_KIND: ${{ needs.prepare.outputs.classification }}
+      AUTHORIZATION_MODE: ${{ needs.prepare.outputs.authorization_mode }}
     needs: [prepare, validate]
     name: Publish one lease-guarded PR integration head
     runs-on: ubuntu-26.04
@@ -443,7 +470,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.NATIVE_RETIREMENT_PUBLICATION_TOKEN || github.token }}
+          AUTOMATIC_PR_CI: ${{ secrets.NATIVE_RETIREMENT_PUBLICATION_TOKEN != '' }}
         run: |
           set -euo pipefail
           base='${{ needs.prepare.outputs.base }}'
@@ -492,6 +520,10 @@ jobs:
           trap 'rm -f "$askpass"' EXIT
           test "$(git -C trusted ls-remote --refs origin refs/heads/main | cut -f1)" = "$base"
           test "$(git -C trusted ls-remote --refs origin "refs/heads/$head_ref" | cut -f1)" = "$head"
+          if [[ "$AUTOMATIC_PR_CI" != true ]]; then
+            echo '::warning::No publication token configured; approve the new PR workflow runs in GitHub after publication.'
+            echo 'Automatic PR CI is disabled: configure NATIVE_RETIREMENT_PUBLICATION_TOKEN.' >> "$GITHUB_STEP_SUMMARY"
+          fi
           staging_ref="refs/heads/native-retirement-staging/pr-$PR_NUMBER-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           GIT_ASKPASS="$askpass" git -C trusted push --porcelain \
             origin "$commit:$staging_ref"
