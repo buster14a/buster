@@ -8751,6 +8751,39 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value(CIntegerIrBuilder* builder, 
     return c_ir_emit_integer_value_typed(builder, value, is_negative, token, builder->s32_type);
 }
 
+// Canonical integer constants carry one magnitude limb. Assemble a rare
+// full-width enumerator with ordinary canonical operations, preserving that
+// instruction contract for every backend and the canonical validator.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_enumerator(CIntegerIrBuilder* builder, CEntity const* entity, CToken token)
+{
+    IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+    IrValueId value = IR_VALUE_ID_INVALID;
+    if (type.value != IR_ID_UNDERLYING_INVALID)
+    {
+        u64 high = entity->enum_member_plus_one && entity->enum_member_plus_one <= builder->parse.enum_member_count
+                       ? builder->parse.enum_members[entity->enum_member_plus_one - 1].integer_constant.magnitude_high : 0;
+        if (high)
+        {
+            CIrWideInteger bits = {.low = entity->constant_value, .high = high};
+            if (entity->constant_is_negative)
+            {
+                bits = c_ir_wide_negate(bits);
+            }
+            IrSourceRange source = c_ir_token_source_range(builder, token);
+            IrValueId low_value = c_ir_emit_integer_value_at(builder, bits.low, false, source, type);
+            IrValueId high_value = c_ir_emit_integer_value_at(builder, bits.high, false, source, type);
+            IrValueId shift = c_ir_emit_integer_value_at(builder, 64, false, source, type);
+            high_value = c_ir_emit_binary_value(builder, high_value, shift, type, IR_BINARY_SHIFT_LEFT, source);
+            value = c_ir_emit_binary_value(builder, low_value, high_value, type, IR_BINARY_INTEGER_BITWISE_OR, source);
+        }
+        else
+        {
+            value = c_ir_emit_integer_value_typed(builder, entity->constant_value, entity->constant_is_negative, token, type);
+        }
+    }
+    return value;
+}
+
 typedef struct CIrVlaLayout CIrVlaLayout;
 struct CIrVlaLayout
 {
@@ -25858,7 +25891,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     }
     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
     {
-        type = builder->s32_type;
+        CTypeId declared = builder->parse.entities[entity.value].type;
+        type = declared.value < builder->parse.type_count ? builder->c_type_ir_map[declared.value] : IR_TYPE_ID_INVALID;
     }
     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
     {
@@ -28227,7 +28261,7 @@ c_ir_expression_core_loop:
                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
                 {
                     CEntity* enumerator = &builder->parse.entities[entity.value];
-                    value = c_ir_emit_integer_value(builder, enumerator->constant_value, enumerator->constant_is_negative, token);
+                    value = c_ir_emit_enumerator(builder, enumerator, token);
                 }
                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_FUNCTION)
                 {
@@ -31179,7 +31213,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             }
             else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
             {
-                candidate = builder->s32_type;
+                CTypeId declared = builder->parse.entities[entity.value].type;
+                candidate = declared.value < builder->parse.type_count ? builder->c_type_ir_map[declared.value] : IR_TYPE_ID_INVALID;
             }
             else
             {
@@ -43515,12 +43550,14 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
         if (entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value))
         {
             IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : builder->s32_type;
-            u64 value = entity->constant_value;
-            if (entity->constant_is_negative)
+            CIrWideInteger bits = {.low = entity->constant_value};
+            if (entity->enum_member_plus_one && entity->enum_member_plus_one <= builder->parse.enum_member_count)
             {
-                value = 0 - value;
+                bits.high = builder->parse.enum_members[entity->enum_member_plus_one - 1].integer_constant.magnitude_high;
             }
-            *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, value);
+            if (entity->constant_is_negative) bits = c_ir_wide_negate(bits);
+            *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, bits.low);
+            result->integer_high = bits.high;
             return true;
         }
         // A function-local static is C_ENTITY_LOCAL with a symbol -- the

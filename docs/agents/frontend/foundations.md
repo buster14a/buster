@@ -656,4 +656,71 @@ expansion from exceeding Windows ARM64's unwind function-size limit.
   and canonical compaction remap or invalidate its place IDs before later
   promotion and selection consume it. No frontend entity IDs enter the map.
 
-Enum initializer lookup includes pending members of earlier enum definitions: file-scope enumerators become ordinary entities only after the declaration pass. The typed integer-constant evaluator retains their existing `int` binding until #900 selects dialect-correct declaration-point types.
+## Enumerator types and declaration order (#900)
+
+An enumerator retains three distinct facts: the original typed initializer ICE
+(`integer_constant`), the immutable `declaration_type` visible to later
+initializers in its own list, and `type`, finalized at the closing brace. The
+owning enum records its compatible integer type in `element_type`; the separate
+`has_fixed_underlying_type` bit distinguishes an explicit base from a resolved
+ordinary enum. Completing the enum never rewrites the original ICE or its
+recorded declaration-point type.
+
+The supported contracts are explicit, not selected by the host compiler:
+
+- GNU17 follows the historical Clang extension: an explicit int-representable
+  initializer declares an `int` enumerator; otherwise it uses the initializer's
+  integer type. On completion, each int-representable member remains `int`;
+  larger members use the completed enum type.
+- C23/GNU23 follows WG14 N3029: declaration-point typing is the same for those
+  explicit initializers, but an ordinary completed enum containing any value
+  outside `int` gives **all** members its enum type. An all-small list keeps
+  `int` enumerators. Fixed-underlying enum members have the enum type both
+  during the list and after completion, including narrow bases.
+
+Ordinary compatible-type selection considers both full-width signed-magnitude
+limits. It chooses an unsigned type for an entirely nonnegative range, or a
+signed type when negative values occur, trying int, long, long long and the
+supported 128-bit extension in rank order. Widths come from the target, not the
+host: the same 2^32 value therefore selects unsigned long on LP64 and unsigned
+long long on LLP64. A range no available integer type represents is diagnosed.
+Successors carry the same two-limb representation without host signed overflow;
+fixed-base representability diagnostics and the wider successor-boundary
+conformance campaign remain the separate #903 and #901 work.
+
+Pending lookup respects lexical scope and declaration order, including a nearer
+ordinary identifier shadowing an outer enumerator. Published names use ordinary
+lookup; only the current incomplete list can shadow them before publication.
+File- and block-scope entities publish the same member type, independently of
+pointer/typedef/object declarators sharing the enum definition. `typeof`, sizeof,
+constant folding and runtime operands consume that type. Static assertions using
+enumerators defer to typed semantic evaluation instead of replacing names with
+untyped decimal spellings. Full-width runtime constants use ordinary canonical
+shift/or operations; the one-immediate integer-constant contract is unchanged.
+
+`c_test_enumerator_types` pins both contracts across Linux x86-64/AArch64 and
+Windows x86-64, and validates canonical IR in both frontend SSA forms.
+`c_test_fixed_and_wide_enumerator_types` covers narrow fixed bases, preserved
+128-bit references and signed magnitudes. On Linux x86-64,
+`c_test_enumerator_type_differential` executes the same assertion-bearing source
+with Clang GNU17 and GCC GNU2x at O0/O2, then with Buster GNU17/GNU23 in both
+frontend forms with strict codegen verification. The independently verified
+reference versions are Clang 17.0.0/21.1.8 and GCC 14.2.0/15.2.0. Clang 20's
+[N3029 implementation](https://github.com/llvm/llvm-project/pull/103917) also
+changed its pre-C23 extension behavior: Clang 20 and later use the C23 completion
+profile in GNU17 mode; earlier Clang uses the historical profile. The external
+Clang source selects these two hardcoded profiles using `__clang_major__`, not
+observed probe results. GCC GNU2x always uses the C23 profile. GCC 14's GNU17 mode
+already applies its C23 completion rule, whereas Clang 17's GNU2x mode still uses
+its older rule; dialect names alone do not identify an external oracle.
+
+Buster receives a separate source file with an unconditional `ENUM_C23=0` or
+`ENUM_C23=1`, selected only by its requested dialect. The external prefix never
+reaches Buster, so a reference upgrade cannot weaken its GNU17 checks or silently
+change its semantics. Every reference must compile and execute the full
+assertion-bearing fixture. A compiler failure reports the executable, dialect,
+optimization, native status, timeout and captured stdout/stderr; failed source
+writes never launch a compiler against an earlier temporary file.
+
+Specification: [WG14 N3029](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3029.htm)
+and [N3030 fixed enums](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3030.htm).
