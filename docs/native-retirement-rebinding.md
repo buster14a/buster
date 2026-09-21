@@ -139,9 +139,10 @@ Candidates are classified before any privileged operation:
 - a candidate that changes both implementation and policy/schema is rejected
   and must be split.
 
-`bootstrap` and `policy` dispatches require a maintainer/admin dispatcher and an
-approval from a maintainer/admin other than the PR author on the exact candidate
-commit. The publisher always executes the
+By default, `bootstrap` and `policy` dispatches require a maintainer/admin
+dispatcher and an approval from a maintainer/admin other than the PR author
+on the exact candidate head. An explicitly configured solo-maintainer repository
+can instead use the admin-dispatch authorization described below. The publisher always executes the
 implementation from the old/current trusted `main`, never the candidate's
 version. In the read-only validation job, the candidate authority must then
 accept the exact generated state produced by that old authority for the final
@@ -149,6 +150,58 @@ tree. A bootstrap that would immediately make `main` stale therefore fails
 before publication. A schema change that the old implementation cannot
 understand must land as a backwards-compatible bootstrap first, then as a
 separate policy transition after that bootstrap is trusted.
+
+### Solo-maintainer authorization
+
+`authorization_mode: solo-maintainer` is explicit owner authorization of one
+bootstrap or policy transition. It is recorded separately from independent
+review; `maintainer_approvals` remains empty. The default is still
+`independent-review`, and missing reviews never silently select the solo route.
+Ordinary integrations retain their existing dispatcher authorization.
+
+After this implementation is installed on trusted `main`, configure the
+repository Actions variable `NATIVE_RETIREMENT_SOLO_MAINTAINER` with the exact
+GitHub login of the solo maintainer (`davidgmbb` for this repository). That
+account must currently have the `admin` role. A candidate file cannot set this
+configuration. The variable is captured by each workflow run; removing it
+disables future dispatches, so cancel any already-running solo dispatch when
+revoking the configuration. Current admin permission is checked again before
+publication.
+
+To authorize a transition, open **Actions -> Native retirement trusted
+integration -> Run workflow**, select `main`, and supply:
+
+| Input | Value |
+| --- | --- |
+| `pull_request` | The open, non-draft, same-repository PR number |
+| `expected_head` | Its full reviewed 40-character head SHA |
+| `transition_kind` | `bootstrap` or `policy`, matching the trusted classifier |
+| `authorization_mode` | `solo-maintainer` |
+| `expected_base` | The full current `main` SHA you approve as the base |
+
+This manual dispatch is the approval action. It must originate from the
+configured admin account, use the default-branch writer at the approved base,
+and be attempt 1 of a fresh workflow run. Re-running jobs is not fresh approval:
+start a new dispatch after a failure or cancellation. If either main or the
+candidate changes, inspect the new revisions and dispatch again. Approval is
+checked during preparation and immediately before publication. Both resulting
+`authorization.json` records are retained alongside the generated-tree evidence
+and contain the PR/head, base, actor, transition, workflow revision and run ID.
+
+Solo authorization does not skip the old-trusted-tool reconstruction, separate
+read-only candidate validation, second-refresh equality check, protected writer
+environment, generated-file ownership rules, or leased publication. A writer
+environment configured to require another person's approval is still blocking
+for a solo maintainer; this option does not bypass environment protection.
+
+**Installation is a separate policy change.** A PR introducing this mode cannot
+authorize its own privileged execution. Review and install this source-only
+prerequisite through the repository's existing permitted change process before
+setting the variable or dispatching solo mode. Do not run the candidate workflow
+with write credentials or manufacture a successful admission status. This
+prerequisite does not install #927's PR-head publisher or attest #927; that
+publisher transition remains separate work after the authorization policy is
+trusted.
 
 Generated files are never an escape hatch: manual edits to either generated
 artifact fail for all classes. External/SDK pins remain reviewed policy and
