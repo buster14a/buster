@@ -79,9 +79,41 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      - name: Prepare exact admission self-test tree
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C candidate rev-parse HEAD)" = "$HEAD_SHA"
+          case "$EVENT_NAME" in
+            pull_request)
+              [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+              test_tree=$(git -C candidate merge-tree --write-tree "$BASE_SHA" "$HEAD_SHA")
+              ;;
+            merge_group|push|workflow_dispatch)
+              test_tree=$(git -C candidate rev-parse "${HEAD_SHA}^{tree}")
+              ;;
+            *) echo '::error::Unsupported admission self-test event.'; exit 1 ;;
+          esac
+          [[ "$test_tree" =~ ^[0-9a-f]{40}$ ]]
+          # Test the combined tree, not an older feature checkout that predates
+          # these files. Do not update its ref/index or hide candidate deletions.
+          test_root="$GITHUB_WORKSPACE/admission-tests"
+          git -c core.hooksPath=/dev/null -C candidate worktree add --detach "$test_root" "$HEAD_SHA"
+          git -C "$test_root" read-tree --reset -u "$test_tree"
+          test "$(git -C "$test_root" write-tree)" = "$test_tree"
+          test -f "$test_root/tools/native_retirement_merge_gate_test.py"
+          test -f "$test_root/tools/native_retirement_admission_checkout_test.py"
+          printf 'Admission self-test tree: %s\n' "$test_tree"
       - name: Test native-retirement merge admission
-        working-directory: candidate
-        run: python3 -B tools/native_retirement_merge_gate_test.py -v
+        working-directory: admission-tests
+        run: |
+          python3 -B tools/native_retirement_merge_gate_test.py -v
+          python3 -B tools/native_retirement_admission_checkout_test.py -v
       - name: Enforce trusted native-retirement integration
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
         shell: bash
