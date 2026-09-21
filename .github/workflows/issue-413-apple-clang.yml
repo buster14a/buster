@@ -1,0 +1,321 @@
+name: Issue 413 Apple Clang experiment
+
+on:
+  push:
+    branches:
+      - codex/413-apple-clang-codegenprepare
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-413-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apple-clang-ab:
+    if: ${{ vars.GH_ACTIONS_CI_ENABLED != 'false' }}
+    runs-on: macos-26-intel
+    timeout-minutes: 120
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Record runner and toolchain identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          {
+            echo "head=$(git rev-parse HEAD)"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            sw_vers
+            uname -a
+            sysctl -n machdep.cpu.brand_string || true
+            sysctl -n hw.logicalcpu || true
+            clang --version
+            cmake --version
+            ninja --version
+            xcodebuild -version
+          } | tee evidence/environment.txt
+
+      - name: Configure and build matched baseline and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .bootstrap
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            build.c -o .bootstrap/build
+
+          common=(
+            -DBUSTER_UNITY_BUILD=ON
+            -DBUSTER_INCLUDE_TESTS=ON
+            -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF
+            -DBUSTER_DEVELOPER_TARGETS=OFF
+            -DBUSTER_DEBUG_INFO=OFF
+            -DBUSTER_FRAME_POINTERS=OFF
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          )
+
+          ./.bootstrap/build generate --ci --linker DEFAULT \
+            --build-directory build-413-base -- "${common[@]}"
+          ./.bootstrap/build build --config Release -t ide \
+            --build-directory build-413-base
+
+          ./.bootstrap/build generate --ci --linker DEFAULT \
+            --build-directory build-413-candidate -- "${common[@]}" \
+            '-DCMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -mllvm -cgpp-huge-func=5000'
+          ./.bootstrap/build build --config Release -t ide \
+            --build-directory build-413-candidate
+
+          grep -R -- '-cgpp-huge-func=5000' build-413-candidate/CMakeFiles \
+            build-413-candidate/compile_commands.json > evidence/candidate-flag.txt
+
+      - name: Run matched object-compile AB BA AB pairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import csv
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import resource
+          import shlex
+          import subprocess
+          import time
+
+          root = pathlib.Path.cwd()
+          evidence = root / "evidence"
+          entries = json.loads((root / "build-413-base/compile_commands.json").read_text())
+          matches = []
+          for entry in entries:
+              file_name = pathlib.Path(entry["file"]).as_posix()
+              command = entry.get("command", "")
+              if file_name.endswith("/src/buster/apps/ide/ide.c") and "BUSTER_UNITY_BUILD=1" in command and "-O2" in command:
+                  matches.append(entry)
+          if len(matches) != 1:
+              raise SystemExit(f"expected one Release unity ide.c command, found {len(matches)}")
+
+          entry = matches[0]
+          base_args = shlex.split(entry["command"])
+          cleaned = []
+          i = 0
+          while i < len(base_args):
+              arg = base_args[i]
+              if arg in ("-MD", "-MMD"):
+                  i += 1
+                  continue
+              if arg in ("-MF", "-MT", "-MQ"):
+                  i += 2
+                  continue
+              if arg == "-o":
+                  i += 2
+                  continue
+              cleaned.append(arg)
+              i += 1
+
+          output = root / "build-413-base/issue-413-measured.o"
+          order = ("baseline", "candidate", "candidate", "baseline", "baseline", "candidate")
+
+          def command_for(variant):
+              args = list(cleaned)
+              if variant == "candidate":
+                  args.extend(("-mllvm", "-cgpp-huge-func=5000"))
+              args.extend(("-o", str(output)))
+              return args
+
+          def run_one(label, variant, measured):
+              if output.exists():
+                  output.unlink()
+              stderr_path = evidence / f"object-{label}.stderr.txt"
+              before = resource.getrusage(resource.RUSAGE_CHILDREN)
+              started = time.perf_counter_ns()
+              with stderr_path.open("wb") as stderr:
+                  result = subprocess.run(command_for(variant), cwd=entry["directory"], stdout=subprocess.DEVNULL, stderr=stderr)
+              elapsed = (time.perf_counter_ns() - started) / 1e9
+              after = resource.getrusage(resource.RUSAGE_CHILDREN)
+              if result.returncode != 0:
+                  raise SystemExit(f"{label} failed with {result.returncode}; see {stderr_path}")
+              data = output.read_bytes()
+              row = {
+                  "label": label,
+                  "variant": variant,
+                  "wall_seconds": f"{elapsed:.6f}",
+                  "user_seconds": f"{after.ru_utime - before.ru_utime:.6f}",
+                  "system_seconds": f"{after.ru_stime - before.ru_stime:.6f}",
+                  "object_bytes": len(data),
+                  "object_sha256": hashlib.sha256(data).hexdigest(),
+                  "measured": int(measured),
+              }
+              print(row, flush=True)
+              return row
+
+          run_one("warmup-baseline", "baseline", False)
+          rows = [run_one(f"pair-{index + 1}-{variant}", variant, True) for index, variant in enumerate(order)]
+          with (evidence / "object-samples.csv").open("w", newline="") as stream:
+              writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+              writer.writeheader()
+              writer.writerows(rows)
+          (evidence / "object-command.txt").write_text(" ".join(shlex.quote(arg) for arg in cleaned) + "\n")
+
+          grouped = {variant: [float(row["wall_seconds"]) for row in rows if row["variant"] == variant] for variant in ("baseline", "candidate")}
+          import statistics
+          summary = {
+              variant: {
+                  "samples": values,
+                  "median": statistics.median(values),
+                  "minimum": min(values),
+              }
+              for variant, values in grouped.items()
+          }
+          summary["candidate_over_baseline_median"] = summary["candidate"]["median"] / summary["baseline"]["median"]
+          (evidence / "object-summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Capture current baseline and candidate time traces
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import shlex
+          import subprocess
+
+          root = pathlib.Path.cwd()
+          evidence = root / "evidence"
+          entries = json.loads((root / "build-413-base/compile_commands.json").read_text())
+          entry = next(e for e in entries if pathlib.Path(e["file"]).as_posix().endswith("/src/buster/apps/ide/ide.c") and "BUSTER_UNITY_BUILD=1" in e.get("command", "") and "-O2" in e.get("command", ""))
+          original = shlex.split(entry["command"])
+          cleaned = []
+          i = 0
+          while i < len(original):
+              if original[i] in ("-MD", "-MMD"):
+                  i += 1
+              elif original[i] in ("-MF", "-MT", "-MQ", "-o"):
+                  i += 2
+              else:
+                  cleaned.append(original[i])
+                  i += 1
+          for variant in ("baseline", "candidate"):
+              output = evidence / f"trace-{variant}.o"
+              args = list(cleaned)
+              if variant == "candidate":
+                  args.extend(("-mllvm", "-cgpp-huge-func=5000"))
+              args.extend(("-ftime-trace", "-ftime-trace-verbose", "-o", str(output)))
+              subprocess.run(args, cwd=entry["directory"], check=True)
+              produced = output.with_suffix(".json")
+              if not produced.exists():
+                  raise SystemExit(f"missing time trace {produced}")
+          PY
+          ./.bootstrap/build time_trace_summary evidence/trace-baseline.json \
+            --limit 40 > evidence/trace-baseline-summary.txt
+          ./.bootstrap/build time_trace_summary evidence/trace-candidate.json \
+            --limit 40 > evidence/trace-candidate-summary.txt
+          cat evidence/trace-baseline-summary.txt
+          cat evidence/trace-candidate-summary.txt
+
+      - name: Run candidate tests and self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./.bootstrap/build build --config Release -t test_all \
+            --build-directory build-413-candidate 2>&1 | tee evidence/test-all.txt
+          ./.bootstrap/build test_self_host --config Release \
+            --build-directory build-413-candidate 2>&1 | tee evidence/test-self-host.txt
+
+      - name: Compare trusted compiler throughput and output
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export SDKROOT
+          python3 - <<'PY'
+          import csv
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import resource
+          import statistics
+          import subprocess
+          import time
+
+          root = pathlib.Path.cwd()
+          evidence = root / "evidence"
+          sdk = os.environ["SDKROOT"]
+          variants = {
+              "baseline": (root / "build-413-base/Release/ide", root / "build-413-base/generated"),
+              "candidate": (root / "build-413-candidate/Release/ide", root / "build-413-candidate/generated"),
+          }
+          order = ("baseline", "candidate", "candidate", "baseline", "baseline", "candidate")
+          output = root / "build-413-base/issue-413-self.o"
+
+          def run_one(label, variant, measured):
+              compiler, generated = variants[variant]
+              if output.exists():
+                  output.unlink()
+              command = [
+                  str(compiler), "cc", "-Isrc", f"-I{generated}",
+                  "-DBUSTER_UNITY_BUILD=1", "-DBUSTER_INCLUDE_TESTS=0",
+                  "-isysroot", sdk, "-c", "src/buster/apps/ide/ide.c",
+                  "-o", str(output),
+              ]
+              before = resource.getrusage(resource.RUSAGE_CHILDREN)
+              started = time.perf_counter_ns()
+              result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              elapsed = (time.perf_counter_ns() - started) / 1e9
+              after = resource.getrusage(resource.RUSAGE_CHILDREN)
+              (evidence / f"self-{label}.txt").write_text(result.stdout)
+              if result.returncode != 0:
+                  raise SystemExit(f"{label} failed with {result.returncode}")
+              data = output.read_bytes()
+              row = {
+                  "label": label,
+                  "variant": variant,
+                  "wall_seconds": f"{elapsed:.6f}",
+                  "user_seconds": f"{after.ru_utime - before.ru_utime:.6f}",
+                  "system_seconds": f"{after.ru_stime - before.ru_stime:.6f}",
+                  "object_bytes": len(data),
+                  "object_sha256": hashlib.sha256(data).hexdigest(),
+                  "measured": int(measured),
+              }
+              print(row, flush=True)
+              return row
+
+          run_one("warmup-baseline", "baseline", False)
+          rows = [run_one(f"pair-{index + 1}-{variant}", variant, True) for index, variant in enumerate(order)]
+          with (evidence / "self-compile-samples.csv").open("w", newline="") as stream:
+              writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+              writer.writeheader()
+              writer.writerows(rows)
+          grouped = {variant: [float(row["wall_seconds"]) for row in rows if row["variant"] == variant] for variant in variants}
+          summary = {
+              variant: {
+                  "samples": values,
+                  "median": statistics.median(values),
+                  "minimum": min(values),
+                  "sha256": sorted({row["object_sha256"] for row in rows if row["variant"] == variant}),
+              }
+              for variant, values in grouped.items()
+          }
+          summary["candidate_over_baseline_median"] = summary["candidate"]["median"] / summary["baseline"]["median"]
+          summary["all_outputs_identical"] = len({row["object_sha256"] for row in rows}) == 1
+          (evidence / "self-compile-summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Retain experiment evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-413-apple-clang-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: warn
+          retention-days: 7
