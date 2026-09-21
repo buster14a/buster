@@ -46,7 +46,7 @@ jobs:
               "tools/merge_conflict_preflight.py",
               "tools/merge_conflict_preflight_test.py",
           )
-              run("git", "rm", "--", "tools/repair_pr922_workflow_run.py")
+              run("git", "rm", "-f", "--", "tools/repair_pr922_workflow_run.py")
               expected = {
                   "docs/native-retirement-support-v1.tsv",
                   "tests/ci_tools_test.py",
