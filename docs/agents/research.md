@@ -31,10 +31,8 @@ repo:buster14a/buster is:issue is:open label:"status/needs-reproduction"
 repo:buster14a/buster is:issue is:open label:"status/needs-census"
 repo:buster14a/buster is:issue is:open label:"status/ready-implementation"
 repo:buster14a/buster is:issue label:"status/measured-neutral"
-repo:buster14a/buster is:issue label:"status:completed"
+repo:buster14a/buster is:issue label:"status/completed"
 ```
-
-Use `label:"status/completed"` for the last query; the colon spelling above is intentionally invalid and must not be copied.
 
 ## Current-state comments and transitions
 
