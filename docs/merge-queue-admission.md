@@ -39,8 +39,9 @@ regenerates state nor changes PR branches, main, statuses or rulesets.
 ## Required-check inventory
 
 The six existing checks remain separately required from GitHub Actions app
-15368. Add `Main integration admission` from the same app only as part of the
-reviewed rollout; never remove one of the existing requirements.
+15368. Preserve the separate `Native retirement merge admission` check installed
+by the retirement rollout. Add `Main integration admission` from the same app
+only as part of the reviewed queue rollout; never remove an existing requirement.
 
 | Required check | Workflow | PR revision | Merge-group revision |
 | --- | --- | --- | --- |
@@ -49,7 +50,8 @@ reviewed rollout; never remove one of the existing requirements.
 | Canonical TCC bootstrap | tcc-bootstrap.yml | Explicit PR head (existing #245 policy) | Exact synthetic group |
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
-| API migration policy | api-migration-policy.yml | Existing policy/trusted admission rules | Exact synthetic group |
+| API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
+| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Trusted retirement gate; sensitive groups fail closed until supported |
 | Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
 
 `CI complete` retains desktop x86-64/AArch64, mobile, native-mode, UEFI, lint and
@@ -92,7 +94,7 @@ truncation and ambiguous results fail closed.
 Immediately before admission, the collector repeats the six-result read,
 requires the same evidence, rechecks live main and the queue ref, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
-adds only the exact-group gate, rejects bypasses/strict branch updates, and
+preserves independent retirement admission, adds the exact-group gate, rejects bypasses/strict branch updates, and
 requires the single-build/single-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.

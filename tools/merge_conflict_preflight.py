@@ -45,6 +45,7 @@ GENERATED_RETIREMENT_PATHS = frozenset((
     "tools/native_retirement_dependency_binding.generated.h",
 ))
 RETIREMENT_TRUST_PATHS = frozenset((
+    ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
     ".github/workflows/native-retirement-rebind.yml",
