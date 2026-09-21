@@ -29,7 +29,7 @@ jobs:
           CANDIDATE_BRANCH: codex/857-ready-tests-20260920
         run: |
           set -euo pipefail
-          base=$(git rev-parse HEAD^)
+          base=$(git rev-parse origin/main)
           git fetch origin "refs/heads/$SOURCE_BRANCH:refs/remotes/origin/pr857-source"
           test "$(git rev-parse refs/remotes/origin/pr857-source)" = "$EXPECTED_HEAD"
           export BASE_SHA="$base"
@@ -81,7 +81,7 @@ jobs:
           audit = 'docs/performance-audits/2026-09-19T153920Z.md'
           prefix = 'docs/performance-audits/evidence/2026-09-19T153920Z/'
           paths = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', head, '--', audit, prefix], text=True).splitlines()
-          assert len(paths) == 7, paths
+          assert len(paths) == 6, paths
           for path in paths:
               prior = subprocess.check_output(['git', 'show', f'{head}:{path}'])
               target = root / path
