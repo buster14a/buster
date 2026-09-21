@@ -11,9 +11,94 @@ BUSTER_GLOBAL_LOCAL u64 ir_test_operand_total(IrFunction* function)
     return total;
 }
 
-BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_publication_span_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    for (u32 variant = 0; variant < 4; variant += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena,
+            S8("volatile int observed;int test(void){return observed;}"), target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            IrFunction* function = module->functions;
+            program->disable_local_promotion = true;
+            program->fast_passes = 0;
+            u32 count = function->instruction_count;
+            BUSTER_TEST(arguments, function->block_count == 1 && count > 1);
+            if (function->block_count == 1 && count > 1)
+            {
+                IrBlock* block = function->blocks;
+                IrInstruction* original = arena_allocate(arguments->arena, IrInstruction, count);
+                memcpy(original, function->instructions, sizeof(*original) * count);
+                if (variant == 2)
+                {
+                    // Reverse physical row IDs while preserving the linked
+                    // program. Publication must build the explicit permutation.
+                    for (u32 index = 0; index < count; index += 1)
+                    {
+                        IrInstruction row = original[index];
+                        if (row.next.value < count) row.next.value = count - row.next.value - 1;
+                        function->instructions[count - index - 1] = row;
+                    }
+                    for (u32 index = 0; index < function->value_count; index += 1)
+                    {
+                        IrInstructionId* definition = &function->values[index].definition;
+                        if (definition->value < count) definition->value = count - definition->value - 1;
+                    }
+                    block->first_instruction.value = count - 1;
+                    block->last_instruction.value = 0;
+                }
+                else if (variant == 3)
+                {
+                    function->instructions[0].next.value = 0;
+                }
+                // Publication proves ownership itself even when preparation
+                // receives a producer-certified module.
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, variant == 1 || variant == 3);
+                BUSTER_TEST(arguments, prepared.error == (variant == 3 ? IR_VALIDATION_INSTRUCTION_OWNERSHIP : IR_VALIDATION_NONE));
+                if (variant == 3)
+                {
+                    BUSTER_TEST(arguments, !function->published_cfg);
+                }
+                else if (BUSTER_REQUIRE(arguments, function->published_cfg != 0))
+                {
+                    IrPublishedCfg const* cfg = function->published_cfg;
+                    BUSTER_TEST(arguments, cfg->blocks[0].first_instruction == 0 && cfg->blocks[0].instruction_count == count);
+                    BUSTER_TEST(arguments, (cfg->instruction_remap != 0) == (variant == 2));
+                    for (u32 index = 0; index < count; index += 1)
+                    {
+                        IrInstruction* row = function->instructions + index;
+                        BUSTER_TEST(arguments, row->opcode == original[index].opcode && row->result.value == original[index].result.value);
+                        // Dead construction metadata must not influence a
+                        // published walk or the strict canonical validator.
+                        BUSTER_TEST(arguments, row->next.value == IR_ID_UNDERLYING_INVALID);
+                        row->next.value = UINT32_MAX - 1;
+                        IrInstructionId published_next = ir_block_next_instruction(function, block, (IrInstructionId){.value = index});
+                        BUSTER_TEST(arguments, published_next.value == (index + 1 < count ? index + 1 : UINT32_MAX));
+                    }
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    ir_function_invalidate_cfg(function);
+                    BUSTER_TEST(arguments, !function->published_cfg);
+                    for (u32 index = 0; index < count; index += 1)
+                    {
+                        BUSTER_TEST(arguments, function->instructions[index].next.value == original[index].next.value);
+                    }
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = ir_publication_span_tests(arguments);
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");

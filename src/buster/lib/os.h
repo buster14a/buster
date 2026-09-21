@@ -168,6 +168,24 @@ struct ProcessCaptureLimits
 
 typedef struct ProcessGroupControlState ProcessGroupControlState;
 
+typedef enum ProcessSpawnFailure
+{
+    PROCESS_SPAWN_FAILURE_NONE,
+    PROCESS_SPAWN_FAILURE_INVALID_ARGUMENTS,
+    PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT,
+    PROCESS_SPAWN_FAILURE_EXECUTABLE_LOOKUP,
+    PROCESS_SPAWN_FAILURE_FILE_ACTIONS_INIT,
+    PROCESS_SPAWN_FAILURE_ATTRIBUTES_INIT,
+    PROCESS_SPAWN_FAILURE_PIPE,
+    PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION,
+    PROCESS_SPAWN_FAILURE_FILE_ACTION,
+    PROCESS_SPAWN_FAILURE_ATTRIBUTE,
+    PROCESS_SPAWN_FAILURE_HANDLE_DUPLICATION,
+    PROCESS_SPAWN_FAILURE_HANDLE_LIST,
+    PROCESS_SPAWN_FAILURE_SPAWN,
+    PROCESS_SPAWN_FAILURE_UNSUPPORTED,
+} ProcessSpawnFailure;
+
 typedef struct ProcessSpawnResult ProcessSpawnResult;
 struct ProcessSpawnResult
 {
@@ -178,6 +196,10 @@ struct ProcessSpawnResult
     OsFileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
     ProcessCaptureLimits capture_limits;
     OsFileDescriptor* capture_overflow_files[(size_t)STANDARD_STREAM_COUNT];
+    // The first failed validation or platform setup stage. Native error zero is
+    // reserved for success; callers never need to scrape a diagnostic string.
+    OsError error;
+    ProcessSpawnFailure failure;
     // Optional shared flag state. The wait lane remains the sole owner of the
     // process-group identity and performs every signal, query, and reap.
     ProcessGroupControlState* process_group_control;
@@ -192,11 +214,17 @@ typedef struct ProcessSpawnOptions ProcessSpawnOptions;
 struct ProcessSpawnOptions
 {
     u64 capture : (size_t)STANDARD_STREAM_COUNT;
+    // Inherit the captured process environment exactly. Otherwise the supplied
+    // key/value slices form the complete child environment, including empty.
     u64 use_process_environment : 1;
     // POSIX creates a fresh process group. Windows creates a kill-on-close Job
     // Object and assigns the suspended child before allowing it to execute.
     u64 new_process_group : 1;
-    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 2;
+    // Resolve a bare argv[0] once against the captured parent PATH before any
+    // pipe or platform spawn object is created. Direct execution never asks an
+    // OS API to search PATH.
+    u64 search_path : 1;
+    u64 reserved : sizeof(u64) * 8 - (size_t)STANDARD_STREAM_COUNT - 3;
     ProcessCaptureLimits capture_limits;
     OsFileDescriptor* capture_overflow_files[(size_t)STANDARD_STREAM_COUNT];
     ProcessCaptureOverflowPolicy capture_overflow_policy;

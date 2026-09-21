@@ -168,6 +168,14 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   four allocators (GitHub #323). Bit extraction uses the unqualified value
   type returned by the load, including its shift and mask constants. Volatility
   remains on the memory access; it must not create mismatched arithmetic types.
+  A flat initializer keeps an iterative cursor for every aggregate subobject it
+  enters. Scalar expressions therefore fill the nested object before the cursor
+  resumes at the next enclosing member, while aggregate-valued expressions are
+  stored as one object. The registered driver regression embeds the complete
+  source and exercises named and anonymous records, arrays, unions, compound
+  literals, qualifiers, and source-order side effects under both frontend SSA
+  forms and all four allocators (GitHub #341). The approved retirement corpus
+  retains its existing inventory and policy.
   The strict driver corpus independently validates the complete canonical IR.
   A bit-field declarator carries a list of its own in exactly one place, *after*
   the width -- Clang rejects `int b __attribute__((packed)) : 5` -- so

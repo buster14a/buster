@@ -1454,7 +1454,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
             fifo_path,
         };
         ProcessSpawnResult writer = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(writer_arguments), (SliceString8){0}, (SliceString8){0},
-                                                       (ProcessSpawnOptions){.use_process_environment = 1});
+                                                       (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
         BUSTER_TEST(arguments, writer.handle != 0);
         if (writer.handle)
         {
@@ -1500,7 +1500,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
         ProcessSpawnResult compile = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments), (SliceString8){0}, (SliceString8){0},
                                                         (ProcessSpawnOptions){
                                                             .capture = (u64)1 << STANDARD_STREAM_ERROR,
-                                                            .use_process_environment = 1,
+                                                            .use_process_environment = 1, .search_path = 1,
                                                         });
         BUSTER_TEST(arguments, compile.handle != 0);
         if (compile.handle)
@@ -1511,7 +1511,7 @@ UnitTestResult file_tests(UnitTestArguments* arguments)
             {
                 String8 run_arguments[] = {executable_path};
                 ProcessSpawnResult run = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments), (SliceString8){0}, (SliceString8){0},
-                                                           (ProcessSpawnOptions){.use_process_environment = 1});
+                                                           (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1});
                 BUSTER_TEST(arguments, run.handle != 0);
                 if (run.handle)
                 {

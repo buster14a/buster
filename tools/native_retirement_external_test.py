@@ -12,6 +12,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import native_retirement_external as external
+import native_retirement_dependency_binding as authority
 import native_retirement_materializer as materializer
 
 
@@ -63,6 +64,50 @@ class ExternalClosureTests(unittest.TestCase):
         result = external.prepare(self._manifest(), self.root)
         self.assertEqual(result["checkouts"], 1)
         self.assertEqual(result["records"], 1)
+
+    def _split_manifest(self, extra_projects=()):
+        source = self.root / "repo.h"
+        source.write_bytes(b"#define REPO 1\n")
+        project = {"source": "repo.h", "provenance": "repo:repo.h",
+                   "destination": "dependencies/project-include/repo.h",
+                   "bytes": source.stat().st_size,
+                   "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+        legacy = {"schema": authority.LEGACY_SCHEMA, "version": 1,
+                  "source_root": "..", "projects": [self.record, project, *extra_projects],
+                  "external_checkouts": [self.declaration]}
+        legacy_raw = authority.canonical_json(legacy)
+        policy_raw, policy = authority.policy_from_legacy(legacy_raw)
+        snapshot_raw, _records = authority.render_snapshot(
+            policy_raw, policy,
+            lambda _source: (source.stat().st_size, hashlib.sha256(source.read_bytes()).hexdigest()))
+        for path, data in ((authority.LEGACY_DESCRIPTOR_PATH, legacy_raw),
+                           (authority.POLICY_PATH, policy_raw),
+                           (authority.SNAPSHOT_PATH, snapshot_raw)):
+            (self.root / path).write_bytes(data)
+        source.write_bytes(b"#define REPO 2\n")
+        return self.root / authority.POLICY_PATH
+
+    def test_split_policy_keeps_external_byte_pins_during_repository_change(self):
+        self.record["sha256"] = "0" * 64
+        with self.assertRaisesRegex(external.ExternalClosureError, "source identity mismatch: external/"):
+            external.prepare(self._split_manifest(), self.root)
+
+    def test_split_policy_keeps_sdk_byte_pins_during_repository_change(self):
+        sdk = self.root / "sdk.h"
+        sdk.write_bytes(b"sdk before\n")
+        record = {"source": "sdk.h", "provenance": "sdk/pinned/header.h",
+                  "destination": "dependencies/project-include/sdk.h",
+                  "bytes": sdk.stat().st_size,
+                  "sha256": hashlib.sha256(sdk.read_bytes()).hexdigest()}
+        manifest = self._split_manifest((record,))
+        sdk.write_bytes(b"sdk after\n")
+        with self.assertRaisesRegex(external.ExternalClosureError, "source identity mismatch: sdk.h"):
+            external.prepare(manifest, self.root)
+
+    def test_legacy_repository_bytes_remain_frozen(self):
+        self._split_manifest()
+        with self.assertRaisesRegex(external.ExternalClosureError, "source identity mismatch: repo.h"):
+            external.prepare(self.root / authority.LEGACY_DESCRIPTOR_PATH, self.root)
 
     def test_revision_mutation_fails_closed(self):
         manifest = self._manifest(external_checkouts=[dict(self.declaration, revision="0" * 40)])

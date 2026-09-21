@@ -377,6 +377,286 @@ BUSTER_GLOBAL_LOCAL bool os_test_thread_name_get(Arena* arena, String8* name)
 }
 #endif
 
+#if !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool os_process_spawn_test_released(ProcessSpawnResult spawn)
+{
+    bool result = spawn.handle == 0;
+    for (u32 stream = 0; result && stream < STANDARD_STREAM_COUNT; stream += 1)
+    {
+        for (u32 side = 0; result && side < 2; side += 1)
+        {
+            result = spawn.pipes[stream][side] == 0;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ProcessWaitResult os_process_spawn_test_wait(Arena* arena, ProcessSpawnResult spawn)
+{
+    ProcessWaitResult result = {.result = PROCESS_RESULT_NOT_EXISTENT};
+    if (spawn.handle)
+    {
+        result = os_process_wait_sync(arena, spawn);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult os_process_spawn_contract_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 self_arguments[] = {program_state->input.arguments.pointer[0], S8("help")};
+
+    ProcessSpawnResult empty_arguments = os_process_spawn((SliceString8){0}, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, empty_arguments.failure == PROCESS_SPAWN_FAILURE_INVALID_ARGUMENTS && empty_arguments.error.v != 0 &&
+                               os_process_spawn_test_released(empty_arguments));
+
+    char8 embedded_nul_bytes[] = {'x', 0, 'y'};
+    String8 embedded_nul_arguments[] = {{.pointer = embedded_nul_bytes, .length = BUSTER_ARRAY_LENGTH(embedded_nul_bytes)}};
+    ProcessSpawnResult embedded_nul = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(embedded_nul_arguments), (SliceString8){0},
+                                                       (SliceString8){0}, (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, embedded_nul.failure == PROCESS_SPAWN_FAILURE_INVALID_ARGUMENTS && embedded_nul.error.v != 0 &&
+                               os_process_spawn_test_released(embedded_nul));
+
+    String8 one_key[] = {S8("KEY")};
+    ProcessSpawnResult mismatched_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                                 (SliceString8)BUSTER_ARRAY_TO_SLICE(one_key), (SliceString8){0},
+                                                                 (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, mismatched_environment.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT &&
+                               mismatched_environment.error.v != 0 && os_process_spawn_test_released(mismatched_environment));
+
+    String8 invalid_keys[] = {S8("BAD=KEY")};
+    String8 invalid_values[] = {S8("value")};
+    ProcessSpawnResult invalid_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_keys),
+                                                              (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values), (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, invalid_environment.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT && invalid_environment.error.v != 0 &&
+                               os_process_spawn_test_released(invalid_environment));
+
+    char8 embedded_nul_key_bytes[] = {'K', 0, 'Y'};
+    String8 embedded_nul_keys[] = {{.pointer = embedded_nul_key_bytes, .length = BUSTER_ARRAY_LENGTH(embedded_nul_key_bytes)}};
+    ProcessSpawnResult embedded_nul_key = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(embedded_nul_keys),
+                                                          (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values), (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, embedded_nul_key.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT && embedded_nul_key.error.v != 0 &&
+                               os_process_spawn_test_released(embedded_nul_key));
+
+    char8 embedded_nul_value_bytes[] = {'v', 0, 'x'};
+    String8 embedded_nul_values[] = {{.pointer = embedded_nul_value_bytes, .length = BUSTER_ARRAY_LENGTH(embedded_nul_value_bytes)}};
+    ProcessSpawnResult embedded_nul_value = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(one_key),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(embedded_nul_values), (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, embedded_nul_value.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT && embedded_nul_value.error.v != 0 &&
+                               os_process_spawn_test_released(embedded_nul_value));
+
+    String8 empty_key[] = {{0}};
+    ProcessSpawnResult empty_environment_key = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(empty_key),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values), (ProcessSpawnOptions){0});
+    BUSTER_TEST(arguments, empty_environment_key.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT &&
+                               empty_environment_key.error.v != 0 && os_process_spawn_test_released(empty_environment_key));
+
+    ProcessSpawnResult conflicting_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                                 (SliceString8)BUSTER_ARRAY_TO_SLICE(one_key),
+                                                                 (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_values),
+                                                                 (ProcessSpawnOptions){.use_process_environment = true});
+    BUSTER_TEST(arguments, conflicting_environment.failure == PROCESS_SPAWN_FAILURE_INVALID_ENVIRONMENT &&
+                               conflicting_environment.error.v != 0 && os_process_spawn_test_released(conflicting_environment));
+
+    String8 environment_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_EXPECTED"), S8("PATH")};
+    String8 environment_values[] = {S8("environment"), S8("present"), S8("hostile-path")};
+    ProcessSpawnResult exact_environment = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                            (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
+                                                            (ProcessSpawnOptions){
+                                                                .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) |
+                                                                           ((u64)1 << STANDARD_STREAM_ERROR),
+                                                            });
+    ProcessWaitResult exact_environment_wait = os_process_spawn_test_wait(arena, exact_environment);
+    BUSTER_TEST(arguments, exact_environment.failure == PROCESS_SPAWN_FAILURE_NONE && exact_environment.error.v == 0 &&
+                               exact_environment_wait.result == PROCESS_RESULT_SUCCESS);
+
+#if BUSTER_WINDOWS
+    String8 path_search_arguments[] = {S8("cmd.exe"), S8("/d"), S8("/c"), S8("exit 0")};
+#else
+    String8 path_search_arguments[] = {S8("sh"), S8("-c"), S8("exit 0")};
+#endif
+    ProcessSpawnResult no_search = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(path_search_arguments), (SliceString8){0},
+                                                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+    BUSTER_TEST(arguments, !no_search.handle && no_search.failure == PROCESS_SPAWN_FAILURE_SPAWN && no_search.error.v != 0 &&
+                               os_process_spawn_test_released(no_search));
+
+    ProcessSpawnResult searched = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(path_search_arguments), (SliceString8){0}, (SliceString8){0},
+                                                   (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+    ProcessWaitResult searched_wait = os_process_spawn_test_wait(arena, searched);
+    BUSTER_TEST(arguments, searched.failure == PROCESS_SPAWN_FAILURE_NONE && searched_wait.result == PROCESS_RESULT_SUCCESS);
+
+    String8 descriptor_value = {0};
+#if BUSTER_WINDOWS
+    SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, TRUE};
+    HANDLE unrelated = CreateEventW(&security_attributes, TRUE, FALSE, 0);
+    bool unrelated_created = unrelated != 0;
+    if (unrelated_created)
+    {
+        descriptor_value = string_format(arena, S8("{u64}"), (u64)(uintptr_t)unrelated);
+    }
+#else
+    int unrelated[2] = {-1, -1};
+    bool unrelated_created = pipe(unrelated) == 0;
+    if (unrelated_created)
+    {
+        descriptor_value = string_format(arena, S8("{u64}"), (u64)unrelated[0]);
+    }
+#endif
+    BUSTER_TEST(arguments, unrelated_created);
+    if (unrelated_created)
+    {
+        String8 descriptor_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_PROBE_VALUE")};
+        String8 descriptor_values[] = {S8("descriptor"), descriptor_value};
+        ProcessSpawnResult descriptor_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(descriptor_keys),
+                                                               (SliceString8)BUSTER_ARRAY_TO_SLICE(descriptor_values), (ProcessSpawnOptions){0});
+        ProcessWaitResult descriptor_wait = os_process_spawn_test_wait(arena, descriptor_spawn);
+        BUSTER_TEST(arguments, descriptor_spawn.failure == PROCESS_SPAWN_FAILURE_NONE && descriptor_wait.result == PROCESS_RESULT_SUCCESS);
+#if BUSTER_WINDOWS
+        CloseHandle(unrelated);
+#else
+        close(unrelated[0]);
+        close(unrelated[1]);
+#endif
+    }
+
+    for (u32 mask = 0; mask < ((u32)1 << STANDARD_STREAM_COUNT); mask += 1)
+    {
+        String8 mask_value = string_format(arena, S8("{u32}"), mask);
+        String8 closed_keys[] = {S8("BUSTER_OS_SPAWN_PROBE"), S8("BUSTER_OS_SPAWN_STDIO_MASK")};
+        String8 closed_values[] = {S8("closed-stdio"), mask_value};
+        ProcessSpawnResult closed_stdio = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                           (SliceString8)BUSTER_ARRAY_TO_SLICE(closed_keys),
+                                                           (SliceString8)BUSTER_ARRAY_TO_SLICE(closed_values), (ProcessSpawnOptions){0});
+        ProcessWaitResult closed_stdio_wait = os_process_spawn_test_wait(arena, closed_stdio);
+        BUSTER_TEST(arguments, closed_stdio.failure == PROCESS_SPAWN_FAILURE_NONE &&
+                                   closed_stdio_wait.result == PROCESS_RESULT_SUCCESS);
+    }
+
+#if BUSTER_WINDOWS
+    (void)arena_allocate(arena, char16, 0);
+    u64 environment_position = arena->position;
+    char16 expected_empty[] = {0, 0};
+    char16 expected_one[] = {'A', '=', '1', 0, 0};
+    char16 expected_two[] = {'A', '=', '1', 0, 'B', '=', '2', 0, 0};
+    String8 one_keys[] = {S8("A")};
+    String8 one_values[] = {S8("1")};
+    String8 two_keys[] = {S8("A"), S8("B")};
+    String8 two_values[] = {S8("1"), S8("2")};
+    String8 one_entry[] = {S8("A=1")};
+    String8 two_entries[] = {S8("A=1"), S8("B=2")};
+
+    char16* dirty = arena_allocate(arena, char16, BUSTER_ARRAY_LENGTH(expected_empty));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_empty); index += 1) dirty[index] = (char16)0xa5a5;
+    arena_set_position(arena, environment_position);
+    WindowsStringList empty_key_value = windows_environment_from_keys_and_values(arena, (SliceString8){0}, (SliceString8){0});
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_empty) &&
+                               !memcmp(empty_key_value, expected_empty, sizeof(expected_empty)));
+
+    arena_set_position(arena, environment_position);
+    WindowsStringList one_key_value = windows_environment_from_keys_and_values(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(one_keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(one_values));
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_one) &&
+                               !memcmp(one_key_value, expected_one, sizeof(expected_one)));
+
+    arena_set_position(arena, environment_position);
+    WindowsStringList two_key_values = windows_environment_from_keys_and_values(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(two_keys), (SliceString8)BUSTER_ARRAY_TO_SLICE(two_values));
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_two) &&
+                               !memcmp(two_key_values, expected_two, sizeof(expected_two)));
+
+    arena_set_position(arena, environment_position);
+    dirty = arena_allocate(arena, char16, BUSTER_ARRAY_LENGTH(expected_empty));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected_empty); index += 1) dirty[index] = (char16)0xa5a5;
+    arena_set_position(arena, environment_position);
+    WindowsStringList empty_block = windows_environment_block_from_slice_string(arena, (SliceString8){0});
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_empty) &&
+                               !memcmp(empty_block, expected_empty, sizeof(expected_empty)));
+
+    arena_set_position(arena, environment_position);
+    WindowsStringList one_block = windows_environment_block_from_slice_string(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(one_entry));
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_one) &&
+                               !memcmp(one_block, expected_one, sizeof(expected_one)));
+
+    arena_set_position(arena, environment_position);
+    WindowsStringList two_blocks = windows_environment_block_from_slice_string(
+        arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(two_entries));
+    BUSTER_TEST(arguments, arena->position - environment_position == sizeof(expected_two) &&
+                               !memcmp(two_blocks, expected_two, sizeof(expected_two)));
+    arena_set_position(arena, environment_position);
+#endif
+
+#if BUSTER_WINDOWS
+    OsProcessSpawnTestOperation operations[] = {
+        OS_PROCESS_SPAWN_TEST_PIPE,
+        OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION,
+        OS_PROCESS_SPAWN_TEST_HANDLE_DUPLICATION,
+        OS_PROCESS_SPAWN_TEST_HANDLE_LIST,
+        OS_PROCESS_SPAWN_TEST_SPAWN,
+    };
+    ProcessSpawnFailure failures[] = {
+        PROCESS_SPAWN_FAILURE_PIPE,
+        PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION,
+        PROCESS_SPAWN_FAILURE_HANDLE_DUPLICATION,
+        PROCESS_SPAWN_FAILURE_HANDLE_LIST,
+        PROCESS_SPAWN_FAILURE_SPAWN,
+    };
+#else
+    OsProcessSpawnTestOperation operations[] = {
+        OS_PROCESS_SPAWN_TEST_FILE_ACTIONS_INIT,
+        OS_PROCESS_SPAWN_TEST_ATTRIBUTES_INIT,
+        OS_PROCESS_SPAWN_TEST_PIPE,
+        OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION,
+        OS_PROCESS_SPAWN_TEST_FILE_ACTION,
+        OS_PROCESS_SPAWN_TEST_ATTRIBUTE,
+        OS_PROCESS_SPAWN_TEST_SPAWN,
+    };
+    ProcessSpawnFailure failures[] = {
+        PROCESS_SPAWN_FAILURE_FILE_ACTIONS_INIT,
+        PROCESS_SPAWN_FAILURE_ATTRIBUTES_INIT,
+        PROCESS_SPAWN_FAILURE_PIPE,
+        PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION,
+        PROCESS_SPAWN_FAILURE_FILE_ACTION,
+        PROCESS_SPAWN_FAILURE_ATTRIBUTE,
+        PROCESS_SPAWN_FAILURE_SPAWN,
+    };
+#endif
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(operations) == BUSTER_ARRAY_LENGTH(failures));
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(operations); index += 1)
+    {
+        u64 resources_before = os_process_spawn_test_resource_count();
+        os_process_spawn_test_fail_on_call(operations[index], 0);
+        ProcessSpawnResult injected = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values),
+                                                       (ProcessSpawnOptions){
+                                                           .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
+                                                           .new_process_group = true,
+                                                       });
+        bool injection_consumed = os_process_spawn_test_end();
+        u64 resources_after = os_process_spawn_test_resource_count();
+        BUSTER_TEST(arguments, injection_consumed);
+        BUSTER_TEST(arguments, injected.failure == failures[index] && injected.error.v != 0 && os_process_spawn_test_released(injected));
+        BUSTER_TEST(arguments, resources_before == resources_after);
+    }
+
+    ProcessSpawnResult after_faults = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(self_arguments),
+                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_keys),
+                                                       (SliceString8)BUSTER_ARRAY_TO_SLICE(environment_values), (ProcessSpawnOptions){0});
+    ProcessWaitResult after_faults_wait = os_process_spawn_test_wait(arena, after_faults);
+    BUSTER_TEST(arguments, after_faults.failure == PROCESS_SPAWN_FAILURE_NONE && after_faults_wait.result == PROCESS_RESULT_SUCCESS);
+
+    return result;
+}
+#endif
+
 // Private child payloads must run before compiler prewarming and unrelated test
 // modules, so process deadlines measure the payload and not a nested suite.
 void os_test_process_child_run(UnitTestArguments* arguments)
@@ -494,6 +774,41 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
+    if (fatal_mode.length)
+    {
+        if (string_ends_with_sequence(fatal_mode, S8("closed")))
+        {
+            os_file_close(os_get_standard_stream(STANDARD_STREAM_ERROR));
+        }
+#if BUSTER_LINUX
+        if (string_ends_with_sequence(fatal_mode, S8("full")))
+        {
+            int full = open("/dev/full", O_WRONLY);
+            if (full < 0 || dup2(full, STDERR_FILENO) < 0) { os_exit(7); }
+            close(full);
+        }
+#endif
+        if (string_starts_with_sequence(fatal_mode, S8("raw")))
+        {
+            os_fail_raw(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-37"));
+        }
+        else
+        {
+            os_fail_va(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-{u32}"), (u32)37);
+        }
+    }
+#endif
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    // Test-owned subprocess modes above must dispatch before this fixture.
+    // Otherwise each probe recursively runs the full spawn contract before
+    // reaching its sentinel, which can consume the deadlock deadline under
+    // sanitizers without exercising the resource-failure path.
+    BUSTER_TEST_FIXTURE(arguments, os_process_spawn_contract_tests);
+#endif
+
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     // Symbol lookup accepts bounded String8 names. A readable suffix
     // and an exact-sized buffer must not become part of the C string.
     {
@@ -581,30 +896,6 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 #endif
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
-    if (fatal_mode.length)
-    {
-        if (string_ends_with_sequence(fatal_mode, S8("closed")))
-        {
-            os_file_close(os_get_standard_stream(STANDARD_STREAM_ERROR));
-        }
-#if BUSTER_LINUX
-        if (string_ends_with_sequence(fatal_mode, S8("full")))
-        {
-            int full = open("/dev/full", O_WRONLY);
-            if (full < 0 || dup2(full, STDERR_FILENO) < 0) { os_exit(7); }
-            close(full);
-        }
-#endif
-        if (string_starts_with_sequence(fatal_mode, S8("raw")))
-        {
-            os_fail_raw(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-37"));
-        }
-        else
-        {
-            os_fail_va(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-{u32}"), (u32)37);
-        }
-    }
     {
         String8 modes[] = {S8("raw-live"), S8("formatted-live"), S8("raw-closed"), S8("formatted-closed"),
 #if BUSTER_LINUX
@@ -1279,7 +1570,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // waiter must verify that exact state before reaping without losing helpers.
     {
         String8 spawn_arguments[] = {S8("/bin/sh"), S8("-c"), S8("exit 0")};
-        ProcessSpawnOptions options = {.use_process_environment = 1, .new_process_group = 1};
+        ProcessSpawnOptions options = {.use_process_environment = 1, .search_path = 1, .new_process_group = 1};
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
             (SliceString8){0}, (SliceString8){0}, options);
         BUSTER_TEST(arguments, spawn.handle != 0 && spawn.process_group);
@@ -1339,7 +1630,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = 1,
+            .use_process_environment = 1, .search_path = 1,
             .new_process_group = 1,
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
@@ -1386,7 +1677,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions options = {
             .capture = (u64)1 << STANDARD_STREAM_OUTPUT,
-            .use_process_environment = 1,
+            .use_process_environment = 1, .search_path = 1,
             .new_process_group = 1,
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments),
@@ -1458,7 +1749,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions options = {
             .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
-            .use_process_environment = 1,
+            .use_process_environment = 1, .search_path = 1,
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments), (SliceString8){0}, (SliceString8){0}, options);
         BUSTER_TEST(arguments, spawn.handle != 0);
@@ -1487,7 +1778,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         };
         ProcessSpawnOptions options = {
             .capture = ((u64)1 << STANDARD_STREAM_INPUT) | ((u64)1 << STANDARD_STREAM_OUTPUT),
-            .use_process_environment = 1,
+            .use_process_environment = 1, .search_path = 1,
         };
         ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(spawn_arguments), (SliceString8){0}, (SliceString8){0}, options);
         BUSTER_TEST(arguments, spawn.handle != 0);
@@ -1577,7 +1868,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             // Set from a constant rather than a stored mask: `capture` is a
             // three-bit field, and GCC rejects a runtime u64 narrowed into it.
             ProcessSpawnOptions options = {
-                .use_process_environment = 1,
+                .use_process_environment = 1, .search_path = 1,
             };
             if (deadline_cases[i].capture_output)
             {

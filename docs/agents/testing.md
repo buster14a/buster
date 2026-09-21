@@ -342,6 +342,17 @@ within the existing deadline. Fatal reporters use recoverable output attempts
 so an output failure cannot recursively report itself. These are unsuccessful
 process controls, not successful compiler or missing-evidence observations.
 
+## Node-backed Wasm oracle deadlines
+
+The compiler-driver Node oracles use a bounded 30-second deadline on Linux and macOS and a bounded 60-second deadline on Windows. The Windows allowance covers measured hosted-runner startup and execution variance without changing the process-deadline primitive or other platforms.
+
+Oracle output is evidence, not completion. A run passes only after the child exits normally with status zero, leaves stderr empty, and ends stdout with the oracle's exact terminal summary marker. A process that prints the marker and remains alive is killed at the deadline and fails as `summary-before-timeout`. `compiler_driver_test_wasm_node_policy` also locks down launch failure, nonzero exit, incomplete output, stderr output, a true hang, and summary-then-hang behavior.
+
+The Wasm oracle process-policy controls launch a native `ide test` child before
+compiler prewarming. Their short deadlines exercise completion, output, errors
+and hangs without depending on Node startup latency; the actual Wasm execution
+fixtures still use Node and its platform-specific 30/60-second deadline.
+
 ## Win64 padded-vector execution
 
 The inline padded-vector fixture runs natively on Windows x86-64 in all four
@@ -351,3 +362,12 @@ Clang consumer supplies its own `memset` for aggregate initialization; that
 helper is enabled only for this mixed-object build. Link failures retain the
 symbol diagnostic, and runtime failures retain the process status and captured
 output. Exit 1 identifies the first U8x3 value check, not an ISA probe.
+
+## Retirement adapter test checkouts
+
+The immutable statistics-adapter tests use private checkouts of the exact
+current commit. Native-retirement CI reconstructs generated bindings in its
+working tree before running these tests; that expected generated drift must
+not become the fixture for a control that requires clean committed source.
+Tracked-drift, source-identity, and checkout-race controls still exercise the
+production validator against those private checkouts.
