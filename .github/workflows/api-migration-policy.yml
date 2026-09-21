@@ -79,9 +79,22 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      # The workflow's immutable event revision owns its regression suite.
+      # A conflict-free feature head can predate that suite. Do not update it
+      # or substitute this merged test checkout for either admission input.
+      - name: Check out immutable workflow regression revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: regression
+          fetch-depth: 1
+          persist-credentials: false
       - name: Test native-retirement merge admission
-        working-directory: candidate
+        working-directory: regression
         run: python3 -B tools/native_retirement_merge_gate_test.py -v
+      - name: Test native-retirement workflow revision
+        working-directory: regression
+        run: python3 -B tools/native_retirement_workflow_revision_test.py -v
       - name: Enforce trusted native-retirement integration
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
         shell: bash
