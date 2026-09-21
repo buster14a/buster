@@ -8,33 +8,54 @@ concurrency:
   group: pr856-readiness-validation
   cancel-in-progress: true
 jobs:
-  source:
+  baseline:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 40
+    env:
+      BUSTER_TEST_JOBS: '2'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 9bd4f8e8f4a20cd54ca49538417ed14972d03fb1
-          path: base
           persist-credentials: false
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: 94231973fe5563edb2700602f3ebf862133691ff
-          path: candidate
-          persist-credentials: false
-      - name: Export immutable sources and identities
+      - name: Record source and toolchain
         shell: bash
         run: |
           set -euo pipefail
-          mkdir evidence
-          git -C base archive HEAD | gzip -1 > evidence/base.tar.gz
-          git -C candidate archive HEAD | gzip -1 > evidence/candidate.tar.gz
-          git -C base show -s --format='%H %T' HEAD > evidence/base-identity.txt
-          git -C candidate show -s --format='%H %T' HEAD > evidence/candidate-identity.txt
-          sha256sum evidence/*.tar.gz > evidence/SHA256SUMS
+          mkdir -p evidence
+          git show -s --format='%H %T' HEAD | tee evidence/source.txt
+          clang --version | tee evidence/clang.txt
+          cmake --version | tee evidence/cmake.txt
+          lscpu > evidence/cpu.txt
+      - name: Bootstrap and configure
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF 2>&1 | tee evidence/configure.log
+      - name: Baseline self-host fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee evidence/self-host.log
+      - name: Baseline complete Release tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j2 2>&1 | tee evidence/test-all.log
+      - name: Baseline native modes
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_mode_matrix --config Release 2>&1 | tee evidence/modes.log
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
         with:
-          name: pr856-source-${{ github.run_id }}
-          path: evidence/
-          retention-days: 3
+          name: pr856-baseline-${{ github.run_id }}
+          path: |
+            evidence/
+            build/compile_commands.json
+          retention-days: 7
           if-no-files-found: error
