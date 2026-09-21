@@ -1,0 +1,120 @@
+name: Prepare PR 920 resource-child repair
+on:
+  push:
+    branches: [ci/920-resource-child-dispatch-20260920]
+    paths: [.github/workflows/repair-920-resource-child.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/ci/920-resource-child-dispatch-20260920'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ee44c49441e6cb723e97faffb6e9b22f3a281ab7
+          persist-credentials: false
+      - name: Move the pinned payload without changing its assertions or deadline
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          import subprocess
+          source_path = pathlib.Path('src/buster/tests/os_test.c')
+          expected_blob = 'dafd5a09eae8673f8b2738a24f2407629bdf1cb6'
+          actual_blob = subprocess.check_output(['git', 'hash-object', str(source_path)], text=True).strip()
+          if actual_blob != expected_blob:
+              raise SystemExit('Pinned OS test blob changed: ' + actual_blob)
+          original = source_path.read_text()
+          guard = '#if !BUSTER_SINGLE_THREADED && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS\n'
+          if original.count(guard) != 1:
+              raise SystemExit('Resource-dispatch guard is not unique')
+          start = original.index(guard)
+          end = original.index('\n#endif\n', start) + len('\n#endif\n')
+          payload = original[start:end]
+          if 'BUSTER_OS_RESOURCE_FAILURE_MODE' not in payload or 'os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_JOIN, 0);' not in payload:
+              raise SystemExit('Resource-dispatch payload did not match')
+          entry = 'void os_test_process_child_run(UnitTestArguments* arguments)\n{\n    BUSTER_UNUSED(arguments);\n'
+          if original.count(entry) != 1 or start < original.index('UnitTestResult os_tests('):
+              raise SystemExit('Unexpected child-dispatch layout')
+          changed = original[:start] + original[end:]
+          changed = changed.replace(entry, entry + '\n' + payload, 1)
+          child_start = changed.index(entry)
+          suite_start = changed.index('UnitTestResult os_tests(')
+          assert child_start < changed.index(guard) < suite_start
+          assert changed.count(payload) == 1
+          assert 'BUSTER_OS_RESOURCE_FAILURE_MODE' not in changed[suite_start:changed.index('// Symbol lookup', suite_start)]
+          assert changed.count('os_process_wait_deadline(arguments->arena, spawn, 30000000)') == original.count('os_process_wait_deadline(arguments->arena, spawn, 30000000)')
+          assert changed.count('BUSTER_TEST(arguments, !wait.timed_out);') == original.count('BUSTER_TEST(arguments, !wait.timed_out);')
+          assert changed.count('BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);') == original.count('BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);')
+          source_path.write_text(changed)
+          guide = pathlib.Path('docs/agents/testing.md')
+          before = guide.read_text()
+          old = ('The private OS flood and process-tree child modes dispatch at the start of\n'
+                 '`library_tests`, before compiler prewarming and other test modules. They must\n'
+                 'not recursively run the suite before producing their pipe payload or readiness\n'
+                 'marker. Capture limits, byte-count assertions, and process deadlines remain\n'
+                 'identical for these child modes.')
+          new = ('The private OS resource-failure, flood and process-tree child modes dispatch at\n'
+                 'the start of `library_tests`, before compiler prewarming and other test modules.\n'
+                 'They must not recursively run the suite before triggering the injected failure\n'
+                 'or producing their pipe payload or readiness marker. Capture limits, exit and\n'
+                 'diagnostic assertions, and process deadlines remain identical for these modes.')
+          if before.count(old) != 1:
+              raise SystemExit('Pinned testing guide paragraph did not match')
+          guide.write_text(before.replace(old, new, 1))
+          print('PASS: payload moved intact, dispatch precedes suite, deadlines and fatal-exit assertions preserved')
+          PY
+          git diff --check
+          git diff --stat
+          git diff -- src/buster/tests/os_test.c docs/agents/testing.md
+      - name: Publish only the reviewed source tree on a separate result ref
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import urllib.request
+          base = 'ee44c49441e6cb723e97faffb6e9b22f3a281ab7'
+          api = 'https://api.github.com/repos/buster14a/buster'
+          expected_paths = ['docs/agents/testing.md', 'src/buster/tests/os_test.c']
+          paths = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          if sorted(paths) != expected_paths:
+              raise SystemExit('Unexpected changed paths: ' + repr(paths))
+          if subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() != base:
+              raise SystemExit('Unexpected checkout head')
+          def post(path, payload):
+              request = urllib.request.Request(api + path, data=json.dumps(payload).encode(), method='POST', headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              })
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          entries = []
+          for path in paths:
+              blob = post('/git/blobs', {'encoding': 'utf-8', 'content': pathlib.Path(path).read_text()})
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          base_tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          tree = post('/git/trees', {'base_tree': base_tree, 'tree': entries})
+          commit = post('/git/commits', {'message': 'test: dispatch resource-failure children before compiler prewarm', 'tree': tree['sha'], 'parents': [base]})
+          result_ref = 'refs/heads/ci/920-resource-child-result-20260920'
+          post('/git/refs', {'ref': result_ref, 'sha': commit['sha']})
+          print('REPAIR_COMMIT=' + commit['sha'])
+          print('REPAIR_TREE=' + tree['sha'])
+          print('REPAIR_REF=' + result_ref)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('Prepared source-only repair commit `' + commit['sha'] + '`.\n\n')
+              summary.write('Static source checks and git diff --check passed. Native CI has not run on this commit.\n')
+          PY
