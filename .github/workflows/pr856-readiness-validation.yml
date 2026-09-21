@@ -1,0 +1,40 @@
+name: PR 856 readiness validation
+on:
+  push:
+    branches: [codex/856-readiness-validation-20260920]
+permissions:
+  contents: read
+concurrency:
+  group: pr856-readiness-validation
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9bd4f8e8f4a20cd54ca49538417ed14972d03fb1
+          path: base
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 94231973fe5563edb2700602f3ebf862133691ff
+          path: candidate
+          persist-credentials: false
+      - name: Export immutable sources and identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git -C base archive HEAD | gzip -1 > evidence/base.tar.gz
+          git -C candidate archive HEAD | gzip -1 > evidence/candidate.tar.gz
+          git -C base show -s --format='%H %T' HEAD > evidence/base-identity.txt
+          git -C candidate show -s --format='%H %T' HEAD > evidence/candidate-identity.txt
+          sha256sum evidence/*.tar.gz > evidence/SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr856-source-${{ github.run_id }}
+          path: evidence/
+          retention-days: 3
+          if-no-files-found: error
