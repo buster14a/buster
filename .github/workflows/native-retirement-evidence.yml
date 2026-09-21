@@ -68,6 +68,11 @@ jobs:
           path: trusted
           fetch-depth: 1
           persist-credentials: false
+      - name: Classify candidate before creating reserved input directories
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          python3 trusted/tools/native_retirement_integration.py classify \
+            --repo-root "$GITHUB_WORKSPACE/candidate" --base "$TRUSTED_REF" --head "$CANDIDATE_HEAD"
       - name: Check out pinned cJSON closure
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -129,10 +134,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$BUSTER_RETIREMENT_CANDIDATE"
-          if [[ '${{ github.event_name }}' == pull_request ]]; then
-            python3 ../trusted/tools/native_retirement_integration.py classify \
-              --repo-root "$(pwd)" --base "$TRUSTED_REF" --head "$CANDIDATE_HEAD"
-          fi
           python3 ../trusted/tools/native_retirement_sdks.py --source-root "$(pwd)"
           python3 ../trusted/tools/native_retirement_external.py prepare \
             --manifest docs/native-retirement-dependencies-v1.json \
@@ -152,6 +153,7 @@ jobs:
           # revision and must consume the same trusted temporary authority.
           cp docs/native-retirement-repository-sources-v1.json ../validation/docs/
           cp tools/native_retirement_dependency_binding.generated.h ../validation/tools/
+          python3 tools/native_retirement_evidence_workflow_test.py
           python3 tools/native_retirement_materializer.py self-test
           python3 tools/native_retirement_materializer.py materialize \
             --manifest docs/native-retirement-dependencies-v1.json \
