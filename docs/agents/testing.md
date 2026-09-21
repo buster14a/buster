@@ -179,6 +179,13 @@ not recursively run the suite before producing their pipe payload or readiness
 marker. Capture limits, byte-count assertions, and process deadlines remain
 identical for these child modes.
 
+The native Wasm-oracle policy children publish readiness after writing their
+summary, before the parent starts the existing 500 ms hang deadline. Setup has
+its own bounded five-second budget; missing readiness fails and still reaps the
+child. `WASM_NODE_PROCESS` retains separate startup and wait timings. Delayed
+startup and missing-readiness controls cover the handshake. Actual Node-backed
+Wasm oracle deadlines and success requirements are unchanged.
+
 ## Throughput runner integration
 
 The desktop combination matrix builds and runs `bench_throughput self-test`
