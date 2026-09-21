@@ -16,12 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 46ed5e141baed17dfc1e977691ac73e08be5b9f5
+          ref: bfbd24ef4f6a82f0a6192af876fda571dbe9ff46
+          fetch-depth: 2
           path: source
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 6612ac99d248ed1b129e5888360517ea0ca4cb92
+          ref: 38eeed0dd97614e441cf8d7afa736e928c32175c
           path: payload
           persist-credentials: false
       - name: Construct and verify exact candidate
@@ -32,24 +33,21 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import base64, gzip, hashlib
-          s = Path('../payload/issue902.patch.gz.b64').read_text()
-          s = s.replace('UIzMnCAOEjE9', 'UIzMnCAOEENjE9').replace('GJUKO6WXRNJOH', 'GJUKO6XRNHJOH')
-          p = gzip.decompress(base64.b64decode(s))
-          assert hashlib.sha256(p).hexdigest() == '8d4b5a4e1ba24e99d03abc78332a7915713920c990936581514de6210e7bfdcf'
-          Path('../issue902.patch').write_bytes(p)
+          p = gzip.decompress(base64.b64decode(Path('../payload/issue902-volatile.patch.gz.b64').read_text()))
+          assert hashlib.sha256(p).hexdigest() == 'a1257c5c280083481524d22b712a20d6c549f12566c74c7ab11c0cfb8101e6ad'
+          Path('../issue902-volatile.patch').write_bytes(p)
           PY
-          git apply --check ../issue902.patch
-          git apply ../issue902.patch
-          python3 ../payload/issue902-repair.py
+          git apply --check ../issue902-volatile.patch
+          git apply ../issue902-volatile.patch
           git diff --check
-          git diff --binary > "$RUNNER_TEMP/validated.patch"
-          echo 'c62ec218a6bc8acf24cdbf17a138a3374eede54650bfacd219160ee48d1ae0f4  '"$RUNNER_TEMP/validated.patch" | sha256sum -c -
+          git diff 46ed5e141baed17dfc1e977691ac73e08be5b9f5 --binary > "$RUNNER_TEMP/validated.patch"
+          echo '19e1a19707ea4566d32384ae9a5735fea608dbc47432f4d376c26bfc9d9ed6b2  '"$RUNNER_TEMP/validated.patch" | sha256sum -c -
           python3 - <<'PY'
           import subprocess
           names = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           assert names == {'docs/agents/frontend/layout.md', 'src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/compiler/frontend/c/c_test.c'}, names
           PY
-      - name: Publish focused feature branch
+      - name: Publish repair without rebasing or force pushing
         id: publish
         working-directory: source
         shell: bash
@@ -57,11 +55,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git switch -c codex/902-wide-enum-bit-fields
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/agents/frontend/layout.md src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c
-          git commit -m 'fix(c): use resolved semantic types for enum bit-fields'
+          git commit -m 'fix(c): preserve volatile qualifiers across split bit-field accesses'
           header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git -c "http.https://github.com/.extraheader=$header" push origin HEAD:refs/heads/codex/902-wide-enum-bit-fields
           git show --stat --oneline HEAD
@@ -78,7 +75,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ needs.publish.outputs.sha }}
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
       - name: Prepare baseline production and frontend-only diagnostic dispatch
         shell: bash
@@ -86,7 +83,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/evidence"
           git rev-parse HEAD | tee "$RUNNER_TEMP/evidence/candidate.sha"
-          git show HEAD^:src/buster/lib/compiler/frontend/c/c_gen.c > src/buster/lib/compiler/frontend/c/c_gen.c
+          git show 46ed5e141baed17dfc1e977691ac73e08be5b9f5:src/buster/lib/compiler/frontend/c/c_gen.c > src/buster/lib/compiler/frontend/c/c_gen.c
           python3 - <<'PY'
           from pathlib import Path
           p = Path('src/buster/tests/test.c')
@@ -107,11 +104,26 @@ jobs:
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/driver"
           "$RUNNER_TEMP/driver" generate --cc clang --config Debug --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_DEBUG_INFO=OFF
           "$RUNNER_TEMP/driver" build --config Debug -t ide
-      - name: Baseline complete frontend suite including new regressions
+      - name: Baseline negative control must fail only lost volatile flags
         shell: bash
         run: |
-          set -euo pipefail
-          BUSTER_TEST_JOBS=2 timeout 600 build/Debug/ide test --ci=1 2>&1 | tee "$RUNNER_TEMP/evidence/baseline-frontend.log"
+          set -uo pipefail
+          BUSTER_TEST_JOBS=2 timeout 600 build/Debug/ide test --ci=1 > "$RUNNER_TEMP/evidence/baseline-frontend.log" 2>&1
+          status=$?
+          set -e
+          test "$status" -eq 1
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, re
+          text = (Path(os.environ['RUNNER_TEMP'])/'evidence/baseline-frontend.log').read_text()
+          failures = [line for line in text.splitlines() if ' failed at ' in line]
+          assert len(failures) == 192, failures
+          assert all(line.startswith('instruction->volatile_access == expected.is_volatile failed at ') for line in failures), failures
+          counts = re.search(r'\[(\d+)/(\d+)\] Unit tests', text)
+          assert counts and int(counts[2]) - int(counts[1]) == 192, text[-2000:]
+          print('PASS: baseline fails exactly 192 volatile load/store assertions; all other frontend assertions pass')
+          print(text[-500:])
+          PY
       - name: Baseline Debug-seeded fixed point
         if: ${{ matrix.runner == 'ubuntu-26.04' }}
         shell: bash
@@ -149,8 +161,8 @@ jobs:
           set -euo pipefail
           git restore src/buster/tests/test.c
           git diff --exit-code
-          git diff HEAD^ HEAD --binary > "$RUNNER_TEMP/evidence/validated.patch"
-          echo 'c62ec218a6bc8acf24cdbf17a138a3374eede54650bfacd219160ee48d1ae0f4  '"$RUNNER_TEMP/evidence/validated.patch" | sha256sum -c -
+          git diff 46ed5e141baed17dfc1e977691ac73e08be5b9f5 HEAD --binary > "$RUNNER_TEMP/evidence/validated.patch"
+          echo '19e1a19707ea4566d32384ae9a5735fea608dbc47432f4d376c26bfc9d9ed6b2  '"$RUNNER_TEMP/evidence/validated.patch" | sha256sum -c -
       - name: Retain validation evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
