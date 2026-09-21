@@ -6,10 +6,10 @@ permissions:
   contents: read
 concurrency:
   group: pr856-readiness-validation
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   source:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
