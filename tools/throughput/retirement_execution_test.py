@@ -10,6 +10,7 @@ import copy
 from contextlib import closing
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -19,6 +20,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import native_retirement_performance_binding as binding
 import native_retirement_performance_binding_test as binding_tests
+import native_retirement_result_input as result_input
 
 
 class NativeExecutionTests(unittest.TestCase):
@@ -26,6 +28,7 @@ class NativeExecutionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.root = Path(sys.argv[1])
         cls.data = (cls.root / "retirement-execution.jsonl").read_bytes()
+        cls.sample_data = (cls.root / "retirement-samples-0000.jsonl").read_bytes()
         cls.shard = {"path": "retirement-execution.jsonl", "bytes": len(cls.data),
                      "sha256": hashlib.sha256(cls.data).hexdigest(), "records": 1220}
 
@@ -48,6 +51,81 @@ class NativeExecutionTests(unittest.TestCase):
             value = json.loads(text)
             self.assertEqual(json.dumps(value, separators=(",", ":")), text)
             self.assertEqual(binding.Decimal(str(value)) * 1_000_000_000, int(nanoseconds))
+
+    def test_native_sample_bytes_and_manifest_are_canonical(self):
+        path = self.root / "retirement-samples.manifest.json"
+        manifest_bytes = path.read_bytes()
+        manifest = json.loads(manifest_bytes)
+        self.assertEqual(manifest_bytes, (json.dumps(manifest, sort_keys=True,
+            separators=(",", ":")) + "\n").encode())
+        self.assertEqual(manifest, {
+            "schema": result_input.MANIFEST_SCHEMA, "version": 1,
+            "identity_field": "record_id", "shards": [{
+                "identity": "samples-0000", "path": "retirement-samples-0000.jsonl",
+                "bytes": len(self.sample_data), "sha256": hashlib.sha256(self.sample_data).hexdigest()}]})
+        for ordinal, line in enumerate(self.sample_data.splitlines(keepends=True)):
+            value = json.loads(line)
+            self.assertEqual(line, (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            self.assertEqual((value["row"], value["round"], value["pair"]),
+                             (ordinal // 120, ordinal // 60 % 2, ordinal % 60))
+            self.assertEqual("generated_runtime" in value["measurements"], value["row"] != 1)
+        self.assertEqual(ordinal + 1, 360)
+
+    @unittest.skipUnless(os.name == "posix", "production no-follow result reader requires POSIX")
+    def test_native_sample_shards_pass_production_integrity_reader(self):
+        receipt = result_input.verify(self.root.resolve(), "retirement-samples.manifest.json")
+        self.assertEqual(receipt["records"], 360)
+        self.assertEqual(receipt["scope"], "integrity-only")
+        self.assertEqual(receipt["shards"][0]["sha256"], hashlib.sha256(self.sample_data).hexdigest())
+
+    @unittest.skipUnless(os.name == "posix", "production no-follow result reader requires POSIX")
+    def test_native_sample_boundary_and_applicability(self):
+        root = (self.root / "retirement-samples-boundary").resolve()
+        rows = {row: {"row": row, "metrics": {"compiler_peak_rss": True,
+            "compiler_wall_time": True, "generated_code_bytes": row % 3 != 2,
+            "generated_runtime": row % 3 != 1}} for row in range(274)}
+        ordinal_map = {row: row for row in rows}
+        digest, seen = hashlib.sha256(), [0]
+
+        def consume(_shard, _ordinal, value):
+            binding._consume_result_record(value, ordinal_map, rows, 2, 60, 0, seen, digest)
+
+        receipt = result_input.verify(root, "retirement-samples.manifest.json", record_consumer=consume)
+        self.assertEqual(receipt["records"], 32880)
+        self.assertEqual(seen[0], 32880)
+        self.assertEqual([shard["records"] for shard in receipt["shards"]], [32768, 112])
+        expected = hashlib.sha256()
+        for shard in receipt["shards"]:
+            with (root / shard["path"]).open("rb") as stream:
+                for line in stream:
+                    value = json.loads(line)
+                    self.assertEqual(line, (json.dumps(value, sort_keys=True,
+                        separators=(",", ":")) + "\n").encode())
+                    expected.update(line)
+        self.assertEqual(digest.hexdigest(), expected.hexdigest())
+
+    def test_native_manifest_full_cap_partitions(self):
+        # These are explicitly synthetic descriptor-only fixtures: this checks
+        # maximum-capacity manifest layout, not 39 million collected samples.
+        counts, number = [], 0
+        for partition in range(3):
+            path = f"retirement-partition-{partition}.manifest.json"
+            data = (self.root / path).read_bytes()
+            value = json.loads(data)
+            self.assertEqual(data, (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            identity, shards, _bytes = result_input._manifest(value, path, len(data), result_input.Limits())
+            self.assertEqual(identity, "record_id")
+            records = 0
+            for shard in shards:
+                self.assertEqual(shard["identity"], f"samples-{number:04d}")
+                self.assertEqual(shard["path"], f"retirement-samples-{number:04d}.jsonl")
+                self.assertEqual(shard["bytes"] % 500, 0)
+                records += shard["bytes"] // 500
+                number += 1
+            counts.append(records)
+        self.assertEqual(counts, [16777216, 16777216, 5963776])
+        self.assertEqual(number, 1206)
+        self.assertEqual(sum(counts), 39518208)
 
     def test_full_invocation_replay_joins_native_observations(self):
         events = list(binding._execution_trace_records(self.root, [self.shard], 1220))
@@ -101,7 +179,7 @@ class NativeExecutionTests(unittest.TestCase):
                 "pairs_per_round": 60, "warmups_per_variant": 2, "cpu": 2,
                 "performance_rows_sha256": "a" * 64, "rows": contracts})
             (root / self.shard["path"]).write_bytes(self.data)
-            raw_digest = "9" * 64
+            raw_digest = hashlib.sha256(self.sample_data).hexdigest()
             receipt = put("receipt.json", {"schema": binding.EXECUTION_RECEIPT_SCHEMA, "version": 1,
                 "context_sha256": binding._canonical_json_digest(binding._execution_context(record, raw_digest)),
                 "execution_plan_sha256": plan["sha256"], "job_id": "job-1", "attempt": 2,
@@ -111,19 +189,14 @@ class NativeExecutionTests(unittest.TestCase):
             with closing(sqlite3.connect(":memory:")) as db:
                 db.execute("CREATE TABLE samples(row_id INTEGER, round_id INTEGER, pair_id INTEGER, "
                            "metric TEXT, baseline TEXT, candidate TEXT, PRIMARY KEY(row_id, round_id, pair_id, metric))")
-                samples = {}
-                for event in events:
-                    if event["phase"] != "sample":
-                        continue
-                    metrics = {"generated_runtime": event["wall_seconds"]} if event["kind"] == "runtime" else {
-                        "compiler_wall_time": event["wall_seconds"], "compiler_peak_rss": event["peak_rss_bytes"],
-                        "generated_code_bytes": event["code_section_bytes"]}
-                    for metric, value in metrics.items():
-                        key = (event["row"], event["round"], event["pair"], metric)
-                        samples.setdefault(key, {})[event["variant"]] = str(value)
-                for key, values in samples.items():
-                    db.execute("INSERT INTO samples VALUES (?, ?, ?, ?, ?, ?)",
-                               (*key, values["baseline"], values["candidate"]))
+                row_by_id = {row["row"]: row for row in rows}
+                row_ordinals = {row["row"]: ordinal for ordinal, row in enumerate(rows)}
+                measurement_digest, seen = hashlib.sha256(), [0]
+                for line in self.sample_data.splitlines():
+                    binding._consume_result_record(json.loads(line), row_ordinals, row_by_id,
+                        2, 60, 0, seen, measurement_digest, db)
+                self.assertEqual(seen[0], 360)
+                self.assertEqual(measurement_digest.hexdigest(), raw_digest)
                 result = binding._check_execution_transcript(root, receipt, plan, record, rows,
                     rules["sampling"], db, raw_digest, receipt["sha256"], 2, "x86_64-unknown-linux-gnu")
                 self.assertEqual(result["invocations"], 1220)

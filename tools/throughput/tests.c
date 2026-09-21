@@ -9,6 +9,7 @@
 #undef TP_WORKLOAD_TEST_ALLOCATIONS
 #include "retirement_stats.h"
 #include "retirement_execution.h"
+#include "retirement_samples.h"
 
 static unsigned test_assertions, test_failures;
 #define CHECK(c) do { ++test_assertions; if (!(c)) { ++test_failures; fprintf(stderr, "TEST failure %d: %s\n", __LINE__, #c); } } while (0)
@@ -1697,6 +1698,11 @@ static void test_retirement_records(char const* root)
     TpRetirementTranscript transcript;
     CHECK(tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 1000));
     CHECK(tp_retirement_transcript_begin_shard(&transcript, file));
+    FILE* spool = tmpfile();
+    TpRetirementSamples samples;
+    TpRetirementSampleRow row_workspace[3];
+    unsigned metrics[] = {3, 1, 3};
+    CHECK(spool && tp_retirement_samples_init(&samples, &transcript, spool, row_workspace, metrics, 3));
     char executable[65], command[65], output[65], code[65];
     memset(executable, 'a', 64); executable[64] = 0;
     memset(command, 'b', 64); command[64] = 0;
@@ -1718,7 +1724,7 @@ static void test_retirement_records(char const* root)
         size_t count = tp_retirement_execution_record(line, sizeof(line), &invocation, &observed,
             &process, &identities, "job-1", 2, "boot-123", 2);
         CHECK(count > 0 && count < sizeof(line) && line[count - 1] == '\n');
-        CHECK(tp_retirement_transcript_append(&transcript, &observed, &process, &identities));
+        CHECK(tp_retirement_samples_append(&samples, &observed, &process, &identities));
     }
     CHECK(tp_retirement_execution_complete(&state));
     TpRetirementShard shard;
@@ -1730,6 +1736,25 @@ static void test_retirement_records(char const* root)
     uint64_t size = 0, lines = 0;
     CHECK(tp_hash_file(path, digest, &size, &lines) && size == shard.bytes &&
         lines == shard.records && !strcmp(digest, shard.sha256));
+
+    CHECK(tp_retirement_samples_begin_export(&samples));
+    CHECK(tp_path(path, root, "retirement-samples-0000.jsonl"));
+    file = fopen(path, "wb");
+    TpRetirementShard sample_shard, manifest;
+    CHECK(file && tp_retirement_samples_write_shard(&samples, file, &sample_shard));
+    if (file) CHECK(fclose(file) == 0);
+    CHECK(sample_shard.records == 360 && samples.exported == 360);
+    CHECK(tp_retirement_samples_finish(&samples));
+    CHECK(tp_hash_file(path, digest, &size, &lines) && size == sample_shard.bytes &&
+        lines == sample_shard.records && !strcmp(digest, sample_shard.sha256) &&
+        !strcmp(digest, samples.raw_sha256));
+    CHECK(tp_path(path, root, "retirement-samples.manifest.json"));
+    file = fopen(path, "wb");
+    CHECK(file && tp_retirement_samples_manifest(&samples, &sample_shard, 1, 0, file, &manifest));
+    if (file) CHECK(fclose(file) == 0);
+    CHECK(tp_hash_file(path, digest, &size, &lines) && size == manifest.bytes &&
+        lines == 1 && !strcmp(digest, manifest.sha256));
+    if (spool) CHECK(fclose(spool) == 0);
 
     /* Every missing required observation and every failed child is invalid. */
     CHECK(tp_retirement_execution_init(&state, 1, 3, runtime_rows, 2, 60, workspace, 12));
@@ -1948,6 +1973,8 @@ static void test_process_observations(char const* executable, char const* root)
 
 #include "qualification_test.h"
 
+#include "retirement_samples_test.h"
+
 int main(int argc, char** argv)
 {
     ThreadContext* context = thread_context_allocate();
@@ -2009,6 +2036,7 @@ int main(int argc, char** argv)
         test_retirement_statistics();
         test_retirement_execution();
         test_retirement_records(root);
+        test_retirement_samples(root);
         test_retirement_shards(root);
 #ifdef __linux__
         test_process_observations(executable, root);

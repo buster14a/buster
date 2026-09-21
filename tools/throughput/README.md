@@ -785,6 +785,58 @@ nonregression. #346's optional macro/aggregate workloads remain separate; no
 preprocessing/debug-specific case or default corpus expansion is added here.
 
 
+### Native-retirement paired numeric samples
+
+`retirement_samples.h` extends the invocation writer with an explicitly attached
+`TpRetirementSamples` collector. Initialize it with a fresh exclusive seekable
+spool, per-row workspace, and immutable code/runtime applicability. All
+invocations, including warmups, must advance through its append operation;
+advancing the transcript independently invalidates collection. Runtime
+applicability must match the cursor's copied row map. Caller flags are not an
+admission surface: the eventual installed recipe must derive these facts from
+the independently verified full support population.
+
+Collection preserves the approved execution order, but replay requires numeric
+samples in row/round/pair order. A private 72-byte-per-pair spool bridges these
+orders without allocating the entire experiment. It stores exact nanoseconds,
+RSS, code bytes, runtime and variant order as little-endian integers. It is
+scratch storage, **not a second published result schema**. Per-row in-memory
+compiler/runtime hash states bind observed values to the actual exported bytes;
+positive-value mutation, including a mutation after a shard boundary within the
+same row, prevents successful completion. RAM is proportional to rows, while
+the bounded spool is proportional to rows times rounds times pairs.
+
+Export begins only after the complete invocation transcript finishes. Each
+numeric shard contains 32,768 canonical existing result-input records, except
+for the final short shard. Optional metrics are omitted exactly when
+inapplicable; unavailable mandatory observations never become zero. Descriptors
+are emitted only after a successful flush, and an ordered descriptor digest
+binds the complete shard inventory. The writer emits full-cap 16,777,216-record
+manifest partitions, with only the final partition shortened. Each partition
+retains the result reader's 16 GiB bound; the complete collector rejects more
+than 39,518,208 records. No statistical threshold or pinned statistics source
+changes.
+
+The native tests write both transcript and numeric sample fixtures. The Python
+replay imports the C-written numeric records through the production sample
+consumer, joins them to every authenticated invocation, and verifies the
+manifest through the production no-follow result reader on POSIX. A real
+32,768-record boundary, deterministic second collection, copied applicability,
+partial collection, bypass, stale state, missing metrics, spool mutation,
+truncation, nonempty destinations, descriptor replacement and buffered disk-full
+failures are covered. The commands above run this coverage in the existing
+native/sanitized harness lanes; Windows does not claim the POSIX-only result
+reader gate.
+
+These are collection primitives, not service admission. The caller still owns
+exclusive file identities, correctness and output-oracle gates, live quiet-phase
+coordination, cancellation, durable publication and independent rehash/replay.
+Ordinary throughput does not use this collector. In particular, its spool and
+transcript writes are not proof of a quiet-phase retention policy: the installed
+recipe must implement and validate that integration before admission. The
+performance descriptor remains blocked; neither synthetic fixtures nor an
+integrity-only manifest establishes a performance verdict.
+
 ### QUALITY scratch/work census
 
 The existing `BUSTER_BENCH_ALLOCATIONS=ON` diagnostic compiler also emits
