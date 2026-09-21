@@ -2408,15 +2408,14 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_result_sync_tree(int result_directory)
     return ok;
 }
 
-BqError bq_worker_result_binding_validate(BqJob const* job)
+BUSTER_GLOBAL_LOCAL BqError bq_worker_result_binding_validate_at(BqJob const* job, int result_directory)
 {
-    char path[BQ_PATH_CAP + 1];
+    char path[BQ_PATH_CAP + 1] = {0};
     BqRecipeFiles recipe;
     BqRecipe selected = job ? bq_request_recipe(&job->request) : BQ_RECIPE_UNKNOWN;
     BqError error = job && job->result_bound && bq_recipe_service(selected) && bq_recipe_files(selected, &recipe) &&
                     bq_worker_text(string_from_pointer(job->result_root), path, sizeof(path)) &&
                     path[0] == '/' ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
-    int result_directory = error == BQ_OK ? bq_worker_open_trusted_directory(string_from_pointer(path), true, false) : -1;
     struct stat directory_info = {0};
     if (error == BQ_OK)
     {
@@ -2500,7 +2499,15 @@ BqError bq_worker_result_binding_validate(BqJob const* job)
         error = !memcmp(expected_bundle, job->result_bundle_digest, SHA256_HEX_CAPACITY) &&
                 !memcmp(actual_full, job->result_full_digest, SHA256_HEX_CAPACITY) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     }
-    if (result_directory >= 0 && close(result_directory) != 0 && error == BQ_OK) error = BQ_IO;
+    return error;
+}
+
+BqError bq_worker_result_binding_validate(BqJob const* job)
+{
+    int directory = job && job->result_bound ?
+        bq_worker_open_trusted_directory(string_from_pointer(job->result_root), true, false) : -1;
+    BqError error = bq_worker_result_binding_validate_at(job, directory);
+    if (directory >= 0 && close(directory) != 0 && error == BQ_OK) error = BQ_IO;
     return error;
 }
 

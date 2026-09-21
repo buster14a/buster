@@ -281,7 +281,8 @@ retry, never roll it back in memory and continue appending.
 
 Limits are fixed across journal schemas 1 and 2: eight unfinished jobs
 (including active and cleaning), 64 lifetime submissions, 1,024 journal events, 320-byte request
-payloads, 564-byte maximum journal frames and 536-byte control frames. Normal
+payloads, 564-byte maximum journal frames and 536-byte control requests/ordinary replies.
+The authenticated export operation has a separate fixed reply cap; see [EXPORT.md](EXPORT.md). Normal
 job transitions use fewer than 16 events each. There is no compaction, rotation,
 expiry or tombstone eviction. Once all 64 lifetime slots are used, new keys fail
 closed even if every job has finished; existing identical retries still work.
@@ -490,10 +491,16 @@ resource values, unit names or executable paths. Those six values are fixed at
 startup by the deployment command; the client protocol carries only a named
 recipe request and bounded status/cancel/log operations. The endpoint is a
 Linux `AF_UNIX` `SOCK_SEQPACKET` socket. Each connection contains exactly one
-frame, is capped at the existing 536-byte control limit, and must have the
+request frame, capped at 536 bytes, and must have the
 daemon's effective UID and GID through `SO_PEERCRED`. The service refuses the
 materialize, workspace-reconcile and worker-run operations over this endpoint;
-the worker configuration is service-owned.
+the worker configuration is service-owned. Export replies alone may carry up to
+65,672 bytes (one 64 KiB chunk plus bounded framing and identities).
+The authenticated UID/GID maps to the fixed `github-actions` principal.
+Public submissions cannot override it; status/result/cancel/log/export reject
+foreign and unknown jobs identically. Public logs use per-job ordinal cursors;
+local operator logs retain journal sequence cursors. Public status receipts
+suppress global sequence, occupancy and reconciliation fields.
 
 The service retries a queued admitted service request on each bounded idle
 tick and runs the existing supervisor with that fixed configuration. At
@@ -560,8 +567,10 @@ Neither command grants access: the socket still requires the daemon's exact
 effective UID and GID. Operator authorization must permit only the installed
 fixed gateway invocation. Never grant Actions an arbitrary service-account
 shell, direct queue access, `rpc` or unrestricted service executable invocation.
-The fixed encoder is not a setuid program or a completed privilege boundary;
-the deployment checklist's authorization and bounded-export gates still apply.
+The fixed encoder is not a setuid program or a completed privilege boundary.
+Operator authorization and live deployment qualification still apply.
+[Authenticated bundle export](EXPORT.md) provides bounded downloads and
+independent reconstruction without exposing a service-side path.
 
 `SOCKET`'s parent must already be a private, operator-provisioned directory;
 the service refuses an existing socket, final symlink, non-private parent or
@@ -569,7 +578,7 @@ replacement inode. The bind uses a restrictive umask and validates the
 pathname inode before listening and again after setup. On shutdown it removes
 only the socket inode it created and reports cleanup or replacement failures.
 Windows and macOS compile the bounded codec but report `unsupported` for
-`serve`, `client`, `gateway` and `rpc`; no network listener is added there.
+`serve`, `client`, `gateway`, `rpc` and `unpack-export`; no network listener is added there.
 
 ## CLI
 
