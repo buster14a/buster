@@ -92,24 +92,39 @@ The workflow has three separately permissioned jobs:
 - **validate** independently reconstructs the same final tree with read-only
   permissions, proves byte equality with prepare, and only then executes the
   candidate's affected tests and census self-test.
-- **publish** is the sole `contents: write` job. It independently reconstructs
-  and compares the same tree but never executes candidate code. It reauthorizes
-  the PR immediately before one `--force-with-lease` ref update whose merge
-  commit contains both the candidate and the generated state.
+- **publish** is the sole write job. It independently reconstructs and compares
+  the same tree but never executes candidate code. It reauthorizes the PR
+  immediately before one lease-guarded update of the same-repository PR branch.
+  The resulting head is a two-parent integration commit whose first parent is
+  exact current `main`, whose second parent is the reviewed candidate, and
+  whose tree contains the trusted generated state. It then posts the
+  `Native retirement trusted integration` status for that exact head. The
+  normal protected pull-request path, not this workflow, merges `main`.
+
+The required `Native retirement merge admission` check refuses ordinary merge
+for a candidate that changes an admitted repository source, trusted implementation,
+or reviewed policy/schema. It admits the writer-produced head only after
+checking the exact parents, evidence trailers, generated-only post-candidate
+delta, current-main identity, and GitHub Actions attestation. A main-push run
+invalidates every open integration head whose recorded base no longer equals
+current `main`; dispatching the writer again reconstructs it without requiring
+a manual feature-branch rebase. The independent `API migration policy` check
+continues to enforce bounded API compatibility. Configure admission as a
+required GitHub Actions check (integration ID `15368`) without enabling strict
+required-status-check policy or removing any existing required check.
 
 Evidence records base/head commits and trees, the pre-generation combined tree,
 the final tree, the old trusted rebinder revision/tree and file digests, the
 exact next-trusted file digests in the final tree, both generated artifact
-digests, and the policy/receipt/project/ledger identities. The merge commit
-records the evidence digest, base, candidate, and final tree.
+digests, and the policy/receipt/project/ledger identities. The integration
+commit records the evidence digest, base, candidate, transition kind, and final
+tree.
 
 The writer rechecks both `main` and the PR head immediately before publication.
 A moved PR head fails closed. A moved `main` discards the prepared result and
-fails closed before any ref update. A maintainer/admin must start a fresh
+fails closed before any branch update. A maintainer/admin must start a fresh
 trusted dispatch, which reconstructs from the new current `main`; no previous
-snapshot or quartet is reused. The workflow deliberately has no
-`actions: write` permission, so stale recovery cannot silently continue under
-the identity of `github-actions[bot]`. Publication is one leased ref update, so
+snapshot or quartet is reused. Publication is one leased PR-branch update, so
 a failure or cancellation cannot leave a partially published generated state.
 
 ## Trust transitions
@@ -125,7 +140,8 @@ Candidates are classified before any privileged operation:
   and must be split.
 
 `bootstrap` and `policy` dispatches require a maintainer/admin dispatcher and an
-approval from a different maintainer/admin. The publisher always executes the
+approval from a maintainer/admin other than the PR author on the exact candidate
+commit. The publisher always executes the
 implementation from the old/current trusted `main`, never the candidate's
 version. In the read-only validation job, the candidate authority must then
 accept the exact generated state produced by that old authority for the final
@@ -153,5 +169,5 @@ recomputes the materializer ledger, and cross-checks the receipt/project closure
 rather than trusting producer output. Evidence without the generated snapshot
 is treated as legacy only when all frozen previous identities match exactly.
 
-This ownership cutover does not enable a GitHub merge queue/ruleset (#867) and
-does not implement the general conflict-preflight mechanism (#869).
+The required admission gate is selective to retirement-sensitive PRs. General
+multi-PR serialization remains #867, and conflict preflight remains #869.

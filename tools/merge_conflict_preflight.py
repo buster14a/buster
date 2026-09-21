@@ -42,6 +42,7 @@ GENERATED_RETIREMENT_PATHS = frozenset((
     "tools/native_retirement_dependency_binding.generated.h",
 ))
 RETIREMENT_TRUST_PATHS = frozenset((
+    ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
     ".github/workflows/native-retirement-rebind.yml",
@@ -50,6 +51,7 @@ RETIREMENT_TRUST_PATHS = frozenset((
     "tools/native_retirement_dependency_binding.py",
     "tools/native_retirement_external.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_materializer.py",
     "tools/native_retirement_rebind.py",
     "tools/native_retirement_rebind_contract.py",

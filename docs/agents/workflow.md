@@ -172,8 +172,14 @@ Ordinary feature branches do not own
 `tools/native_retirement_dependency_binding.generated.h`. Do not run
 `native_retirement_rebind.py refresh` and commit its output merely because
 an admitted source changed. The read-only rebinding workflow reconstructs the
-exact candidate state in a disposable checkout; only the serialized trusted
-integration workflow may publish it.
+exact candidate state in a disposable checkout. The repository ruleset's
+required `Native retirement merge admission` check is the merge-admission
+authority. `API migration policy` remains a separate compatibility check. For
+retirement-sensitive changes it accepts only a current-main, two-parent
+integration head with a successful exact-head
+`Native retirement trusted integration` status from `github-actions[bot]`.
+When `main` advances that status is invalidated; rerun the protected writer
+instead of hand-editing generated state or requiring a manual rebase.
 
 Changes to rebinder/materializer/validator/workflow implementation are a
 `bootstrap` transition. Changes to reviewed policy, generated schema, or
