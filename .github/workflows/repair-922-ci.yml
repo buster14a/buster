@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: repair-922-ci-policy-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -29,83 +29,80 @@ jobs:
           from pathlib import Path
           import hashlib
           import subprocess
+          import textwrap
           workflow = Path('.github/workflows/merge-conflict-preflight.yml')
           assert subprocess.check_output(['git', 'hash-object', str(workflow)], text=True).strip() == 'b6233361ed1b310ad1e5b925eac69233c5e5cd48'
           digest = hashlib.sha256(workflow.read_text(encoding='utf-8').encode('utf-8')).hexdigest()
           path = Path('tests/ci_tools_test.py')
           text = path.read_text(encoding='utf-8')
-          old = '''                text = path.read_text()
-                          self.assertNotIn("pull_request_target", text)
-                          self.assertIn("contents: read", text)'''.replace('\n                          ', '\n                ')
-          new = '''                text = path.read_text(encoding="utf-8")
-                          self.assert_pull_request_target_policy(path, text)
-                          self.assertIn("contents: read", text)'''.replace('\n                          ', '\n                ')
+          old = '                text = path.read_text()\n                self.assertNotIn("pull_request_target", text)\n                self.assertIn("contents: read", text)'
+          new = '                text = path.read_text(encoding="utf-8")\n                self.assert_pull_request_target_policy(path, text)\n                self.assertIn("contents: read", text)'
           assert text.count(old) == 1
           text = text.replace(old, new)
-          addition = '''    def assert_pull_request_target_policy(self, path, text):
-                  if path.name == "merge-conflict-preflight.yml":
-                      # The sole exception is the exact reviewed workflow, not a filename
-                      # allowlist. Its candidate tests are read-only and PR-only; the
-                      # status-writing job executes only the trusted default-branch tool.
-                      # Any workflow edit must be reviewed against that boundary before
-                      # this literal is updated, including otherwise harmless formatting.
-                      # read_text normalizes checkout CRLF before hashing on Windows.
-                      self.assertEqual(
-                          hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                          "APPROVED_DIGEST",
-                          "preflight workflow changed: review event guards, permissions, "
-                          "trusted checkout, and every executed step before renewing approval",
-                      )
-                  else:
-                      self.assertNotIn("pull_request_target", text)
-
-              def test_preflight_target_exception_is_not_a_general_event_allowlist(self):
-                  workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
-                  text = workflow.read_text(encoding="utf-8")
-                  self.assert_pull_request_target_policy(workflow, text)
-                  for name in ("ci.yml", "unreviewed.yml", "merge-conflict-preflight.yaml"):
-                      with self.subTest(name=name), self.assertRaises(AssertionError):
-                          self.assert_pull_request_target_policy(workflow.with_name(name), text)
-
-              def test_preflight_target_exception_rejects_privilege_and_execution_changes(self):
-                  workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
-                  text = workflow.read_text(encoding="utf-8")
-                  changes = (
-                      ("contents: read", "contents: write"),
-                      ("persist-credentials: false", "persist-credentials: true"),
-                      ("ref: ${{ github.event.repository.default_branch }}",
-                       "ref: ${{ github.event.pull_request.head.sha }}"),
-                      ("github.event_name == 'pull_request'", "always()"),
-                      ("github.event_name != 'pull_request'", "always()"),
-                      ("statuses: write", "statuses: write\\n      contents: write"),
-                      ("run: python3 -B tools/merge_conflict_preflight_test.py -v",
-                       "env:\\n          GITHUB_TOKEN: ${{ github.token }}\\n"
-                       "        run: python3 -B tools/merge_conflict_preflight_test.py -v"),
-                      ("python3 -B tools/merge_conflict_preflight.py github-event",
-                       "python3 -B tools/merge_conflict_preflight_test.py -v"),
-                      ("retention-days: 14", "retention-days: 14\\n"
-                       "      - name: Unreviewed execution\\n        run: echo unreviewed"),
+          addition = '''\
+          def assert_pull_request_target_policy(self, path, text):
+              if path.name == "merge-conflict-preflight.yml":
+                  # The sole exception is the exact reviewed workflow, not a filename
+                  # allowlist. Its candidate tests are read-only and PR-only; the
+                  # status-writing job executes only the trusted default-branch tool.
+                  # Any workflow edit must be reviewed against that boundary before
+                  # this literal is updated, including otherwise harmless formatting.
+                  # read_text normalizes checkout CRLF before hashing on Windows.
+                  self.assertEqual(
+                      hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                      "APPROVED_DIGEST",
+                      "preflight workflow changed: review event guards, permissions, "
+                      "trusted checkout, and every executed step before renewing approval",
                   )
-                  for before, after in changes:
-                      with self.subTest(change=before):
-                          self.assertIn(before, text)
-                          changed = text.replace(before, after)
-                          self.assertNotEqual(changed, text)
-                          with self.assertRaises(AssertionError):
-                              self.assert_pull_request_target_policy(workflow, changed)
+              else:
+                  self.assertNotIn("pull_request_target", text)
 
-              def test_preflight_target_approval_normalizes_checkout_line_endings(self):
-                  workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
-                  text = workflow.read_text(encoding="utf-8")
-                  with tempfile.TemporaryDirectory() as directory:
-                      copy = Path(directory) / workflow.name
-                      copy.write_bytes(text.replace("\\n", "\\r\\n").encode("utf-8"))
-                      self.assert_pull_request_target_policy(copy, copy.read_text(encoding="utf-8"))
+          def test_preflight_target_exception_is_not_a_general_event_allowlist(self):
+              workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+              text = workflow.read_text(encoding="utf-8")
+              self.assert_pull_request_target_policy(workflow, text)
+              for name in ("ci.yml", "unreviewed.yml", "merge-conflict-preflight.yaml"):
+                  with self.subTest(name=name), self.assertRaises(AssertionError):
+                      self.assert_pull_request_target_policy(workflow.with_name(name), text)
+
+          def test_preflight_target_exception_rejects_privilege_and_execution_changes(self):
+              workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+              text = workflow.read_text(encoding="utf-8")
+              changes = (
+                  ("contents: read", "contents: write"),
+                  ("persist-credentials: false", "persist-credentials: true"),
+                  ("ref: EXPR github.event.repository.default_branch }}",
+                   "ref: EXPR github.event.pull_request.head.sha }}"),
+                  ("github.event_name == 'pull_request'", "always()"),
+                  ("github.event_name != 'pull_request'", "always()"),
+                  ("statuses: write", "statuses: write\\n      contents: write"),
+                  ("run: python3 -B tools/merge_conflict_preflight_test.py -v",
+                   "env:\\n          GITHUB_TOKEN: EXPR github.token }}\\n"
+                   "        run: python3 -B tools/merge_conflict_preflight_test.py -v"),
+                  ("python3 -B tools/merge_conflict_preflight.py github-event",
+                   "python3 -B tools/merge_conflict_preflight_test.py -v"),
+                  ("retention-days: 14", "retention-days: 14\\n"
+                   "      - name: Unreviewed execution\\n        run: echo unreviewed"),
+              )
+              for before, after in changes:
+                  with self.subTest(change=before):
+                      self.assertIn(before, text)
+                      changed = text.replace(before, after)
+                      self.assertNotEqual(changed, text)
+                      with self.assertRaises(AssertionError):
+                          self.assert_pull_request_target_policy(workflow, changed)
+
+          def test_preflight_target_approval_normalizes_checkout_line_endings(self):
+              workflow = ROOT / ".github/workflows/merge-conflict-preflight.yml"
+              text = workflow.read_text(encoding="utf-8")
+              with tempfile.TemporaryDirectory() as directory:
+                  copy = Path(directory) / workflow.name
+                  copy.write_bytes(text.replace("\\n", "\\r\\n").encode("utf-8"))
+                  self.assert_pull_request_target_policy(copy, copy.read_text(encoding="utf-8"))
 
           '''
-          addition = addition.replace('\n          ', '\n').replace('APPROVED_DIGEST', digest)
-          # Preserve GitHub expressions as literal fixture bytes, never as runner interpolation.
-          addition = addition.replace('ref: main', 'ref: ' + '$' + '{{ github.event.repository.default_branch }}')
+          addition = textwrap.indent(addition, '    ').replace('APPROVED_DIGEST', digest)
+          addition = addition.replace('EXPR', '$' + '{{')
           anchor = '    def test_integrity_and_security_policy(self):\n'
           assert text.count(anchor) == 1
           text = text.replace(anchor, addition + anchor)
@@ -174,6 +171,7 @@ jobs:
           test "$(git show -s --format=%P "$sha")" = 24afc62a3adac9ad551baa78dffbbfa7097b3175
           test "$(git diff-tree --no-commit-id --name-only -r "$sha")" = tests/ci_tools_test.py
           git diff --check "$sha^" "$sha"
+          git show "$sha:tests/ci_tools_test.py" | python3 -c 'import sys; text = sys.stdin.read(); assert "ghs_" not in text and "github_pat_" not in text'
           basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic" GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null git push origin "$sha:refs/heads/repair/922-verified-20260921"
           printf 'Verified single-file repair commit: `%s`\n' "$sha" >> "$GITHUB_STEP_SUMMARY"
