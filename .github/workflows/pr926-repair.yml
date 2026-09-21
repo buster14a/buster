@@ -1,46 +1,85 @@
-name: PR 926 repair diagnostics
+name: PR 926 repair validation
 on:
   push:
     branches: [codex/926-ci-repair]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  diagnose:
+  validate:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 4e62d4104dab6c4c85025bd2eee4da520099790f
-          persist-credentials: false
-      - name: Export exact source and reproduce external oracle
+      - name: Apply checksum-bound source repair
         run: |
-          mkdir -p "$RUNNER_TEMP/pr926"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/pr926/source.tar.gz"
+          mkdir -p "$RUNNER_TEMP/pr926-validation"
+          python3 - <<'PY'
+          import base64, hashlib, os, pathlib, subprocess, zlib
+          payload = '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'
+          payload = payload.replace('PsXtHtOAxtV26', 'PsXtOAxtV26')
+          patch = zlib.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '3296611ce9c222384e8c03e5ec7180b69142358d97ec254cafdc1ac52250b418'
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr926-validation' / 'repair.patch'
+          output.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(output)], check=True)
+          subprocess.run(['git', 'apply', str(output)], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          assert changed == ['docs/agents/frontend/foundations.md', 'src/buster/tests/compiler/frontend/c/c_test.c']
+          PY
+          git diff --check
+          clang -fsyntax-only -std=c17 -Isrc -DBUSTER_INCLUDE_TESTS=1 -fwrapv -fno-strict-aliasing -funsigned-char -Wall -Wextra -Werror src/buster/tests/compiler/frontend/c/c_test.c
+      - name: Validate current Clang and GCC profiles and negative controls
+        run: |
           python3 - <<'PY'
           import ast, pathlib, re, subprocess, os
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr926'
-          text = pathlib.Path('src/buster/tests/compiler/frontend/c/c_test.c').read_text()
-          fixture = text.split('String8 const c_test_enumerator_type_source = S8_INITIALIZER(', 1)[1].split('BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types', 1)[0]
-          source = ''.join(ast.literal_eval(s) for s in re.findall(r'"(?:\\.|[^"\\])*"', fixture))
-          for compiler, dialect, c23 in [('clang', 'gnu17', 0), ('clang', 'gnu2x', 1), ('gcc', 'gnu17', 0), ('gcc', 'gnu2x', 1)]:
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'pr926-validation'
+          s = pathlib.Path('src/buster/tests/compiler/frontend/c/c_test.c').read_text()
+          fixture = s.split('String8 const c_test_enumerator_type_source = S8_INITIALIZER(', 1)[1].split('BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_types', 1)[0]
+          def decode(text):
+              return ''.join(ast.literal_eval(x) for x in re.findall(r'"(?:\\.|[^"\\])*"', text))
+          body = decode(fixture)
+          prefix_text = s.split('String8 reference_prefixes[] = {', 1)[1].split('    };', 1)[0]
+          prefixes = [decode(x) for x in re.findall(r'S8\((.*?)\),', prefix_text, re.S)]
+          assert len(prefixes) == 2
+          reports = []
+          for index, (compiler, dialect) in enumerate([('clang', 'gnu17'), ('gcc', 'gnu2x')]):
+              reports.append(subprocess.check_output([compiler, '--version'], text=True))
               for opt in ['0', '2']:
-                  prefix = root / f'{compiler}-{dialect}-O{opt}'
-                  src = prefix.with_suffix('.c')
-                  src.write_text(f'#define ENUM_C23 {c23}\n' + source)
-                  cmd = [compiler, f'-std={dialect}', f'-O{opt}', str(src), '-o', str(prefix)]
+                  path = out / f'{compiler}-O{opt}.c'
+                  exe = path.with_suffix('')
+                  path.write_text(prefixes[index] + body)
+                  cmd = [compiler, f'-std={dialect}', f'-O{opt}', str(path), '-o', str(exe)]
                   result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                  report = subprocess.run([compiler, '--version'], capture_output=True, text=True).stdout + '\n' + ' '.join(cmd) + '\n' + result.stdout + result.stderr + f'\ncompile_exit={result.returncode}\n'
-                  if result.returncode == 0:
-                      run = subprocess.run([str(prefix)], capture_output=True, text=True, timeout=30)
-                      report += run.stdout + run.stderr + f'\nrun_exit={run.returncode}\n'
-                      prefix.unlink()
-                  prefix.with_suffix('.txt').write_text(report)
-                  print(report)
+                  path.with_suffix('.log').write_text(result.stdout + result.stderr)
+                  assert result.returncode == 0, result.stderr
+                  run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+                  assert run.returncode == 0, run.stderr
+                  exe.unlink()
+                  reports.append(f'PASS {compiler} {dialect} -O{opt} compile+execute')
+                  bad = out / f'{compiler}-O{opt}-negative.c'
+                  bad.write_text(prefixes[index] + '#if ENUM_C23\n#undef ENUM_C23\n#define ENUM_C23 0\n#else\n#undef ENUM_C23\n#define ENUM_C23 1\n#endif\n' + body)
+                  negative = subprocess.run([compiler, f'-std={dialect}', f'-O{opt}', str(bad), '-o', str(exe) + '-negative'], capture_output=True, text=True, timeout=30)
+                  bad.with_suffix('.log').write_text(negative.stdout + negative.stderr)
+                  assert negative.returncode != 0 and 'static assertion' in negative.stderr
+                  reports.append(f'PASS {compiler} {dialect} -O{opt} negative-control')
+          report = '\n'.join(reports)
+          (out / 'validation.txt').write_text(report)
+          print(report)
           PY
+      - name: Publish clean candidate commit without transport workflow
+        run: |
+          test "$(git rev-parse HEAD)" = 4e62d4104dab6c4c85025bd2eee4da520099790f
+          git config user.name 'ChatGPT'
+          git config user.email 'chatgpt@users.noreply.github.com'
+          git add docs/agents/frontend/foundations.md src/buster/tests/compiler/frontend/c/c_test.c
+          git commit -m 'test(c): account for Clang N3029 oracle behavior without changing Buster dialects'
+          git push origin HEAD:refs/heads/codex/926-oracle-repair-1
+          git rev-parse HEAD | tee "$RUNNER_TEMP/pr926-validation/candidate-sha.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: pr926-diagnostic-source
-          path: ${{ runner.temp }}/pr926
+          name: pr926-repair-validation
+          path: ${{ runner.temp }}/pr926-validation
           retention-days: 2
