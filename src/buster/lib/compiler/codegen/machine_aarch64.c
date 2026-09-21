@@ -5933,6 +5933,12 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_instruction(MachineA64Selector* sele
     (IR_OPCODE_BIT(IR_OPCODE_LOAD) | IR_OPCODE_BIT(IR_OPCODE_STORE) | IR_OPCODE_BIT(IR_OPCODE_DEREFERENCE) |                           \
      IR_OPCODE_BIT(IR_OPCODE_BRANCH_IF))
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+{
+    u32 suffix_count = function->block_count - function->entry.value;
+    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+}
+
 MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                bool assume_validated, bool preserve_debug_values)
 {
@@ -5940,7 +5946,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (arena && program && function && target.cpu_arch == CPU_ARCH_AARCH64 && function->state == IR_FUNCTION_LOWERED && function->block_count &&
-        function->entry.value == 0)
+        function->entry.value < function->block_count)
     {
         IrType* function_type = ir_type_from_id(&program->types, function->canonical_type);
         result.signature_rejected = function_type && function_type->kind == IR_TYPE_FUNCTION;
@@ -6042,8 +6048,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             selector.value_stack_slots[value_index] = UINT32_MAX;
             selector.value_indirect_slots[value_index] = UINT32_MAX;
         }
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             u32 parameter_count = 0;
             IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
             for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -6136,6 +6143,11 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         bool returns_twice_free = true;
         u32 walk_ordinal = 0;
         u32 expanded_blocks = 0;
+        if (function->entry.value)
+        {
+            selector.block_entries = arena_allocate(arena, u32, function->block_count);
+            selector.block_exits = arena_allocate(arena, u32, function->block_count);
+        }
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
         {
             IrBlock* block = function->blocks + block_index;
@@ -6304,6 +6316,19 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 promotable_locals[value_index] = 0;
             }
         }
+        if (function->entry.value)
+        {
+            u32 next_block = 0;
+            for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+            {
+                u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
+                u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+                selector.block_entries[block_index] = next_block;
+                selector.block_exits[block_index] = next_block + block_width - 1u;
+                next_block += block_width;
+            }
+            BUSTER_CHECK(next_block == expanded_blocks);
+        }
         selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);
@@ -6419,8 +6444,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         // Classification pass: direct locals become stack slots, every other
         // scalar result becomes a virtual register, in stable value-id order.
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
             for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
@@ -6782,8 +6808,9 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         u32 typed_instruction_count = 0;
         u32 simd_operation_count = 0;
-        for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+        for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
         {
+            u32 block_index = machine_a64_canonical_layout_block(function, layout_index);
             IrBlock* block = function->blocks + block_index;
             selector.current_block = block_index;
             machine_builder_block_begin(&selector.builder);
@@ -6806,7 +6833,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
             }
             selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
-            if (block_index == 0)
+            if (block_index == function->entry.value)
             {
                 if (windows_variadic)
                 {

@@ -7504,6 +7504,14 @@ struct MachineX64CandidateRow
 
 #include <buster/lib/compiler/codegen/machine_x86_64_predicate.c>
 
+// Canonical block IDs need not start at the function entry. Preserve their
+// identity while publishing entry-first MIR and remapping every CFG edge.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_canonical_layout_block(IrFunction const* function, u32 layout_index)
+{
+    u32 suffix_count = function->block_count - function->entry.value;
+    return layout_index < suffix_count ? function->entry.value + layout_index : layout_index - suffix_count;
+}
+
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                               bool position_independent, bool assume_validated, bool predicate_residency,
                                                               bool preserve_debug_values, MachineSelectionModule* module)
@@ -7512,7 +7520,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .failed_opcode = IR_OPCODE_COUNT,
     };
     if (!arena || !program || !function || target.cpu_arch != CPU_ARCH_X86_64 || function->state != IR_FUNCTION_LOWERED || !function->block_count ||
-        function->entry.value != 0)
+        function->entry.value >= function->block_count)
     {
         return result;
     }
@@ -7628,8 +7636,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     selector.parameter_placements = signature_parameter_placements;
     selector.parameter_count = function_type->parameter_count;
     selector.argument_values = arena_allocate(arena, u32, function_type->parameter_count);
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         u32 parameter_count = 0;
         IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
         for (u32 parameter_index = 0; parameter_index < published_block->parameter_count; parameter_index += 1)
@@ -7780,6 +7789,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     bool returns_twice_free = true;
     u32 walk_ordinal = 0;
     u32 expanded_blocks = 0;
+    if (function->entry.value)
+    {
+        selector.block_entries = arena_allocate(arena, u32, function->block_count);
+        selector.block_exits = arena_allocate(arena, u32, function->block_count);
+    }
     for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
     {
         IrBlock* block = function->blocks + block_index;
@@ -7930,6 +7944,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         }
         block_candidate_counts[block_index] = block_candidate_count;
     }
+    if (function->entry.value)
+    {
+        u32 next_block = 0;
+        for (u32 layout_index = 0; layout_index < function->block_count; layout_index += 1)
+        {
+            u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
+            u32 block_width = selector.block_exits[block_index] - selector.block_entries[block_index] + 1u;
+            selector.block_entries[block_index] = next_block;
+            selector.block_exits[block_index] = next_block + block_width - 1u;
+            next_block += block_width;
+        }
+        BUSTER_CHECK(next_block == expanded_blocks);
+    }
     // Block-parameter incoming values are uses on CFG edges rather than row
     // operands. Keep them visible to aliasing and branch fusion: in
     // particular, a comparison that also supplies a promoted local is not a
@@ -8055,8 +8082,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
     // Classification pass: direct locals become stack slots, every other
     // scalar result becomes a virtual register, in stable value-id order.
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         IrBlock* block = function->blocks + block_index;
         u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
         u32 block_first_row = block->first_instruction.value;
@@ -8456,8 +8484,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         selector.virtual_register_count ? (MachineVirtualRegister*)(selector.builder.virtual_registers.first + 1) : 0;
     u32 typed_instruction_count = 0;
     u32 simd_operation_count = 0;
-    for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
+    for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
     {
+        u32 block_index = machine_x64_canonical_layout_block(function, layout_index);
         IrBlock* block = function->blocks + block_index;
         selector.current_block = block_index;
         machine_builder_block_begin(&selector.builder);
@@ -8480,7 +8509,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
         selector.open_block.parameter_count = (u16)(selector.builder.block_parameters.total_count - selector.open_block.parameter_offset);
-        if (block_index == 0)
+        if (block_index == function->entry.value)
         {
             if (function_type->is_variadic && windows_abi)
             {
