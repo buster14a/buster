@@ -127,6 +127,8 @@ jobs:
           pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
           PY_STATUS
             status_args=(--status-json "$RUNNER_TEMP/native-retirement-status.json")
+          elif [[ "$EVENT_NAME" == merge_group ]]; then
+            status_args=(--repository "$GITHUB_REPOSITORY")
           fi
           python3 "$tool" check \
             --repo-root "$GITHUB_WORKSPACE/candidate" \
@@ -134,7 +136,6 @@ jobs:
             --head "$HEAD_SHA" \
             --current-main "$current_main" \
             --event "$EVENT_NAME" \
-            --repository "$GITHUB_REPOSITORY" \
             "${status_args[@]}" \
             | tee "$RUNNER_TEMP/native-retirement-admission.json"
       - name: Invalidate stale trusted integrations after main advances

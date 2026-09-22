@@ -488,6 +488,37 @@ class InvalidationTests(unittest.TestCase):
 class WorkflowPolicyTests(unittest.TestCase):
     root = Path(__file__).resolve().parents[1]
 
+    def test_pr_bootstrap_keeps_legacy_trusted_cli_and_groups_get_repository(self):
+        for name, step in (("api-migration-policy.yml", "Enforce trusted native-retirement integration"),
+                           ("native-retirement-rebind.yml", "Reject feature-owned generated state and classify trust transitions")):
+            workflow = (self.root / ".github/workflows" / name).read_text()
+            block = workflow.split("      - name: " + step + "\n", 1)[1].split("      - name:", 1)[0]
+            script = textwrap.dedent(block.split("        run: |\n", 1)[1])
+            for event in ("pull_request", "merge_group"):
+                with self.subTest(workflow=name, event=event), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "trusted/tools").mkdir(parents=True)
+                    (root / "candidate").mkdir()
+                    (root / "trusted/tools/native_retirement_merge_gate.py").write_text(
+                        "import argparse,json,os\n"
+                        "p=argparse.ArgumentParser(); p.add_argument('command',choices=['check'])\n"
+                        "for key in ('repo-root','base','head','current-main','event','status-json'): p.add_argument('--'+key)\n"
+                        "p.add_argument('--allow-pending',action='store_true')\n"
+                        "if os.environ['EVENT_NAME']=='merge_group': p.add_argument('--repository',required=True)\n"
+                        "args=p.parse_args()\n"
+                        "if args.event=='pull_request': assert args.status_json\n"
+                        "else: assert args.repository=='buster14a/buster'\n"
+                        "print(json.dumps({'status':'admitted','mode':'trusted-integration'}))\n")
+                    # Exercise the actual shell, supplying only remote read fixtures.
+                    prefix = 'git() { printf "%s\\trefs/heads/main\\n" "$BASE_SHA"; }\ngh() { printf "[[]]\\n"; }\n'
+                    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", prefix + script],
+                        env={**os.environ, "EVENT_NAME": event, "GITHUB_WORKSPACE": str(root),
+                             "RUNNER_TEMP": str(root), "GITHUB_OUTPUT": str(root / "output"),
+                             "GITHUB_REPOSITORY": "buster14a/buster", "BASE_SHA": "a" * 40,
+                             "TRUSTED_REF": "a" * 40, "HEAD_SHA": "b" * 40, "CANDIDATE_HEAD": "b" * 40},
+                        capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_admission_and_compatibility_are_independent_required_checks(self):
         workflow = (self.root / ".github/workflows/api-migration-policy.yml").read_text()
         policy, admission = workflow.split("  native-retirement-admission:\n", 1)
