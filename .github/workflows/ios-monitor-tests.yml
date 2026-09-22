@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
           /bin/bash --version
           python3 ios/hosted_signing_budget_test.py 2>&1 | tee "$RUNNER_TEMP/ios-signing-budget.log"
-          bash tests/ios_install_lifecycle_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-install-lifecycle.log"
+          bash ios/install_lifecycle_test.sh 2>&1 | tee "$RUNNER_TEMP/ios-install-lifecycle.log"
           bash tests/mobile_ci_scripts_test.sh 2>&1 | tee "$RUNNER_TEMP/mobile-lifecycle.log"
       - name: Exercise Android monitor and batch status attribution
         id: android_status
@@ -99,7 +99,7 @@ jobs:
         run: |
           # Backticks delimit literal Markdown code in the summary.
           # shellcheck disable=SC2016
-          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nShared suite: **%s**. Android status suite: **%s**. Android summary suite: **%s**.\n\nReproduce: `python3 ios/hosted_signing_budget_test.py`, `bash tests/ios_install_lifecycle_test.sh`, `bash tests/mobile_ci_scripts_test.sh`, `bash android/payload_deadline_policy_test.sh`, `bash android/run_tests_test.sh`, and `python3 android/ci_summary_test.py -v` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" "$ANDROID_SUMMARY_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf '## Mobile lifecycle on %s\n\nCommit: `%s`\n\nShared suite: **%s**. Android status suite: **%s**. Android summary suite: **%s**.\n\nReproduce: `python3 ios/hosted_signing_budget_test.py`, `bash ios/install_lifecycle_test.sh`, `bash tests/mobile_ci_scripts_test.sh`, `bash android/payload_deadline_policy_test.sh`, `bash android/run_tests_test.sh`, and `python3 android/ci_summary_test.py -v` (macOS needs modern Bash and the coreutils gnubin directory on PATH).\n' "$RUNNER_OS" "$GITHUB_SHA" "$CI_RESULT" "$ANDROID_STATUS_RESULT" "$ANDROID_SUMMARY_RESULT" >> "$GITHUB_STEP_SUMMARY"
       - name: Retain lifecycle log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
