@@ -291,6 +291,24 @@ class WorkflowSetupTests(unittest.TestCase):
         return subprocess.run([self.shell, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script],
                               cwd=self.root, env=self.environment, text=True, capture_output=True, timeout=30)
 
+    def test_workflow_tools_keep_platform_budget_and_all_suites(self):
+        block = self.steps["Workflow tool regression tests"]
+        self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 5 || 2 }}", block)
+        self.assertIn("matrix.shard == 'release'", block)
+        self.assertIn("set -euo pipefail", block)
+        self.assertNotIn("continue-on-error:", block)
+        expected = {
+            "tests/ci_tools_test.py", "tools/ci_admission_test.py", "tools/ci_zig_test.py",
+            "tools/ci_zig_cache_test.py", "tools/ci_android_sdk_test.py",
+            "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
+            "tools/matrix_shard_test.py", "tools/differential_ci_policy_test.py",
+            "tools/native_producer_profile_test.py", "tools/ci_configure_evidence_test.py",
+            "tools/ci_matrix_phases_test.py", "tools/ci_native_observation_test.py",
+        }
+        suites = re.findall(r'"\$BUSTER_CI_PYTHON" ([^ ]+) -v', block)
+        self.assertEqual(set(suites), expected)
+        self.assertEqual(len(suites), len(expected))
+
     def test_checks_zig_setup_creates_its_own_log_directory_and_propagates_failure(self):
         tools = self.root / "tools"
         tools.mkdir()

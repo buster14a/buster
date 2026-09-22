@@ -16,7 +16,11 @@ A missing, skipped, cancelled, timed-out, or failed wrapper suite cannot be
 replaced by a successful compiler matrix. `CI complete` still requires every
 desktop lane. No test, runner, or existing compiler gate is removed.
 
-The three policy suites retain their existing shared two-minute step budget.
+The thirteen workflow-tool suites share a five-minute Windows budget and retain
+the two-minute Unix budget. In run `35733354799`, Windows AArch64 job
+`106764232727` reached the final passing suite before the two-minute step
+deadline cancelled it. The bounded Windows allowance covers native fixture
+compilation and process startup without removing suites or suppressing errors.
 The wrapper step has a separate two-minute Unix budget and a twenty-minute
 Windows budget. This is a conservative hang-detection ceiling, not an expected
 runtime or an accepted performance limit. It does not switch Windows coverage
