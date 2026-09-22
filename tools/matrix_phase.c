@@ -134,12 +134,17 @@ BUSTER_GLOBAL_LOCAL Generate matrix_phase_tree(Arena* arena, Generate generate, 
             matrix_coverage_json_escape(arena, compiler.version), matrix_coverage_json_escape(arena, compiler.target),
             matrix_coverage_json_escape(arena, generate.configuration_types), generate.sanitize, generate.fuzz_available,
             matrix_coverage_json_escape(arena, generate_linker(generate, compiler.path))));
+        // OsArgumentBuilder is a contiguous arena-backed String8 array.
+        // Materialize strings first; allocations during append corrupt it.
+        String8 observer_arguments[] = {
+            cmake_string(arena, S8("BUSTER_MATRIX_PHASE_DRIVER"), matrix_phase.driver),
+            cmake_string(arena, S8("BUSTER_MATRIX_PHASE_ROOT"), matrix_phase.root),
+            cmake_string(arena, S8("BUSTER_MATRIX_PHASE_TREE"), record->id),
+            cmake_string(arena, S8("BUSTER_MATRIX_PHASE_EPOCH"), string_format(arena, S8("{u64}"), matrix_phase.epoch)),
+        };
         OsArgumentBuilder args = os_argument_builder_start(arena);
         for (u64 i = 0; i < generate.cmake_arguments.length; i += 1) { os_argument_builder_append(&args, generate.cmake_arguments.pointer[i]); }
-        os_argument_builder_append(&args, cmake_string(arena, S8("BUSTER_MATRIX_PHASE_DRIVER"), matrix_phase.driver));
-        os_argument_builder_append(&args, cmake_string(arena, S8("BUSTER_MATRIX_PHASE_ROOT"), matrix_phase.root));
-        os_argument_builder_append(&args, cmake_string(arena, S8("BUSTER_MATRIX_PHASE_TREE"), record->id));
-        os_argument_builder_append(&args, cmake_string(arena, S8("BUSTER_MATRIX_PHASE_EPOCH"), string_format(arena, S8("{u64}"), matrix_phase.epoch)));
+        for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(observer_arguments); i += 1) { os_argument_builder_append(&args, observer_arguments[i]); }
         generate.cmake_arguments = os_argument_builder_flush(&args);
         for (u32 i = 0; i < tree.row_count; i += 1)
         {

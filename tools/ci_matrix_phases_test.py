@@ -247,7 +247,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
         {
             Generate gen = {.build_directory = string_format(arena, S8("build/fixture-{u32}"), count), .compiler = tree.compiler,
                             .configuration_types = tree.configuration_types, .sanitize = tree.sanitize, .fuzz_available = tree.fuzz_available};
+            String8 passthrough[] = {S8("-DBUSTER_FIXTURE=ON")};
+            gen.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(passthrough);
             gen = matrix_phase_tree(arena, gen, &coverage, tree);
+            ok = ok && gen.cmake_arguments.length == 5 && string_equal(gen.cmake_arguments.pointer[0], passthrough[0]);
+            String8 names[] = {S8("-DBUSTER_MATRIX_PHASE_DRIVER="), S8("-DBUSTER_MATRIX_PHASE_ROOT="),
+                               S8("-DBUSTER_MATRIX_PHASE_TREE="), S8("-DBUSTER_MATRIX_PHASE_EPOCH=")};
+            for (u32 a = 0; ok && a < BUSTER_ARRAY_LENGTH(names); a += 1)
+            {
+                ok = string_starts_with_sequence(gen.cmake_arguments.pointer[a + 1], names[a]);
+            }
             ProcessRun* configure = run_add(arena, step_add(arena));
             String8* argv = arena_allocate(arena, String8, 1);
             argv[0] = S8("fixture-cmake");
