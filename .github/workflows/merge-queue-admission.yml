@@ -10,6 +10,8 @@ on:
 permissions:
   contents: read
   actions: read
+  pull-requests: read
+  statuses: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.run_id || '' }}

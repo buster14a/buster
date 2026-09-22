@@ -12,6 +12,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name("native_retirement_merge_gate.py")
@@ -238,6 +239,205 @@ class FakeGitHub:
             self.posts.append(body)
             return {"id": len(self.posts)}
         raise AssertionError((path, method, body, query))
+
+
+class GroupGitHub:
+    repository = "buster14a/buster"
+
+    def __init__(self, root, base, head, evidence):
+        self.head = head
+        self.statuses = json.loads(status_file(root, head, evidence).read_text())["statuses"]
+        self.statuses[0]["created_at"] = "2026-09-22T00:01:00Z"
+        self.pulls = [{"number": 1, "state": "open", "draft": False,
+                       "head": {"sha": head, "repo": {"full_name": self.repository}},
+                       "base": {"ref": "main", "repo": {"full_name": self.repository}}}]
+        self.run = {"id": 1, "run_attempt": 1, "repository": {"full_name": self.repository},
+                    "path": ".github/workflows/native-retirement-integration.yml",
+                    "event": "workflow_dispatch", "head_branch": "main", "head_sha": base,
+                    "status": "completed", "conclusion": "success",
+                    "run_started_at": "2026-09-22T00:00:00Z",
+                    "updated_at": "2026-09-22T00:02:00Z"}
+
+    def all(self, path):
+        if path == "statuses/" + self.head:
+            return self.statuses
+        if path == "commits/" + self.head + "/pulls":
+            return self.pulls
+        raise AssertionError(path)
+
+    def request(self, path):
+        if path != "actions/runs/1":
+            raise AssertionError(path)
+        return self.run
+
+
+class MergeGroupTests(unittest.TestCase):
+    setUp = AdmissionTests.setUp
+
+    def group(self, member, base=None, tree=None):
+        repo = self.repository.repo
+        base = base or self.repository.base
+        tree = tree or gate.clean_merge_tree(repo, base, member)
+        return git(repo, "commit-tree", tree, "-p", base, "-p", member, "-m", "queue group")
+
+    def prepared(self):
+        source = self.repository.branch("bound", {"src/buster/lib/value.c": "int value = 7;\n"})
+        head, evidence = self.repository.integration(source)
+        api = GroupGitHub(self.root, self.repository.base, head, evidence)
+        return head, self.group(head), api
+
+    def check(self, group, api, base=None):
+        base = base or self.repository.base
+        return gate.check_event(self.repository.repo, base, group, base, None,
+                                "merge_group", False, api)
+
+    def test_exact_generated_tree_uses_existing_writer_evidence(self):
+        head, group, api = self.prepared()
+        result = self.check(group, api)
+        self.assertNotEqual(group, head)
+        self.assertEqual(result["mode"], "trusted-integration-merge-group")
+        self.assertEqual(result["integration_head"], head)
+        self.assertEqual(result["head"], group)
+        self.assertEqual(result["final_tree"], gate.tree(self.repository.repo, head))
+        self.assertEqual(result["publication"], {"run_id": 1, "run_attempt": 1})
+
+    def test_unrelated_group_needs_no_writer_or_same_repository_pr(self):
+        head = self.repository.branch("docs", {"README.md": "unrelated\n"})
+        result = self.check(self.group(head), None)
+        self.assertEqual(result["mode"], "ordinary-merge-group")
+
+    def test_sensitive_group_requires_live_status_even_with_allow_pending(self):
+        _, group, api = self.prepared()
+        with self.assertRaisesRegex(gate.AdmissionError, "live trusted"):
+            gate.check_event(self.repository.repo, self.repository.base, group,
+                             self.repository.base, None, "merge_group", True)
+        api.statuses.clear()
+        with self.assertRaisesRegex(gate.AdmissionError, "attestation"):
+            self.check(group, api)
+
+    def test_generated_only_group_does_not_take_ordinary_path(self):
+        head = self.repository.branch("generated", {
+            "tools/native_retirement_dependency_binding.generated.h": "#define NEW 2\n"})
+        with self.assertRaisesRegex(gate.AdmissionError, "live trusted"):
+            self.check(self.group(head), None)
+
+    def test_group_cannot_change_any_byte_after_attestation(self):
+        head, _, api = self.prepared()
+        changed = self.repository.branch("other", {"README.md": "another tree\n"})
+        group = self.group(head, tree=gate.tree(self.repository.repo, changed))
+        with self.assertRaisesRegex(gate.AdmissionError, "combined tree"):
+            self.check(group, api)
+
+    def test_group_cannot_include_another_queued_candidate(self):
+        head, _, api = self.prepared()
+        sibling = self.repository.branch("sibling", {"README.md": "sibling\n"})
+        group = self.group(head, base=sibling)
+        with self.assertRaisesRegex(gate.AdmissionError, "current main as first parent"):
+            self.check(group, api)
+
+    def test_stale_group_and_stale_integration_require_reconstruction(self):
+        head, group, api = self.prepared()
+        new_main = self.repository.branch("advanced", {"README.md": "new main\n"})
+        with self.assertRaisesRegex(gate.AdmissionError, "main advanced"):
+            gate.check_event(self.repository.repo, self.repository.base, group,
+                             new_main, None, "merge_group", False, api)
+        rebuilt = self.group(head, base=new_main)
+        with self.assertRaisesRegex(gate.AdmissionError, "not based on"):
+            self.check(rebuilt, api, base=new_main)
+
+    def test_failed_cancelled_pending_and_retried_writer_do_not_authorize(self):
+        _, group, api = self.prepared()
+        for updates in ({"conclusion": "failure"}, {"conclusion": "cancelled"},
+                        {"conclusion": "skipped"}, {"status": "in_progress"},
+                        {"run_attempt": 2, "run_started_at": "2026-09-22T00:01:30Z"}):
+            with self.subTest(updates=updates), patch.dict(api.run, updates):
+                with self.assertRaises(gate.AdmissionError):
+                    self.check(group, api)
+
+    def test_wrong_writer_identity_and_missing_timestamps_are_rejected(self):
+        _, group, api = self.prepared()
+        for key, value in (("repository", {"full_name": "elsewhere/repo"}),
+                           ("path", ".github/workflows/ci.yml"), ("event", "pull_request"),
+                           ("head_branch", "feature"), ("head_sha", "a" * 40),
+                           ("run_started_at", None), ("updated_at", "invalid")):
+            with self.subTest(key=key), patch.dict(api.run, {key: value}):
+                with self.assertRaises(gate.AdmissionError):
+                    self.check(group, api)
+
+    def test_closed_fork_moved_draft_or_ambiguous_pr_is_not_current_publication(self):
+        _, group, api = self.prepared()
+        pull = api.pulls[0]
+        for updates in ({"state": "closed"}, {"draft": True},
+                        {"head": {"sha": api.head, "repo": {"full_name": "fork/buster"}}},
+                        {"head": {"sha": "a" * 40, "repo": {"full_name": api.repository}}}):
+            with self.subTest(updates=updates), patch.dict(pull, updates):
+                with self.assertRaisesRegex(gate.AdmissionError, "one open"):
+                    self.check(group, api)
+        api.pulls.append(dict(pull, number=2))
+        with self.assertRaisesRegex(gate.AdmissionError, "one open"):
+            self.check(group, api)
+
+    def test_latest_status_cannot_reuse_previous_success(self):
+        _, group, api = self.prepared()
+        for state in ("pending", "failure", "error"):
+            api.statuses[:] = [api.statuses[0], dict(api.statuses[0], id=43, state=state)]
+            with self.subTest(state=state), self.assertRaisesRegex(gate.AdmissionError, "latest"):
+                self.check(group, api)
+
+    def test_second_old_base_source_needs_new_writer_output_after_first_lands(self):
+        first = self.repository.branch("first", {"src/buster/lib/value.c": "int value = 8;\n"})
+        second = self.repository.branch("second", {"tools/native_retirement_rebind.py": "# bootstrap\n"})
+        second_head, evidence = self.repository.integration(second, kind="bootstrap")
+        api = GroupGitHub(self.root, self.repository.base, second_head, evidence)
+        self.check(self.group(second_head), api)
+        first_head, _ = self.repository.integration(first)
+        with self.assertRaisesRegex(gate.AdmissionError, "not based on"):
+            self.check(self.group(second_head, base=first_head), api, base=first_head)
+        # Model a fresh authorized writer preparation from the original source.
+        # This Git fixture does not claim a live dispatch or SDK reconstruction.
+        recovered = gate.source_candidate(self.repository.repo, first_head, second_head, api)
+        self.assertEqual(recovered["head"], second_head)
+        self.assertEqual(recovered["source_head"], second)
+        self.repository.base = first_head
+        refreshed, new_evidence = self.repository.integration(recovered["source_head"], kind="bootstrap")
+        fresh_api = GroupGitHub(self.root, first_head, refreshed, new_evidence)
+        result = self.check(self.group(refreshed), fresh_api)
+        self.assertEqual(result["base"], first_head)
+        self.assertNotEqual(result["final_tree"], gate.tree(self.repository.repo, second_head))
+
+    def test_source_recovery_preserves_live_head_and_rejects_failed_publication(self):
+        head, _, api = self.prepared()
+        original = gate.commit(self.repository.repo, "HEAD")
+        report = gate.source_candidate(self.repository.repo, self.repository.base, head, api)
+        self.assertEqual(report["source_head"], gate.commit_parents(self.repository.repo, head)[1])
+        self.assertEqual(gate.commit(self.repository.repo, "HEAD"), original)
+        api.run["conclusion"] = "cancelled"
+        with self.assertRaisesRegex(gate.AdmissionError, "successful"):
+            gate.source_candidate(self.repository.repo, self.repository.base, head, api)
+
+    def test_source_recovery_rejects_manual_generated_edits_and_real_conflicts(self):
+        edited = self.repository.branch("generated", {
+            "tools/native_retirement_dependency_binding.generated.h": "#define EDIT 1\n"})
+        with self.assertRaisesRegex(gate.integration.IntegrationError, "integration-owned"):
+            gate.source_candidate(self.repository.repo, self.repository.base, edited, None)
+        head, _, api = self.prepared()
+        conflict = self.repository.branch("conflict", {"src/buster/lib/value.c": "int value = 99;\n"})
+        with self.assertRaisesRegex(gate.AdmissionError, "conflict-free"):
+            gate.source_candidate(self.repository.repo, conflict, head, api)
+
+    def test_writer_authorizes_live_head_but_regenerates_only_verified_source(self):
+        workflow = (Path(__file__).resolve().parents[1] /
+                    ".github/workflows/native-retirement-integration.yml").read_text()
+        self.assertIn("tools/native_retirement_merge_gate.py source-candidate", workflow)
+        self.assertIn('--source-head "$source_head"', workflow)
+        self.assertEqual(workflow.count("--head '${{ needs.prepare.outputs.source_head }}'"), 2)
+        self.assertIn("--head '${{ steps.identities.outputs.source_head }}'", workflow)
+        self.assertIn('--expected-head "$head"', workflow)
+        self.assertIn('--expected-head "$EXPECTED_HEAD"', workflow)
+        self.assertIn('"Native-retirement-candidate: $source_head"', workflow)
+        self.assertIn('commit-tree "$final_tree" -p "$base" -p "$source_head"', workflow)
+        self.assertIn('--force-with-lease="refs/heads/$head_ref:$head"', workflow)
+        self.assertIn("source-candidate.json", workflow)
 
 
 class InvalidationTests(unittest.TestCase):

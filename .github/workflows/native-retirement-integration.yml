@@ -63,9 +63,12 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      actions: read
+      statuses: read
     outputs:
       base: ${{ steps.identities.outputs.base }}
       head: ${{ steps.identities.outputs.head }}
+      source_head: ${{ steps.identities.outputs.source_head }}
       final_tree: ${{ steps.evidence.outputs.final_tree }}
       evidence_sha256: ${{ steps.evidence.outputs.evidence_sha256 }}
       classification: ${{ steps.evidence.outputs.classification }}
@@ -90,8 +93,12 @@ jobs:
           git -C trusted fetch --no-tags origin \
             "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/native-retirement-candidate"
           head=$(git -C trusted rev-parse refs/remotes/origin/native-retirement-candidate)
+          source_record=$(python3 trusted/tools/native_retirement_merge_gate.py source-candidate \
+            --repo-root trusted --base "$base" --head "$head" --repository "$GITHUB_REPOSITORY")
+          source_head=$(jq -r '.source_head' <<<"$source_record")
           resolved=$(python3 trusted/tools/native_retirement_integration.py resolve-dispatch \
             --repo-root trusted --base "$base" --head "$head" \
+            --source-head "$source_head" \
             --expected-head "$EXPECTED_HEAD" --expected-base "$EXPECTED_BASE" \
             --transition-kind "$TRANSITION_KIND" --authorization-mode "$AUTHORIZATION_MODE")
           TRANSITION_KIND=$(jq -r '.classification' <<<"$resolved")
@@ -103,6 +110,7 @@ jobs:
           printf '## Resolved retirement request\n\nPR: %s\n\nBase: `%s`\n\nHead: `%s`\n\nClass: %s\n\nAuthorization: %s\n' \
             "$PR_NUMBER" "$base" "$head" "$TRANSITION_KIND" "$AUTHORIZATION_MODE" >> "$GITHUB_STEP_SUMMARY"
           mkdir -p "$RUNNER_TEMP/native-retirement"
+          printf '%s\n' "$source_record" > "$RUNNER_TEMP/native-retirement/source-candidate.json"
           python3 trusted/tools/native_retirement_integration.py authorize \
             --pull-request "$PR_NUMBER" \
             --expected-head "$head" \
@@ -112,13 +120,14 @@ jobs:
             | tee "$RUNNER_TEMP/native-retirement/authorization.json"
           echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "source_head=$source_head" >> "$GITHUB_OUTPUT"
       - name: Construct exact current-main plus candidate tree
         run: |
           python3 trusted/tools/native_retirement_integration.py stage \
             --repo-root trusted \
             --worktree "$GITHUB_WORKSPACE/integration" \
             --base '${{ steps.identities.outputs.base }}' \
-            --head '${{ steps.identities.outputs.head }}' \
+            --head '${{ steps.identities.outputs.source_head }}' \
             --transition-kind "$TRANSITION_KIND" \
             --authorized \
             --output "$RUNNER_TEMP/native-retirement/staged.json"
@@ -211,6 +220,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-retirement/evidence.json
             ${{ runner.temp }}/native-retirement/authorization.json
+            ${{ runner.temp }}/native-retirement/source-candidate.json
           if-no-files-found: error
           retention-days: 7
 
@@ -245,7 +255,7 @@ jobs:
             --repo-root trusted \
             --worktree "$GITHUB_WORKSPACE/integration" \
             --base '${{ needs.prepare.outputs.base }}' \
-            --head '${{ needs.prepare.outputs.head }}' \
+            --head '${{ needs.prepare.outputs.source_head }}' \
             --transition-kind "$TRANSITION_KIND" \
             --authorized \
             --output "$RUNNER_TEMP/native-retirement/staged.json"
@@ -377,7 +387,7 @@ jobs:
             --repo-root trusted \
             --worktree "$GITHUB_WORKSPACE/integration" \
             --base '${{ needs.prepare.outputs.base }}' \
-            --head '${{ needs.prepare.outputs.head }}' \
+            --head '${{ needs.prepare.outputs.source_head }}' \
             --transition-kind "$TRANSITION_KIND" \
             --authorized \
             --output "$RUNNER_TEMP/native-retirement/staged.json"
@@ -476,6 +486,7 @@ jobs:
           set -euo pipefail
           base='${{ needs.prepare.outputs.base }}'
           head='${{ needs.prepare.outputs.head }}'
+          source_head='${{ needs.prepare.outputs.source_head }}'
           final_tree='${{ needs.prepare.outputs.final_tree }}'
           evidence='${{ needs.prepare.outputs.evidence_sha256 }}'
           transition='${{ needs.prepare.outputs.classification }}'
@@ -497,7 +508,7 @@ jobs:
             "" \
             "Native-retirement-integration-evidence: $evidence" \
             "Native-retirement-base: $base" \
-            "Native-retirement-candidate: $head" \
+            "Native-retirement-candidate: $source_head" \
             "Native-retirement-final-tree: $final_tree" \
             "Native-retirement-transition-kind: $transition"
           commit=$(
@@ -506,7 +517,7 @@ jobs:
               GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
               GIT_COMMITTER_NAME='github-actions[bot]' \
               GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
-              git -C trusted commit-tree "$final_tree" -p "$base" -p "$head"
+              git -C trusted commit-tree "$final_tree" -p "$base" -p "$source_head"
           )
           askpass="$RUNNER_TEMP/native-retirement-askpass.sh"
           cat > "$askpass" <<'SH'

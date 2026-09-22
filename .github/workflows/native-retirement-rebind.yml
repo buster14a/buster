@@ -68,6 +68,8 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
   statuses: read
 
 jobs:
@@ -159,6 +161,7 @@ jobs:
             --head "$CANDIDATE_HEAD" \
             --current-main "$current_main" \
             --event "$EVENT_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
             --allow-pending \
             "${status_args[@]}" \
             | tee "$RUNNER_TEMP/native-retirement-admission.json"
@@ -168,7 +171,7 @@ jobs:
           PY
           )
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          if [[ "$mode" != trusted-integration ]]; then
+          if [[ "$mode" != trusted-integration && "$mode" != trusted-integration-merge-group ]]; then
             python3 "$classifier" classify \
               --repo-root "$GITHUB_WORKSPACE/candidate" \
               --base "$TRUSTED_REF" \
@@ -242,7 +245,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/native-retirement-rebind"
-          if [[ '${{ github.event_name }}' == push || '${{ github.event_name }}' == workflow_dispatch || '${{ steps.admission.outputs.mode }}' == trusted-integration ]]; then
+          if [[ '${{ github.event_name }}' == push || '${{ github.event_name }}' == workflow_dispatch || '${{ steps.admission.outputs.mode }}' == trusted-integration || '${{ steps.admission.outputs.mode }}' == trusted-integration-merge-group ]]; then
             python3 trusted/tools/native_retirement_rebind.py check \
               --repo-root "$GITHUB_WORKSPACE/candidate" \
               | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"

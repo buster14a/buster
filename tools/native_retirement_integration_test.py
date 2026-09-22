@@ -647,7 +647,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         publish = text.split("\n  publish:\n", 1)[1]
         self.assertIn("statuses: write", publish)
         self.assertIn('test "$head_repo" = "$GITHUB_REPOSITORY"', publish)
-        self.assertIn('commit-tree "$final_tree" -p "$base" -p "$head"', publish)
+        self.assertIn('commit-tree "$final_tree" -p "$base" -p "$source_head"', publish)
+        self.assertIn('--force-with-lease="refs/heads/$head_ref:$head"', publish)
         self.assertIn('--force-with-lease="refs/heads/$head_ref:$head"', publish)
         self.assertIn('test "$main_remote" = "$base"', publish)
         self.assertIn('test "$pull_remote" = "$head"', publish)

@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pull-requests: read
   statuses: read
   checks: write
@@ -133,6 +134,7 @@ jobs:
             --head "$HEAD_SHA" \
             --current-main "$current_main" \
             --event "$EVENT_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
             "${status_args[@]}" \
             | tee "$RUNNER_TEMP/native-retirement-admission.json"
       - name: Invalidate stale trusted integrations after main advances
