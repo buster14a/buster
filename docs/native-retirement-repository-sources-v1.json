@@ -106,8 +106,8 @@
     },
     {
       "source": "src/buster/lib/float.h",
-      "bytes": 702,
-      "sha256": "941aff32b252022893dc7698934c059eadd37953a5af5e644b0756719e63a5a4"
+      "bytes": 772,
+      "sha256": "ca97698994f041f7b8639f1d89cde7061b4d1338e90d5e45ae7010c90e7a4af2"
     },
     {
       "source": "src/buster/lib/hash.c",
