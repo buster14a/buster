@@ -231,7 +231,9 @@ jobs:
       - name: Workflow tool regression tests
         id: workflow_tools
         if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
-        timeout-minutes: 2
+        # Thirteen suites include native fixture builds and process launches.
+        # Windows ARM64 exceeded 120s with passing tests in run 35733354799.
+        timeout-minutes: ${{ matrix.platform == 'windows' && 5 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -251,7 +253,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_native_observation_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-observation-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the
-      # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
+      # policy suites' shared budget; see docs/ci-bootstrap-wrapper.md.
       - name: Bootstrap wrapper regression tests
         id: bootstrap_wrappers
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
