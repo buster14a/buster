@@ -1,0 +1,96 @@
+# Focused hardware evidence: normalized switch-range certificate
+
+Evidence collected 2026-09-22. This is a hardware appendix for the parent investigation, not a report of measurements performed on `benchpress`. No host access or timing was performed by this researcher. Numbers below are AMD documentation or original uops.info measurements, clearly distinguished.
+
+## Applicable hardware and revision
+
+AMD's [Ryzen 7 9700X product specification](https://www.amd.com/en/products/processors/desktops/ryzen/9000-series/amd-ryzen-7-9700x.html) identifies the target as desktop Zen 5, 8 cores/16 threads. Crucially, [uops.info's methodology and CPU list](https://uops.info/background.html) explicitly identifies **Ryzen 7 9700X** as its Zen 5 measurement CPU. These measurements are therefore from the right desktop implementation, although not the user's physical machine, firmware, or software environment.
+
+AMD **Software Optimization Guide for the AMD Zen5 Microarchitecture**, publication 58455, revision 1.00, August 2024 (release 2024-08-15): [landing page](https://docs.amd.com/v/u/en-US/58455_1.00), [official ZIP](https://docs.amd.com/api/khub/documents/RCLISlZoOyWkKA9SYwLLDQ/content). Download verified; ZIP SHA-256 `a9a9e04d910bccec33a00f6d89a4ed457c3d3555a46eceb5dd39e52da49543fe`. Included `Zen5_Instruction_Latencies_version_1-00.xlsx` SHA-256 `3cae55b0d07b4a73ad17489894e2fbce1456f3172623603e307992d6d58976cc`. Spreadsheet throughput is **instructions per cycle**, whereas the table below uses its reciprocal, **cycles per instruction**. AMD's spreadsheet column is macro-ops; do not conflate this blindly with uops.info's measured executed-uop count.
+
+Focused constraints from guide sections 2.6.2, 2.6.2.2 and 2.11:
+
+- Four 512-bit FP/packed-integer execution pipes exist, but individual instructions can use different subsets.
+- At most **two** 128/256/512-bit vector loads and **one** 512-bit store per cycle. A 512-bit load uses paired 256-bit load pipes; four vector loads/cycle is unsupported.
+- L1 is 48 KiB, 12-way. A 64-byte boundary crossing can penalize access. A 512-bit store consumes two dispatch slots and two store-queue entries.
+
+The guide's general statement favoring 512-bit operations is a design recommendation, not proof of end-to-end speedup or stable frequency under every instruction mix. Record actual target behavior.
+
+ISA semantics were checked in AMD **Architecture Programmer's Manual Volume 4**, 26568 revision 3.26, January 2026, pages 1125–1126 (`VPCMPUQ`), 535–536 (`VPMAXUQ`) and 1137–1138 (`VPCOMPRESSD`). [Official metadata](https://docs.amd.com/v/u/en-US/26568_3.26_APM_Vol4) was search-accessible, but its download returned 404; the original AMD-authored PDF was read through [this archival mirror](https://kib.kiev.ua/x86docs/AMD/AMD64/26568_APM_v4-r3.26.pdf). This is the same document revision, not a secondary interpretation. The register and memory `VPCMPUQ` encodings are `EVEX.512.66.0F3A.W1 1E /r ib` (or EVEX.256 with VL); LE has `imm8=2`. `VPMAXUQ` uses `EVEX.512.66.0F38.W1 3F /r`, `VPXORQ` uses `EVEX.512.66.0F.W1 EF /r`, and `VPANDQ` uses `EVEX.512.66.0F.W1 DB /r`. The manual verifies that VPCMPUQ clears mask bits above bit 7/3 for ZMM/YMM, ANDs comparison results with an optional input mask, and supports instruction-specific memory-fault suppression. These properties do not make preceding C evaluation safe automatically.
+
+## Exact forms relevant to the lead candidate
+
+`z` = ZMM, `y` = YMM; `k` is a mask register, `r32` a scalar general register. Latencies are source-operand to destination dependencies, not generic instruction durations. All rows below are uops.info Zen 5 measurements unless the cell says AMD. In register forms, operand numbering includes destination first; masked forms include the input mask next. `FP12` means eligible FP pipe 1 or 2 in uops.info's resource notation, not two simultaneous pipes for one uop. Its `FP45` labels describe store-data/cross-domain resource assignments, not fifth and sixth general-purpose 512-bit arithmetic pipes. Keep the guide's physical diagram and uops.info's site-specific resource labels distinct; the observed names do not establish a one-to-one physical-port map.
+
+| Exact form | Required subset | Measured dependency latency (cycles) | Reciprocal throughput loop / unrolled | Executed uops and measured eligible resources |
+|---|---|---:|---:|---|
+| [`VPCMPUQ k,z,z,imm8`](https://www.uops.info/html-instr/VPCMPUQ_K_ZMM_ZMM_I8.html) | F | either vector input → k: 6 | 0.50 / 0.50 | 1; FP12 |
+| [`VPCMPUQ k{k},z,z,imm8`](https://www.uops.info/html-instr/VPCMPUQ_K_K_ZMM_ZMM_I8.html) | F | vector or input mask → output mask: 6 | 0.50 / 0.50 | 1; FP12 |
+| [`VPCMPUQ k,y,y,imm8`](https://www.uops.info/html-instr/VPCMPUQ_K_YMM_YMM_I8.html) | F+VL, EVEX | either vector → k: 4 | 0.50 / 0.50 | 1; FP12 |
+| [`VPCMPUQ k{k},y,y,imm8`](https://www.uops.info/html-instr/VPCMPUQ_K_K_YMM_YMM_I8.html) | F+VL, EVEX | vector or input mask → output mask: 4 | 0.50 / 0.50 | 1; FP12 |
+| [`VPCMPUQ k,z,m512,imm8`](https://www.uops.info/html-instr/VPCMPUQ_K_ZMM_M512_I8.html) | F | register → k: 6; memory load-to-mask not reported here | 0.50 / 0.50 | 2; FP12 plus load demand not captured by that FP-only notation |
+| [`VPCMPUQ k{k},z,m512,imm8`](https://www.uops.info/html-instr/VPCMPUQ_K_K_ZMM_M512_I8.html) | F | input mask or vector register → k: 6; memory load-to-mask not reported here | 0.50 / 0.50 | 2; FP12 plus load demand |
+| [`VPCMPUQ k{k},y,m256,imm8`](https://www.uops.info/html-instr/VPCMPUQ_K_K_YMM_M256_I8.html) | F+VL | input mask or vector register → k: 4; memory load-to-mask not reported here | 0.50 / 0.50 | 2; FP12 plus load demand |
+| [`VPXORQ z,z,z`](https://www.uops.info/html-instr/VPXORQ_ZMM_ZMM_ZMM.html) | F | either nonzeroing source → z: 1 | 0.25 / 0.37 | 1; FP0123 |
+| [`VPANDQ z,z,z`](https://www.uops.info/html-instr/VPANDQ_ZMM_ZMM_ZMM.html) | F | either source → z: 2 (AMD: 1) | 0.25 / 0.37 | 1; FP0123 |
+| [`VPMAXUQ z,z,z`](https://www.uops.info/html-instr/VPMAXUQ_ZMM_ZMM_ZMM.html) | F | operand 2 → dest: 2; operand 3 → dest: 1 (AMD aggregate: 2) | 0.50 / 0.50 | 1; FP03 |
+| [`VPMAXUQ y,y,y`](https://www.uops.info/html-instr/VPMAXUQ_YMM_YMM_YMM.html) | F+VL, EVEX | both source dependencies: 2 | 0.50 / 0.50 | 1; FP03 |
+| [`KANDW k,k,k`](https://www.uops.info/html-instr/KANDW_K_K_K.html), [`KORW k,k,k`](https://www.uops.info/html-instr/KORW_K_K_K.html) | F | either mask source → dest: 1 | 0.50 / 0.50 | 1; FP03 |
+| [`KMOVW r32,k`](https://www.uops.info/html-instr/KMOVW_R32_K.html) | F | measured upper bound ≤8; AMD: 1 | 0.50 / 0.50 | 1; FP45 |
+| [`KMOVW k,r32`](https://www.uops.info/html-instr/KMOVW_K_R32.html) | F | measured upper bound ≤8; AMD: 2 | 1.00 / 1.00 | 2; FP12 notation omits non-FP demand |
+| [`KMOVB r32,k`](https://www.uops.info/html-instr/KMOVB_R32_K.html) | **DQ** | measured upper bound ≤8; AMD: 1 | 0.50 / 0.50 | 1; FP45 |
+| [`VPBROADCASTQ z,r64`](https://www.uops.info/html-instr/VPBROADCASTQ_ZMM_R64.html) | F | measured upper bound ≤8; AMD: 1 | 1.00 / 1.00 | 2; FP12 notation omits non-FP demand |
+
+The 9700X can support these subsets, but verify CPUID and OS state on the actual host. `KMOVB` is a meaningful gotcha: an eight-bit C mask does not make its byte instruction AVX512F-only. An F-only build can use word mask moves. `VPMAXUQ`, despite operating on qwords, is F; it does not by itself require DQ. The YMM Q-named logical forms are EVEX F+VL, distinct from AVX2's VEX `VPXOR`/`VPAND`.
+
+Sources of table data are the linked exact-form pages, retrieved on the research date. Full HTML SHA-256 identities for the most relevant forms are in `hardware-source-identities.json`. These pages do not identify a versioned dataset revision or the benchmark machine's microcode; this limits direct reproducibility. The published loop/unrolled disagreement is preserved. Do not select only the favorable throughput or reinterpret an upper-bound transfer-chain latency as an exact KMOV latency.
+
+## Design consequences for interval overlap
+
+For one candidate interval `[lo,hi]` and eight previous normalized unsigned intervals, overlap is the conjunction of `lo <= old_hi` and `old_lo <= hi`. Use unsigned comparison immediate **2** (LE); no signed subtraction, `hi+1`, or endpoint overflow is needed. Compare each condition independently, then AND masks. Evaluate tails with an explicitly valid-lane mask.
+
+**Potentially harmful mask fusion:** a writemasked second `VPCMPUQ` consumes the first result as its input mask. For ZMM, two independent comparisons followed by `KANDW` have approximately `6 + 1 = 7` cycles of register-data-to-combined-predicate depth. The fused masked-compare chain is approximately `6 + 6 = 12` cycles. For EVEX YMM, corresponding models are 5 versus 8. The exact masked-memory forms emitted by GCC were also checked: their published mask→result dependencies are respectively 6 and 4, but memory load-to-mask latency is not supplied by these summaries. These are dependency models with ready data/L1 experiment conditions, not measured kernel times or complete load/branch paths. Fewer instructions can lengthen the path to the branch. A static tail mask already ready before either comparison has a different dependency situation.
+
+With preexisting contiguous lo/hi arrays and normalized values, an optimistic steady-state tile lower bound is:
+
+`max(2 vector loads / 2 loads-per-cycle, 2 compares / 2 compares-per-cycle, (1 AND + 1 OR) / 2 mask-ops-per-cycle) = 1 cycle / 8 previous intervals`.
+
+This assumes sufficient independent work, ideal L1 residency, no cross-line penalty, amortized broadcast, no materialization, and no per-tile scalar extraction. Charge layout construction, normalization, short-call setup, tails, branches, output and mask extraction separately; a folded memory compare still consumes load resources. If six FP macro-ops are needed in a tile, FP renaming is already a possible limit before loop overhead. Extra costs can overlap; do not add all resource bounds.
+
+The actual ZMM quadratic control emits two scalar-to-ZMM `VPBROADCASTQ` instructions per current interval. Their measured reciprocal throughput is 1 cycle/instruction; their ready-source dependencies are not precisely isolated by the published upper bound. The exact unmasked YMM GPR-source measurement page was unavailable, so no ZMM transfer number is silently assigned to that form.
+
+The useful comparison is against the **scalar sort plus adjacent-overlap certificate**, whose work elimination can beat a much faster quadratic pair kernel. After sorting by lower endpoint, test `high[i] >= low[i+1]`. Any nonadjacent overlap implies an adjacent collision: if `high[i] >= low[j]` for `j > i`, sorted order gives `low[i+1] <= low[j] <= high[i]`. Therefore the Boolean certificate needs **no prefix maximum**. VPMAXUQ is retained in the hardware table only as an investigated, then rejected, unnecessary operation; it is two-way eligible, but optimizing it would optimize work the certificate should remove. Sorting is unnecessary for a still stronger easy-input scalar control: maintain the hull minimum and maximum of admitted ranges, and skip comparisons when the next interval lies strictly outside that hull. Charge occasional interior insertions and exact fallback; the hull alone cannot decide overlap within holes.
+
+Test 1/2/4/8 interleaved tiles for the quadratic control, but justify register allocation from the live set: two broadcast registers plus loaded lo/hi pairs, tail constants and up to two temporary masks plus accumulation. Seven mask registers can act as writemasks; k0 cannot serve as an ordinary writemask. Renameable temporary register versions can overlap dynamically, so eight in-flight tiles need not mean sixteen simultaneously named mask registers. Early scalar decisions can prevent that overlap. Watch generated assembly for spills and repeated `KMOV` extraction. Report measurements before choosing any unroll factor.
+
+## Other findings useful only if a finalist needs them
+
+The D-word compaction/gather forms were checked before the lead candidate was selected; they should not distract the main report.
+
+- [`VPCOMPRESSD z{k}{z},z`](https://uops.info/html-instr/VPCOMPRESSD_Z_ZMM_K_ZMM.html): data→result 4 cycles, mask→result 9, 1.00 cycles/instruction, two FP12 uops. The merge form has an extra old-destination dependency. AMD's aggregate latency is 5, which is not a substitute for the mask dependency.
+- [`VPCOMPRESSD m512{k},z`](https://www.uops.info/html-instr/VPCOMPRESSD_M512_K_ZMM.html): measured 3.00 cycles/instruction and 8 executed uops, versus a misleading FP-port-only bound of 1.00. AMD spreadsheet marks memory compaction as microcoded, no fixed latency/throughput. Do not use register-compaction cost for compress-store.
+- [`VPGATHERDD z{k},[base+zindex]`](https://uops.info/html-instr/VPGATHERDD_ZMM_K_VSIB_ZMM.html): published loop/unrolled reciprocal throughput 12.63/12.57, 64 executed uops, mask→dest 27 cycles. Its measurement initializes indices to zero and is not a random-address/cache-miss model. Gather consumes and updates the mask. These results are irrelevant to a contiguous interval layout unless the experiment actually emits gather.
+
+## Actual-host verification and PMU plan
+
+For Linux dispatch, check CPUID leaf availability, leaf 1 ECX.OSXSAVE and AVX before XGETBV; require `(XCR0 & 0xe6) == 0xe6` (XMM, YMM, opmask, ZMM-high state and high ZMM registers). Check leaf 7 subleaf 0 EBX bit 16 for F, bit 31 for VL, bit 17 for DQ if emitted, and separate AVX2 bit 5 for the baseline. Check XSAVE support as well before executing state-query instructions. A known primary implementation of these checks is [LLVM compiler-rt x86 CPU detection, llvmorg-20.1.0](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.0/compiler-rt/lib/builtins/cpu_model/x86.c), around lines 863–928. Do not infer OS availability solely from `/proc/cpuinfo`, marketing support, or a successful compilation. The dispatch function itself must have a baseline target.
+
+Record exact source/binary hashes, compiler executable/version and full flags, `uname -a`, `lscpu`, `/proc/cpuinfo` model/stepping/microcode, CPUID and XCR0 dumps, affinity, sibling topology and sibling activity, memory capacity/channels/speed, governor and boost/PBO/power policy, kernel/perf versions and background load. Read settings without silently changing them. Affinity alone does not reserve the sibling. Serialize host experiments through the established service.
+
+Start with supported `perf stat` events `cycles,instructions,branches,branch-misses,task-clock,context-switches,cpu-migrations,page-faults` in small compatible groups; retain enabled/running times and scaling, and reject unsupported events. These symbolic names still require recording the actual target mapping. Keep wall time, actual core cycles, APERF/MPERF and invariant-TSC ticks separate. Compare compiler-like short bursts with sustained loops; do not assume frequency stability.
+
+For memory/predicate explanations, select only events advertised by that host's `perf list --details` and the matching AMD model's PPR. Do not borrow raw encodings from an EPYC PPR or Intel counters. [AMD uProf 57368 IBS derived events](https://docs.amd.com/r/en-US/57368-uProf-user-guide/IBS-Derived-Events) documents branch-mispredict and load-latency analyses on Zen 5. Its [predefined views](https://docs.amd.com/r/en-US/57368-uProf-user-guide/Predefined-View-Configuration) include IBS load-latency and frontend/backend analyses. Save event names, source revision, sample period, lost records, multiplexing and unsupported counters. IBS samples are evidence about sampled operations, not a complete count of all compiler loads. Without counters, timing plus assembly can distinguish algorithms and emitted mechanisms but cannot establish that a change wins by reducing cache misses.
+
+Correctness: a masked load intrinsic is not permission to form invalid C pointers, evaluate undefined shifts, dereference invalid expressions before masking, or overrun the output. Restrict full vector loads to in-bounds blocks; use documented masked-tail loads only from a valid base, or a scalar/copy tail. All-zero tails, all-one masks, exact page ends, empty and tiny arrays, signed endpoint normalization, duplicate endpoints, nested ranges and touching inclusive endpoints must be in the reference-equivalence tests. Bounds validity precedes timing.
+
+## Independent assembly review of the experimental control
+
+Independently reread the final `switch-experiment/assembly.txt`, generated by GCC 13.3 at `-O3` with tree and SLP auto-vectorization disabled and per-function ISA targets. Final reviewed SHA-256: `a7c06608d5026ffe6eedfa86df267b48e54b780ab6372116a88b2a985be96211`. The full build changed after CPUID/metadata edits, moving instruction addresses; the final overlap-kernel instruction forms, mask fusion/extractions, named register sets and spill conclusions below remain unchanged from the initial review. Final binary SHA-256: `5eb2bf9acd39dd9f217842f569d88128fec148f6d091d1d7ea0cca9ba9312bfc`.
+
+- `overlap_scalar` and `overlap_hull` contain scalar predicates. `overlap_certificate` uses scalar sort/adjacency decisions, but GCC uses XMM `MOVDQU/MOVUPS` to copy 16-byte interval records. Calling the certificate literally SIMD-free would be inaccurate; its algorithmic decisions are scalar.
+- Both `overlap_evex256` and `overlap_avx512_1` lower the two source comparisons to a first `VPCMPUQ`, then a **dependent writemasked `VPCMPUQ` with a folded memory operand**, followed by `KMOVW` and scalar `TEST`. The source-level independent mask variables do not survive as the intended independent comparisons plus `KANDW`.
+- The 2/4/8-tile ZMM variants also use masked-compare chains. They extract one word mask to a GPR **per tile**, then OR those scalar results; this is not a persistent all-mask-register reduction. No KANDW or KORW implements the intended source-level combination in the observed loops.
+- The eight-tile variant names ZMM0–7 and all k0–7, and contains an explicit `KMOVW k1,k0` before using that predicate as a writemask. It therefore demonstrates mask-register pressure and extra scalar work, even without vector spills. No ZMM/YMM stack spills were found in any overlap kernel. The U8 prologue saves five callee-saved GPRs and RBP; those saves/restores and the U2/U4 RBX restore are not vector spills.
+- Actual SIMD-control instructions are consistent with F-only ZMM and F+VL EVEX256 targets. The emitted extraction is `KMOVW`, not DQ-requiring `KMOVB`. AVX2 uses VEX signed-qword comparisons after sign-bit XOR and a vector-mask extraction. No gather or compress instruction appears.
+
+This is an assembly-validated **negative lowering result**, not a measured slowdown: the proposed parallel-predicate dependency graph was not emitted. The source unroll variants can still expose independent work across tiles, but they cannot establish the value of keeping all selection logic in mask registers. A forced independent-predicate variant would be a useful next ablation only if the quadratic SIMD control first survives comparison with the scalar work-eliminating algorithms on the real workload.

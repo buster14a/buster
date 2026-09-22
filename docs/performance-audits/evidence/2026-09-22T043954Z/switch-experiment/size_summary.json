@@ -1,0 +1,23 @@
+{
+  "files_excluding_this_summary_and_SHA256SUMS": 17,
+  "bytes_excluding_this_summary_and_SHA256SUMS": 809072,
+  "files": {
+    "README.md": 14103,
+    "all_failures.json": 1017,
+    "assembly.txt": 203157,
+    "build.py": 2221,
+    "build_manifest.json": 1613,
+    "context.example.json": 704,
+    "correctness.json": 1633,
+    "final-dry-run/metadata.json": 24005,
+    "final-dry-run/plan.json": 121210,
+    "generate_unroll.py": 1947,
+    "harness_checks.json": 113,
+    "relocation_qa.json": 4292,
+    "run_pairs.py": 10943,
+    "switch_overlap": 104248,
+    "switch_overlap.c": 22431,
+    "switch_overlap_sanitize": 288712,
+    "unroll.inc": 6723
+  }
+}

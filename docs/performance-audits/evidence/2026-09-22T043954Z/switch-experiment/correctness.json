@@ -1,0 +1,67 @@
+[
+  {
+    "build_command": [
+      "gcc",
+      "-std=c11",
+      "-g",
+      "-fno-omit-frame-pointer",
+      "-fno-tree-vectorize",
+      "-fno-tree-slp-vectorize",
+      "-fwrapv",
+      "-fno-strict-aliasing",
+      "-funsigned-char",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-Wpedantic",
+      "-O3",
+      "switch_overlap.c",
+      "-o",
+      "switch_overlap"
+    ],
+    "test_command": [
+      "./switch_overlap",
+      "--test"
+    ],
+    "test_environment": {
+      "ASAN_OPTIONS": ""
+    },
+    "returncode": 0,
+    "stdout": "{\"mode\":\"correctness\",\"cases\":17440,\"failures\":0,\"avx2\":1,\"evex256\":1,\"avx512\":1,\"xcr0\":\"0xe7\"}\n",
+    "stderr": "",
+    "binary_sha256": "5eb2bf9acd39dd9f217842f569d88128fec148f6d091d1d7ea0cca9ba9312bfc"
+  },
+  {
+    "build_command": [
+      "gcc",
+      "-std=c11",
+      "-g",
+      "-fno-omit-frame-pointer",
+      "-fno-tree-vectorize",
+      "-fno-tree-slp-vectorize",
+      "-fwrapv",
+      "-fno-strict-aliasing",
+      "-funsigned-char",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-Wpedantic",
+      "-O1",
+      "-fsanitize=address,undefined",
+      "switch_overlap.c",
+      "-o",
+      "switch_overlap_sanitize"
+    ],
+    "test_command": [
+      "./switch_overlap_sanitize",
+      "--test"
+    ],
+    "test_environment": {
+      "ASAN_OPTIONS": "detect_leaks=0"
+    },
+    "returncode": 0,
+    "stdout": "{\"mode\":\"correctness\",\"cases\":17440,\"failures\":0,\"avx2\":1,\"evex256\":1,\"avx512\":1,\"xcr0\":\"0xe7\"}\n",
+    "stderr": "",
+    "binary_sha256": "9379ecdd55bf0bb00c0a1cfd2b935fe470b80b0e972c1cdcffd300cbb30f8890"
+  }
+]

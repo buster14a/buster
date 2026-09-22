@@ -1,0 +1,93 @@
+[
+  {
+    "name": "VPCMPUQ_K_ZMM_ZMM_I8",
+    "url": "https://www.uops.info/html-instr/VPCMPUQ_K_ZMM_ZMM_I8.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "d6e3f6d917351894f5d655ef87773fc255d5a4774ffbba09da0deb2374837163",
+    "bytes": 13020
+  },
+  {
+    "name": "VPCMPUQ_K_K_ZMM_ZMM_I8",
+    "url": "https://www.uops.info/html-instr/VPCMPUQ_K_K_ZMM_ZMM_I8.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "86b6cd6df6bce843b67a3e4e71a7d094f3a505c58c3dab8bd38926928b9afe05",
+    "bytes": 14420
+  },
+  {
+    "name": "VPCMPUQ_K_YMM_YMM_I8",
+    "url": "https://www.uops.info/html-instr/VPCMPUQ_K_YMM_YMM_I8.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "960a3c16789644bc229c79f2c2e09d348115bc67ef0bc6ed24232e54445fa7d2",
+    "bytes": 13020
+  },
+  {
+    "name": "VPMAXUQ_ZMM_ZMM_ZMM",
+    "url": "https://www.uops.info/html-instr/VPMAXUQ_ZMM_ZMM_ZMM.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "adb3b9e6750e7d3331190f76e5e720ddf371a0415565b0236114a335ca1e9876",
+    "bytes": 13309
+  },
+  {
+    "name": "VPXORQ_ZMM_ZMM_ZMM",
+    "url": "https://www.uops.info/html-instr/VPXORQ_ZMM_ZMM_ZMM.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "a45f04bc13e88ae7bf9452bb72e23420d1e6e0bbe28505b0910b084a5610bce2",
+    "bytes": 18272
+  },
+  {
+    "name": "VPANDQ_ZMM_ZMM_ZMM",
+    "url": "https://www.uops.info/html-instr/VPANDQ_ZMM_ZMM_ZMM.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "28d1b6b64cb7ed640db86163101d165c837fd96807006681f29fe0c30039a63f",
+    "bytes": 13219
+  },
+  {
+    "name": "KANDW_K_K_K",
+    "url": "https://www.uops.info/html-instr/KANDW_K_K_K.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "542210f10408d2021ce5387c1d45d22ba86c053786043e10e3161d7426f10b5c",
+    "bytes": 11989
+  },
+  {
+    "name": "KORW_K_K_K",
+    "url": "https://www.uops.info/html-instr/KORW_K_K_K.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "1d190b3393c0953c4cdf88b8353a2820aa9424596642c60eb65b978533a13eea",
+    "bytes": 11909
+  },
+  {
+    "name": "KMOVW_R32_K",
+    "url": "https://www.uops.info/html-instr/KMOVW_R32_K.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "71eccf1844876496130d2420fcc8b097089d3e750b5c06c42471277b5af8086b",
+    "bytes": 10916
+  },
+  {
+    "name": "KMOVB_R32_K",
+    "url": "https://www.uops.info/html-instr/KMOVB_R32_K.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "570ea639432681e28f56568525d870c1cba71a9c8c13c98f279e9d7145c95c34",
+    "bytes": 10917
+  },
+  {
+    "name": "VPCMPUQ_K_K_ZMM_M512_I8",
+    "url": "https://www.uops.info/html-instr/VPCMPUQ_K_K_ZMM_M512_I8.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "d25c57e0148fdfe2c74d2ebdc0dbc58a7312a47153004d5fe073f9ad552df955",
+    "bytes": 14299
+  },
+  {
+    "name": "VPCMPUQ_K_K_YMM_M256_I8",
+    "url": "https://www.uops.info/html-instr/VPCMPUQ_K_K_YMM_M256_I8.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "aafddbded60d9637338486e982dffcd263bf5c5f91bffb7ae00940c33157af0c",
+    "bytes": 14253
+  },
+  {
+    "name": "VPBROADCASTQ_ZMM_R64",
+    "url": "https://www.uops.info/html-instr/VPBROADCASTQ_ZMM_R64.html",
+    "retrieved_utc": "2026-09-22",
+    "sha256": "062a232ea95836e3688f50ce269b03cd0cd6140225ff8767ec091b9abe1f55de",
+    "bytes": 11733
+  }
+]

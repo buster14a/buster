@@ -1,0 +1,10 @@
+{
+  "dimm_configuration": "RECORD capacity, channels, ranks, speed, timing policy",
+  "other_host_activity": "RECORD observed workload and quiet-host condition",
+  "smt_sibling_condition": "RECORD sibling CPU and observed activity",
+  "host_lease": "RECORD operator-authorized reservation identity; not harness self-attestation",
+  "thermal_condition": "RECORD starting temperature and ambient/cooling conditions",
+  "power_policy_notes": "RECORD existing governor, boost/PBO and power limits; do not change silently",
+  "cpu_microcode_firmware": "RECORD firmware and microcode if not available through sysfs",
+  "frequency_observation": "RECORD sustained vs burst behavior separately, or unavailable"
+}

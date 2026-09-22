@@ -1,0 +1,51 @@
+{
+  "evidence": "map-equivalence correctness model; no timing or PDB-output test",
+  "repository_commit": "ec1897b900c694e57a10ee5ddaacd89c4cd7c57c",
+  "repository_tree": "1e20ddfb534ba16a05a277136ff4f391a93dc28f",
+  "exhaustive_transcripts_by_n": {
+    "0": 1,
+    "1": 1,
+    "2": 2,
+    "3": 8,
+    "4": 64,
+    "5": 872,
+    "6": 18024
+  },
+  "exhaustive_total": 18972,
+  "randomized_transcripts": 20000,
+  "random_seed": 47336792102,
+  "maximum_random_merging_rounds": 8,
+  "poison_reads": 0,
+  "mismatches": 0,
+  "controls": {
+    "empty": {
+      "n": 0,
+      "final_count": 0,
+      "merging_rounds": 0,
+      "reference_map_writes": 0,
+      "proposed_map_writes": 0
+    },
+    "no_merges": {
+      "n": 16,
+      "final_count": 16,
+      "merging_rounds": 0,
+      "reference_map_writes": 16,
+      "proposed_map_writes": 16
+    },
+    "one_round_all_equal": {
+      "n": 128,
+      "final_count": 1,
+      "merging_rounds": 1,
+      "reference_map_writes": 256,
+      "proposed_map_writes": 255
+    },
+    "eight_round_retiring_root_chain": {
+      "n": 128,
+      "final_count": 120,
+      "merging_rounds": 8,
+      "reference_map_writes": 1152,
+      "proposed_map_writes": 136
+    }
+  },
+  "script_sha256": "ff342e80dbcab8702af0ccab858dab29a95013adf20eaf41e3ca72afcbbf8468"
+}

@@ -1,0 +1,68 @@
+{
+  "summary": {
+    "scope": "entry-c",
+    "input_files": 2,
+    "source": "lexical production text; comments/string/char literals excluded, preprocessor branches all retained, macro-generated cases omitted; braced switches only; nested switch labels owned by innermost braced switch",
+    "switches": 1,
+    "cases": 8,
+    "p50": 8,
+    "p90": 8,
+    "p99": 8,
+    "max": 8,
+    "candidate_pairs_one_pass": 28,
+    "gnu_ranges": 0,
+    "simple_numeric": 0,
+    "lexical_unmatched_close_count": 0,
+    "top": [
+      {
+        "path": "src/buster/apps/ide/ide.c",
+        "line": 1219,
+        "cases": 8,
+        "gnu_ranges": 0,
+        "simple_numeric": 0,
+        "candidate_pairs": 28,
+        "label_expressions": [
+          "COMPILER_COMMAND_HELP",
+          "COMPILER_COMMAND_TEST",
+          "COMPILER_COMMAND_METAMORPHIC",
+          "COMPILER_COMMAND_BENCH",
+          "COMPILER_COMMAND_BENCH_SELECT",
+          "COMPILER_COMMAND_CC",
+          "COMPILER_COMMAND_FUZZ",
+          "COMPILER_COMMAND_X86_64_COMPLETION_CENSUS"
+        ]
+      }
+    ]
+  },
+  "inputs": [
+    {
+      "path": "src/buster/apps/disk_builder.c",
+      "sha256": "f310503ff95e8b53cdd1bffcf45ed8629780236265519c5e71ca3ba9ca88ef52"
+    },
+    {
+      "path": "src/buster/apps/ide/ide.c",
+      "sha256": "bb8d3a0982cfb6bb8031c66e24ba44f96f4c6e7bed6fc533b6f0e405fd7bcb0a"
+    }
+  ],
+  "switches": [
+    {
+      "path": "src/buster/apps/ide/ide.c",
+      "line": 1219,
+      "cases": 8,
+      "gnu_ranges": 0,
+      "simple_numeric": 0,
+      "candidate_pairs": 28,
+      "label_expressions": [
+        "COMPILER_COMMAND_HELP",
+        "COMPILER_COMMAND_TEST",
+        "COMPILER_COMMAND_METAMORPHIC",
+        "COMPILER_COMMAND_BENCH",
+        "COMPILER_COMMAND_BENCH_SELECT",
+        "COMPILER_COMMAND_CC",
+        "COMPILER_COMMAND_FUZZ",
+        "COMPILER_COMMAND_X86_64_COMPLETION_CENSUS"
+      ]
+    }
+  ],
+  "anomalies": []
+}

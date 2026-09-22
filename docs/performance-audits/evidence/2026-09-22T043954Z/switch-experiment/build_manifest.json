@@ -1,0 +1,52 @@
+{
+  "scope": "isolated correctness builds, not trusted compiler acceptance",
+  "compiler": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n\n",
+  "commands": [
+    [
+      "gcc",
+      "-std=c11",
+      "-g",
+      "-fno-omit-frame-pointer",
+      "-fno-tree-vectorize",
+      "-fno-tree-slp-vectorize",
+      "-fwrapv",
+      "-fno-strict-aliasing",
+      "-funsigned-char",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-Wpedantic",
+      "-O3",
+      "switch_overlap.c",
+      "-o",
+      "switch_overlap"
+    ],
+    [
+      "gcc",
+      "-std=c11",
+      "-g",
+      "-fno-omit-frame-pointer",
+      "-fno-tree-vectorize",
+      "-fno-tree-slp-vectorize",
+      "-fwrapv",
+      "-fno-strict-aliasing",
+      "-funsigned-char",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-Wpedantic",
+      "-O1",
+      "-fsanitize=address,undefined",
+      "switch_overlap.c",
+      "-o",
+      "switch_overlap_sanitize"
+    ]
+  ],
+  "source_sha256": {
+    "switch_overlap.c": "343067a36505c5751dc76c0712887423257cabe7d6e3e05176a2a42f27e7b957",
+    "unroll.inc": "a65dc16a2482d360a11babea3cb762c7c8518ce05340464a0c79d9e0ffc6f4e2",
+    "generate_unroll.py": "b2956ac3bc7428951af8b7bced4893630150627d8ea7dfbdd107763ab48b619e",
+    "run_pairs.py": "64dc8a72c1080112481ba75fabfb846024a9e9a39c2be4b5e4f89086157f0797",
+    "build.py": "34fc273b56d2caa9d48fe2dc0d7f253393bbce32e9795ed4c7c199e0a99ee933"
+  }
+}

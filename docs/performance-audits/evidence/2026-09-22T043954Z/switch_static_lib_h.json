@@ -1,0 +1,462 @@
+{
+  "summary": {
+    "scope": "lib-h",
+    "input_files": 110,
+    "source": "lexical production text; comments/string/char literals excluded, preprocessor branches all retained, macro-generated cases omitted; braced switches only; nested switch labels owned by innermost braced switch",
+    "switches": 0,
+    "cases": 0,
+    "p50": null,
+    "p90": null,
+    "p99": null,
+    "max": 0,
+    "candidate_pairs_one_pass": 0,
+    "gnu_ranges": 0,
+    "simple_numeric": 0,
+    "lexical_unmatched_close_count": 0,
+    "top": []
+  },
+  "inputs": [
+    {
+      "path": "src/buster/lib/aarch64.h",
+      "sha256": "23cb823747178b033393dfb85478797e9bc33e901c6679864075e0fa06ab976d"
+    },
+    {
+      "path": "src/buster/lib/apple_runtime.h",
+      "sha256": "3593e5495ec5df5d81280e761cb2c91134fab9d214f85d17ac4375a1a8a8c019"
+    },
+    {
+      "path": "src/buster/lib/arena.h",
+      "sha256": "686212dc6501ebb211545c84420844f983dd9f556102166720c551ea62b3ca6b"
+    },
+    {
+      "path": "src/buster/lib/base.h",
+      "sha256": "2b858570273468236f9b05533258c09edc6690a3b2b2536f6aed6ef0a40b6ab1"
+    },
+    {
+      "path": "src/buster/lib/byte_writer.h",
+      "sha256": "2b79d63d69ca1581c957baaa60f1165fe42e32ec25eb3dc3f095094c54476bd2"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_alias_projection.h",
+      "sha256": "3bd266f42f5520f094311af92ea5f1cd5e123d37332e6353099d749cc2fa2f07"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.h",
+      "sha256": "d14eacfea49326c3739ebd7fb6b6f2894ad63cbde4b49102c285859b6004ee9d"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_control_semantics.h",
+      "sha256": "874870583f36efea5af52b7d177b12b3b2fef9bdb8879adf750912b77f53407a"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.h",
+      "sha256": "1edcb9feb8cff2f8cc825725ef494e379623b6a62e97b9fc245bf89f5c00ca88"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_encoding.h",
+      "sha256": "d9075392f143a60883eb39b2513b655fdcc3ee1d2f585dd7bd8b9267add2523b"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_exact_bridge.h",
+      "sha256": "ae76bbd7937bd260479cb2b309610dc5dd31dc3cdb9f6252ef2c9abb9d58ffd0"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_memory_semantics.h",
+      "sha256": "f780fb797641c693e330aa88e652a7cb4a5686a50e764d75525cce5eaf9766ee"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_semantic_vm.h",
+      "sha256": "a9a8f613fa7e1ad25b67eef2b7a98d3129a090adada876955c9a315481c08467"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_semantics.h",
+      "sha256": "601215addf49aafabea1f2bfe3db582762742ab41ac2837180e3971e04d84599"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_syntax.h",
+      "sha256": "f26b26b058e9d018791682d3e8aa372b2d6aa1bdd9302877d087b9890e540f33"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_system_registers.h",
+      "sha256": "0ce48e50abc6c2c840ee5783c3e40b259e1df5e604f5c5d2030119010a426952"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/aarch64_system_semantics.h",
+      "sha256": "a94053b9c4e10e6264f52052535818a3e208e2cd4826311c290a122572199ee2"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/assembly.h",
+      "sha256": "c5580f1038b43627d036b2ce6957c7bc2cf7c5789514c7f5356644e6a612070c"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/assembly_unit.h",
+      "sha256": "b9fafbe88084324b39d12d36d736018833206454ff3f61e8dc41f6dfac4c0495"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/assembly_unit_internal.h",
+      "sha256": "faf403e903f8debd5cd6d6968f7c481cc8f2e232e596e6361abd992f4e140460"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-alias-projection.generated.h",
+      "sha256": "b8a2944e06b80b203a2778c5e58699b1960763f2dce897afc13b2e23d6363dc7"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-assembly.generated.h",
+      "sha256": "3fba62775b3c8a6e42e703fd14e609cab8f8e25efef8c189ce520054259373ad"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-canonical-decoder.generated.h",
+      "sha256": "0f23ec4913a1fa7742d5e8b8f7f9731a2e05e8cf946f58bd76f3d6d74a327f7a"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-complex-simd.generated.h",
+      "sha256": "2483251c687caa080d138e97132820f8949f8c279446293ca9b8c19b6808b696"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-control-semantics.generated.h",
+      "sha256": "b1747fc020a990c0e6483ac7f49b71ef4887c0e2f55533d62352f3f5b20bef9e"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-direct-simd.generated.h",
+      "sha256": "2cac5091949d9281f7a8f9820d3998bddf28d50c55019ce80588c4491d59f758"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-exact-crosswalk.generated.h",
+      "sha256": "88517ef87e518153994449053651fecfb45e672dd0db6a40ec3b57d7d27b0e5f"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-form-ids.generated.h",
+      "sha256": "24cade60bf6178af4034cf610486e7bfdf2d03c156e15032c9907c7bcd6dc22a"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-memory-semantics.generated.h",
+      "sha256": "1676278e9cf0942e3d528694870f8821cd1afb9c8452f6abcb1f3575d68c3974"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-production-plan.generated.h",
+      "sha256": "6774510279a33734ae08bb0b17180f7dd72dd138c6e0065d5ab45f837c1ffb10"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-semantic-vm.generated.h",
+      "sha256": "465d96b796cd4a856be0a79171132b6ff9ed3e67b42a408f2cb426203ed9da64"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-syntax.generated.h",
+      "sha256": "3d37e0767a1f1d3c5072963997610e740e5b49adbb3dbbb82cf98d5e96c1f9c9"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-system-registers.generated.h",
+      "sha256": "34a424078dc590689b022b155c53103d5b11485e218414a00d8f9800abad3a97"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/aarch64-system-semantics.generated.h",
+      "sha256": "a1b71097c40dded9c376cbd98e260659fde083b8df3bc49d2153aff4047e68ac"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/arm-a64-m1-fixed.generated.h",
+      "sha256": "77fabccb575a5f45229c139eded90c4869f683465d2fd610ddcc68859e7a64f1"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/arm-a64-m1-gpr.generated.h",
+      "sha256": "ca7f687c1a0586345de6ab68d0c460952b58e2546b8dbb513115851821c20452"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/arm-a64-m1-scalar-integer.generated.h",
+      "sha256": "edeccc21704dc0dbbecd71c18e642b9f9d7a60357801a252d7bfbcf216593937"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/arm-a64-semantic.generated.h",
+      "sha256": "eca5b5313223d9b81a603fc877c919895edf666c2b759da7e15644b219ccb732"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/generated/x86_64-assembly.generated.h",
+      "sha256": "442f2b1e99122b5e41c693116bfb4efdad93332e8de1c1b52c8caccf03c34419"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/x86_64_completion_census.h",
+      "sha256": "67608b41bbf5c3e65a32012632e5cbee4eaafb07e6efae29015f1303c3314367"
+    },
+    {
+      "path": "src/buster/lib/compiler/assembly/x86_64_metadata.h",
+      "sha256": "1b0304d16ae56e89c88fe659be0381ea2fa46c6833b7d8bb672c4f6f5456978f"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/bootstrap_trace.h",
+      "sha256": "71c91c0c065bfdf0858519aeb533336491584ba30426a6d5e85598d7b8f0e51f"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/codegen.h",
+      "sha256": "50a700f1d3d686894130a614402209df330740deb07efba3f98b2131a5a225c5"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/codegen_internal.h",
+      "sha256": "51da9e51c948c174a9a8b662d032f851fd412283030262c45aa84c0b0871738e"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/machine.h",
+      "sha256": "6cb6bc13f6664410230646d21747b8c42fc19cfdfb332a95f697d4137f3b1ca4"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/machine_schedule_internal.h",
+      "sha256": "d6ce3d232611577f54caf9c2a34c5dd6b0243923363f70351d40b820436072fd"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/machine_select.h",
+      "sha256": "5585240dabaf54636bc84eb5b87bd00f7563e73eb34544ccf43e9e4744935d29"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/machine_x86_64_emit_registry.h",
+      "sha256": "e2988f3b33b801044e859306539cfed71c0889c88db9dadb38e51ae2e6dbfe4a"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/machine_x86_64_internal.h",
+      "sha256": "a3b561590c0b6c4b20562363641e0ff7ed2bd9cedc6eca52ed29bea3bc57e118"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/register_allocator_fast_internal.h",
+      "sha256": "c4370a6cf5a8b22dbe5fb9ee920da9eabba1d6c77c4d077c95687345f59072e5"
+    },
+    {
+      "path": "src/buster/lib/compiler/codegen/register_allocator_quality_internal.h",
+      "sha256": "c3d951df59c7eb3e814f0564635bba5d115f0f0035e5fb184a0f31c6d77e1cff"
+    },
+    {
+      "path": "src/buster/lib/compiler/codeview/codeview.h",
+      "sha256": "ab90e18bb24837cb0be14ef7a189abe2110378eba96d7598b94c27d5087ac32c"
+    },
+    {
+      "path": "src/buster/lib/compiler/debug/debug.h",
+      "sha256": "79abc65d3e5c1d72ba1b1527ace72ed6f6bcfce951dba79aecbb0871f927c2a1"
+    },
+    {
+      "path": "src/buster/lib/compiler/diagnostic.h",
+      "sha256": "193064f8dca85f5d7fb3ce77fc9779a103fd4e7a4f4984d15455ffbcb6b0783e"
+    },
+    {
+      "path": "src/buster/lib/compiler/driver/archive_internal.h",
+      "sha256": "d1f339620435696f803467cf7b5338d0f9f51329e2b44799be42df204ae3efe1"
+    },
+    {
+      "path": "src/buster/lib/compiler/driver/codegen_configurations.h",
+      "sha256": "ed96c5dd99c1a6a567c7cc9b645b5f6dcc4f26a566d7650ee55b04c723410837"
+    },
+    {
+      "path": "src/buster/lib/compiler/driver/driver.h",
+      "sha256": "8629a9616ec86c0b00fe8fe927eabc53578605692a572743112affa468074902"
+    },
+    {
+      "path": "src/buster/lib/compiler/driver/driver_internal.h",
+      "sha256": "abd91e3d43b30f30c10d9a48aaa1d894e8e994af74f3fb824f251687cec7ba89"
+    },
+    {
+      "path": "src/buster/lib/compiler/dwarf/dwarf.h",
+      "sha256": "26eabd8379fa6167b3e445b6a3c205d67e5bf7cbeb7b745a2b80b25676587d5f"
+    },
+    {
+      "path": "src/buster/lib/compiler/ebpf/ebpf.h",
+      "sha256": "bd31cf0045e05b2d9766750498bd4a12abe06206716b2417bd5321a4c60003b8"
+    },
+    {
+      "path": "src/buster/lib/compiler/ebpf/ebpf_internal.h",
+      "sha256": "42a7db3b96df68a47509c644ca53c513e92d76295a9fb7957abca375838f8ed8"
+    },
+    {
+      "path": "src/buster/lib/compiler/frontend/c/c.h",
+      "sha256": "ddb478551f4e6a7ef72e43fcf5d173fbf43e4350747b80ea7f6be71b6dd9fc76"
+    },
+    {
+      "path": "src/buster/lib/compiler/frontend/c/c_gen_internal.h",
+      "sha256": "aae4cd2ad66dc23e02cb888e33ed6d23a4dbb95dda9d0b1e09c4c08159326caf"
+    },
+    {
+      "path": "src/buster/lib/compiler/frontend/c/c_internal.h",
+      "sha256": "4334bc0dacd32fbeff65c66208c28b6a5c340ec6cfd52eb0a66984bcde6c1cdf"
+    },
+    {
+      "path": "src/buster/lib/compiler/frontend/c/c_parse_internal.h",
+      "sha256": "60cf0f531c90a8285759649fd5d8ba2ff2f2170c16de2434be8a96b7d48124f6"
+    },
+    {
+      "path": "src/buster/lib/compiler/frontend/c/c_source_internal.h",
+      "sha256": "600bc39f77d8852cdf8d0e34127a486b65285c51dcbcfd6549cbb99ec2a417c8"
+    },
+    {
+      "path": "src/buster/lib/compiler/frontend/c/c_source_metrics_internal.h",
+      "sha256": "e6b56bd6f43b835b083b077465b9a6cd71b3a0e7156a3539057db2d903a699f4"
+    },
+    {
+      "path": "src/buster/lib/compiler/gpu/gpu.h",
+      "sha256": "985d22ac37f4e5e40c7b73780a1f1943ffd0ab1d794a42237d584146e25ab62d"
+    },
+    {
+      "path": "src/buster/lib/compiler/ir/ir.h",
+      "sha256": "944b7fab8664cb7c9bf55b4c49595d752cef62de001f1e80e900018fcc20c195"
+    },
+    {
+      "path": "src/buster/lib/compiler/ir/ir_append.h",
+      "sha256": "79b81a22e530697e588d66a3f78d649579e217cfd1a3716b64df75fc0a0fc661"
+    },
+    {
+      "path": "src/buster/lib/compiler/ir/ir_construction.h",
+      "sha256": "2ded94b11a998ab872328ebb3f71178883f1d24f326b3084b13c234510fa5b2d"
+    },
+    {
+      "path": "src/buster/lib/compiler/ir/ir_internal.h",
+      "sha256": "a525086c8c0ec909224fbcc2257ee3ff1ee7fe6efdf03df60443af0bc9c59134"
+    },
+    {
+      "path": "src/buster/lib/compiler/ir/model.h",
+      "sha256": "25f78bf3b1470b4ea3015cb352d9687ce74a35205cb0b3554cbc335ef8b43e22"
+    },
+    {
+      "path": "src/buster/lib/compiler/jit/jit.h",
+      "sha256": "746a16eaf0bfbe2e4f3270708c5829855269f189dbc2eb7966d72dc8d9b121e9"
+    },
+    {
+      "path": "src/buster/lib/compiler/link/link.h",
+      "sha256": "909c50e3ee325373ee0fac6fd059229e605c5b981ae6b582542d7c7a4836df00"
+    },
+    {
+      "path": "src/buster/lib/compiler/link/link_internal.h",
+      "sha256": "d7c103dd178f4141ac53fc26d6b82225b50c0f8b30d355beec6119e61a99243e"
+    },
+    {
+      "path": "src/buster/lib/compiler/llvm/bitcode.h",
+      "sha256": "c2250c78265f7e1777821d4989669a6354ba40d066181f38a6b322e4111c79f6"
+    },
+    {
+      "path": "src/buster/lib/compiler/object/object.h",
+      "sha256": "c397e43356e6a09f955f0d7158e6e7d5bc248519191d03727ad824719cc3c2db"
+    },
+    {
+      "path": "src/buster/lib/compiler/object/object_internal.h",
+      "sha256": "02c708c7ed20658fee3821d8ec9579f8bdf7b348292ffe6fb13634c99abbe16d"
+    },
+    {
+      "path": "src/buster/lib/compiler/pdb/pdb.h",
+      "sha256": "33347bf062475d64d042ca125732e89e97d4b2bbb869eeba9fb3c7c628e85839"
+    },
+    {
+      "path": "src/buster/lib/compiler/pdb/pdb_internal.h",
+      "sha256": "44648258f9623949a0901b001a538cd28d2c5f699d10f1231c58c4a6a933f6fe"
+    },
+    {
+      "path": "src/buster/lib/compiler/wasm/wasm.h",
+      "sha256": "028735542bdabf679bc9a42e58feba04952af32b51205046fc6802e53d4a3d86"
+    },
+    {
+      "path": "src/buster/lib/compiler/wasm/wasm_internal.h",
+      "sha256": "ef7c7689fa36aee58e36d26001437d75b8dc4e9304263c3e221b7ef7b5ce31f3"
+    },
+    {
+      "path": "src/buster/lib/entry_point.h",
+      "sha256": "1b91b3633b889980ec69463c36dcd152a70fa64ac02e40ffba9083f66a409a96"
+    },
+    {
+      "path": "src/buster/lib/file.h",
+      "sha256": "bb6d5293c63dd97b89a08af02757819a014a0477e9989b905678055f91c6904d"
+    },
+    {
+      "path": "src/buster/lib/float.h",
+      "sha256": "941aff32b252022893dc7698934c059eadd37953a5af5e644b0756719e63a5a4"
+    },
+    {
+      "path": "src/buster/lib/font_provider.h",
+      "sha256": "642f213fc6f54f863b058c8f027dc2f33a182b9c0df232331937c069ba307b35"
+    },
+    {
+      "path": "src/buster/lib/hash.h",
+      "sha256": "b7637c0970640add4adf298c906dc6a5a086edd7f431af3772c8d5793a2004d6"
+    },
+    {
+      "path": "src/buster/lib/integer.h",
+      "sha256": "6e23390bec10298d876e1992c1c16aeead1d53768520965f08870ad70ad6c92e"
+    },
+    {
+      "path": "src/buster/lib/os.h",
+      "sha256": "3fdbe86eb535eb496b8dd66cff5af02eadb26747e353d651351f4928cf1c17d1"
+    },
+    {
+      "path": "src/buster/lib/os_internal.h",
+      "sha256": "e9f50abe84940de4d87c2abb094cec0b63094401db45c5c7891333678da28f42"
+    },
+    {
+      "path": "src/buster/lib/rendering/internal.h",
+      "sha256": "c433c633e26d50c971ae721e08b26b6cdcbdae4a21a720479267e7b570e43601"
+    },
+    {
+      "path": "src/buster/lib/rendering.h",
+      "sha256": "7ccf95057a514753d6a673a53fe65244e382a37d9422c6fb810f1dc0d40b1ba9"
+    },
+    {
+      "path": "src/buster/lib/shaders/blur_shared.h",
+      "sha256": "2d8c397a11105a10722a3e771282953d86882c754ac32ba0e1e20477da2383eb"
+    },
+    {
+      "path": "src/buster/lib/shaders/rect_shared.h",
+      "sha256": "56831ac582fbdf8a5863177fb50814feef91948006e392d6f73eab7779742332"
+    },
+    {
+      "path": "src/buster/lib/simd.h",
+      "sha256": "7e12a18fd0258e86618080a17c90c6314b11649c442768e122fc30909a834a64"
+    },
+    {
+      "path": "src/buster/lib/string.h",
+      "sha256": "fa07c4f70e6bf85dbe51359d9af1dda9e2f3c8af3f4f3deccc86b958736dbd21"
+    },
+    {
+      "path": "src/buster/lib/system_headers.h",
+      "sha256": "98ab81319a21510f8c6ebd986f32b7dc37780b6f6bd60c5cb7ec8abe648684fc"
+    },
+    {
+      "path": "src/buster/lib/target.h",
+      "sha256": "845e2b13dc3b2bd46ee29d10ee59f3c0cb420071dd2d69ed3ada8344604554d3"
+    },
+    {
+      "path": "src/buster/lib/time.h",
+      "sha256": "17a01099eeedd7854742179eb3b2007a78d74baac8a35d9e4af94d814826c439"
+    },
+    {
+      "path": "src/buster/lib/tls.h",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "src/buster/lib/truetype.h",
+      "sha256": "d1eeeb0684cf6d6124e1b27a523f2cbe3f741755ff935a3ba6f136c414e4bf89"
+    },
+    {
+      "path": "src/buster/lib/truetype_internal.h",
+      "sha256": "5587ee08ddf797cc8269b392dda22fc0263fc1f2c2f6d96630a85141c1be5e9e"
+    },
+    {
+      "path": "src/buster/lib/ui_builder.h",
+      "sha256": "11866177409206ffe94f5c2e8222ba21bbf9c9097648226808691de9dddac90c"
+    },
+    {
+      "path": "src/buster/lib/ui_core.h",
+      "sha256": "2d024ee46f550a22c827ec95e817a0814d84f3b49092bc87bd54717936495964"
+    },
+    {
+      "path": "src/buster/lib/wasm64_gfx.h",
+      "sha256": "0dfe1b6a8c2aea40115abc04b6ef79ffd3bef3b72d39418dec574fc370a3a551"
+    },
+    {
+      "path": "src/buster/lib/window/apple_helpers.h",
+      "sha256": "490c044d817387c706a7b6c55a6672e7d0b588502a07eefb667006b3754f5b6b"
+    },
+    {
+      "path": "src/buster/lib/window/internal.h",
+      "sha256": "85171e183329ca7377f4a4df150bf4f1dd27fbb0b284c4c8856da997e8caabf2"
+    },
+    {
+      "path": "src/buster/lib/window.h",
+      "sha256": "fae3661b4b05496fadba38c646dbe3469628a5fdedaeb1d42fee285d29d6f431"
+    },
+    {
+      "path": "src/buster/lib/x86_64.h",
+      "sha256": "55d25c14542c8e4a436c9a7a2dd31fac5f4075747776c44917c714ff7e8adedf"
+    }
+  ],
+  "switches": [],
+  "anomalies": []
+}

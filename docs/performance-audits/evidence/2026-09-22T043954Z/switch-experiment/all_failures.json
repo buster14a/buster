@@ -1,0 +1,17 @@
+{
+  "scope": "All observed failed experimental commands in this subtask; no timed runs and no correctness mismatch observed",
+  "failures": [
+    {
+      "command": [
+        "./switch_overlap_sanitize",
+        "--test"
+      ],
+      "returncode": 1,
+      "phase": "Initial sanitizer invocation before detect_leaks=0 and before corpus expansion from16437 to17440 cases",
+      "provenance": "Verbatim combined output retained in execution-tool response; transcribed here. No original stderr file or timestamp was created.",
+      "output": "==2==LeakSanitizer has encountered a fatal error.\n==2==HINT: For debugging, try setting environment variable LSAN_OPTIONS=verbosity=1:log_threads=1\n==2==HINT: LeakSanitizer does not work under ptrace (strace, gdb, etc)\n",
+      "classification": "Environment prevents LeakSanitizer initialization; not a reported address/undefined-behavior defect",
+      "resolution": "ASAN_OPTIONS=detect_leaks=0; ASan+UBSan subsequently passed; leak checking unvalidated"
+    }
+  ]
+}
