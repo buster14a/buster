@@ -6810,7 +6810,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_storage_address(CIntegerIrBuilde
 
 // One piece of that span as a place of its own width, at `offset` bytes in.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_piece_place(CIntegerIrBuilder* builder, IrValueId byte_address, u32 offset, IrTypeId piece_type,
-                                                            IrSourceRange source)
+                                                            bool is_volatile, IrSourceRange source)
 {
     IrTypeId byte_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_CHAR);
     IrValueId address = byte_address;
@@ -6824,7 +6824,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_piece_place(CIntegerIrBuilder* b
     IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID && piece_pointer_type.value != IR_ID_UNDERLYING_INVALID
                          ? c_ir_emit_cast(builder, address, piece_pointer_type, source)
                          : IR_VALUE_ID_INVALID;
-    return cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    IrValueId result = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    if (result.value < builder->function->value_count)
+    {
+        // The unsigned piece type describes storage, not the qualifications
+        // of the original field. Preserve its volatile access on every piece.
+        builder->function->values[result.value].is_volatile |= is_volatile;
+    }
+    return result;
 }
 
 // The bits of `field` that lie in one piece of its span, as the half-open
@@ -6873,7 +6880,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
         }
         IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
         IrValueId piece_place =
-            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type,
+                                                                                            builder->function->values[place.value].is_volatile, source)
                                                          : IR_VALUE_ID_INVALID;
         IrValueId loaded = piece_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, piece_place, piece_type, source)
                                                                         : IR_VALUE_ID_INVALID;
@@ -6957,7 +6965,8 @@ BUSTER_C_INTERNAL bool c_ir_emit_split_bit_field_store(CIntegerIrBuilder* builde
         u32 piece_bits = (u32)pieces[index].size * 8;
         IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
         IrValueId piece_place =
-            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type,
+                                                                                            builder->function->values[place.value].is_volatile, source)
                                                          : IR_VALUE_ID_INVALID;
         if (piece_place.value == IR_ID_UNDERLYING_INVALID)
         {
@@ -48647,33 +48656,9 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         break;
                     }
                     IrTypeId field_type_id = c_type_ir_map[member->type.value];
-                    // A bit-field of enumerated type is read with the
-                    // signedness C leaves to the implementation, and the
-                    // choice GCC and Clang make is the enum's own underlying
-                    // type: unsigned when no enumerator is negative. Read as
-                    // a signed field instead, QuickJS's
-                    // `JSClosureTypeEnum closure_type : 3` answers -3 for the
-                    // enumerator 5 and its switch falls to `default: abort()`.
-                    if (member->is_bit_field)
-                    {
-                        CType const* enumeration = &parse.types[member->type.value];
-                        if (enumeration->has_unqualified_type && enumeration->unqualified_type.value < parse.type_count)
-                        {
-                            enumeration = &parse.types[enumeration->unqualified_type.value];
-                        }
-                        if (enumeration->kind == C_TYPE_ENUM && enumeration->element_type.value >= parse.type_count)
-                        {
-                            bool negative_enumerator = false;
-                            for (u32 enum_index = 0; enum_index < enumeration->enum_member_count; enum_index += 1)
-                            {
-                                negative_enumerator |= parse.enum_members[enumeration->enum_member_start + enum_index].is_negative;
-                            }
-                            if (!negative_enumerator)
-                            {
-                                field_type_id = constant_builder.scalar_types[C_TYPE_UNSIGNED_INT];
-                            }
-                        }
-                    }
+                    // Enum members use the same resolved compatible/fixed type
+                    // as ordinary objects. Width, packing and access_size below
+                    // describe storage; none may select another semantic type.
                     IrType* field_type = ir_type_from_id(&program->types, field_type_id);
                     // A `void` member lays out beside the others rather than
                     // holding the whole definition unresolved, exactly as a

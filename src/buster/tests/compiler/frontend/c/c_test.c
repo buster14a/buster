@@ -798,6 +798,342 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successor_limits(UnitTestArgument
     return result;
 }
 
+// One source pins semantic/IR facts and observable values independently of layout.
+BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
+{
+    String8 parts[] = {S8(
+    "enum EU32 { U32_ZERO=0, U32_HIGH=0x80000000U, U32_MAX=0xffffffffU };\n"
+    "enum ES32 { S32_NEG=-1, S32_POS=17 };\n"
+    "enum ESmall { SMALL_ZERO=0, SMALL_FIVE=5 };\n"
+    "enum EU40 { U40_ZERO=0, U40_HIGH=0x100000001ULL };\n"
+    "enum ES40 { S40_NEG=-0x100000000LL, S40_POS=0x100000001LL };\n"
+    "enum EU64 { U64_ZERO=0, U64_HIGH=0x8000000000000000ULL, U64_MAX=0xffffffffffffffffULL };\n"
+    "enum ES64 { S64_MIN=(-9223372036854775807LL-1), S64_MAX=9223372036854775807LL };\n"
+    "enum EFixedU : unsigned long long { FIXED_U=1 };\n"
+    "enum EFixedS : long long { FIXED_S=5 };\n"
+    "typedef enum EU40 U40Alias;\n"
+    "typedef volatile U40Alias VolatileU40;\n"
+    "struct U32Box { enum EU32 field:32; enum EU32 ordinary; };\n"
+    "volatile struct U32Box object_U32Box={ U32_HIGH, U32_HIGH };\n"
+    "enum EU32 read_U32Box(void) { return object_U32Box.field; }\n"
+    "struct S32Box { enum ES32 field:6; enum ES32 ordinary; };\n"
+    "volatile struct S32Box object_S32Box={ S32_NEG, S32_NEG };\n"
+    "enum ES32 read_S32Box(void) { return object_S32Box.field; }\n"
+    "struct SmallBox { enum ESmall field:3; enum ESmall ordinary; };\n"
+    "volatile struct SmallBox object_SmallBox={ SMALL_FIVE, SMALL_FIVE };\n"
+    "enum ESmall read_SmallBox(void) { return object_SmallBox.field; }\n"
+    "struct U40Box { enum EU40 field:40; enum EU40 ordinary; };\n"
+    "volatile struct U40Box object_U40Box={ U40_HIGH, U40_HIGH };\n"
+    "enum EU40 read_U40Box(void) { return object_U40Box.field; }\n"
+    "struct S40Box { enum ES40 field:40; enum ES40 ordinary; };\n"
+    "volatile struct S40Box object_S40Box={ S40_NEG, S40_NEG };\n"
+    "enum ES40 read_S40Box(void) { return object_S40Box.field; }\n"
+    "struct U64Box { enum EU64 field:64; enum EU64 ordinary; };\n"
+    "volatile struct U64Box object_U64Box={ U64_HIGH, U64_HIGH };\n"
+    "enum EU64 read_U64Box(void) { return object_U64Box.field; }\n"
+    "struct S64Box { enum ES64 field:64; enum ES64 ordinary; };\n"
+    "volatile struct S64Box object_S64Box={ S64_MIN, S64_MIN };\n"
+    "enum ES64 read_S64Box(void) { return object_S64Box.field; }\n"
+    "struct FixedUBox { enum EFixedU field:64; enum EFixedU ordinary; };\n"
+    "volatile struct FixedUBox object_FixedUBox={ FIXED_U, FIXED_U };\n"
+    "enum EFixedU read_FixedUBox(void) { return object_FixedUBox.field; }\n"
+    "struct FixedSBox { enum EFixedS field:64; enum EFixedS ordinary; };\n"
+    "volatile struct FixedSBox object_FixedSBox={ FIXED_S, FIXED_S };\n"
+    "enum EFixedS read_FixedSBox(void) { return object_FixedSBox.field; }\n"
+    "struct QualifiedBox { VolatileU40 field:40; VolatileU40 ordinary; };\n"
+    "volatile struct QualifiedBox object_QualifiedBox={ U40_HIGH, U40_HIGH };\n"
+    "enum EU40 read_QualifiedBox(void) { return object_QualifiedBox.field; }\n"
+    "union __attribute__((packed)) PackedU40 { enum EU40 field:40; };\n"
+    "union __attribute__((packed)) PackedS40 { enum ES40 field:40; };\n"
+    "volatile union PackedU40 packed_u[2]={{U40_HIGH},{U40_HIGH}};\n"
+    "volatile union PackedS40 packed_s[2]={{S40_NEG},{S40_NEG}};\n"
+    "enum EU40 read_PackedU40(void) { return packed_u[0].field; }\n"
+    "enum ES40 read_PackedS40(void) { return packed_s[0].field; }\n"
+    "void write_PackedU40(void) { packed_u[0].field=7; }\n"
+    "void write_PackedS40(void) { packed_s[0].field=S40_POS; }\n"
+    "union __attribute__((packed)) PlainPackedU40 { enum EU40 field:40; };\n"
+    "union PlainPackedU40 plain_packed_u={U40_HIGH};\n"
+    "enum EU40 read_PlainPackedU40(void) { return plain_packed_u.field; }\n"
+    "void write_PlainPackedU40(void) { plain_packed_u.field=9; }\n"
+    "_Static_assert(sizeof(enum EU32)==4 && sizeof(enum EU40)==8 && sizeof(enum ES40)==8, \"enum representation\");\n"
+    "_Static_assert(sizeof(enum EU64)==8 && sizeof(enum ES64)==8, \"full width representation\");\n"
+    "_Static_assert(sizeof(union PackedU40)==5 && sizeof(union PackedS40)==5, \"storage is not the enum type\");\n"
+    ), S8(
+    "int main(void)\n"
+    "{\n"
+    "    int result=0;\n"
+    "    result |= read_U32Box()!=U32_HIGH || object_U32Box.ordinary!=U32_HIGH;\n"
+    "    result |= read_S32Box()!=S32_NEG || object_S32Box.ordinary!=S32_NEG;\n"
+    "    result |= read_SmallBox()!=SMALL_FIVE || object_SmallBox.ordinary!=SMALL_FIVE;\n"
+    "    result |= read_U40Box()!=U40_HIGH || object_U40Box.ordinary!=U40_HIGH;\n"
+    "    result |= read_S40Box()!=S40_NEG || object_S40Box.ordinary!=S40_NEG;\n"
+    "    result |= read_U64Box()!=U64_HIGH || object_U64Box.ordinary!=U64_HIGH;\n"
+    "    result |= read_S64Box()!=S64_MIN || object_S64Box.ordinary!=S64_MIN;\n"
+    "    result |= read_FixedUBox()!=FIXED_U || object_FixedUBox.ordinary!=FIXED_U;\n"
+    "    result |= read_FixedSBox()!=FIXED_S || object_FixedSBox.ordinary!=FIXED_S;\n"
+    "    result |= read_QualifiedBox()!=U40_HIGH || object_QualifiedBox.ordinary!=U40_HIGH;\n"
+    "    result |= read_U32Box()<=0 || read_U40Box()<=0 || read_U64Box()<=0;\n"
+    "    result |= read_S32Box()>=0 || read_S40Box()>=0 || read_S64Box()>=0;\n"
+    "    result |= +object_SmallBox.field!=5 || (object_SmallBox.field-6)!=-1;\n"
+    "    object_U32Box.field=U32_MAX;\n"
+    "    object_U64Box.field=U64_MAX;\n"
+    "    object_S64Box.field=S64_MAX;\n"
+    "    object_S40Box.field=S40_POS;\n"
+    "    object_U40Box.field=0;\n"
+    "    object_QualifiedBox.field=0;\n"
+    "    object_FixedSBox.field=-1;\n"
+    "    object_FixedUBox.field=0x8000000000000000ULL;\n"
+    "    result |= object_U32Box.field!=U32_MAX || object_U32Box.ordinary!=U32_HIGH;\n"
+    "    result |= object_U64Box.field!=U64_MAX || object_U64Box.ordinary!=U64_HIGH;\n"
+    "    result |= object_S64Box.field!=S64_MAX || object_S64Box.ordinary!=S64_MIN;\n"
+    "    result |= object_S40Box.field!=S40_POS || object_S40Box.ordinary!=S40_NEG;\n"
+    "    result |= object_U40Box.field!=0 || object_U40Box.ordinary!=U40_HIGH;\n"
+    "    result |= object_QualifiedBox.field!=0 || object_QualifiedBox.ordinary!=U40_HIGH;\n"
+    "    result |= object_FixedSBox.field!=-1 || object_FixedUBox.field!=0x8000000000000000ULL;\n"
+    "    result |= packed_u[0].field!=U40_HIGH || packed_s[0].field!=S40_NEG;\n"
+    "    write_PackedU40();\n"
+    "    write_PackedS40();\n"
+    "    result |= packed_u[0].field!=7 || packed_u[1].field!=U40_HIGH;\n"
+    "    result |= packed_s[0].field!=S40_POS || packed_s[1].field!=S40_NEG;\n"
+    "    result |= read_PlainPackedU40()!=U40_HIGH;\n"
+    "    write_PlainPackedU40();\n"
+    "    result |= read_PlainPackedU40()!=9;\n"
+    "    struct U40Box local_u={U40_HIGH,U40_HIGH};\n"
+    "    struct S40Box local_s={S40_NEG,S40_NEG};\n"
+    "    local_u.field=3;\n"
+    "    local_s.field=-7;\n"
+    "    result |= local_u.field!=3 || local_u.ordinary!=U40_HIGH;\n"
+    "    result |= local_s.field!=-7 || local_s.ordinary!=S40_NEG;\n"
+    "    return result;\n"
+    "}\n"
+    )};
+    return string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    typedef struct CEnumBitFieldCase CEnumBitFieldCase;
+    struct CEnumBitFieldCase
+    {
+        String8 record;
+        CTypeKind compatible_kind;
+        u32 semantic_width;
+        u32 field_width;
+        bool is_signed;
+        bool packed;
+        bool is_volatile;
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        Target target = targets[target_index];
+        CTypeKind unsigned_wide = target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_UNSIGNED_LONG_LONG : C_TYPE_UNSIGNED_LONG;
+        CTypeKind signed_wide = target.os == OPERATING_SYSTEM_WINDOWS ? C_TYPE_LONG_LONG : C_TYPE_LONG;
+        CEnumBitFieldCase cases[] = {
+        {S8("U32Box"), C_TYPE_UNSIGNED_INT, 32, 32, false, false, true},
+        {S8("S32Box"), C_TYPE_INT, 32, 6, true, false, true},
+        {S8("SmallBox"), C_TYPE_UNSIGNED_INT, 32, 3, false, false, true},
+        {S8("U40Box"), unsigned_wide, 64, 40, false, false, true},
+        {S8("S40Box"), signed_wide, 64, 40, true, false, true},
+        {S8("U64Box"), unsigned_wide, 64, 64, false, false, true},
+        {S8("S64Box"), signed_wide, 64, 64, true, false, true},
+        {S8("FixedUBox"), C_TYPE_UNSIGNED_LONG_LONG, 64, 64, false, false, true},
+        {S8("FixedSBox"), C_TYPE_LONG_LONG, 64, 64, true, false, true},
+        {S8("QualifiedBox"), unsigned_wide, 64, 40, false, false, true},
+        {S8("PackedU40"), unsigned_wide, 64, 40, false, true, true},
+        {S8("PackedS40"), signed_wide, 64, 40, true, true, true},
+        {S8("PlainPackedU40"), unsigned_wide, 64, 40, false, true, false},
+        };
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_enum_bit_field_source(temporary.arena), (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("enum-bit-fields.c"), tokens, parse, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        IrProgram* program = lowered.program;
+                        IrModule* module = program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                        {
+                            CEnumBitFieldCase expected = cases[case_index];
+                            CType const* record = 0;
+                            IrType* ir_record = 0;
+                            for (u32 index = 0; index < parse.type_count && !record; index += 1)
+                            {
+                                CType const* type = parse.types + index;
+                                if (!type->has_unqualified_type && (type->kind == C_TYPE_STRUCT || type->kind == C_TYPE_UNION) &&
+                                    string_equal(type->tag, expected.record))
+                                {
+                                    record = type;
+                                }
+                            }
+                            for (u32 index = 0; index < program->types.count && !ir_record; index += 1)
+                            {
+                                IrType* type = program->types.types + index;
+                                if (!type->is_volatile && (type->kind == IR_TYPE_STRUCT || type->kind == IR_TYPE_UNION) &&
+                                    string_equal(type->name, expected.record))
+                                {
+                                    ir_record = type;
+                                }
+                            }
+                            if (BUSTER_REQUIRE(arguments, record && record->member_count && ir_record && ir_record->field_count))
+                            {
+                                CMember const* member = parse.members + record->member_start;
+                                if (BUSTER_REQUIRE(arguments, member->type.value < parse.type_count))
+                                {
+                                    CType const* enumeration = parse.types + member->type.value;
+                                    if (enumeration->has_unqualified_type && enumeration->unqualified_type.value < parse.type_count)
+                                    {
+                                        enumeration = parse.types + enumeration->unqualified_type.value;
+                                    }
+                                    BUSTER_TEST(arguments, enumeration->kind == C_TYPE_ENUM);
+                                    if (BUSTER_REQUIRE(arguments, enumeration->element_type.value < parse.type_count))
+                                    {
+                                        BUSTER_TEST(arguments, parse.types[enumeration->element_type.value].kind == expected.compatible_kind);
+                                    }
+                                    if (!expected.packed && BUSTER_REQUIRE(arguments, record->member_count == 2 && ir_record->field_count == 2))
+                                    {
+                                        BUSTER_TEST(arguments, member->type.value == parse.members[record->member_start + 1].type.value);
+                                        BUSTER_TEST(arguments, ir_record->fields[0].type.value == ir_record->fields[1].type.value);
+                                    }
+                                }
+                                IrField* field = ir_record->fields;
+                                IrType* field_type = ir_type_from_id(&program->types, field->type);
+                                if (BUSTER_REQUIRE(arguments, field_type != 0))
+                                {
+                                    BUSTER_TEST(arguments, field->is_bit_field && field->bit_width == expected.field_width);
+                                    BUSTER_TEST(arguments, field_type->kind == IR_TYPE_INTEGER && field_type->bit_width == expected.semantic_width);
+                                    BUSTER_TEST(arguments, field_type->is_signed == expected.is_signed);
+                                    BUSTER_TEST(arguments, field_type->layout.size == expected.semantic_width / 8);
+                                    if (expected.packed)
+                                    {
+                                        BUSTER_TEST(arguments, ir_record->layout.size == 5 && ir_record->layout.alignment == 1);
+                                        BUSTER_TEST(arguments, ir_field_access_size(&program->types, field) == 5);
+                                    }
+                                    String8 read_name = string_format(temporary.arena, S8("read_{S8}"), expected.record);
+                                    IrFunction* reader = c_test_find_ir_function(module, read_name);
+                                    IrType* signature = reader ? ir_type_from_id(&program->types, reader->canonical_type) : 0;
+                                    IrType* returned = signature ? ir_type_from_id(&program->types, signature->return_type) : 0;
+                                    if (BUSTER_REQUIRE(arguments, reader && returned))
+                                    {
+                                        BUSTER_TEST(arguments, returned->kind == IR_TYPE_INTEGER && returned->bit_width == expected.semantic_width);
+                                        BUSTER_TEST(arguments, returned->is_signed == expected.is_signed);
+                                        u32 loads = 0;
+                                        for (u32 index = 0; index < reader->instruction_count; index += 1)
+                                        {
+                                            IrInstruction* instruction = reader->instructions + index;
+                                            if (instruction->opcode == IR_OPCODE_LOAD)
+                                            {
+                                                IrType* loaded = ir_type_from_id(&program->types, instruction->canonical_type);
+                                                if (BUSTER_REQUIRE(arguments, loaded != 0))
+                                                {
+                                                    BUSTER_TEST(arguments, loaded->bit_width <= (expected.packed ? 32u : expected.semantic_width));
+                                                    BUSTER_TEST(arguments, instruction->volatile_access == expected.is_volatile);
+                                                }
+                                                loads += 1;
+                                            }
+                                        }
+                                        BUSTER_TEST(arguments, loads == (expected.packed ? 2u : 1u));
+                                        if (expected.packed)
+                                        {
+                                            IrFunction* writer = c_test_find_ir_function(module,
+                                                string_format(temporary.arena, S8("write_{S8}"), expected.record));
+                                            if (BUSTER_REQUIRE(arguments, writer != 0))
+                                            {
+                                                u32 stores = 0;
+                                                for (u32 index = 0; index < writer->instruction_count; index += 1)
+                                                {
+                                                    IrInstruction* instruction = writer->instructions + index;
+                                                    if (instruction->opcode == IR_OPCODE_STORE)
+                                                    {
+                                                        BUSTER_TEST(arguments, instruction->volatile_access == expected.is_volatile);
+                                                        stores += 1;
+                                                    }
+                                                }
+                                                BUSTER_TEST(arguments, stores == 2);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_field_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("enum-bit-fields"), S8(".c"));
+    String8 source_text = c_test_enum_bit_field_source(arguments->arena);
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(source_text))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("enum-bit-fields-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], frontends[form],
+                                         S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("enum bit-fields {S8} {S8} {S8}: {S8}"),
+                                      dialects[dialect], modes[mode], frontends[form], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("enum bit-fields runtime {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                    dialects[dialect], modes[mode], frontends[form], execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -815,15 +1151,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
     String8 buster_dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     String8 frontend_flags[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
-    String8 fixtures[] = {c_test_enumerator_type_source, c_test_enum_successor_source, c_test_enum_wide_successor_source};
+    String8 fixtures[] = {c_test_enumerator_type_source, c_test_enum_successor_source, c_test_enum_wide_successor_source, c_test_enum_bit_field_source(arguments->arena)};
     // The successor fixture preserves wide negative declaration types, which
     // GCC 14 narrows to int. Clang covers that rule in both requested dialects.
     // GCC covers the >64-bit extension: Clang 17 does not support its successors.
-    for (u32 test_case = 0; test_case < 6; test_case += 1)
+    for (u32 test_case = 0; test_case < 2 * BUSTER_ARRAY_LENGTH(fixtures); test_case += 1)
     {
         u32 c23 = test_case & 1;
         u32 fixture = test_case / 2;
-        u32 reference = fixture == 0 ? c23 : fixture == 1 ? 0 : 1;
+        u32 reference = fixture == 0 || fixture == 3 ? c23 : fixture == 1 ? 0 : 1;
         for (u32 form = 0; form < 2; form += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -20039,6 +20375,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successor_limits);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
+    BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_field_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
