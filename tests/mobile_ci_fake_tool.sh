@@ -261,7 +261,16 @@ case "$tool" in
                 printf 'Device booted\n'
                 ;;
             install)
-                printf '%s\n' "${2:-}" >"$state/installed"
+                install_path=${2:-}
+                printf 'fake install stdout: %s\n' "$install_path"
+                printf 'fake install stderr: lifecycle diagnostic\n' >&2
+                if [[ -z ${FAKE_IOS_INSTALL_FAIL_LABEL:-} || $install_path == *"/${FAKE_IOS_INSTALL_FAIL_LABEL}/"* ]]; then
+                    sleep "${FAKE_IOS_INSTALL_SLEEP_SECONDS:-0}"
+                    if [[ ${FAKE_IOS_INSTALL_STATUS:-0} -ne 0 ]]; then
+                        exit "${FAKE_IOS_INSTALL_STATUS}"
+                    fi
+                fi
+                printf '%s\n' "$install_path" >"$state/installed"
                 ;;
             spawn)
                 spawn_udid=${1:-}
