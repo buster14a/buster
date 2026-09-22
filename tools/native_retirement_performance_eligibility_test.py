@@ -57,6 +57,27 @@ class RetirementEligibilityTests(unittest.TestCase):
         self.assertEqual(census.APPLICABILITY_FIELDS, schema.APPLICABILITY_FIELDS)
         self.assertEqual(census.APPLICABILITY_SKIP_FIELDS, schema.APPLICABILITY_SKIP_FIELDS)
 
+    def test_actual_validator_report_and_evidence_use_the_production_schema(self):
+        from native_retirement_contract_test import ContractTests, read_table
+        fixture = ContractTests()
+        fixture.setUp()
+        try:
+            report = fixture.validate()
+            binding._keys(report, schema.VALIDATOR_REPORT_FIELDS, "production report")
+            _, rows = read_table(fixture.shards[0] / "rows.tsv")
+            by_row = {row: name for name, ids in report["applicability_rows_by_class"].items()
+                      for row in ids}
+            evidence = binding._check_validator_projection_evidence(
+                fixture.root, report, rows, by_row, set(report["applicability_skip_rows"]))
+            self.assertEqual(len(evidence["artifacts"]), 3)
+            self.assertEqual(len(by_row), len(rows))
+            self.assertTrue(report["applicability_rows_by_class"]["retained-control"])
+            self.assertEqual(report["applicability_skip_rows"], [])
+            for artifact in evidence["artifacts"]:
+                binding._check_evidence(fixture.root, artifact, "census projection")
+        finally:
+            fixture.tearDown()
+
     def test_measured_direct_reference_control_is_not_a_skip(self):
         report = self.report()
         report["applicability_skip_rows"] = [2, 3]
