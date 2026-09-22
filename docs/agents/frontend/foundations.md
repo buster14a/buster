@@ -704,7 +704,14 @@ through following implicit members; an explicit initializer can reset the
 sequence. Explicit initializers never speculatively compute a successor, so an
 explicit reset immediately after the largest supported constant is valid.
 Fixed-base successors use the same arithmetic but must fit their declared base
-and never widen. General explicit fixed-base range validation remains #903.
+and never widen. Explicit fixed-base initializers pass the same signed-magnitude
+representability check after typed evaluation, including all casts in the ICE,
+and before the member's fixed declaration type is published (#903). A negative
+value cannot fit an unsigned base; an explicit cast can change that value before
+checking. Range failures diagnose the enumerator's name and invalidate its ICE,
+so following implicit members stay invalid until an explicit reset. The declared
+base and the original ICE's magnitude/type are never widened or narrowed to make
+an invalid value fit. GNU17's fixed-base extension and GNU23 use this same rule.
 
 Pending lookup respects lexical scope and declaration order, including a nearer
 ordinary identifier shadowing an outer enumerator. Published names use ordinary
@@ -755,6 +762,15 @@ and constants observed through globals and runtime functions.
 `c_test_enum_successor_limits` checks diagnostic kind, message and source
 location for consecutive invalid successors at both 128-bit terminal limits
 and signed/unsigned fixed 8/64-bit limits, without changing the declared base.
+
+`c_test_fixed_enum_ranges` and `c_test_fixed_enum_range_diagnostics` extend that
+contract to signed/unsigned 8/16/32/64/128-bit bases, target-sized long, typedef
+bases and bool. They cover exact endpoints, out-of-range explicit values,
+signedness-changing casts, implicit overflow and recovery, with declaration-site
+diagnostics and unchanged base types on Linux/Windows x86-64/AArch64 in GNU17
+and GNU23. Positive inputs also validate both frontend IR forms. The existing
+enumerator differential harness compiles and executes the fixed-base source
+with Clang in both dialects at O0/O2 and with Buster in both frontend forms.
 
 The Linux x86-64 `c_test_enumerator_type_differential` also executes the new
 sources at O0/O2: Clang in GNU17/GNU2x for the 32-bit transitions and negative

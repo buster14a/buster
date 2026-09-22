@@ -11332,6 +11332,17 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
                         string_format(result->arena, S8("enumerator '{S8}' is not an integer constant expression"),
                                       c_token_spelling(preprocess.spelling_base, name)));
                 }
+                else if (fixed_type.value < result->type_count &&
+                         !c_parse_enum_value_fits(preprocess.target, integer_constant, c_parse_expression_value_kind(result, fixed_type)))
+                {
+                    // Check the evaluated value, including explicit casts, before
+                    // publishing the fixed type. Never narrow the ICE to make it fit.
+                    c_parse_diagnostic(
+                        result, c_preprocess_token_location(&preprocess, name), C_DIAGNOSTIC_INVALID_CONSTEXPR,
+                        string_format(result->arena, S8("enumerator '{S8}' is not representable by its fixed underlying type"),
+                                      c_token_spelling(preprocess.spelling_base, name)));
+                    integer_constant.valid = false;
+                }
                 declaration_type = fixed_type.value < result->type_count ? fixed_type
                                    : c_parse_enum_value_fits(preprocess.target, integer_constant, C_TYPE_INT)
                                        ? c_parse_expression_scalar_type(result, C_TYPE_INT) : integer_constant.type;
