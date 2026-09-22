@@ -303,6 +303,10 @@ test_ios_batch_and_cleanup() (
     assert_count 1 'simctl shutdown FAKE-UDID' "$log"
     assert_count 2 'simctl install FAKE-UDID' "$log"
     assert_count 2 'simctl launch --console-pty FAKE-UDID' "$log"
+    assert_file_contains 'phase=install label=Debug outcome=success status=0 native_status=0 capture_status=0' "$state/console.Debug.log.install.status.log"
+    assert_file_contains 'phase=install label=Release outcome=success status=0 native_status=0 capture_status=0' "$state/console.Release.log.install.status.log"
+    assert_file_contains 'fake install stdout:' "$state/console.Debug.log.install.log"
+    assert_file_contains 'fake install stderr:' "$state/console.Debug.log.install.log"
     assert_file_contains "$result_marker_success" "$state/console.Debug.log"
     assert_file_contains "$result_marker_success" "$state/console.Release.log"
 )
@@ -833,6 +837,18 @@ test_ios_lifecycle_evidence() (
             status=124; native=unavailable; outcome=timeout
             export FAKE_IOS_CODESIGN_SLEEP_SECONDS=60 ;;
         codesign-large-output) export FAKE_IOS_LARGE_OUTPUT=1 ;;
+        install-exit|install-native-124|install-timeout)
+            phase=install; label=Debug; status=8; native=8; prior_status=1
+            export FAKE_IOS_CODESIGN_STATUS=0
+            export FAKE_IOS_INSTALL_FAIL_LABEL=Debug FAKE_IOS_INSTALL_STATUS=8
+            export BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=1
+            if [[ $case_name == install-native-124 ]]; then
+                status=124; native=124; export FAKE_IOS_INSTALL_STATUS=124
+            elif [[ $case_name == install-timeout ]]; then
+                status=124; native=unavailable; outcome=timeout
+                export FAKE_IOS_INSTALL_STATUS=0 FAKE_IOS_INSTALL_SLEEP_SECONDS=60
+            fi
+            ;;
         shutdown-exit|shutdown-timeout|app-and-shutdown|native-macos)
             phase=shutdown; label=batch; status=9; native=9; prior_status=0
             export FAKE_IOS_CODESIGN_STATUS=0 FAKE_IOS_SHUTDOWN_STATUS=9
@@ -862,6 +878,7 @@ test_ios_lifecycle_evidence() (
         exit 1
     fi
     evidence="$state/console.Debug.log.codesign"
+    if [[ $phase == install ]]; then evidence="$state/console.Debug.log.install"; fi
     if [[ $phase == shutdown ]]; then evidence="$state/console.log.shutdown"; fi
     assert_file_contains "phase=$phase label=$label outcome=$outcome" "$evidence.status.log"
     if [[ $case_name != native-macos ]]; then
@@ -911,6 +928,7 @@ test_ios_boot_recovery_controls
 test_ios_boot_recovery_policy
 test_ios_boot_recovery_cancellation
 for lifecycle_case in codesign-exit codesign-native-124 codesign-timeout codesign-large-output \
+    install-exit install-native-124 install-timeout \
     shutdown-exit shutdown-timeout app-and-shutdown; do
     test_ios_lifecycle_evidence "$lifecycle_case"
 done
