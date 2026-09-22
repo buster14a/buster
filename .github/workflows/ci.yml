@@ -111,6 +111,7 @@ jobs:
   test:
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
+      BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
       # Profiling is diagnostic and opt-in. The manual dispatch input is
       # captured in the event payload, so delayed and retried jobs use one value.
@@ -247,6 +248,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
           "$BUSTER_CI_PYTHON" tools/native_producer_profile_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-producer-profile.log"
           "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
+          "$BUSTER_CI_PYTHON" tools/ci_matrix_phases_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-phases-test.log"
           "$BUSTER_CI_PYTHON" tools/ci_native_observation_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-observation-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the

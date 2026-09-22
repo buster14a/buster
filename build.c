@@ -19,6 +19,7 @@
 //   cmake_profile_summary_*,                    diagnostics: build summaries
 //   ninja_log_summary_*, time_trace_summary_*,   and the compile/test time
 //   test_timing_summary_*                        summaries
+//   tools/matrix_phase.c                       optional desktop phase observation
 //   matrix_superbuild_*                          the test_all_combinations
 //                                                superbuild scheduler
 //   matrix_coverage_*                            authoritative desktop
@@ -124,6 +125,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_TEST_ALL_COMBINATIONS,
     BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI,
     BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST,
+    BUILD_COMMAND_MATRIX_PHASE_RUN,
     BUILD_COMMAND_COUNT,
 } BuildCommand;
 
@@ -210,6 +212,7 @@ struct ProcessRun
     ProcessSpawnResult spawn;
     ProcessResult result;
     String8 working_directory;
+    String8 phase_task; // Optional desktop observer; empty outside instrumented matrices.
     String8 timing_description;
     String8 timing_configuration;
     u64 start_us;
@@ -24118,6 +24121,8 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_self_host_plan_valid(MatrixSuperbuild
     return result;
 }
 
+#include "tools/matrix_phase.c"
+
 BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 path, String8 source_directory, String8 build_driver,
                                                            MatrixTestTree* trees, u32 tree_count, u32 outer_jobs,
                                                            MatrixTestCombination* combinations, MatrixSuperbuildSelfHostPlan self_host,
@@ -24394,6 +24399,29 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
         }
 
         String8 prefix = string_format(arena, S8("BUSTER_SUPERBUILD_TREE_{u32}"), tree_i);
+        String8 phase_tree = matrix_phase_find_tree(tree.build_directory);
+        String8 build_id = string_format(arena, S8("{S8}-build-all"), phase_tree);
+        String8 test_pool = string_format(arena, S8("validation-{S8}"), phase_tree);
+        matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_BUILD_OBSERVER"), prefix), phase_tree,
+                           S8("build"), S8(""), string_format(arena, S8("build-{S8}"), phase_tree), S8("scheduler"), tree.parallel_jobs);
+        if (first_test_config.length)
+        {
+            matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_TEST_0_OBSERVER"), prefix), phase_tree,
+                               S8("validation"), first_test_config, test_pool, build_id, tree.parallel_jobs);
+        }
+        if (second_test_config.length)
+        {
+            matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_TEST_1_OBSERVER"), prefix), phase_tree,
+                               S8("validation"), second_test_config, test_pool,
+                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, first_test_config), tree.parallel_jobs);
+        }
+        if (analyze_config.length)
+        {
+            matrix_phase_cmake(arena, &lines, string_format(arena, S8("{S8}_ANALYZE_OBSERVER"), prefix), phase_tree,
+                               S8("post_test"), analyze_config, test_pool,
+                               string_format(arena, S8("{S8}-validation-{S8}"), phase_tree, analyze_config), 0);
+        }
+
         string8_list_push(arena, &lines,
                           string_format(arena, S8("set({S8}_BUILD_DIRECTORY [==[{S8}]==])\n"), prefix, tree.build_directory));
         string8_list_push(arena, &lines, string_format(arena, S8("set({S8}_NATIVE_CONFIG {S8})\n"), prefix, first_config));
@@ -24422,6 +24450,12 @@ BUSTER_GLOBAL_LOCAL bool matrix_superbuild_manifest_write(Arena* arena, String8 
                           string_format(arena, S8("set({S8}_TABLE_AUDITS {u32})\n"), prefix, tree.table_audit_scheduled));
     }
 
+    if (self_host.enabled)
+    {
+        String8 phase_tree = matrix_phase_find_tree(self_host.build_directory);
+        matrix_phase_cmake(arena, &lines, S8("BUSTER_SUPERBUILD_SELF_HOST_OBSERVER"), phase_tree, S8("self_host"), S8("Release"),
+                           S8("self-host"), string_format(arena, S8("{S8}-build-all"), phase_tree), self_host.pool_jobs);
+    }
     String8 manifest = string_join_arena(arena, string8_list_to_slice(arena, lines), true);
     return file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(manifest));
 }
@@ -24591,6 +24625,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         return PROCESS_RESULT_FAILED;
     }
 
+    if (!matrix_phase_begin(arena, coverage_manifest, direct_matrix))
+    {
+        string_print(S8("error: matrix phase output must be a fresh directory\n"));
+        return PROCESS_RESULT_FAILED;
+    }
+
     MatrixTestCombination combinations[BUILD_COMPILER_COUNT * 4] = {0};
     u64 combination_count = 0;
     BuildStep* generate_step = step_add(arena);
@@ -24645,7 +24685,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
             .cross_configs = !direct_matrix,
             .cmake_arguments = ci ? (SliceString8)BUSTER_ARRAY_TO_SLICE(ci_cmake_arguments) : (SliceString8){0},
         };
+        generate = matrix_phase_tree(arena, generate, coverage_manifest, tree_plan);
         generate_add(arena, generate_step, generate);
+        matrix_phase_wrap(arena, generate_step->last_process, matrix_phase_find_tree(build_directory), S8("configure"), S8(""), 0);
         if (cmake_profile)
         {
             cmake_profile_summary_add(arena, profile_summary_step, cmake_profile_path, cmake_profile_summary_limit);
@@ -24788,6 +24830,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     if (!direct_matrix)
     {
         matrix_superbuild_allocate_jobs(trees, tree_count, thread_count);
+        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(thread_count, tree_count);
         string_print(S8("BUSTER_SUPERBUILD_PARALLELISM: threads={u32} trees={u32} outer_jobs={u32}\n"), thread_count, tree_count,
                      matrix_superbuild_outer_jobs(thread_count, tree_count));
         for (u32 tree_i = 0; tree_i < tree_count; tree_i += 1)
@@ -39105,6 +39148,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS] = S8_INITIALIZER("test_all_combinations"),
         [BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI] = S8_INITIALIZER("test_all_combinations_ci"),
         [BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST] = S8_INITIALIZER("coverage_manifest_self_test"),
+        [BUILD_COMMAND_MATRIX_PHASE_RUN] = S8_INITIALIZER("matrix_phase_run"),
     };
 
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(build_command_names) == BUILD_COMMAND_COUNT);
@@ -39185,7 +39229,12 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     TestMuslOptions test_musl_options = {0};
     TestCpythonOptions test_cpython_options = {0};
 
-    if (command == BUILD_COMMAND_PRODUCTION_PROFILE)
+    if (command == BUILD_COMMAND_MATRIX_PHASE_RUN)
+    {
+        result = matrix_phase_run(arena, (SliceString8){.pointer = arguments.pointer + argument_i, .length = arguments.length - argument_i});
+        argument_i = arguments.length;
+    }
+    else if (command == BUILD_COMMAND_PRODUCTION_PROFILE)
     {
         result = production_profile_main(
             arena,
@@ -40384,6 +40433,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             test_cpython_action_add(arena, test_cpython_options);
         }
         break;
+        case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_GPU_TOOLCHAINS:
         case BUILD_COMMAND_TEST_DIFFERENTIAL:
         case BUILD_COMMAND_NATIVE_RETIREMENT_CENSUS:
@@ -40404,6 +40454,10 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             machine_info_print();
             bool ci = command == BUILD_COMMAND_TEST_ALL_COMBINATIONS_CI;
             result = test_all(arena, ci, options);
+            if (result == PROCESS_RESULT_SUCCESS && !matrix_phase_plan(arena, string_equal(matrix_phase.scheduler, S8("direct"))))
+            {
+                result = PROCESS_RESULT_FAILED;
+            }
         }
         break;
         case BUILD_COMMAND_COVERAGE_MANIFEST_SELF_TEST:
@@ -40563,6 +40617,11 @@ ProcessResult entry_point(void)
 
     for (BuildStep* step = build_graph->first_step; step; step = step->next)
     {
+        if (matrix_phase.enabled && !matrix_phase_ready(arena, step))
+        {
+            result = PROCESS_RESULT_FAILED;
+            break;
+        }
         u32 pending_count = 0;
         ProcessRun* first_pending = step->first_process;
 
@@ -40648,5 +40707,6 @@ ProcessResult entry_point(void)
         }
     }
 
+    result = matrix_phase_finish(arena, result);
     return result;
 }
