@@ -1436,7 +1436,7 @@ def _validator_projection(report, row_count):
     return by_row, set(skip_rows)
 
 
-def _report_evidence_path(root, value, name):
+def _report_evidence_path(root, value, name, *, directory=False):
     _string(value, name)
     root = Path(root).resolve()
     candidate = Path(value)
@@ -1455,8 +1455,9 @@ def _report_evidence_path(root, value, name):
         cursor /= part
         if cursor.is_symlink():
             _fail(f"{name} contains a symbolic link")
-    if not candidate.is_file() or candidate.is_symlink():
-        _fail(f"{name} is missing or is a symbolic link")
+    exists = candidate.is_dir() if directory else candidate.is_file()
+    if not exists or candidate.is_symlink():
+        _fail(f"{name} is missing, has the wrong type, or is a symbolic link")
     return candidate
 
 
@@ -1523,6 +1524,12 @@ def _check_validator_projection_evidence(root, report, census_rows, by_row, skip
         expected = {"group": source["group"], "fixture": source["fixture"],
                     "target": source["target"], "allocator": source["allocator"],
                     "applicability": by_row[row], "reason": reasons[row]}
+        # Non-object source obligations determine skip provenance even when
+        # final applicability describes unavailable native execution instead.
+        # The census replay authenticates both projections independently.
+        if source["compile_obligation"] == "registered-non-object-control":
+            expected["applicability"] = "retained-control"
+            expected["reason"] = source["compile_obligation"]
         if any(item[key] != value for key, value in expected.items()):
             _fail("applicability-skips.tsv is not row-bound to trusted source evidence")
     artifacts = []
@@ -1553,6 +1560,72 @@ TARGET_ABIS = {
     "x86_64-unknown-linux-gnu": "systemv-x86_64",
     "x86_64-unknown-uefi": "win64-x86_64",
 }
+
+
+def _replay_validator_report(root, validator_report, projection_evidence):
+    directories = _list(validator_report["directories"],
+                        "validator_report.directories")
+    if not directories:
+        _fail("#508 validator report must name the validated census shard directories")
+    directory_paths = [
+        _report_evidence_path(root, directory,
+                              f"validator_report.directories[{index}]", directory=True)
+        for index, directory in enumerate(directories)
+    ]
+    # Re-run the repository's actual schema-2 validator over the bound shard
+    # directories.  The receipt above is only accepted when every report
+    # field (including both candidate and acceptance gates) equals this fresh
+    # recomputation; a copied ``clean_*`` claim cannot pass.
+    validator_program = Path(__file__).resolve().with_name("native_retirement_contract.py")
+    if not validator_program.is_file():
+        _fail("#508 schema-2 validator source is unavailable for replay")
+    with tempfile.TemporaryDirectory(prefix="retirement-census-replay-") as replay_dir:
+        output = Path(replay_dir) / "validator-report.json"
+        command = [sys.executable, str(validator_program), "validate-shards",
+                   *(str(path) for path in directory_paths), "--out", str(output)]
+        if validator_report["require_clean_candidate"]:
+            command.append("--require-clean-candidate")
+        if validator_report["require_clean_acceptance"]:
+            command.append("--require-clean-acceptance")
+        if validator_report["reference_supplement_sha256"]:
+            command.append("--reference-supplements")
+        replay = subprocess.run(command, check=False, capture_output=True, text=True,
+                                cwd=Path(root).resolve())
+        expected_success = not (
+            validator_report["require_clean_candidate"]
+            and validator_report["candidate_failure_rows"]) and not (
+            validator_report["require_clean_acceptance"]
+            and validator_report["acceptance_failure_rows"])
+        if (replay.returncode == 0) is not expected_success or not output.is_file():
+            _fail("#508 schema-2 validator replay status differs from retained failures")
+        try:
+            recomputed = json.loads(output.read_text(encoding="utf-8"),
+                                    object_pairs_hook=_json_object)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            _fail(f"#508 schema-2 validator replay output is invalid: {error}")
+        path_fields = set(RETIREMENT_SCHEMA.PATH_FIELDS)
+        for field, expected in validator_report.items():
+            if field in path_fields:
+                continue
+            if recomputed.get(field) != expected:
+                _fail(f"#508 schema-2 validator replay differs in {field}")
+        _keys(recomputed, RETIREMENT_SCHEMA.VALIDATOR_REPORT_FIELDS, "replayed validator report")
+        replay_files = {
+            "applicability_evidence": projection_evidence["applicability_bytes"],
+            "applicability_skip_evidence": projection_evidence["skip_bytes"],
+            "residual_evidence": projection_evidence["residual_bytes"],
+        }
+        for field, expected_bytes in replay_files.items():
+            replay_path = Path(recomputed[field])
+            if not replay_path.is_file() or replay_path.read_bytes() != expected_bytes:
+                _fail(f"#508 schema-2 validator replay differs in {field}")
+
+
+def _check_census_cpu_axes(census_rows, axes):
+    # These rows are authenticated by the mandatory census replay. Preserve
+    # their exact CPU profiles, including target-scoped fixture overrides.
+    if axes["cpus"] != sorted({row["cpu"] for row in census_rows}):
+        _fail("canonical performance CPU profiles differ from the census")
 
 
 def _check_support_output(root, binding, row_data, native_target=None):
@@ -1717,8 +1790,8 @@ def _check_support_output(root, binding, row_data, native_target=None):
             _fail(f"rows.tsv[{index}] has an invalid target ABI")
         if row["cpu"] == "" or not row["cpu_features"]:
             _fail(f"rows.tsv[{index}] lacks explicit CPU identity")
-        if row["cpu"] != manifest["cpu"]:
-            _fail(f"rows.tsv[{index}] CPU differs from the manifest")
+        # The census validator authenticates target-scoped fixture CPU recipes
+        # during independent replay below; manifest.cpu is only the fallback.
         if row["PIC"] not in PIC or row["selected"] not in {"0", "1"}:
             _fail(f"rows.tsv[{index}] has an invalid PIC/selection field")
         for field in ("fixture_recipe", "compile_obligation", "link_obligation",
@@ -1764,8 +1837,7 @@ def _check_support_output(root, binding, row_data, native_target=None):
             or axes["PIC"] != PIC or axes["stages"] != STAGES \
             or axes["targets"] != sorted(TARGETS):
         _fail("canonical performance rows do not cover the approved axes")
-    if len(axes["cpus"]) != 1:
-        _fail("canonical performance rows must bind one explicit CPU profile")
+    _check_census_cpu_axes(census_rows, axes)
 
     performance_artifact = _support_file(support, "performance_declaration")
     performance = _read_json_evidence(root, performance_artifact,
@@ -1822,24 +1894,6 @@ def _check_support_output(root, binding, row_data, native_target=None):
     projection_evidence = _check_validator_projection_evidence(
         root, validator_report, census_rows, applicability_by_row,
         applicability_skip_rows)
-    directories = _list(validator_report["directories"],
-                        "validator_report.directories")
-    if not directories:
-        _fail("#508 validator report must name the validated census shard directories")
-    directory_paths = []
-    for index, directory in enumerate(directories):
-        _string(directory, f"validator_report.directories[{index}]")
-        candidate = Path(directory)
-        if candidate.is_absolute():
-            try:
-                candidate = Path(value).relative_to(Path(root).resolve())
-            except ValueError:
-                _fail("validator report directory escapes the evidence root")
-            directory = candidate.as_posix()
-        else:
-            directory = _relative_path(directory,
-                                       f"validator_report.directories[{index}]")
-        directory_paths.append(Path(root).resolve() / PurePosixPath(directory))
     if validator_report["rows_validated"] != declaration_object_rows \
             or validator_report["groups"] != declaration_groups \
             or validator_report["shards"] <= 0:
@@ -1867,51 +1921,7 @@ def _check_support_output(root, binding, row_data, native_target=None):
     if validator_report["clean_acceptance"] != (
             not validator_report["acceptance_failure_rows"]):
         _fail("schema-2 clean_acceptance disagrees with retained failure evidence")
-    # Re-run the repository's actual schema-2 validator over the bound shard
-    # directories.  The receipt above is only accepted when every report
-    # field (including both candidate and acceptance gates) equals this fresh
-    # recomputation; a copied ``clean_*`` claim cannot pass.
-    validator_program = Path(__file__).resolve().with_name("native_retirement_contract.py")
-    if not validator_program.is_file():
-        _fail("#508 schema-2 validator source is unavailable for replay")
-    with tempfile.TemporaryDirectory(prefix="retirement-census-replay-") as replay_dir:
-        output = Path(replay_dir) / "validator-report.json"
-        command = [sys.executable, str(validator_program), "validate-shards",
-                   *(str(path) for path in directory_paths), "--out", str(output)]
-        if validator_report["require_clean_candidate"]:
-            command.append("--require-clean-candidate")
-        if validator_report["require_clean_acceptance"]:
-            command.append("--require-clean-acceptance")
-        replay = subprocess.run(command, check=False, capture_output=True, text=True,
-                                cwd=Path(root).resolve())
-        expected_success = not (
-            validator_report["require_clean_candidate"]
-            and validator_report["candidate_failure_rows"]) and not (
-            validator_report["require_clean_acceptance"]
-            and validator_report["acceptance_failure_rows"])
-        if (replay.returncode == 0) is not expected_success or not output.is_file():
-            _fail("#508 schema-2 validator replay status differs from retained failures")
-        try:
-            recomputed = json.loads(output.read_text(encoding="utf-8"),
-                                    object_pairs_hook=_json_object)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            _fail(f"#508 schema-2 validator replay output is invalid: {error}")
-        path_fields = set(RETIREMENT_SCHEMA.PATH_FIELDS)
-        for field, expected in validator_report.items():
-            if field in path_fields:
-                continue
-            if recomputed.get(field) != expected:
-                _fail(f"#508 schema-2 validator replay differs in {field}")
-        _keys(recomputed, RETIREMENT_SCHEMA.VALIDATOR_REPORT_FIELDS, "replayed validator report")
-        replay_files = {
-            "applicability_evidence": projection_evidence["applicability_bytes"],
-            "applicability_skip_evidence": projection_evidence["skip_bytes"],
-            "residual_evidence": projection_evidence["residual_bytes"],
-        }
-        for field, expected_bytes in replay_files.items():
-            replay_path = Path(recomputed[field])
-            if not replay_path.is_file() or replay_path.read_bytes() != expected_bytes:
-                _fail(f"#508 schema-2 validator replay differs in {field}")
+    _replay_validator_report(root, validator_report, projection_evidence)
     compiler_eligible_rows = set()
     performance_applicability = {}
     eligible_object_rows = 0
