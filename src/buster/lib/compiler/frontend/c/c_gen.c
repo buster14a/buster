@@ -8757,6 +8757,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* bui
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token)
 {
+    // Synthetic int operands only; enumerators use their published semantic
+    // type through c_ir_emit_enumerator, including full-width constants.
     return c_ir_emit_integer_value_typed(builder, value, is_negative, token, builder->s32_type);
 }
 
@@ -43556,16 +43558,18 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
     if (entity_id.value < builder->parse.entity_count)
     {
         CEntity* entity = builder->parse.entities + entity_id.value;
-        if (entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value))
+        if ((entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value)) &&
+            entity->type.value < builder->parse.type_count &&
+            builder->c_type_ir_map[entity->type.value].value != IR_ID_UNDERLYING_INVALID)
         {
-            IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : builder->s32_type;
+            IrTypeId type = builder->c_type_ir_map[entity->type.value];
             CIrWideInteger bits = {.low = entity->constant_value};
             if (entity->enum_member_plus_one && entity->enum_member_plus_one <= builder->parse.enum_member_count)
             {
                 bits.high = builder->parse.enum_members[entity->enum_member_plus_one - 1].integer_constant.magnitude_high;
             }
             if (entity->constant_is_negative) bits = c_ir_wide_negate(bits);
-            *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, bits.low);
+            *result = c_ir_constant_integer(type, bits.low);
             result->integer_high = bits.high;
             return true;
         }
@@ -48299,7 +48303,21 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         CType* c_type = &parse.types[type_index];
         if (c_type->kind == C_TYPE_ENUM && !c_type->has_unqualified_type)
         {
-            c_type_ir_map[type_index] = c_type->element_type.value < parse.type_count ? c_type_ir_map[c_type->element_type.value] : s32_type;
+            // Completion owns compatible-type selection. An incomplete tag
+            // can be a pointee, but has no integer layout to guess here.
+            if (c_type->element_type.value < parse.type_count)
+            {
+                c_type_ir_map[type_index] = c_type_ir_map[c_type->element_type.value];
+            }
+            else if (!c_type->is_complete)
+            {
+                c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+                    .name = c_type->tag,
+                    .kind = IR_TYPE_ENUM,
+                    .element_type = IR_TYPE_ID_INVALID,
+                    .return_type = IR_TYPE_ID_INVALID,
+                });
+            }
             continue;
         }
         if ((c_type->kind != C_TYPE_STRUCT && c_type->kind != C_TYPE_UNION) || c_type->has_unqualified_type)
@@ -48502,6 +48520,22 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     {
                         c_type_ir_map[type_index] = qualified;
                         progress = true;
+                    }
+                    continue;
+                }
+                if (c_type->kind == C_TYPE_ENUM)
+                {
+                    // A fixed base can be an aligned typedef whose mapping
+                    // was pending during the seed pass. Reuse that resolved
+                    // mapping when it becomes available, without a range scan.
+                    if (c_type->element_type.value < parse.type_count)
+                    {
+                        IrTypeId underlying = c_type_ir_map[c_type->element_type.value];
+                        if (underlying.value != IR_ID_UNDERLYING_INVALID && underlying.value != c_type_ir_map[type_index].value)
+                        {
+                            c_type_ir_map[type_index] = underlying;
+                            progress = true;
+                        }
                     }
                     continue;
                 }

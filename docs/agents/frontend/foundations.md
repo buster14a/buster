@@ -785,3 +785,31 @@ unconditional completion contract selected by its requested dialect.
 
 The implicit declaration rule is specified by C23 draft N3096, 6.7.2.2p11
 ([WG14 draft](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3096.pdf)).
+
+## Resolved enum lowering (#904)
+
+`c_parse_enum_complete` is the authority for an ordinary enum's compatible
+integer type. Lowering reads its stored `element_type` through `c_type_ir_map`;
+it never rescans the enumerators or substitutes signed int. Enumerator runtime
+values (`c_ir_emit_enumerator`) and constant identifiers use the completed
+symbol's mapped semantic type, which can still be int for an individually small
+GNU17 enumerator. `c_ir_emit_integer_value` is only the synthetic-int helper.
+An unavailable constant type remains unresolved instead of folding through s32.
+
+The existing type worklist also resolves enum bases that depend on a pending
+typedef mapping. This matters for fixed bases with an alignment attribute:
+their enum objects, return values and static initializers must all consume the
+same resolved base. An ordinary forward enum tag has an incomplete canonical
+enum type so pointers can name it without inventing a four-byte object layout.
+
+`c_test_enum_lowering` checks the semantic compatible kind and canonical return,
+parameter and global types on Linux, Windows and macOS, each on x86-64/AArch64,
+in GNU17/GNU23 and both frontend forms. The assertion-bearing source covers
+all-small signed/unsigned ranges, bit 31, 2^32, mixed negative/large-positive
+values, implicit successors across UINT_MAX, UINT64_MAX, sizeof, comparisons,
+widening, static initializers and volatile runtime values. The existing external
+differential harness runs it with Clang/GCC at O0/O2; expected values are literal
+constants, not inferred from Buster. The fixed-range fixture additionally checks
+the aligned-base case against Clang. `c_test_enum_runtime` runs these two sources
+and the bit-field source in all four native allocator modes with strict codegen
+verification, rejecting machine fallback outside NONE.
