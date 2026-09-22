@@ -111,7 +111,6 @@ jobs:
   test:
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
-      BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
       # Profiling is diagnostic and opt-in. The manual dispatch input is
       # captured in the event payload, so delayed and retried jobs use one value.
@@ -387,6 +386,8 @@ jobs:
 
       - name: Combination matrix (Linux, macOS)
         id: combinations_unix
+        env:
+          BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
         if: ${{ !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
@@ -402,6 +403,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' }}
         shell: powershell
         env:
+          BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
           CLANG_ARCH: ${{ matrix.clang_arch }}
@@ -467,6 +469,7 @@ jobs:
           BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_windows') || (matrix.platform == 'unix' && 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_windows') }}
           BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=${{ matrix.shard }} and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
           BUSTER_CI_ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
+          BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
           BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
           BUSTER_CI_COVERAGE_REQUIRED: "1"
           BUSTER_CI_COVERAGE_PLATFORM: ${{ matrix.os }}
