@@ -2219,11 +2219,21 @@ else()
         COMMENT "Run unit tests"
         VERBATIM
     )
+    # Native observer only; this prefix does not change dependencies or test policy.
+    set(BUSTER_MATRIX_TEST_OBSERVER)
+    if (BUSTER_MATRIX_PHASE_DRIVER)
+        if (NOT BUSTER_MATRIX_PHASE_ROOT OR NOT BUSTER_MATRIX_PHASE_TREE OR NOT BUSTER_MATRIX_PHASE_EPOCH)
+            message(FATAL_ERROR "Incomplete desktop matrix observer identity")
+        endif()
+        set(BUSTER_MATRIX_TEST_OBSERVER "${BUSTER_MATRIX_PHASE_DRIVER}" matrix_phase_run
+            "${BUSTER_MATRIX_PHASE_ROOT}" "${BUSTER_MATRIX_PHASE_TREE}-test-$<CONFIG>"
+            "${BUSTER_MATRIX_PHASE_EPOCH}" 0 --)
+    endif()
     if (BUSTER_CI)
         add_custom_target(test_all
             COMMAND
             ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-            "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            ${BUSTER_MATRIX_TEST_OBSERVER} "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
             DEPENDS ide
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             COMMENT "Run all compiler and library tests"
@@ -2233,7 +2243,7 @@ else()
         add_custom_target(test_all
             COMMAND
             ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
-            "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
+            ${BUSTER_MATRIX_TEST_OBSERVER} "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS}
             DEPENDS ide
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             COMMENT "Test all"

@@ -10,6 +10,7 @@ records explain, but never replace, the authoritative step outcome.
 import html
 import hashlib
 import json
+import ci_matrix_phases
 import os
 from pathlib import Path
 import re
@@ -770,12 +771,20 @@ def write_report(environment, *, expected_coverage_mode="ci"):
             except (OSError, ValueError, TypeError) as error:
                 coverage_errors = [f"coverage manifest could not be read: {error}"]
         failures = sorted(set(failures + ["coverage"] if coverage_errors else failures))
+    phases = None
+    if environment.get("BUSTER_MATRIX_PHASE_OUTPUT"):
+        try:
+            phases = ci_matrix_phases.collect(environment, coverage)
+        except (OSError, ValueError, TypeError) as error:
+            phases = {"complete": False, "errors": [str(error)]}
+        if not phases["complete"]:
+            failures = sorted(set(failures + ["matrix_phases"]))
     metadata = {key: environment.get(key, "unknown") for key in (
         "GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_REF", "GITHUB_RUN_ID",
         "GITHUB_RUN_ATTEMPT", "RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion", "BUSTER_CI_RUNNER",
         "BUSTER_MATRIX_SHARD", "BUSTER_CI_ZIG_CACHE_HIT")}
     report = {"schema": 1, "metadata": metadata, "required_steps": required,
-              "steps": steps, "coverage": coverage, "coverage_errors": coverage_errors,
+              "steps": steps, "coverage": coverage, "coverage_errors": coverage_errors, "matrix_phases": phases,
               "unsatisfied_steps": failures, "success": not failures}
     output = Path(environment["RUNNER_TEMP"]) / "buster-ci"
     output.mkdir(parents=True, exist_ok=True)
@@ -793,6 +802,8 @@ def write_report(environment, *, expected_coverage_mode="ci"):
         lines += _android_summary(report["android"])
     if coverage_required:
         lines += _coverage_summary(coverage, coverage_errors)
+    if phases is not None:
+        lines += [ci_matrix_phases.markdown(phases)]
     if failures:
         lines += ["", "Missing, skipped, cancelled, or failed required work is not a pass."]
     reproduction = environment.get("BUSTER_CI_REPRO", "See docs/ci-github-actions.md.")
