@@ -25,6 +25,7 @@ SPEC = importlib.util.spec_from_file_location(
     ROOT / "tools" / "native_retirement_performance_binding.py")
 binding = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(binding)
+RETIREMENT_SCHEMA = binding.RETIREMENT_SCHEMA
 
 
 class BindingTests(unittest.TestCase):
@@ -173,10 +174,43 @@ class BindingTests(unittest.TestCase):
         # performance binding checks candidate and acceptance cleanliness
         # separately; a synthetic ``success`` receipt is intentionally not
         # accepted as a substitute.
+        applicability_rows = list(range(len(census_rows)))
+        applicability_counts = {
+            name: (len(census_rows) if name == "admitted-supported" else 0)
+            for name in RETIREMENT_SCHEMA.APPLICABILITY_CLASSES
+        }
+        applicability_rows_by_class = {
+            name: (applicability_rows if name == "admitted-supported" else [])
+            for name in RETIREMENT_SCHEMA.APPLICABILITY_CLASSES
+        }
+        applicability_records = []
+        for row in census_rows:
+            applicability_records.append({
+                "row": row["row"], "group": row["group"], "fixture": row["fixture"],
+                "target": row["target"], "cpu": row["cpu"],
+                "frontend": row["frontend_lowering"], "allocator": row["allocator"],
+                "PIC": row["PIC"], "applicability": "admitted-supported",
+                "admission": "admitted-supported", "disposition": "strict-success",
+                "reason": "supported-object-zero-fallback",
+                "ownership": "candidate-compiler", "candidate_failure": "0",
+                "reference_failure": "0", "acceptance_failure": "0",
+            })
+        applicability_data = cls._tsv(
+            RETIREMENT_SCHEMA.APPLICABILITY_FIELDS, applicability_records)
+        applicability_artifact = artifact("census/applicability.tsv", applicability_data)
+        skips_data = cls._tsv(RETIREMENT_SCHEMA.APPLICABILITY_SKIP_FIELDS, [])
+        skips_artifact = artifact("census/applicability-skips.tsv", skips_data)
+        residual_data = (
+            b"row\tgroup\tfixture\tfunction\tfunction_id\ttarget\tcpu\tfrontend\t"
+            b"allocator\tPIC\tapplicability\tadmission\tdisposition\treason\t"
+            b"ownership\tdiagnostic\tstage\topcode_id\tsource_hex\tfunction_hex\t"
+            b"line\tcolumn\n")
+        residual_artifact = artifact("census/residual.tsv", residual_data)
         report_data = {
             "schema": 2,
-            "directories": 1,
+            "directories": ["census/shard-0"],
             "shards": 1,
+            "profile": "full-census",
             "rows_validated": len(census_rows),
             "groups": len(census_rows) // len(binding.ALLOCATORS),
             "compiler_revision_claim": revision_a,
@@ -184,6 +218,9 @@ class BindingTests(unittest.TestCase):
             "compiler_sha256": candidate_binary["sha256"],
             "baseline_sha256": baseline_binary["sha256"],
             "support_contract_sha256": declaration_artifact["sha256"],
+            "supported_gap_ledger_sha256": "d" * 64,
+            "applicability_ledger_sha256": "e" * 64,
+            "applicability_ledger_entries": 0,
             "resource_include_sha256": "c" * 64,
             "manifest_identity_sha256": manifest_artifact["sha256"],
             "rows_identity_fields": list(binding.ROW_FIELDS),
@@ -194,18 +231,44 @@ class BindingTests(unittest.TestCase):
             "reference_dispositions": {},
             "setup_dispositions": {},
             "candidate_dispositions": {},
+            "applicability_classes": list(RETIREMENT_SCHEMA.APPLICABILITY_CLASSES),
+            "admission_classes": list(RETIREMENT_SCHEMA.APPLICABILITY_CLASSES),
+            "applicability_counts": applicability_counts,
+            "admission_counts": dict(applicability_counts),
+            "applicability_rows_by_class": applicability_rows_by_class,
+            "admission_rows_by_class": dict(applicability_rows_by_class),
+            "supported_gap_rows": [],
+            "supported_gap_count": 0,
+            "supported_gap_sha256": binding._canonical_json_digest([]),
+            "applicability_rows": len(census_rows),
+            "applicability_evidence": applicability_artifact["path"],
+            "applicability_tsv": applicability_artifact["path"],
+            "applicability_sha256": applicability_artifact["sha256"],
+            "applicability_skip_rows": [],
+            "applicability_skip_evidence": skips_artifact["path"],
+            "residual_evidence": residual_artifact["path"],
+            "residual_tsv": residual_artifact["path"],
+            "residual_sha256": residual_artifact["sha256"],
+            "residual_rows": 0,
+            "residual_limit": 256,
+            "residual_truncated": False,
             "candidate_failure_rows": [],
+            "direct_reference_failure_rows": [],
+            "reference_supplement_sha256": [],
             "reference_failure_rows": [],
             "acceptance_failure_rows": [],
             "inapplicable_rows": [],
             "fallback_defect_rows": [],
             "telemetry_defect_rows": [],
             "execution_defect_rows": [],
+            "artifact_defect_rows": [],
+            "unexpected_failure_rows": [],
             "require_clean_candidate": True,
             "require_clean_acceptance": True,
             "clean_candidate": True,
             "clean_acceptance": True,
             "complete_row_partition": True,
+            "global_identity_unique": True,
         }
         report_bytes = (json.dumps(report_data, sort_keys=True, separators=(",", ":"))
                         + "\n").encode("utf-8")
@@ -475,8 +538,8 @@ class BindingTests(unittest.TestCase):
             "sample_row_count": len(parsed_rows),
             "rounds": sample_rounds,
             "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-            "sample_population": "canonical-performance-rows-with-required-metrics",
-            "eligible_population": "canonical-performance-rows",
+            "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
+            "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
             "pairs_per_round": sample_pairs,
             "records_per_row": sample_rounds * sample_pairs,
             "required_records": required_records,
@@ -1250,8 +1313,8 @@ class BindingTests(unittest.TestCase):
             "object_row_count": 1, "sample_row_count": 2,
             "rounds": 2, "identity_field": "record_id",
             "coordinate_schema": "row-round-pair-v1",
-            "sample_population": "canonical-performance-rows-with-required-metrics",
-            "eligible_population": "canonical-performance-rows",
+            "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
+            "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
             "pairs_per_round": 60, "records_per_row": 120,
             "required_records": 240,
             "max_records_per_manifest": binding.RESULT_INPUT_MAX_RECORDS,
@@ -1422,7 +1485,7 @@ class BindingTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(data)
             seal_files = binding._sealed_closure_files(
-                seal_root, record, None, record["workflow"]["records"],
+                seal_root, record, {}, record["workflow"]["records"],
                 record["workflow"]["phases"], plan_value,
                 result_bundle_descriptor, result_bundle_value,
                 adapter_result_descriptor)
@@ -1528,7 +1591,9 @@ class BindingTests(unittest.TestCase):
             "rows_sha256": support_files[4]["sha256"],
             "performance_rows_sha256": performance_rows_descriptor["sha256"],
             "validator_report_sha256": support_files[8]["sha256"],
-            "object_row_count": 1, "group_count": 1,
+            "object_row_count": 1, "eligible_object_row_count": 1,
+            "compiler_eligible_rows": {row["row"] for row in parsed},
+            "group_count": 1,
         }
         return record, contents, support_output
 
@@ -1686,8 +1751,8 @@ class BindingTests(unittest.TestCase):
                 "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
                 "source_manifest_sha256": "a" * 64, "source_rows_sha256": "b" * 64,
                 "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-                "sample_population": "canonical-performance-rows-with-required-metrics",
-                "eligible_population": "canonical-performance-rows",
+                "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
+                "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
                 "object_row_count": 1, "sample_row_count": 1,
                 "rounds": 2, "pairs_per_round": 60, "records_per_row": 120,
                 "required_records": 120,
@@ -1768,8 +1833,8 @@ class BindingTests(unittest.TestCase):
                 "schema": binding.RESULT_INPUT_PLAN_SCHEMA, "version": 1,
                 "source_manifest_sha256": "a" * 64, "source_rows_sha256": "b" * 64,
                 "identity_field": "record_id", "coordinate_schema": "row-round-pair-v1",
-                "sample_population": "canonical-performance-rows-with-required-metrics",
-                "eligible_population": "canonical-performance-rows",
+                "sample_population": "trusted-census-eligible-performance-rows-with-required-metrics",
+                "eligible_population": "authenticated-applicability-minus-nonexecuted-rows",
                 "object_row_count": 77184, "sample_row_count": sample_rows,
                 "rounds": 2, "pairs_per_round": 254, "records_per_row": 508,
                 "required_records": required, "max_records_per_manifest": cap,
