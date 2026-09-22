@@ -118,9 +118,8 @@ jobs:
             --authorization-mode "$AUTHORIZATION_MODE" \
             --expected-base "$EXPECTED_BASE" \
             | tee "$RUNNER_TEMP/native-retirement/authorization.json"
-          echo "base=$base" >> "$GITHUB_OUTPUT"
-          echo "head=$head" >> "$GITHUB_OUTPUT"
-          echo "source_head=$source_head" >> "$GITHUB_OUTPUT"
+          printf 'base=%s\nhead=%s\nsource_head=%s\n' \
+            "$base" "$head" "$source_head" >> "$GITHUB_OUTPUT"
       - name: Construct exact current-main plus candidate tree
         run: |
           python3 trusted/tools/native_retirement_integration.py stage \
