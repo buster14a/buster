@@ -481,7 +481,7 @@ jobs:
       # Rebuild the upload root from readable regular files only, without
       # preserving links or source permissions.
       - name: Sanitize desktop logs
-        if: ${{ !cancelled() }}
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 2
         shell: bash
         run: |
@@ -544,7 +544,7 @@ jobs:
           PYTHON
 
       - name: Retain desktop logs
-        if: ${{ !cancelled() }}
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}

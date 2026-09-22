@@ -38,7 +38,12 @@ def fixture(root, direct=False):
     def task(tree, phase, config, start, end, dep="ready", pool=""):
         name = phases.task_id(tree, phase, config)
         plan["tasks"].append(dict(id=name, tree=tree, phase=phase, configuration=config, dependency=dep, pool_edge=pool, inner_jobs=1, argv=[]))
-        common = dict(id=name, epoch_us=1, pid=10 + len(plan["tasks"]), start_us=start, argv=["fixture", name])
+        argv = ["fixture", name]
+        if phase in ("build", "validation", "post_test"):
+            argv = ["fixture-cmake", "--build", f"build/{tree}", "--parallel", "1"]
+        elif phase == "test":
+            argv = [f"build/{tree}/{config}/ide" + ("" if direct else ".exe"), "test"]
+        common = dict(id=name, epoch_us=1, pid=10 + len(plan["tasks"]), start_us=start, argv=argv)
         write(root, f"{name}.{common['pid']}.start.json", dict(common, state="running"))
         write(root, f"{name}.{common['pid']}.end.json", dict(common, state="success", child_start_us=start, end_us=end, publication_start_us=end,
               result=0, platform_status=0, spawned=1, timed_out=0, termination_requested=0, forcibly_terminated=0, cpu_time="unknown", peak_rss="unknown", test_jobs="1", ctest_jobs="not-applicable"))
@@ -169,6 +174,18 @@ class PhaseValidationTests(unittest.TestCase):
     def test_missing_task_in_plan_not_empty_success(self):
         self.mutate("plan.json", lambda p: p["tasks"].pop())
         with self.assertRaisesRegex(ValueError, "task identities"):
+            self.check()
+
+    def test_command_for_another_tree_cannot_claim_this_identity(self):
+        for kind in ("start", "end"):
+            self.mutate(f"tree0-test-*.{kind}.json", lambda v: v.update(argv=["build/tree1/Debug/ide.exe", "test"]))
+        with self.assertRaisesRegex(ValueError, "executable/tree mismatch"):
+            self.check()
+
+    def test_recorded_inner_ninja_quota_must_match_plan(self):
+        for kind in ("start", "end"):
+            self.mutate(f"tree0-build-*.{kind}.json", lambda v: v["argv"].__setitem__(-1, "99"))
+        with self.assertRaisesRegex(ValueError, "Ninja quota mismatch"):
             self.check()
 
     def test_source_job_compiler_and_resource_binding(self):
