@@ -50,7 +50,26 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_begin(Arena* arena, MatrixCoverageManifest
             .epoch = os_now_microseconds(), .enabled = true, .valid = true, .scheduler = direct ? S8("direct") : S8("pooled"), .outer_jobs = direct ? 1u : 0u};
         result = matrix_phase.root.length && !path_exists(arena, path_join(arena, root, S8("plan.json")));
         MatrixCoverageLane lane = coverage->lane;
-        String8 source_tree = stage_object_source_tree_identity(arena);
+        // This contract requires a Git tree, never the stage object's commit
+        // fallback. Search PATH explicitly, including on Windows.
+        String8 source_tree = {0};
+        String8 git_arguments[] = {S8("git"), S8("rev-parse"), S8("HEAD^{tree}")};
+        ProcessSpawnResult git = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(git_arguments), (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){.capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR), .use_process_environment = 1, .search_path = 1});
+        if (git.handle)
+        {
+            ProcessWaitResult wait = os_process_wait_deadline(arena, git, 30 * 1000000);
+            if (wait.result == PROCESS_RESULT_SUCCESS && !wait.timed_out)
+            {
+                source_tree = build_compiler_output_trim(BYTE_SLICE_TO_STRING(8, wait.streams[STANDARD_STREAM_OUTPUT]));
+            }
+        }
+        result = result && source_tree.length == 40;
+        for (u64 i = 0; result && i < source_tree.length; i += 1)
+        {
+            char8 c = source_tree.pointer[i];
+            result = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        }
         matrix_phase.identity = string_format(arena,
             S8("{{\"lane_id\":{S8},\"source_revision\":{S8},\"source_tree\":{S8},\"source_hash\":{S8},\"driver_hash\":{S8},\"repository\":{S8},\"run_id\":{S8},\"run_attempt\":{S8},\"workflow\":{S8},\"job\":{S8},\"platform\":{S8},\"architecture\":{S8},\"shard\":{S8}}}"),
             matrix_coverage_json_escape(arena, lane.lane_id), matrix_coverage_json_escape(arena, lane.source_revision),
@@ -143,9 +162,8 @@ BUSTER_GLOBAL_LOCAL Generate matrix_phase_tree(Arena* arena, Generate generate, 
             cmake_string(arena, S8("BUSTER_MATRIX_PHASE_EPOCH"), string_format(arena, S8("{u64}"), matrix_phase.epoch)),
         };
         OsArgumentBuilder args = os_argument_builder_start(arena);
-        for (u64 i = 0; i < generate.cmake_arguments.length; i += 1) { os_argument_builder_append(&args, generate.cmake_arguments.pointer[i]); }
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(observer_arguments); i += 1) { os_argument_builder_append(&args, observer_arguments[i]); }
-        generate.cmake_arguments = os_argument_builder_flush(&args);
+        generate.phase_arguments = os_argument_builder_flush(&args);
         for (u32 i = 0; i < tree.row_count; i += 1)
         {
             MatrixCoverageRow row = coverage->plan.rows[tree.row_indices[i]];
@@ -184,6 +202,26 @@ BUSTER_GLOBAL_LOCAL void matrix_phase_cmake(Arena* arena, String8List* lines, St
     string8_list_push(arena, lines, S8(")\n"));
 }
 
+BUSTER_GLOBAL_LOCAL bool matrix_phase_callback(Arena* arena, ProcessRun* run, bool completed, ProcessResult status)
+{
+    bool result = true;
+    if (matrix_phase.enabled && run->phase_task.length)
+    {
+        u64 now = os_now_microseconds(), pid = os_get_current_process_id();
+        if (!completed) { run->start_us = now; }
+        String8 common = string_format(arena,
+            S8("\"id\":{S8},\"epoch_us\":{u64},\"pid\":{u64},\"start_us\":{u64},\"argv\":{S8},\"authority\":\"driver_callback\""),
+            matrix_coverage_json_escape(arena, run->phase_task), matrix_phase.epoch, pid, run->start_us, matrix_phase_array(arena, run->arguments));
+        String8 value = completed ? string_format(arena,
+            S8("{{{S8},\"state\":{S8},\"child_start_us\":{u64},\"end_us\":{u64},\"publication_start_us\":{u64},\"result\":{u32},\"cpu_time\":\"unknown\",\"peak_rss\":\"unknown\"}}\n"),
+            common, matrix_coverage_json_escape(arena, status == PROCESS_RESULT_SUCCESS ? S8("success") : S8("failure")),
+            run->start_us, now, os_now_microseconds(), (u32)status) : string_format(arena, S8("{{{S8},\"state\":\"running\"}}\n"), common);
+        String8 name = string_format(arena, S8("{S8}.{u64}.{S8}.json"), run->phase_task, pid, completed ? S8("end") : S8("start"));
+        result = matrix_phase_write(arena, matrix_phase.root, name, value);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool matrix_phase_plan(Arena* arena, bool direct)
 {
     bool result = true;
@@ -194,6 +232,30 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_plan(Arena* arena, bool direct)
             for (ProcessRun* run = step->first_process; run; run = run->next)
             {
                 String8 directory = {0}, config = {0}, phase = S8("build");
+                if (run->callback)
+                {
+                    String8 label = {0}, tree = S8("matrix");
+                    if (run->callback == matrix_coverage_complete_action) { label = S8("coverage"); }
+                    else if (run->callback == build_artifact_fanout_capture_action || run->callback == build_artifact_fanout_clean_action)
+                    {
+                        BuildArtifactFanout* fanout = run->callback_data;
+                        tree = matrix_phase_find_tree(fanout->build_directory);
+                        label = run->callback == build_artifact_fanout_capture_action ? S8("capture") : S8("clean");
+                    }
+                    else if (run->callback == x86_completion_census_existing_validate_action || run->callback == x86_completion_census_prepare_output_action)
+                    {
+                        X86CompletionCensusPlan* census = run->callback_data;
+                        tree = matrix_phase_find_tree(census->fanout.build_directory);
+                        label = run->callback == x86_completion_census_existing_validate_action ? S8("census_validate") : S8("census_prepare");
+                    }
+                    if (label.length && tree.length)
+                    {
+                        String8* identity = arena_allocate(arena, String8, 1);
+                        identity[0] = label;
+                        run->arguments = (SliceString8){.pointer = identity, .length = 1};
+                        run->phase_task = matrix_phase_task(arena, tree, S8("evidence"), label, S8(""), S8("ready"), 0, run->arguments);
+                    }
+                }
                 if (!run->phase_task.length && !run->callback)
                 {
                     for (u64 i = 0; i + 1 < run->arguments.length; i += 1)
@@ -202,6 +264,13 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_plan(Arena* arena, bool direct)
                         if (string_equal(arg, S8("--build"))) { directory = run->arguments.pointer[i + 1]; }
                         if (string_equal(arg, S8("--config"))) { config = run->arguments.pointer[i + 1]; }
                         if (string_equal(arg, S8("--target")) && string_equal(run->arguments.pointer[i + 1], S8("test_all"))) { phase = S8("validation"); }
+                        if (string_equal(arg, S8("--target")) && string_equal(run->arguments.pointer[i + 1], S8("clean"))) { phase = S8("clean"); }
+                    }
+                    if (run->arguments.length > 1 && string_equal(run->arguments.pointer[1], S8("x86_64_completion_census")))
+                    {
+                        directory = path_parent(arena, path_parent(arena, run->arguments.pointer[0]));
+                        config = S8("Release");
+                        phase = S8("census");
                     }
                     if (direct && !directory.length)
                     {
@@ -221,7 +290,8 @@ BUSTER_GLOBAL_LOCAL bool matrix_phase_plan(Arena* arena, bool direct)
                         }
                     }
                     String8 tree = matrix_phase_find_tree(directory);
-                    if (tree.length && direct) { matrix_phase_wrap(arena, run, tree, phase, config, 0); }
+                    if (tree.length && (direct || string_equal(phase, S8("clean")) || string_equal(phase, S8("census"))))
+                    { matrix_phase_wrap(arena, run, tree, phase, config, 0); }
                     else if (directory.length && !tree.length && !direct)
                     {
                         matrix_phase_wrap(arena, run, S8("matrix"), S8("scheduler"), S8(""), matrix_phase.outer_jobs);

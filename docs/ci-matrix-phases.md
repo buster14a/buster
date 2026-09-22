@@ -15,6 +15,9 @@ command remains part of its existing `test_all` target. Current main runs the
 native test executable there, not a separate CTest payload. CTest worker quota
 is consequently `not-applicable`; inherited `BUSTER_TEST_JOBS` is recorded,
 and missing/unmeasured values remain `unknown`.
+Native observation arguments occupy a separate `Generate.phase_arguments`
+field so the canonical Release selector continues to inspect the original
+compiler policy. The live CMake cache and graph remain provenance-bound.
 
 ## Authority and files
 
@@ -35,6 +38,13 @@ and missing/unmeasured values remain `unknown`.
 - `summary.json` and `summary.md`: validated timeline, per-tree phase durations,
   admission/completion order, wait, overlap, idle gaps, critical tree, and
   explicitly conditional alternative-order predictions.
+
+The existing producer capture/clean bookkeeping, Linux x86-64 census
+validation/preparation, and final coverage publication are timed in the native
+driver as `evidence` callbacks. Their authority is `driver_callback`, with the
+actual callback result; no child exit word is fabricated. The producer clean
+command contributes to build time, and the completion census contributes to
+post-test time. Final coverage publication is a matrix-wide event.
 
 All timestamps use the host monotonic clock (`CLOCK_MONOTONIC` or QPC) sampled
 in the process owning that lifecycle transition. Workers on one host share its
@@ -79,7 +89,8 @@ unchanged.
 
 Run `python3 tools/ci_matrix_phases_test.py -v`. It compiles the actual native
 observer, exercises success/nonzero exit/deadline controls, exports native
-plans for pooled/direct release/checks, and validates deterministic concurrent
+plans for pooled/direct release/checks at three- and four-CPU budgets, verifies
+exact Git tree identity and canonical Release selection, and validates deterministic concurrent
 fixtures including a fifth tree waiting behind four slots. It also emits five
 `MATRIX_PHASE_OBSERVER_OVERHEAD` samples per hosted release lane. Each upper
 bound includes observer launch/publication, temporary-fixture creation and

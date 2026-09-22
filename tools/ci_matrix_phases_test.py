@@ -44,6 +44,8 @@ def fixture(root, direct=False):
         elif phase == "test":
             argv = [f"build/{tree}/{config}/ide" + ("" if direct else ".exe"), "test"]
         common = dict(id=name, epoch_us=1, pid=10 + len(plan["tasks"]), start_us=start, argv=argv)
+        if phase == "evidence":
+            common["authority"] = "driver_callback"
         write(root, f"{name}.{common['pid']}.start.json", dict(common, state="running"))
         write(root, f"{name}.{common['pid']}.end.json", dict(common, state="success", child_start_us=start, end_us=end, publication_start_us=end,
               result=0, platform_status=0, spawned=1, timed_out=0, termination_requested=0, forcibly_terminated=0, cpu_time="unknown", peak_rss="unknown", test_jobs="1", ctest_jobs="not-applicable"))
@@ -63,6 +65,7 @@ def fixture(root, direct=False):
             start, end = 180 + (50 if direct else 40) * i, 210 + (50 if direct else 40) * i
             task(name, "validation", config, start, end, "ready" if direct else phases.task_id(name, "build"), "" if direct else f"validation-{name}")
             task(name, "test", config, start + 5, end - 5, "nested")
+    task("matrix", "evidence", "coverage", 390, 395)
     write(root, "plan.json", plan)
     write(root, "terminal.json", dict(epoch_us=1, terminal_us=400, result=0))
     return coverage
@@ -147,6 +150,11 @@ class PhaseValidationTests(unittest.TestCase):
     def test_child_exit_authority_not_label(self):
         self.mutate("tree0-test-*.end.json", lambda v: v.update(platform_status=256))
         with self.assertRaisesRegex(ValueError, "exit authority"):
+            self.check()
+
+    def test_callback_exit_authority_is_separate(self):
+        self.mutate("matrix-evidence-coverage.*.end.json", lambda v: v.update(authority="process"))
+        with self.assertRaisesRegex(ValueError, "callback exit authority"):
             self.check()
 
     def test_nonmonotonic_and_impossible_overlap(self):
@@ -239,8 +247,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
 {
     bool direct = environment_flag_is_on(S8("BUSTER_PHASE_FIXTURE_DIRECT"));
     bool checks = environment_flag_is_on(S8("BUSTER_PHASE_FIXTURE_CHECKS"));
+    bool linux_fixture = environment_flag_is_on(S8("BUSTER_PHASE_FIXTURE_LINUX"));
     MatrixCoverageTarget target = {.platform = direct ? S8("macos") : S8("windows"), .architecture = S8("x86_64"),
                                     .windows = !direct, .apple = direct};
+    if (linux_fixture) { target.platform = S8("linux"); target.windows = 0; }
     MatrixCoverageManifest coverage = {0};
     coverage.lane = matrix_coverage_lane_create(arena, checks ? S8("checks") : S8("release"));
     coverage.lane.platform = target.platform;
@@ -263,16 +273,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
         if (matrix_coverage_row_selected(coverage.plan.rows[tree.row_indices[0]], coverage.lane.shard))
         {
             Generate gen = {.build_directory = string_format(arena, S8("build/fixture-{u32}"), count), .compiler = tree.compiler,
-                            .configuration_types = tree.configuration_types, .sanitize = tree.sanitize, .fuzz_available = tree.fuzz_available};
-            String8 passthrough[] = {S8("-DBUSTER_FIXTURE=ON")};
+                            .configuration_types = tree.configuration_types, .sanitize = tree.sanitize, .fuzz_available = tree.fuzz_available,
+                            .ci = 1, .link_libc = 1, .include_tests = 1};
+            String8 passthrough[] = {S8("-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY")};
             gen.cmake_arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(passthrough);
+            CmakeBuildOptions release = {.optimize = 1, .optimize_set = 1};
+            bool canonical = build_artifact_fanout_is_canonical(gen, release);
             gen = matrix_phase_tree(arena, gen, &coverage, tree);
-            ok = ok && gen.cmake_arguments.length == 5 && string_equal(gen.cmake_arguments.pointer[0], passthrough[0]);
+            ok = ok && canonical == build_artifact_fanout_is_canonical(gen, release) &&
+                 canonical == (tree.compiler == BUILD_COMPILER_CLANG && !tree.sanitize) &&
+                 gen.cmake_arguments.length == 1 && gen.phase_arguments.length == 4 &&
+                 string_equal(gen.cmake_arguments.pointer[0], passthrough[0]);
             String8 names[] = {S8("-DBUSTER_MATRIX_PHASE_DRIVER="), S8("-DBUSTER_MATRIX_PHASE_ROOT="),
                                S8("-DBUSTER_MATRIX_PHASE_TREE="), S8("-DBUSTER_MATRIX_PHASE_EPOCH=")};
             for (u32 a = 0; ok && a < BUSTER_ARRAY_LENGTH(names); a += 1)
             {
-                ok = string_starts_with_sequence(gen.cmake_arguments.pointer[a + 1], names[a]);
+                ok = string_starts_with_sequence(gen.phase_arguments.pointer[a], names[a]);
             }
             ProcessRun* configure = run_add(arena, step_add(arena));
             String8* argv = arena_allocate(arena, String8, 1);
@@ -314,7 +330,35 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
     }
     if (!direct)
     {
-        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs(4, count);
+        if (!checks)
+        {
+            BuildArtifactFanout* fanout = arena_allocate(arena, BuildArtifactFanout, 1);
+            *fanout = (BuildArtifactFanout){.build_directory = trees[0].build_directory};
+            ProcessRun* capture = run_add(arena, step_add(arena));
+            *capture = (ProcessRun){.callback = build_artifact_fanout_capture_action, .callback_data = fanout};
+            ProcessRun* clean = run_add(arena, step_add(arena));
+            String8* argv = arena_allocate(arena, String8, 7);
+            argv[0] = S8("fixture-cmake"); argv[1] = S8("--build"); argv[2] = trees[0].build_directory;
+            argv[3] = S8("--config"); argv[4] = S8("Release"); argv[5] = S8("--target"); argv[6] = S8("clean");
+            clean->arguments = (SliceString8){.pointer = argv, .length = 7};
+            ProcessRun* cleaned = run_add(arena, step_add(arena));
+            *cleaned = (ProcessRun){.callback = build_artifact_fanout_clean_action, .callback_data = fanout};
+            if (linux_fixture)
+            {
+                X86CompletionCensusPlan* census = arena_allocate(arena, X86CompletionCensusPlan, 1);
+                *census = (X86CompletionCensusPlan){.fanout = *fanout};
+                ProcessRun* validate = run_add(arena, step_add(arena));
+                *validate = (ProcessRun){.callback = x86_completion_census_existing_validate_action, .callback_data = census};
+                ProcessRun* prepare = run_add(arena, step_add(arena));
+                *prepare = (ProcessRun){.callback = x86_completion_census_prepare_output_action, .callback_data = census};
+                ProcessRun* payload = run_add(arena, step_add(arena));
+                String8* args = arena_allocate(arena, String8, 2);
+                args[0] = path_join(arena, trees[0].build_directory, S8("Release/ide"));
+                args[1] = S8("x86_64_completion_census");
+                payload->arguments = (SliceString8){.pointer = args, .length = 2};
+            }
+        }
+        matrix_phase.outer_jobs = matrix_superbuild_outer_jobs((u32)environment_positive_u64_or(S8("BUSTER_MATRIX_THREADS"), os_get_logical_thread_count()), count);
         MatrixSuperbuildSelfHostPlan self_host = {.enabled = !checks, .tree_index = 0, .pool_jobs = 1, .build_directory = trees[0].build_directory};
         ok = matrix_superbuild_manifest_write(arena, path_join(arena, matrix_phase.root, S8("matrix.cmake")), S8("/fixture"),
                    matrix_phase.driver, trees, count, matrix_phase.outer_jobs, combinations, self_host, false, false) && ok;
@@ -323,9 +367,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult matrix_phase_fixture(Arena* arena)
         args[0] = S8("fixture-cmake"); args[1] = S8("--build"); args[2] = S8("superbuild");
         run->arguments = (SliceString8){.pointer = args, .length = 3};
     }
-    ok = matrix_phase_plan(arena, direct) && ok;
     coverage.output_path = path_join(arena, matrix_phase.root, S8("coverage.json"));
+    matrix_coverage_completion_add(arena, &coverage);
+    ok = matrix_phase_plan(arena, direct) && ok;
+    ProcessRun* callback = program.build_graph.last_step->last_process;
+    ok = matrix_phase_ready(arena, program.build_graph.last_step) && ok;
+    ok = matrix_phase_callback(arena, callback, false, PROCESS_RESULT_SUCCESS) && ok;
     ok = matrix_coverage_manifest_write(arena, &coverage, true) && ok;
+    ok = matrix_phase_callback(arena, callback, true, PROCESS_RESULT_SUCCESS) && ok;
     program.build_graph = (BuildGraph){0};
     return ok ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 }
@@ -365,16 +414,22 @@ class NativeObserverTests(unittest.TestCase):
         return result, phases.read(next(root.glob("*.end.json")))
 
     def test_real_plan_serializer_direct_pooled_release_checks(self):
-        for direct in (False, True):
+        for direct, linux_fixture, budget in ((False, False, 3), (True, False, 4), (False, True, 4)):
             for checks in (False, True):
                 root = Path(tempfile.mkdtemp(dir=self.root))
                 env = dict(os.environ, BUSTER_MATRIX_PHASE_OUTPUT=str(root), BUSTER_PHASE_FIXTURE_DIRECT=str(int(direct)),
-                           BUSTER_PHASE_FIXTURE_CHECKS=str(int(checks)), GITHUB_SHA="a" * 40)
+                           BUSTER_PHASE_FIXTURE_CHECKS=str(int(checks)), BUSTER_PHASE_FIXTURE_LINUX=str(int(linux_fixture)),
+                           BUSTER_MATRIX_THREADS=str(budget), GITHUB_SHA="a" * 40)
                 subprocess.run([str(self.driver), "coverage_manifest_self_test"], cwd=ROOT, env=env, check=True, capture_output=True, timeout=30)
                 plan = phases.read(root / "plan.json")
                 coverage = phases.read(root / "coverage.json")
+                self.assertEqual(plan["identity"]["source_tree"], subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, text=True).strip())
                 trees, tasks = phases.validate_plan(plan, coverage, env)
                 self.assertTrue(trees and tasks)
+                callback = phases.read(next(root.glob("matrix-evidence-coverage.*.end.json")))
+                self.assertEqual(callback["authority"], "driver_callback")
+                self.assertEqual(callback["result"], 0)
+                self.assertLessEqual(callback["start_us"], callback["end_us"])
                 if not direct:
                     self.assertIn("matrix_phase_run", (root / "matrix.cmake").read_text())
 

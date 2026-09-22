@@ -581,6 +581,8 @@ struct Generate
     String8 linker;
     String8 cmake_profile;
     SliceString8 cmake_arguments;
+    // Native observation settings do not alter canonical compiler policy.
+    SliceString8 phase_arguments;
     u64 cmake_profile_summary_limit;
     BuildCompiler compiler;
     u32 fuzz_available : 1;
@@ -1805,6 +1807,10 @@ BUSTER_GLOBAL_LOCAL void generate_add(Arena* arena, BuildStep* step, Generate ge
     for (u64 i = 0; i < generate.cmake_arguments.length; i += 1)
     {
         os_argument_builder_append(b, generate.cmake_arguments.pointer[i]);
+    }
+    for (u64 i = 0; i < generate.phase_arguments.length; i += 1)
+    {
+        os_argument_builder_append(b, generate.phase_arguments.pointer[i]);
     }
 
     SliceString8 arguments = os_argument_builder_flush(&r.builder);
@@ -40653,7 +40659,12 @@ ProcessResult entry_point(void)
 
                 if (result == PROCESS_RESULT_SUCCESS)
                 {
-                    ProcessResult callback_result = run->callback(arena, run->callback_data);
+                    bool observed = !matrix_phase.enabled || matrix_phase_callback(arena, run, false, PROCESS_RESULT_SUCCESS);
+                    ProcessResult callback_result = observed ? run->callback(arena, run->callback_data) : PROCESS_RESULT_FAILED;
+                    if (observed && matrix_phase.enabled && !matrix_phase_callback(arena, run, true, callback_result))
+                    {
+                        callback_result = PROCESS_RESULT_FAILED;
+                    }
                     if (callback_result != PROCESS_RESULT_SUCCESS)
                     {
                         result = callback_result;

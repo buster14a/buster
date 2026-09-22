@@ -15,7 +15,7 @@ import re
 import subprocess
 
 SCHEMA = "buster-desktop-phases-v1"
-PHASES = {"configure", "build", "validation", "test", "post_test", "self_host", "scheduler"}
+PHASES = {"configure", "build", "validation", "test", "post_test", "self_host", "scheduler", "clean", "census", "evidence"}
 ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 MAX_BYTES = 4 * 1024 * 1024
 
@@ -88,7 +88,7 @@ def validate_plan(plan, coverage, environment):
                 (identity["shard"] == "combinations" or row.get("owner_shard") == identity["shard"])}
     detected = {row["id"]: row for row in coverage.get("detected", [])}
     owned = []
-    expected_tasks = set()
+    expected_tasks = {task_id("matrix", "evidence", "coverage")}
     canonical = None
     for tree_id, tree in trees.items():
         rows = tree.get("rows")
@@ -124,6 +124,10 @@ def validate_plan(plan, coverage, environment):
         if obligations.get(key, {}).get("state") in ("scheduled", "success"):
             require(canonical is not None, f"missing {key} owner")
             expected_tasks.add(task_id(canonical, phase, "Release"))
+    if obligations.get("self_host", {}).get("state") in ("scheduled", "success"):
+        expected_tasks.update((task_id(canonical, "clean", "Release"), task_id(canonical, "evidence", "capture"), task_id(canonical, "evidence", "clean")))
+        if identity["platform"] == "linux" and identity["architecture"] == "x86_64":
+            expected_tasks.update((task_id(canonical, "census", "Release"), task_id(canonical, "evidence", "census_validate"), task_id(canonical, "evidence", "census_prepare")))
     if plan["scheduler"] == "pooled":
         expected_tasks.add(task_id("matrix", "scheduler"))
     require(set(tasks) == expected_tasks, f"missing/unknown task identities: {sorted(set(tasks) ^ expected_tasks)}")
@@ -180,8 +184,12 @@ def analyze(root, coverage, environment=None):
         require(start["id"] == name and start["epoch_us"] == epoch and integer(start["pid"]) and start["pid"] > 0, f"stale/mismatched task: {name}")
         require(starts[0].name == f"{name}.{start['pid']}.start.json" and ends[0].name == f"{name}.{start['pid']}.end.json", "filename/process mismatch")
         require(start.get("state") == "running" and end.get("state") == "success", f"unsuccessful phase: {name}/{end.get('state')}")
-        require(all(type(end.get(k)) is int and end[k] == 0 for k in ("result", "platform_status", "timed_out", "termination_requested", "forcibly_terminated")) and type(end.get("spawned")) is int and end["spawned"] == 1,
-                f"child exit authority failed: {name}")
+        if task["phase"] == "evidence":
+            require(start.get("authority") == end.get("authority") == "driver_callback" and type(end.get("result")) is int and end["result"] == 0,
+                    f"callback exit authority failed: {name}")
+        else:
+            require(end.get("authority", "process") == "process" and all(type(end.get(k)) is int and end[k] == 0 for k in ("result", "platform_status", "timed_out", "termination_requested", "forcibly_terminated")) and type(end.get("spawned")) is int and end["spawned"] == 1,
+                    f"child exit authority failed: {name}")
         times = [epoch] + [end.get(k) for k in ("start_us", "child_start_us", "end_us", "publication_start_us")]
         require(all(integer(t) for t in times) and times == sorted(times), f"non-monotonic events: {name}")
         require(isinstance(end["argv"], list) and end["argv"] and all(isinstance(a, str) for a in end["argv"]), "missing child command")
@@ -207,7 +215,10 @@ def analyze(root, coverage, environment=None):
                 if plan["scheduler"] == "pooled":
                     parent = tasks[task_id(task["tree"], "validation", task["configuration"])]
                     require(end.get("test_jobs") == str(parent["inner_jobs"]), f"nested test-worker quota mismatch: {name}")
-            elif task["phase"] in ("build", "validation", "post_test", "self_host"):
+            elif task["phase"] == "census":
+                expected = Path(tree["build_directory"]) / "Release" / "ide"
+                require(same_path(argv[0], expected) and len(argv) > 1 and argv[1] == "x86_64_completion_census", f"census executable/tree mismatch: {name}")
+            elif task["phase"] in ("build", "validation", "post_test", "self_host", "clean"):
                 option = "--build-directory" if task["phase"] == "self_host" else "--build"
                 if option in argv:
                     at = argv.index(option)
@@ -287,7 +298,7 @@ def rank(plan, trees, tasks, records):
     output = []
     for tree_id, tree in trees.items():
         entries = {name: records[name] for name, task in tasks.items() if task["tree"] == tree_id}
-        elapsed = dict.fromkeys(("configure", "build", "test", "post_test", "self_host"), 0)
+        elapsed = dict.fromkeys(("configure", "build", "test", "post_test", "self_host", "evidence"), 0)
         for name, event in entries.items():
             task = tasks[name]
             phase = task["phase"]
@@ -296,13 +307,13 @@ def rank(plan, trees, tasks, records):
                 elapsed["build"] += test["start_us"] - event["child_start_us"]
                 elapsed["post_test"] += event["end_us"] - test["end_us"]
             else:
-                elapsed[phase] += event["end_us"] - event["child_start_us"]
+                elapsed[{"clean": "build", "census": "post_test"}.get(phase, phase)] += event["end_us"] - event["child_start_us"]
         builds = [name for name in entries if tasks[name]["phase"] in ("build", "validation")]
         first = min(builds, key=lambda n: (entries[n]["start_us"], n))
         last = max(entries, key=lambda n: (entries[n]["end_us"], n))
         output.append(dict(tree, elapsed_us=elapsed, admission_us=entries[first]["start_us"],
                            enqueue_us=entries[first]["ready_us"], wait_us=entries[first]["start_us"] - entries[first]["ready_us"],
-                           completion_us=entries[last]["end_us"], terminal_phase="post_test" if tasks[last]["phase"] == "validation" else tasks[last]["phase"],
+                           completion_us=entries[last]["end_us"], terminal_phase={"validation": "post_test", "census": "post_test", "clean": "build"}.get(tasks[last]["phase"], tasks[last]["phase"]),
                            largest_phase=max(elapsed, key=elapsed.get),
                            terminal_task=last, cpu_time="unknown", peak_rss="unknown"))
     for order, tree in enumerate(sorted(output, key=lambda t: (t["admission_us"], t["id"])), 1):
@@ -348,10 +359,10 @@ def markdown(report):
     if not report["complete"]:
         lines += ["- " + error for error in report["errors"]]
     else:
-        lines += ["| Tree | Configure s | Build s | Test s | Post-test s | Wait s | Admit / finish | Critical |", "|---|---:|---:|---:|---:|---:|---|---|"]
+        lines += ["| Tree | Configure s | Build s | Test s | Post-test s | Evidence s | Wait s | Admit / finish | Critical |", "|---|---:|---:|---:|---:|---:|---:|---|---|"]
         for tree in report["trees"]:
             duration = tree["elapsed_us"]
-            values = " | ".join(f"{duration[p] / 1e6:.6f}" for p in ("configure", "build", "test", "post_test"))
+            values = " | ".join(f"{duration[p] / 1e6:.6f}" for p in ("configure", "build", "test", "post_test", "evidence"))
             lines.append(f"| {tree['id']} ({tree['compiler']}, {tree['configurations']}) | {values} | {tree['wait_us'] / 1e6:.6f} | {tree['admission_order']} / {tree['completion_order']} | {tree['terminal_phase'] if tree['critical'] else ''} |")
         lines += ["", "Launch-order predictions hold measured durations and quotas fixed; they are not performance acceptance.",
                   "CPU time and peak RSS: unknown. Post-test time includes measured native validation/command teardown after the test child."]
@@ -367,6 +378,7 @@ def collect(environment, coverage):
         require(source == [report["identity"]["source_revision"], report["identity"]["source_tree"]], "checkout commit/tree mismatch")
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
         report = {"schema": SCHEMA, "complete": False, "errors": [str(error)]}
+        print("MATRIX_PHASE_EVIDENCE_ERROR " + str(error))
     root.mkdir(parents=True, exist_ok=True)
     (root / "summary.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     (root / "summary.md").write_text(markdown(report), encoding="utf-8")
