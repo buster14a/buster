@@ -1,18 +1,20 @@
 # Serialized main integration (#867)
 
-## Rollout state: not enabled
+## Rollout state: enabled; live acceptance in progress
 
 Adapter baseline: `f5ce6cdc10e0e9f49b8698a82944daf4688c0f2e` (after #927 and #933).
-The live ruleset read during this work was `22537199`: six required GitHub
-Actions checks, non-strict branch freshness, no bypass, and no merge queue.
-`.github/main-merge-queue.ruleset.json` is a **desired configuration**, not an
-assertion that those settings have been applied. The checker has no write API.
+On 2026-09-22, after #945 landed, ruleset `22537199` was updated and read back:
+eight required GitHub Actions checks, non-strict branch freshness, no bypass,
+and a single-build/single-merge ALLGREEN queue using merge commits. The saved
+response passes `check-ruleset` at main `6929d847fbab0014284f698cd235ddb570d60e9d`.
+`.github/main-merge-queue.ruleset.json` describes that configuration; verify live
+settings before relying on it. The checker has no write API.
 
 The trusted retirement gate and queue collector have landed. The adapter admits
 one synthetic merge commit only when its first parent is current main and its
 entire tree equals the existing writer's attested PR head. It verifies the open
 same-repository PR, creator-bearing status and completed successful writer run.
-Live activation and the acceptance exercises below are still required; local
+The acceptance exercises below are still required; local
 fixtures do not establish GitHub's live synthetic-commit shape or queue behavior.
 
 ## One admission owner, no branch-freshness requirement
@@ -114,10 +116,34 @@ truncation and ambiguous results fail closed.
 Immediately before admission, the collector repeats the six-result read and
 trusted-publication verification, requires the same evidence, rechecks live main and the queue ref, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
-preserves independent retirement admission, adds the exact-group gate, rejects bypasses/strict branch updates, and
+preserves independent retirement admission, adds the exact-group gate, rejects visible bypasses/strict branch updates, and
 requires the single-build/single-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
+
+### Read-only ruleset visibility
+
+GitHub returns `bypass_actors` only to callers with write access to the ruleset.
+The Actions read-only token normally receives no such property. The live
+collector validates the ruleset identity, enforcement, scope, required checks,
+queue settings and every other policy field it can read. An explicitly returned
+bypass list must be empty; an explicitly returned caller bypass capability must
+be `never`. Missing bypass data is recorded as `hidden` in both ruleset reads
+in the admission artifact and explained in the log. It is not reported as a
+verified empty list.
+
+No-standing-bypass configuration is an administrator-audited deployment
+invariant, not something the read-only workflow can independently prove.
+`check-ruleset` remains strict: a saved administrator response must explicitly
+contain `bypass_actors: []`. Audit that response at activation, after every
+ruleset change, and after any emergency recovery. Do not give the admission
+workflow ruleset-write credentials to expose this field.
+
+The first live group for #956 exposed the former bug: treating a hidden list as
+a standing bypass. The repair preserves trusted-base execution. Consequently,
+it cannot authorize its own first merge while main still contains the bug.
+Follow the emergency policy below for an explicitly authorized, narrowly scoped
+bootstrap; do not run candidate authority code or forge a successful check.
 
 A PR readiness success is not combined-head authorization. Neither a reused
 artifact nor a manually posted status may authorize another SHA/tree. A newer
@@ -125,9 +151,10 @@ main/group invalidates the current attempt. GitHub must build a fresh group and
 rerun required workflows. Content conflicts use #869's exact-path explanation;
 the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge.
 
-## Activation and acceptance still required
+## Activation and acceptance
 
-Before editing repository settings, complete and retain evidence for all of:
+Activation is complete. Retain evidence for the remaining live exercises below;
+do not close #867 based on settings or offline fixtures alone:
 
 1. Land the exact-tree adapter and source-recovery bootstrap through the existing
    trusted writer. Verify a fresh dispatch after main advancement, and verify
@@ -168,7 +195,7 @@ python3 -B tools/merge_queue_admission.py check-ruleset /tmp/live-main-ruleset.j
 
 ## Emergency policy
 
-There is no standing bypass and this work changes no live settings. A repair PR
+There is no standing bypass. A repair PR
 with genuine passing checks is preferred. Any emergency settings change needs
 explicit administrator authorization, a recorded reason and exact before/after
 settings, followed by restoration and read-back verification. Never mint a green
