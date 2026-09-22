@@ -781,6 +781,7 @@ def _parser() -> argparse.ArgumentParser:
     resolve.add_argument("--repo-root", type=Path, required=True)
     resolve.add_argument("--base", required=True)
     resolve.add_argument("--head", required=True)
+    resolve.add_argument("--source-head", help="Verified source candidate for an attested retry")
     resolve.add_argument("--expected-base", default="")
     resolve.add_argument("--expected-head", default="")
     resolve.add_argument("--transition-kind", default="auto")
@@ -801,7 +802,8 @@ def main(argv=None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         if arguments.command == "resolve-dispatch":
-            classification = classify_candidate(arguments.repo_root, arguments.base, arguments.head)
+            classification = classify_candidate(arguments.repo_root, arguments.base,
+                                                arguments.source_head or arguments.head)
             enforce_classification(classification, classification.kind, True)
             report = resolve_dispatch(
                 arguments.base, arguments.head, classification.kind,

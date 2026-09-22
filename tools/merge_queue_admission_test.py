@@ -290,7 +290,25 @@ class OrchestrationTests(unittest.TestCase):
                 self.assertEqual(collect.call_count, 2)
                 self.assertEqual(live.call_count, 3)
                 self.assertEqual(api.return_value.get.call_count, 2)
+                self.assertEqual(native_run.call_count, 2)
                 self.assertNotIn("--allow-pending", native_run.call_args.args[0])
+                self.assertIn("--repository", native_run.call_args.args[0])
+
+    def test_publication_change_during_ci_rejects_admission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            event = Path(temporary) / "event.json"
+            event.write_text("{}")
+            arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
+                                        repo_root=Path(temporary), wait_seconds=0)
+            rules = json.loads((ROOT / ".github/main-merge-queue.ruleset.json").read_text())
+            with patch.object(gate, "identity", return_value=candidate()), \
+                    patch.object(gate, "live_identity"), patch.object(gate, "GitHub") as api, \
+                    patch.object(gate, "collect", return_value=([{"run_id": 1}], [])), \
+                    patch.object(gate, "retirement_admission", side_effect=[
+                        {"attestation_id": 1}, {"attestation_id": 2}]):
+                api.return_value.get.return_value = rules
+                with self.assertRaisesRegex(gate.AdmissionError, "publication changed"):
+                    gate.run_gate(arguments)
 
     def test_workflow_inventory_rejects_removed_group_trigger_and_paths_filter(self):
         with tempfile.TemporaryDirectory() as temporary:

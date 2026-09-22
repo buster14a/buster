@@ -255,26 +255,31 @@ def collect(api: GitHub, candidate: dict) -> tuple[list, list]:
     return check_results(runs, jobs, candidate)
 
 
-def run_gate(arguments) -> dict:
-    event = json.loads(arguments.event.read_text())
-    candidate = identity(event, arguments.repository, arguments.sha, arguments.repo_root)
-    api = GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
-    live_identity(api, candidate)
-    validate_ruleset(api.get(f"rulesets/{RULESET_ID}"))
+def retirement_admission(arguments, candidate: dict) -> dict:
     native_gate = arguments.repo_root / "tools/native_retirement_merge_gate.py"
     require(native_gate.is_file(), "#925/#927 native-retirement admission must land before queue activation")
-    # This delegates, never relaxes, the existing trusted-writer boundary. In
-    # particular a retirement-sensitive group rejected by #927 remains red.
+    # The trusted gate resolves the PR's writer attestation and proves full-tree
+    # equality. A PR-head status alone never authorizes this synthetic SHA.
     result = subprocess.run([
         sys.executable, "-B", str(native_gate), "check", "--repo-root", str(arguments.repo_root),
         "--base", candidate["base"], "--head", candidate["head"], "--current-main", candidate["base"],
-        "--event", "merge_group",
+        "--event", "merge_group", "--repository", arguments.repository,
     ], capture_output=True, text=True, check=False)
     require(result.returncode == 0, "trusted retirement admission rejected group: " + result.stderr.strip())
     retirement = json.loads(result.stdout)
     require(retirement.get("status") == "admitted", "retirement gate did not admit this group")
     require(retirement.get("base") == candidate["base"] and retirement.get("head") == candidate["head"],
             "retirement admission identity mismatch")
+    return retirement
+
+
+def run_gate(arguments) -> dict:
+    event = json.loads(arguments.event.read_text())
+    candidate = identity(event, arguments.repository, arguments.sha, arguments.repo_root)
+    api = GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
+    live_identity(api, candidate)
+    validate_ruleset(api.get(f"rulesets/{RULESET_ID}"))
+    retirement = retirement_admission(arguments, candidate)
     deadline = time.monotonic() + arguments.wait_seconds
     while True:
         live_identity(api, candidate)
@@ -284,6 +289,8 @@ def run_gate(arguments) -> dict:
             # attempt must not hide a rerun that started during collection.
             repeated, pending = collect(api, candidate)
             if not pending and repeated == evidence:
+                require(retirement_admission(arguments, candidate) == retirement,
+                        "trusted publication changed during combined-head CI; rebuild admission")
                 live_identity(api, candidate)
                 validate_ruleset(api.get(f"rulesets/{RULESET_ID}"))
                 break

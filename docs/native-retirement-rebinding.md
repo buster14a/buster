@@ -85,6 +85,25 @@ Dispatch it with an open non-draft PR number. The default `auto` class and
 `configured` authorization mode resolve the immutable request from trusted main.
 Optional SHA and class overrides remain strict assertions.
 
+For a previously attested head, preparation first verifies its original trusted
+publication and recovers the original source candidate. It requires the recorded
+base to be an ancestor of current main, a still-valid successful writer attempt,
+and a clean source merge. The source is reclassified against current main and
+the normal authorization policy is applied to the live PR head. All three jobs
+reconstruct from that source and current main; the publication lease targets the
+live PR head. The replacement integration has current main and original source
+as parents, so generated commits can be replaced without losing source history.
+Manual generated edits, edits stacked on unrecognized integration output and
+genuine conflicts remain blocked. A fresh dispatch is still required after main
+advances; this recovery does not grant automated dispatcher authority.
+
+Merge-group admission is read-only: GitHub's single-candidate synthetic commit
+must have current main first, the attested integration head second, and exactly
+the attested final tree. It resolves live publication evidence for that PR head,
+including the successful latest writer attempt. Combined-head CI remains required
+on the synthetic SHA. Rebinding checks that existing generated pair in place;
+it does not refresh it into a different, untested group tree.
+
 The workflow has three separately permissioned jobs:
 
 - **prepare** is read-only. It resolves current `main`, authorizes the immutable
