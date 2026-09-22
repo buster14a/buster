@@ -798,6 +798,202 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_successor_limits(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL String8 const c_test_fixed_enum_range_source = S8_INITIALIZER(
+    "typedef unsigned short FixedAlias;\n"
+    "enum FixedS8 : signed char { S8_MIN=-128, S8_MAX=127, S8_CAST=(signed char)255, S8_ZERO };\n"
+    "enum FixedU8 : unsigned char { U8_MIN=0, U8_MAX=255, U8_CAST=(unsigned char)-1, U8_RESET=0, U8_NEXT };\n"
+    "enum FixedS16 : short { S16_MIN=-32768, S16_MAX=32767 };\n"
+    "enum FixedU16 : FixedAlias { U16_MIN=0, U16_MAX=65535 };\n"
+    "enum FixedS32 : int { S32_MIN=(-2147483647-1), S32_MAX=2147483647 };\n"
+    "enum FixedU32 : unsigned int { U32_MIN=0, U32_MAX=4294967295U, U32_CAST=(unsigned int)-1 };\n"
+    "enum FixedSL : long { SL_MIN=(sizeof(long)==8?(-9223372036854775807LL-1):(-2147483647-1)),"
+    " SL_MAX=(sizeof(long)==8?9223372036854775807LL:2147483647) };\n"
+    "enum FixedUL : unsigned long { UL_MIN=0, UL_MAX=(unsigned long)-1 };\n"
+    "enum FixedS64 : long long { S64_MIN=(-9223372036854775807LL-1), S64_MAX=9223372036854775807LL, S64_CAST=(long long)~0ULL };\n"
+    "enum FixedU64 : unsigned long long { U64_MIN=0, U64_MAX=18446744073709551615ULL, U64_CAST=(unsigned long long)-1 };\n"
+    "enum FixedS128 : __int128 { S128_MAX=(__int128)(((unsigned __int128)1<<127)-1), S128_MIN=-S128_MAX-1 };\n"
+    "enum FixedU128 : unsigned __int128 { U128_MIN=0, U128_MAX=~(unsigned __int128)0 };\n"
+    "enum FixedBool : _Bool { BOOL_MIN=0, BOOL_MAX=1, BOOL_CAST=(_Bool)9 };\n"
+    "_Static_assert(S8_MIN==-128 && S8_MAX==127 && S8_CAST==-1 && S8_ZERO==0, \"signed byte\");\n"
+    "_Static_assert(U8_MIN==0 && U8_MAX==255 && U8_CAST==255 && U8_NEXT==1, \"unsigned byte\");\n"
+    "_Static_assert(S16_MIN==-32768 && S16_MAX==32767 && U16_MAX==65535, \"short limits\");\n"
+    "_Static_assert(S32_MIN==(-2147483647-1) && S32_MAX==2147483647 && U32_MAX==4294967295U && U32_CAST==U32_MAX, \"int limits\");\n"
+    "_Static_assert(SL_MIN==(-SL_MAX-1) && (unsigned long)SL_MAX==(UL_MAX>>1), \"target long limits\");\n"
+    "_Static_assert(S64_MIN==(-9223372036854775807LL-1) && S64_MAX==9223372036854775807LL && S64_CAST==-1, \"signed 64 limits\");\n"
+    "_Static_assert(U64_MAX==18446744073709551615ULL && U64_CAST==U64_MAX, \"unsigned 64 limits\");\n"
+    "_Static_assert((S128_MIN>>127)==-1 && (S128_MAX>>126)==1 && (U128_MAX>>127)==1, \"wide limits\");\n"
+    "_Static_assert(BOOL_MIN==0 && BOOL_MAX==1 && BOOL_CAST==1, \"bool limits\");\n"
+    "_Static_assert(_Generic(S8_MIN,signed char:1,default:0) && _Generic(U8_MAX,unsigned char:1,default:0), \"byte types\");\n"
+    "_Static_assert(_Generic(SL_MIN,long:1,default:0) && _Generic(UL_MAX,unsigned long:1,default:0), \"long types\");\n"
+    "_Static_assert(sizeof(S16_MAX)==2 && sizeof(U32_MAX)==4 && sizeof(U64_MAX)==8 && sizeof(U128_MAX)==16, \"fixed widths\");\n"
+    "long long fixed_signed_global=S64_MIN;\n"
+    "unsigned long long fixed_unsigned_global=U64_MAX;\n"
+    "int main(void) { enum Local : unsigned char { LOCAL=(unsigned char)-1, RESET=0, NEXT };"
+    " return !(fixed_signed_global==(-9223372036854775807LL-1) && fixed_unsigned_global==~0ULL"
+    " && LOCAL==255 && NEXT==1 && S8_CAST==-1 && U8_CAST==255); }\n");
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_enum_ranges(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 target_index = 0; target_index < 4; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index & 2 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_LINUX;
+        for (u32 c23 = 0; c23 < 2; c23 += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, c_test_fixed_enum_range_source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = c23 ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParseResult parsed = c_parse(temporary.arena, preprocess);
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                BUSTER_TEST(arguments, parsed.diagnostic_count == 0);
+                BUSTER_TEST(arguments, parsed.enum_member_count == 38);
+                for (u32 index = 0; index < parsed.enum_member_count; index += 1)
+                {
+                    CEnumMember const* member = parsed.enum_members + index;
+                    BUSTER_TEST_RAW(arguments, member->integer_constant.valid, member->name);
+                    BUSTER_TEST(arguments, member->type.value == member->enum_type.value);
+                    BUSTER_TEST(arguments, member->declaration_type.value == member->enum_type.value);
+                    if (BUSTER_REQUIRE(arguments, member->enum_type.value < parsed.type_count))
+                    {
+                        BUSTER_TEST(arguments, parsed.types[member->enum_type.value].has_fixed_underlying_type);
+                    }
+                }
+                if (parsed.diagnostic_count == 0)
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("fixed-enum-ranges.c"), preprocess, parsed, target,
+                                                                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_fixed_enum_range_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 base;
+        CTypeKind kind;
+        String8 value;
+        bool implicit;
+    } cases[] = {
+        {S8("signed char"), C_TYPE_SIGNED_CHAR, S8("-129")},
+        {S8("signed char"), C_TYPE_SIGNED_CHAR, S8("128")},
+        {S8("unsigned char"), C_TYPE_UNSIGNED_CHAR, S8("-1")},
+        {S8("unsigned char"), C_TYPE_UNSIGNED_CHAR, S8("256")},
+        {S8("short"), C_TYPE_SHORT, S8("-32769")},
+        {S8("short"), C_TYPE_SHORT, S8("32768")},
+        {S8("unsigned short"), C_TYPE_UNSIGNED_SHORT, S8("-1")},
+        {S8("unsigned short"), C_TYPE_UNSIGNED_SHORT, S8("65536")},
+        {S8("int"), C_TYPE_INT, S8("-2147483649LL")},
+        {S8("int"), C_TYPE_INT, S8("2147483648ULL")},
+        {S8("unsigned int"), C_TYPE_UNSIGNED_INT, S8("-1")},
+        {S8("unsigned int"), C_TYPE_UNSIGNED_INT, S8("4294967296ULL")},
+        {S8("long"), C_TYPE_LONG, S8("-((__int128)1<<(sizeof(long)*8-1))-1")},
+        {S8("long"), C_TYPE_LONG, S8("(unsigned __int128)1<<(sizeof(long)*8-1)")},
+        {S8("unsigned long"), C_TYPE_UNSIGNED_LONG, S8("-1")},
+        {S8("unsigned long"), C_TYPE_UNSIGNED_LONG, S8("(unsigned __int128)1<<(sizeof(long)*8)")},
+        {S8("long long"), C_TYPE_LONG_LONG, S8("-((__int128)1<<63)-1")},
+        {S8("long long"), C_TYPE_LONG_LONG, S8("9223372036854775808ULL")},
+        {S8("unsigned long long"), C_TYPE_UNSIGNED_LONG_LONG, S8("-1")},
+        {S8("unsigned long long"), C_TYPE_UNSIGNED_LONG_LONG, S8("(unsigned __int128)1<<64")},
+        {S8("__int128"), C_TYPE_INT128, S8("(unsigned __int128)1<<127")},
+        {S8("unsigned __int128"), C_TYPE_UNSIGNED_INT128, S8("-1")},
+        {S8("_Bool"), C_TYPE_BOOL, S8("2")},
+        {S8("_Bool"), C_TYPE_BOOL, S8("-1")},
+        {S8("signed char"), C_TYPE_SIGNED_CHAR, S8("(unsigned char)-1")},
+        {S8("unsigned char"), C_TYPE_UNSIGNED_CHAR, S8("(signed char)255")},
+        {S8("long long"), C_TYPE_LONG_LONG, S8("(unsigned long long)-1")},
+        {S8("unsigned long long"), C_TYPE_UNSIGNED_LONG_LONG, S8("(long long)~0ULL")},
+        {S8("unsigned char"), C_TYPE_UNSIGNED_CHAR, S8("_Generic(1,int:-1,default:0)")},
+        {S8("signed char"), C_TYPE_SIGNED_CHAR, S8("127"), true},
+        {S8("unsigned char"), C_TYPE_UNSIGNED_CHAR, S8("255"), true},
+        {S8("short"), C_TYPE_SHORT, S8("32767"), true},
+        {S8("unsigned short"), C_TYPE_UNSIGNED_SHORT, S8("65535"), true},
+        {S8("int"), C_TYPE_INT, S8("2147483647"), true},
+        {S8("unsigned int"), C_TYPE_UNSIGNED_INT, S8("4294967295U"), true},
+        {S8("long"), C_TYPE_LONG, S8("sizeof(long)==8?9223372036854775807LL:2147483647"), true},
+        {S8("unsigned long"), C_TYPE_UNSIGNED_LONG, S8("(unsigned long)-1"), true},
+        {S8("long long"), C_TYPE_LONG_LONG, S8("9223372036854775807LL"), true},
+        {S8("unsigned long long"), C_TYPE_UNSIGNED_LONG_LONG, S8("18446744073709551615ULL"), true},
+        {S8("__int128"), C_TYPE_INT128, S8("(__int128)(((unsigned __int128)1<<127)-1)"), true},
+        {S8("unsigned __int128"), C_TYPE_UNSIGNED_INT128, S8("~(unsigned __int128)0"), true},
+        {S8("_Bool"), C_TYPE_BOOL, S8("1"), true},
+    };
+    for (u32 target_index = 0; target_index < 4; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index & 2 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_LINUX;
+        for (u32 c23 = 0; c23 < 2; c23 += 1)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(0, 0);
+                String8 source = string_format(temporary.arena, cases[index].implicit
+                    ? S8("typedef {S8} Base; enum E : Base {{ FIRST={S8},\nBAD,\nNEXT,\nRESET=0, AFTER }};\n")
+                    : S8("typedef {S8} Base; enum E : Base {{\nBAD={S8},\nNEXT,\nRESET=0, AFTER }};\n"),
+                    cases[index].base, cases[index].value);
+                CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = c23 ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                });
+                CParseResult parsed = c_parse(temporary.arena, preprocess);
+                BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+                BUSTER_TEST_RAW(arguments, parsed.diagnostic_count == 2, source);
+                for (u32 diagnostic = 0; diagnostic < parsed.diagnostic_count; diagnostic += 1)
+                {
+                    BUSTER_TEST(arguments, parsed.diagnostics[diagnostic].kind == C_DIAGNOSTIC_INVALID_CONSTEXPR);
+                    BUSTER_STRING_TEST(arguments, parsed.diagnostics[diagnostic].message, !diagnostic && !cases[index].implicit
+                        ? S8("enumerator 'BAD' is not representable by its fixed underlying type")
+                        : S8("implicit enumerator is not representable by a supported integer type"));
+                    BUSTER_TEST(arguments, parsed.diagnostics[diagnostic].location.line == diagnostic + 2);
+                    BUSTER_TEST(arguments, parsed.diagnostics[diagnostic].location.column == 1);
+                }
+                u32 first = cases[index].implicit ? 1u : 0u;
+                if (BUSTER_REQUIRE(arguments, parsed.enum_member_count == first + 4))
+                {
+                    BUSTER_TEST(arguments, !parsed.enum_members[first].integer_constant.valid);
+                    BUSTER_TEST(arguments, !parsed.enum_members[first + 1].integer_constant.valid);
+                    BUSTER_TEST(arguments, parsed.enum_members[first + 2].integer_constant.valid);
+                    BUSTER_TEST(arguments, parsed.enum_members[first + 3].integer_constant.valid);
+                    BUSTER_TEST(arguments, parsed.enum_members[first + 3].integer_constant.magnitude == 1);
+                    CTypeId owner_id = parsed.enum_members[first].enum_type;
+                    if (BUSTER_REQUIRE(arguments, owner_id.value < parsed.type_count))
+                    {
+                        CType const* owner = parsed.types + owner_id.value;
+                        BUSTER_TEST(arguments, owner->has_fixed_underlying_type);
+                        if (BUSTER_REQUIRE(arguments, owner->element_type.value < parsed.type_count))
+                        {
+                            BUSTER_TEST(arguments, parsed.types[owner->element_type.value].kind == cases[index].kind);
+                        }
+                        for (u32 member = 0; member < parsed.enum_member_count; member += 1)
+                        {
+                            BUSTER_TEST(arguments, parsed.enum_members[member].declaration_type.value == owner_id.value);
+                            BUSTER_TEST(arguments, parsed.enum_members[member].type.value == owner_id.value);
+                        }
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // One source pins semantic/IR facts and observable values independently of layout.
 BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
 {
@@ -1151,7 +1347,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
     String8 buster_dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
     String8 frontend_flags[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
-    String8 fixtures[] = {c_test_enumerator_type_source, c_test_enum_successor_source, c_test_enum_wide_successor_source, c_test_enum_bit_field_source(arguments->arena)};
+    String8 fixtures[] = {c_test_enumerator_type_source, c_test_enum_successor_source, c_test_enum_wide_successor_source,
+                          c_test_enum_bit_field_source(arguments->arena), c_test_fixed_enum_range_source};
     // The successor fixture preserves wide negative declaration types, which
     // GCC 14 narrows to int. Clang covers that rule in both requested dialects.
     // GCC covers the >64-bit extension: Clang 17 does not support its successors.
@@ -1159,7 +1356,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestA
     {
         u32 c23 = test_case & 1;
         u32 fixture = test_case / 2;
-        u32 reference = fixture == 0 || fixture == 3 ? c23 : fixture == 1 ? 0 : 1;
+        // Clang supports fixed bases in both dialects, including 128-bit bases.
+        u32 reference = fixture == 0 || fixture == 3 ? c23 : fixture == 1 || fixture == 4 ? 0 : 1;
         for (u32 form = 0; form < 2; form += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -20375,6 +20573,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successors);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_successor_limits);
+    BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
+    BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_field_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
