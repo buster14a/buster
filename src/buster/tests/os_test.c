@@ -663,6 +663,36 @@ void os_test_process_child_run(UnitTestArguments* arguments)
 {
     BUSTER_UNUSED(arguments);
 
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Fatal-output probes have the same early-dispatch contract as the other
+    // child modes. In os_tests they first ran compiler_prewarm and the serial
+    // suite prefix, exhausting the macOS x86-64 sanitizer deadline (#961).
+    String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
+    if (fatal_mode.length)
+    {
+        if (string_ends_with_sequence(fatal_mode, S8("closed")))
+        {
+            os_file_close(os_get_standard_stream(STANDARD_STREAM_ERROR));
+        }
+#if BUSTER_LINUX
+        if (string_ends_with_sequence(fatal_mode, S8("full")))
+        {
+            int full = open("/dev/full", O_WRONLY);
+            if (full < 0 || dup2(full, STDERR_FILENO) < 0) { os_exit(7); }
+            close(full);
+        }
+#endif
+        if (string_starts_with_sequence(fatal_mode, S8("raw")))
+        {
+            os_fail_raw(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-37"));
+        }
+        else
+        {
+            os_fail_va(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-{u32}"), (u32)37);
+        }
+    }
+#endif
+
 #if !BUSTER_SINGLE_THREADED && (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 resource_failure_mode = os_get_environment_variable(S8("BUSTER_OS_RESOURCE_FAILURE_MODE"));
     if (resource_failure_mode.length)
@@ -773,39 +803,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
 
     UnitTestResult result = {0};
 
-
-#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
-    String8 fatal_mode = os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE"));
-    if (fatal_mode.length)
-    {
-        if (string_ends_with_sequence(fatal_mode, S8("closed")))
-        {
-            os_file_close(os_get_standard_stream(STANDARD_STREAM_ERROR));
-        }
-#if BUSTER_LINUX
-        if (string_ends_with_sequence(fatal_mode, S8("full")))
-        {
-            int full = open("/dev/full", O_WRONLY);
-            if (full < 0 || dup2(full, STDERR_FILENO) < 0) { os_exit(7); }
-            close(full);
-        }
-#endif
-        if (string_starts_with_sequence(fatal_mode, S8("raw")))
-        {
-            os_fail_raw(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-37"));
-        }
-        else
-        {
-            os_fail_va(19, S8("child"), S8("os-fail-regression.c"), S8("fatal-output-{u32}"), (u32)37);
-        }
-    }
-#endif
-
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    // Test-owned subprocess modes above must dispatch before this fixture.
-    // Otherwise each probe recursively runs the full spawn contract before
-    // reaching its sentinel, which can consume the deadlock deadline under
-    // sanitizers without exercising the resource-failure path.
+    // All test-owned subprocess modes dispatch in os_test_process_child_run,
+    // before compiler prewarming, the suite prefix, and this spawn fixture.
     BUSTER_TEST_FIXTURE(arguments, os_process_spawn_contract_tests);
 #endif
 
@@ -903,42 +903,52 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                            S8("raw-full"), S8("formatted-full"),
 #endif
         };
-        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
+        // Verbose execution makes a misplaced dispatcher observable even on
+        // fast hosts: no test-module output may precede the fatal payload.
+        String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test"), S8("--verbose=1")};
+        for (u32 iteration = 0; iteration < 3; iteration += 1)
         {
-            SliceString8 inherited_keys = program_state->input.environment_keys;
-            SliceString8 inherited_values = program_state->input.environment_values;
-            String8* keys = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
-            String8* values = arena_allocate(arguments->arena, String8, inherited_keys.length + 2);
-            keys[0] = S8("BUSTER_OS_FATAL_OUTPUT_MODE"); values[0] = modes[index];
-            keys[1] = S8("BUSTER_TEST_JOBS"); values[1] = S8("1");
-            u64 count = 2;
-            for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(modes); index += 1)
             {
-                if (!string_equal(inherited_keys.pointer[inherited], keys[0]) && !string_equal(inherited_keys.pointer[inherited], keys[1]))
+                u64 arena_position = arguments->arena->position;
+                String8 override_keys[] = {S8("BUSTER_OS_FATAL_OUTPUT_MODE"), S8("BUSTER_TEST_JOBS")};
+                String8 override_values[] = {modes[index], S8("1")};
+                OsTestEnvironment environment =
+                    os_test_environment(arguments->arena, override_keys, override_values, BUSTER_ARRAY_LENGTH(override_keys));
+                ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                    environment.keys, environment.values,
+                    (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawn.handle != 0);
+                if (spawn.handle)
                 {
-                    keys[count] = inherited_keys.pointer[inherited]; values[count] = inherited_values.pointer[inherited];
-                    count += 1;
-                }
-            }
-            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
-                (SliceString8){keys, count}, (SliceString8){values, count},
-                (ProcessSpawnOptions){.capture = (u64)1 << STANDARD_STREAM_ERROR});
-            BUSTER_TEST(arguments, spawn.handle != 0);
-            if (spawn.handle)
-            {
-                ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
-                BUSTER_TEST(arguments, !wait.timed_out);
-                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+                    ProcessWaitResult wait = os_process_wait_deadline(arguments->arena, spawn, 30000000);
+                    BUSTER_TEST(arguments, !wait.timed_out);
+                    BUSTER_TEST(arguments, !wait.capture_failed);
+                    BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
 #if BUSTER_WINDOWS
-                BUSTER_TEST(arguments, wait.platform_status == 1);
+                    bool expected_exit = wait.platform_status == 1;
 #else
-                // Darwin's wait macros take the address of their argument.
-                int native_status = (int)wait.platform_status;
-                BUSTER_TEST(arguments, WIFEXITED(native_status) && WEXITSTATUS(native_status) == 1);
+                    // Darwin's wait macros take the address of their argument.
+                    int native_status = (int)wait.platform_status;
+                    bool expected_exit = WIFEXITED(native_status) && WEXITSTATUS(native_status) == 1;
 #endif
-                String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
-                BUSTER_TEST(arguments, index < 2 ? string_equal(error, S8("fatal-output-37 at os-fail-regression.c:19 in child\n")) : !error.length);
+                    BUSTER_TEST(arguments, expected_exit);
+                    String8 output = {(char8*)wait.streams[STANDARD_STREAM_OUTPUT].pointer, wait.streams[STANDARD_STREAM_OUTPUT].length};
+                    String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
+                    bool expected_error = index < 2 ? string_equal(error, S8("fatal-output-37 at os-fail-regression.c:19 in child\n")) : !error.length;
+                    BUSTER_TEST(arguments, !output.length);
+                    BUSTER_TEST(arguments, expected_error);
+                    if (wait.timed_out || wait.capture_failed || wait.result != PROCESS_RESULT_FAILED ||
+                        !expected_exit || output.length || !expected_error)
+                    {
+                        arguments->show(arguments,
+                            S8("OS_FATAL_OUTPUT_CHILD_V1 mode={S8} iteration={u32} result={u32} platform_status={u32} "
+                               "timed_out={u32} capture_failed={u32} stdout={S8} stderr={S8}\n"),
+                            modes[index], iteration, (u32)wait.result, wait.platform_status,
+                            (u32)wait.timed_out, (u32)wait.capture_failed, output, error);
+                    }
+                }
+                arena_set_position(arguments->arena, arena_position);
             }
         }
     }
@@ -989,7 +999,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
-            BUSTER_TEST(arguments, !os_file_write_attempt(file, (ByteSlice){original, sizeof(original)}));
+            BUSTER_TEST(arguments, !os_file_write_attempt(file, (ByteSlice){original, 1}));
             BUSTER_TEST(arguments, os_file_close(file));
         }
 #endif
