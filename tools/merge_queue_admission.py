@@ -148,12 +148,21 @@ def check_results(runs: dict, jobs: dict, candidate: dict) -> tuple[list, list]:
     return evidence, pending
 
 
-def validate_ruleset(data: dict) -> None:
+def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
     require(data.get("target") == "branch" and data.get("enforcement") == "active",
             "queue ruleset must be active and target branches")
     require(data.get("conditions", {}).get("ref_name") ==
             {"include": ["refs/heads/main"], "exclude": []}, "ruleset scope must be exact main")
-    require(data.get("bypass_actors") == [], "standing bypasses are not admitted")
+    # GitHub omits this administrator-only field from GITHUB_TOKEN reads.
+    # Absence is unknown, not evidence of either a bypass or an empty list.
+    # Deployment audits must still supply a complete administrator response.
+    if not read_only_response or "bypass_actors" in data:
+        require("bypass_actors" in data,
+                "bypass inventory is hidden: check-ruleset needs an administrator response")
+        require(data["bypass_actors"] == [], "standing bypasses are not admitted")
+    if "current_user_can_bypass" in data:
+        require(data["current_user_can_bypass"] == "never",
+                "the admission reader must not have bypass authority")
     rules = data.get("rules", [])
     require(isinstance(rules, list), "rules must be a list")
     by_type = {rule["type"]: rule for rule in rules}
@@ -179,6 +188,19 @@ def validate_ruleset(data: dict) -> None:
             review.get("dismiss_stale_reviews_on_push") is False and
             review.get("required_review_thread_resolution") is True,
             "retain solo-maintainer review policy and resolved threads")
+
+
+def live_ruleset(api: GitHub, repository: str) -> dict:
+    data = api.get(f"rulesets/{RULESET_ID}")
+    require(type(data.get("id")) is int and data["id"] == RULESET_ID and
+            data.get("source_type") == "Repository" and data.get("source") == repository,
+            "live ruleset identity mismatch")
+    validate_ruleset(data, read_only_response=True)
+    visibility = "verified-empty" if "bypass_actors" in data else "hidden"
+    if visibility == "hidden":
+        print("ruleset bypass inventory is hidden from the read-only token; "
+              "no-bypass configuration requires a separate administrator audit", file=sys.stderr)
+    return {"id": RULESET_ID, "bypass_inventory": visibility}
 
 
 def audit_workflows(root: Path) -> None:
@@ -278,7 +300,7 @@ def run_gate(arguments) -> dict:
     candidate = identity(event, arguments.repository, arguments.sha, arguments.repo_root)
     api = GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
     live_identity(api, candidate)
-    validate_ruleset(api.get(f"rulesets/{RULESET_ID}"))
+    ruleset_before = live_ruleset(api, arguments.repository)
     retirement = retirement_admission(arguments, candidate)
     deadline = time.monotonic() + arguments.wait_seconds
     while True:
@@ -292,11 +314,12 @@ def run_gate(arguments) -> dict:
                 require(retirement_admission(arguments, candidate) == retirement,
                         "trusted publication changed during combined-head CI; rebuild admission")
                 live_identity(api, candidate)
-                validate_ruleset(api.get(f"rulesets/{RULESET_ID}"))
+                ruleset_after = live_ruleset(api, arguments.repository)
                 break
         require(time.monotonic() < deadline, "timed out waiting for exact-group gates: " + ", ".join(pending))
         time.sleep(min(30, max(0, deadline - time.monotonic())))
-    return dict(candidate, status="admitted", checks=evidence, retirement=retirement)
+    return dict(candidate, status="admitted", checks=evidence, retirement=retirement,
+                ruleset_reads=[ruleset_before, ruleset_after])
 
 
 def main(argv=None) -> int:

@@ -116,10 +116,34 @@ truncation and ambiguous results fail closed.
 Immediately before admission, the collector repeats the six-result read and
 trusted-publication verification, requires the same evidence, rechecks live main and the queue ref, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
-preserves independent retirement admission, adds the exact-group gate, rejects bypasses/strict branch updates, and
+preserves independent retirement admission, adds the exact-group gate, rejects visible bypasses/strict branch updates, and
 requires the single-build/single-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
+
+### Read-only ruleset visibility
+
+GitHub returns `bypass_actors` only to callers with write access to the ruleset.
+The Actions read-only token normally receives no such property. The live
+collector validates the ruleset identity, enforcement, scope, required checks,
+queue settings and every other policy field it can read. An explicitly returned
+bypass list must be empty; an explicitly returned caller bypass capability must
+be `never`. Missing bypass data is recorded as `hidden` in both ruleset reads
+in the admission artifact and explained in the log. It is not reported as a
+verified empty list.
+
+No-standing-bypass configuration is an administrator-audited deployment
+invariant, not something the read-only workflow can independently prove.
+`check-ruleset` remains strict: a saved administrator response must explicitly
+contain `bypass_actors: []`. Audit that response at activation, after every
+ruleset change, and after any emergency recovery. Do not give the admission
+workflow ruleset-write credentials to expose this field.
+
+The first live group for #956 exposed the former bug: treating a hidden list as
+a standing bypass. The repair preserves trusted-base execution. Consequently,
+it cannot authorize its own first merge while main still contains the bug.
+Follow the emergency policy below for an explicitly authorized, narrowly scoped
+bootstrap; do not run candidate authority code or forge a successful check.
 
 A PR readiness success is not combined-head authorization. Neither a reused
 artifact nor a manually posted status may authorize another SHA/tree. A newer

@@ -19,6 +19,14 @@ def candidate():
             "head_ref": "refs/heads/gh-readonly-queue/main/pr-1-example"}
 
 
+def live_rules():
+    data = json.loads((ROOT / ".github/main-merge-queue.ruleset.json").read_text())
+    data.update(id=gate.RULESET_ID, source_type="Repository", source="buster14a/buster")
+    # The actual read-only Actions response does not reveal bypass actors.
+    del data["bypass_actors"]
+    return data
+
+
 def results():
     expected = candidate()
     rows, jobs = [], {}
@@ -135,6 +143,66 @@ class RulesTests(unittest.TestCase):
     def test_desired_ruleset(self):
         gate.validate_ruleset(self.ruleset())
 
+    def test_readonly_omission_is_not_an_administrator_audit(self):
+        data = live_rules()
+        gate.validate_ruleset(data, read_only_response=True)
+        with self.assertRaisesRegex(gate.AdmissionError, "inventory is hidden"):
+            gate.validate_ruleset(data)
+        self.assertNotIn("bypass_actors", data)
+
+    def test_visible_bypass_and_malformed_inventory_fail_in_both_modes(self):
+        for inventory in (None, {}, "", False, [{"actor_type": "OrganizationAdmin"}]):
+            for read_only in (False, True):
+                with self.subTest(inventory=inventory, read_only=read_only):
+                    data = self.ruleset()
+                    data["bypass_actors"] = inventory
+                    with self.assertRaisesRegex(gate.AdmissionError, "standing bypasses"):
+                        gate.validate_ruleset(data, read_only_response=read_only)
+
+    def test_reader_bypass_authority_is_rejected(self):
+        for authority in ("always", "pull_requests_only", None, ""):
+            data = live_rules()
+            data["current_user_can_bypass"] = authority
+            with self.assertRaisesRegex(gate.AdmissionError, "bypass authority"):
+                gate.validate_ruleset(data, read_only_response=True)
+
+    def test_live_ruleset_identity_and_visibility(self):
+        api = gate.GitHub("buster14a/buster", "fixture-token")
+        for hidden in (False, True):
+            data = live_rules()
+            if not hidden:
+                data["bypass_actors"] = []
+            with patch.object(api, "get", return_value=data):
+                report = gate.live_ruleset(api, "buster14a/buster")
+                self.assertEqual(report["bypass_inventory"],
+                                 "hidden" if hidden else "verified-empty")
+        for key, value in (("id", 1), ("id", str(gate.RULESET_ID)),
+                           ("source_type", "Organization"), ("source", "other/repo")):
+            data = live_rules()
+            data[key] = value
+            with patch.object(api, "get", return_value=data):
+                with self.assertRaisesRegex(gate.AdmissionError, "identity mismatch"):
+                    gate.live_ruleset(api, "buster14a/buster")
+
+    def test_hidden_inventory_does_not_relax_visible_protections(self):
+        for change in ("strict", "missing", "app", "disabled", "scope", "queue"):
+            data = live_rules()
+            checks = data["rules"][3]["parameters"]
+            if change == "strict":
+                checks["strict_required_status_checks_policy"] = True
+            elif change == "missing":
+                checks["required_status_checks"].pop()
+            elif change == "app":
+                checks["required_status_checks"][0]["integration_id"] = 1
+            elif change == "disabled":
+                data["enforcement"] = "disabled"
+            elif change == "scope":
+                data["conditions"]["ref_name"]["include"] = ["~ALL"]
+            else:
+                data["rules"][-1]["parameters"]["max_entries_to_build"] = 2
+            with self.subTest(change=change), self.assertRaises(gate.AdmissionError):
+                gate.validate_ruleset(data, read_only_response=True)
+
     def test_each_admission_check_remains_independently_required(self):
         for context in ("Native retirement merge admission", "Main integration admission"):
             with self.subTest(context=context):
@@ -237,7 +305,7 @@ class OrchestrationTests(unittest.TestCase):
             event.write_text("{}")
             arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
                                         repo_root=root, wait_seconds=0)
-            rules = json.loads((ROOT / ".github/main-merge-queue.ruleset.json").read_text())
+            rules = live_rules()
             with patch.object(gate, "identity", return_value=candidate()), \
                     patch.object(gate, "live_identity"), patch.object(gate, "GitHub") as api:
                 api.return_value.get.return_value = rules
@@ -255,7 +323,7 @@ class OrchestrationTests(unittest.TestCase):
                 event.write_text("{}")
                 arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
                                             repo_root=root, wait_seconds=0)
-                rules = json.loads((ROOT / ".github/main-merge-queue.ruleset.json").read_text())
+                rules = live_rules()
                 result = SimpleNamespace(returncode=returncode, stdout=json.dumps(report), stderr="denied")
                 with patch.object(gate, "identity", return_value=candidate()), \
                         patch.object(gate, "live_identity"), patch.object(gate, "GitHub") as api, \
@@ -275,7 +343,7 @@ class OrchestrationTests(unittest.TestCase):
             event.write_text("{}")
             arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
                                         repo_root=root, wait_seconds=0)
-            rules = json.loads((ROOT / ".github/main-merge-queue.ruleset.json").read_text())
+            rules = live_rules()
             native = {"status": "admitted", "base": "a" * 40, "head": "b" * 40}
             result = SimpleNamespace(returncode=0, stdout=json.dumps(native), stderr="")
             evidence = [{"run_id": 1, "run_attempt": 1}]
@@ -286,6 +354,8 @@ class OrchestrationTests(unittest.TestCase):
                 api.return_value.get.return_value = rules
                 report = gate.run_gate(arguments)
                 self.assertEqual(report["status"], "admitted")
+                self.assertEqual(report["ruleset_reads"], [
+                    {"id": gate.RULESET_ID, "bypass_inventory": "hidden"}] * 2)
                 self.assertEqual(report["head"], "b" * 40)
                 self.assertEqual(collect.call_count, 2)
                 self.assertEqual(live.call_count, 3)
@@ -300,7 +370,7 @@ class OrchestrationTests(unittest.TestCase):
             event.write_text("{}")
             arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
                                         repo_root=Path(temporary), wait_seconds=0)
-            rules = json.loads((ROOT / ".github/main-merge-queue.ruleset.json").read_text())
+            rules = live_rules()
             with patch.object(gate, "identity", return_value=candidate()), \
                     patch.object(gate, "live_identity"), patch.object(gate, "GitHub") as api, \
                     patch.object(gate, "collect", return_value=([{"run_id": 1}], [])), \
@@ -308,6 +378,22 @@ class OrchestrationTests(unittest.TestCase):
                         {"attestation_id": 1}, {"attestation_id": 2}]):
                 api.return_value.get.return_value = rules
                 with self.assertRaisesRegex(gate.AdmissionError, "publication changed"):
+                    gate.run_gate(arguments)
+
+    def test_ruleset_change_during_ci_rejects_admission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            event = Path(temporary) / "event.json"
+            event.write_text("{}")
+            arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
+                                        repo_root=Path(temporary), wait_seconds=0)
+            changed = live_rules()
+            changed["enforcement"] = "disabled"
+            with patch.object(gate, "identity", return_value=candidate()), \
+                    patch.object(gate, "live_identity"), patch.object(gate, "GitHub") as api, \
+                    patch.object(gate, "collect", return_value=([{"run_id": 1}], [])), \
+                    patch.object(gate, "retirement_admission", return_value={"attestation_id": 1}):
+                api.return_value.get.side_effect = [live_rules(), changed]
+                with self.assertRaisesRegex(gate.AdmissionError, "must be active"):
                     gate.run_gate(arguments)
 
     def test_workflow_inventory_rejects_removed_group_trigger_and_paths_filter(self):
