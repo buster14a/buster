@@ -89,13 +89,18 @@ JSON encoding. The requested-work root uses the same encoding over sorted
 
 `support.files[performance_rows]` is the independent #508-produced canonical
 UTF-8 JSON artifact with schema
-`buster-native-retirement-performance-rows-v1`, integer version `1`, the exact
+`buster-native-retirement-performance-rows-v2`, integer version `2`, the exact
 `row_identity_fields` list, a `sources` map for the #508 declaration, manifest,
 inputs, dependencies, environment and validator report digests, and an array
 of rows with contiguous zero-based IDs. A row contains every identity field
 plus explicit boolean eligibility for compiler wall time, peak RSS,
-deterministic code-section bytes and generated runtime. Runtime eligibility
-must name an independent native executable oracle; code eligibility must name
+deterministic code-section bytes and generated runtime. The array remains an
+exhaustive one-to-one audit join to every census row. Compiler eligibility is
+recomputed from the production validator's authenticated
+`applicability_skip_rows`; source-proven non-executed rows retain explicit null
+admission/oracle observations and never enter the dense timing schedule,
+result-input population, or statistical family. Runtime eligibility must name
+an independent native executable oracle; code eligibility must name
 deterministic code sections. The bound `population.source_digests` must identify
 the complete #508 output, including its versioned performance declaration;
 rewriting six self-consistent artifacts or omitting the independent validator
@@ -210,9 +215,14 @@ invalid, not wins.
 The primary aggregate upper bound is `1.02` for compiler wall time, `1.02` for
 peak RSS, `1.01` for generated code bytes, and `1.03` for generated runtime.
 Code bytes are deterministic and use the observed exact ratio rather than a
-fabricated confidence interval. If a format cannot identify code sections with
-an existing validated parser, that cell is unavailable until the parser is
-provided; whole-file size cannot be silently substituted.
+fabricated confidence interval. A deterministic zero-byte candidate code
+payload is retained as the integer observation `0` and is valid against a
+positive baseline denominator; no padding or positive-value fabrication is
+permitted. A zero baseline code payload has no ratio denominator and is
+retained as evidence but excluded from the code-ratio population. If a format
+cannot identify code sections with an existing validated parser, that cell is
+unavailable until the parser is provided; whole-file size cannot be silently
+substituted.
 
 Aggregate results are also recomputed separately for every target, target CPU,
 mode, frontend configuration, and artifact stage. Every slice must satisfy the
@@ -371,8 +381,8 @@ is trustworthy.
 
 Both `pre_sample_plan` and `post_aa_binding` carry the same `execution_plan`
 artifact descriptor. Its schema is
-`buster-native-retirement-execution-plan-v1`, integer version `1`. It binds
-`schedule=tp-retirement-block-schedule-v1`, the full uint64 seed, two rounds,
+`buster-native-retirement-execution-plan-v2`, integer version `1`. It binds
+`schedule=tp-retirement-block-schedule-v2`, the full uint64 seed, two rounds,
 pairs per round, two warmups per variant, the logical CPU and native target from
 the admitted profile/qualification/A/A receipts, the canonical performance-row
 digest, and exactly one contract per canonical row. Each row contract binds its

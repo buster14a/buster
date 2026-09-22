@@ -48,6 +48,8 @@ on:
       - tools/native_retirement_result_input.py
       - tools/native_retirement_result_input_test.py
       - tools/native_retirement_performance_binding.py
+      - tools/native_retirement_performance_schema.py
+      - tools/native_retirement_performance_eligibility_test.py
       - tools/native_retirement_performance_binding_test.py
       - tools/native_retirement_performance_identity_test.py
       - tools/throughput/**
@@ -232,7 +234,9 @@ jobs:
             -o "$RUNNER_TEMP/bench-throughput-retirement"
           "$RUNNER_TEMP/bench-throughput-retirement" self-test
       - name: Validate immutable performance binding schema
-        run: python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
+        run: |
+          python3 -W error::ResourceWarning tools/native_retirement_performance_binding_test.py -v
+          python3 -W error::ResourceWarning tools/native_retirement_performance_eligibility_test.py -v
       - name: Prove unreviewed input drift fails closed
         run: |
           printf '\n' >> tests/basic_c_operations.c
@@ -275,7 +279,7 @@ jobs:
         run: |
           mkdir -p evidence/binding-source/tools evidence/binding-source/docs
           git rev-parse HEAD 'HEAD^{tree}' > evidence/binding-source/revision.txt
-          cp tools/native_retirement_performance_binding.py tools/native_retirement_performance_binding_test.py tools/native_retirement_performance_identity_test.py tools/native_retirement_result_input.py tools/native_retirement_result_input_test.py tools/native_retirement_contract.py evidence/binding-source/tools/
+          cp tools/native_retirement_performance_schema.py tools/native_retirement_performance_eligibility_test.py tools/native_retirement_performance_binding.py tools/native_retirement_performance_binding_test.py tools/native_retirement_performance_identity_test.py tools/native_retirement_result_input.py tools/native_retirement_result_input_test.py tools/native_retirement_contract.py evidence/binding-source/tools/
           cp docs/native-retirement-support-v1.tsv docs/native-retirement-performance-contract.md evidence/binding-source/docs/
       - name: Retain seven-day contract diagnostics
         if: ${{ !cancelled() }}
