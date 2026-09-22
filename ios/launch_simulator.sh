@@ -1013,8 +1013,9 @@ run_one_bundle() {
 
     echo "Installing iOS ${label} app bundle: $app_bundle"
     install_started=$SECONDS
-    if ! run_with_timeout "$install_timeout_seconds" xcrun simctl install "$udid" "$app_bundle"; then
-        echo "error: failed to install iOS ${label} app bundle" >&2
+    if ! run_lifecycle_phase install "$label" "$console_log" "$install_timeout_seconds" \
+        xcrun simctl install "$udid" "$app_bundle"; then
+        echo "error: failed to install iOS ${label} app bundle (outcome=$last_lifecycle_outcome)" >&2
         print_simulator_diagnostics
         return 1
     fi
