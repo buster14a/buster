@@ -2,18 +2,18 @@
 
 ## Rollout state: not enabled
 
-Implementation baseline: `46ed5e141baed17dfc1e977691ac73e08be5b9f5`.
+Adapter baseline: `f5ce6cdc10e0e9f49b8698a82944daf4688c0f2e` (after #927 and #933).
 The live ruleset read during this work was `22537199`: six required GitHub
 Actions checks, non-strict branch freshness, no bypass, and no merge queue.
 `.github/main-merge-queue.ruleset.json` is a **desired configuration**, not an
 assertion that those settings have been applied. The checker has no write API.
 
-Do not activate that configuration yet. #925/#927 must first repair current
-main, land the trusted retirement admission gate, and support retirement-bound
-merge groups. The observed #927 implementation rejects every retirement-sensitive
-merge group, including one carrying an attested integration head. This change
-preserves that rejection instead of manufacturing a green queue result. Thus
-this PR is an independently testable #867 prerequisite, not completion of #867.
+The trusted retirement gate and queue collector have landed. The adapter admits
+one synthetic merge commit only when its first parent is current main and its
+entire tree equals the existing writer's attested PR head. It verifies the open
+same-repository PR, creator-bearing status and completed successful writer run.
+Live activation and the acceptance exercises below are still required; local
+fixtures do not establish GitHub's live synthetic-commit shape or queue behavior.
 
 ## One admission owner, no branch-freshness requirement
 
@@ -51,7 +51,7 @@ only as part of the reviewed queue rollout; never remove an existing requirement
 | GPU Linux consumers | gpu-toolchains.yml | Workflow-selected PR revision | Exact synthetic group |
 | Benchmark service workflow policy | bench-service-policy.yml | GitHub PR merge revision | Exact synthetic group |
 | API migration policy | api-migration-policy.yml | Bounded API compatibility policy | Exact synthetic group |
-| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Trusted retirement gate; sensitive groups fail closed until supported |
+| Native retirement merge admission | api-migration-policy.yml | Exact head and trusted integration evidence | Exact generated tree plus successful trusted writer publication |
 | Main integration admission | merge-queue-admission.yml | Readiness/regression checks only | Trusted-base verification of the exact group and all six gates |
 
 `CI complete` retains desktop x86-64/AArch64, mobile, native-mode, UEFI, lint and
@@ -77,10 +77,30 @@ main as the base ref, a main queue ref, the expected repository, and base ancest
 The report binds base SHA/tree, group SHA/tree and queue ref.
 
 Before waiting for CI it invokes the trusted base's
-`native_retirement_merge_gate.py check --event merge_group` without
-`--allow-pending`. An absent gate, pending result, rejected candidate or mismatched
-base/head fails. The retirement integration owner must extend that gate for the
-final attested group; this checker cannot bless it independently.
+`native_retirement_merge_gate.py check --event merge_group --repository ...`
+without `--allow-pending`. An absent gate, pending result, rejected candidate or
+mismatched base/head fails. For sensitive groups, the gate verifies a two-parent
+synthetic commit with current main first and the attested integration second.
+The synthetic tree must equal both Git's clean combined tree and the full
+attested final tree. Additional candidates or any changed byte require a fresh
+writer preparation. A generated-only delta also requires publication evidence.
+
+The PR head must still identify exactly one open, ready, same-repository PR
+targeting main. The latest integration status must be successful and authored
+by `github-actions[bot]`; an earlier green cannot hide a later pending/failure.
+Its target must be this repository's trusted integration workflow run from the
+exact base. That run must have completed successfully, and the status timestamp
+must fall within its latest attempt. Cancelled, incomplete and superseded writer
+attempts cannot authorize a group. Sensitive fork heads are rejected because
+the existing writer cannot publish to them; ordinary fork groups retain CI.
+
+After main advances, dispatch the same protected writer again with the PR number
+and default inputs. It verifies the previous publication, recovers the original
+source candidate and reconstructs against current main. Authorization and the
+publication lease still bind the current PR head; old generated output is never
+merged or reused. The new attested head replaces the old generated integration
+commit while retaining its source ancestry. Then enqueue the new head. This is
+a fresh authorized dispatch, not autonomous reuse of a historical approval.
 
 The collector reads workflow runs by exact group SHA and `merge_group` event,
 then resolves each of the six workflow **paths**, latest run and latest attempt.
@@ -91,8 +111,8 @@ jobs, skipped/neutral jobs and cancelled workflows do not count. Missing or
 running workflows remain pending until the bounded timeout. API errors,
 truncation and ambiguous results fail closed.
 
-Immediately before admission, the collector repeats the six-result read,
-requires the same evidence, rechecks live main and the queue ref, and validates
+Immediately before admission, the collector repeats the six-result read and
+trusted-publication verification, requires the same evidence, rechecks live main and the queue ref, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
 preserves independent retirement admission, adds the exact-group gate, rejects bypasses/strict branch updates, and
 requires the single-build/single-merge policy. The success artifact records each
@@ -109,10 +129,10 @@ the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge
 
 Before editing repository settings, complete and retain evidence for all of:
 
-1. Land #925/#927's repaired, exact-head-attested bootstrap. Extend its
-   merge-group retirement gate to recognize only an exact final generated tree
-   from the existing trusted writer, including main-advance rebuilding. Keep
-   writer authorization, trust transitions, fork disposition and cancellation
+1. Land the exact-tree adapter and source-recovery bootstrap through the existing
+   trusted writer. Verify a fresh dispatch after main advancement, and verify
+   the actual GitHub group shape against the adapter's single-candidate contract.
+   Keep writer authorization, trust transitions, fork disposition and cancellation
    fail-closed. Do not create another writer/queue to work around that gate.
 2. Merge this prerequisite and run its policy tests on actual main. Resolve
    any newly added required checks by auditing and extending the inventory;
@@ -124,7 +144,12 @@ Before editing repository settings, complete and retain evidence for all of:
    access does not imply permission to edit repository rulesets.
 4. Queue two nonconflicting PRs from the same old base and retain both exact
    group reports. After the first lands, prove the second was rebuilt against
-   the new main. Repeat with different retirement-bound sources and attestations.
+   the new main. Repeat with different retirement-bound sources and attestations;
+   retain the fresh authorized writer dispatch and regenerated second head.
+   A stale sensitive group must block until that dispatch finishes and the
+   replacement head is enqueued. Automatic dispatch/re-enqueue is not implemented
+   or authorized by this adapter; any such automation must preserve the existing
+   exact-head admin/reviewer authorization policy.
 5. Inject a controlled combined-candidate check failure despite green PR heads;
    prove no merge. Exercise cancellation/rerun, main advance during preparation,
    fork approval, and genuine conflict removal with exact path diagnostics.

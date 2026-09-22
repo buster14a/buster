@@ -261,12 +261,17 @@ admission. The group checker executes from the immutable trusted base, binds
 all six required workflows to the group SHA and latest attempt, and rejects
 stale main/group identities. It delegates retirement admission to the existing
 trusted gate; it is neither another writer nor a replacement queue.
+Sensitive groups must have the full tree of a successfully published attested
+integration head. The gate rechecks the live PR, latest status and writer attempt.
+After main advances, a fresh authorized dispatch recovers the original source
+from verified writer output and regenerates against current main; enqueue the
+replacement head after its checks pass. No manual generated-file repair is needed.
 
 The checked-in queue ruleset is a desired configuration, not an enabled live
 policy. Keep `strict_required_status_checks_policy: false`: a conflict-free
 branch does not need a manual update just because main advanced. Do not enable
-the queue until the existing retirement writer/admission supports exact final
-merge groups and its current-main repair has landed. The required-check audit,
+the queue until the exact-tree adapter and source-recovery bootstrap have landed
+and their live acceptance has been established. The required-check audit,
 fork and cancellation policy, activation/read-back steps, remaining live
 acceptance tests, and emergency restrictions are in
 [serialized main integration](../merge-queue-admission.md). No manual success

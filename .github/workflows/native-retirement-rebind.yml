@@ -68,6 +68,8 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
   statuses: read
 
 jobs:
@@ -152,6 +154,8 @@ jobs:
           pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
           PY_STATUS
             status_args=(--status-json "$RUNNER_TEMP/native-retirement-status.json")
+          elif [[ "$EVENT_NAME" == merge_group ]]; then
+            status_args=(--repository "$GITHUB_REPOSITORY")
           fi
           python3 "$gate" check \
             --repo-root "$GITHUB_WORKSPACE/candidate" \
@@ -168,7 +172,7 @@ jobs:
           PY
           )
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          if [[ "$mode" != trusted-integration ]]; then
+          if [[ "$mode" != trusted-integration && "$mode" != trusted-integration-merge-group ]]; then
             python3 "$classifier" classify \
               --repo-root "$GITHUB_WORKSPACE/candidate" \
               --base "$TRUSTED_REF" \
@@ -242,7 +246,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/native-retirement-rebind"
-          if [[ '${{ github.event_name }}' == push || '${{ github.event_name }}' == workflow_dispatch || '${{ steps.admission.outputs.mode }}' == trusted-integration ]]; then
+          if [[ '${{ github.event_name }}' == push || '${{ github.event_name }}' == workflow_dispatch || '${{ steps.admission.outputs.mode }}' == trusted-integration || '${{ steps.admission.outputs.mode }}' == trusted-integration-merge-group ]]; then
             python3 trusted/tools/native_retirement_rebind.py check \
               --repo-root "$GITHUB_WORKSPACE/candidate" \
               | tee "$RUNNER_TEMP/native-retirement-rebind/check.json"

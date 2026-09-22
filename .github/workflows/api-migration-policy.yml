@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pull-requests: read
   statuses: read
   checks: write
@@ -126,6 +127,8 @@ jobs:
           pathlib.Path(output_path).write_text(json.dumps({"sha": head, "statuses": rows}))
           PY_STATUS
             status_args=(--status-json "$RUNNER_TEMP/native-retirement-status.json")
+          elif [[ "$EVENT_NAME" == merge_group ]]; then
+            status_args=(--repository "$GITHUB_REPOSITORY")
           fi
           python3 "$tool" check \
             --repo-root "$GITHUB_WORKSPACE/candidate" \
