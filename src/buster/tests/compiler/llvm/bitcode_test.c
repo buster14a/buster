@@ -194,7 +194,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
                         BUSTER_TEST(arguments, child.handle != 0);
                         if (child.handle)
                         {
-                            BUSTER_TEST(arguments, os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS);
+                            ProcessWaitResult run_result = os_process_wait_sync(arena, child);
+                            if (run_result.result != PROCESS_RESULT_SUCCESS && fixtures[fixture].both_optimizations)
+                            {
+                                arguments->show(arguments, S8("LLVM variadic consumer at {S8}: checker exit {u32}\n"),
+                                                compile[1], run_result.platform_status);
+                            }
+                            BUSTER_TEST(arguments, run_result.result == PROCESS_RESULT_SUCCESS);
                         }
                     }
                 }
@@ -597,6 +603,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_win64_object(UnitT
     }
     scratch_end(temporary);
 #endif
+    return result;
+}
+
+// Construct the four list operations without passing through the C frontend.
+// The C fixture below separately checks that frontend lowering and an LLVM
+// consumer agree about the public ABI.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_canonical_variadics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    IrTypeId parameters[1] = {{.value = 1}};
+    IrType types[5] = {
+        {.id = {.value = 0}, .kind = IR_TYPE_VOID, .layout = {.resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .layout = {.size = 4, .alignment = 4, .resolved = true},
+         .bit_width = 32, .is_signed = true},
+        {.id = {.value = 2}, .kind = IR_TYPE_VA_LIST, .layout = {.size = 24, .alignment = 8, .resolved = true}},
+        {.id = {.value = 3}, .kind = IR_TYPE_POINTER, .element_type = {.value = 2},
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 4}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 1},
+         .parameter_types = parameters, .parameter_count = 1, .is_variadic = true,
+         .calling_convention = IR_CALLING_CONVENTION_C, .layout = {.resolved = true}},
+    };
+    IrSymbol symbols[1] = {{.name = S8("direct_variadic"), .link_name = S8("direct_variadic"), .type = {.value = 4},
+                            .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true}};
+    IrValueId store_original[2] = {{.value = 0}, {.value = 2}};
+    IrValueId original_place[1] = {{.value = 0}};
+    IrValueId original_cursor[1] = {{.value = 3}};
+    IrValueId store_copy[2] = {{.value = 1}, {.value = 4}};
+    IrValueId copy_place[1] = {{.value = 1}};
+    IrValueId copied_cursor[1] = {{.value = 5}};
+    IrValueId returned[1] = {{.value = 6}};
+    u64 parameter_index[1] = {0};
+    IrInstruction instructions[13] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(instructions); index += 1)
+    {
+        instructions[index].next = index + 1 < BUSTER_ARRAY_LENGTH(instructions) ? (IrInstructionId){.value = index + 1} :
+                              IR_INSTRUCTION_ID_INVALID;
+        instructions[index].result = IR_VALUE_ID_INVALID;
+        instructions[index].symbol = IR_SYMBOL_ID_INVALID;
+        instructions[index].canonical_local = IR_LOCAL_ID_INVALID;
+        instructions[index].conversion_operation = IR_CONVERSION_COUNT;
+        instructions[index].unary_operation = IR_UNARY_COUNT;
+        instructions[index].binary_operation = IR_BINARY_COUNT;
+    }
+    instructions[0].opcode = IR_OPCODE_LOCAL;
+    instructions[0].canonical_type.value = 2;
+    instructions[0].canonical_local.value = 0;
+    instructions[0].result.value = 0;
+    instructions[1].opcode = IR_OPCODE_LOCAL;
+    instructions[1].canonical_type.value = 2;
+    instructions[1].canonical_local.value = 1;
+    instructions[1].result.value = 1;
+    instructions[2].opcode = IR_OPCODE_VA_START;
+    instructions[2].canonical_type.value = 2;
+    instructions[2].result.value = 2;
+    instructions[3].opcode = IR_OPCODE_STORE;
+    instructions[3].canonical_type.value = 0;
+    instructions[3].operands = store_original;
+    instructions[3].operand_count = 2;
+    instructions[4].opcode = IR_OPCODE_ADDRESS_OF;
+    instructions[4].canonical_type.value = 3;
+    instructions[4].operands = original_place;
+    instructions[4].operand_count = 1;
+    instructions[4].result.value = 3;
+    instructions[5].opcode = IR_OPCODE_VA_COPY;
+    instructions[5].canonical_type.value = 2;
+    instructions[5].operands = original_cursor;
+    instructions[5].operand_count = 1;
+    instructions[5].result.value = 4;
+    instructions[6].opcode = IR_OPCODE_STORE;
+    instructions[6].canonical_type.value = 0;
+    instructions[6].operands = store_copy;
+    instructions[6].operand_count = 2;
+    instructions[7].opcode = IR_OPCODE_ADDRESS_OF;
+    instructions[7].canonical_type.value = 3;
+    instructions[7].operands = copy_place;
+    instructions[7].operand_count = 1;
+    instructions[7].result.value = 5;
+    instructions[8].opcode = IR_OPCODE_VA_ARG;
+    instructions[8].canonical_type.value = 1;
+    instructions[8].operands = copied_cursor;
+    instructions[8].operand_count = 1;
+    instructions[8].result.value = 6;
+    instructions[9].opcode = IR_OPCODE_VA_END;
+    instructions[9].canonical_type.value = 0;
+    instructions[9].operands = copied_cursor;
+    instructions[9].operand_count = 1;
+    instructions[10].opcode = IR_OPCODE_VA_END;
+    instructions[10].canonical_type.value = 0;
+    instructions[10].operands = original_cursor;
+    instructions[10].operand_count = 1;
+    instructions[11].opcode = IR_OPCODE_ARGUMENT;
+    instructions[11].canonical_type.value = 1;
+    instructions[11].immediates = parameter_index;
+    instructions[11].immediate_count = 1;
+    instructions[11].result.value = 7;
+    instructions[12].opcode = IR_OPCODE_RETURN;
+    instructions[12].canonical_type.value = 0;
+    instructions[12].operands = returned;
+    instructions[12].operand_count = 1;
+
+    IrValue values[8] = {0};
+    u32 definitions[8] = {0, 1, 2, 4, 5, 7, 8, 11};
+    u32 value_types[8] = {2, 2, 2, 3, 2, 3, 1, 1};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+    {
+        values[index].definition.value = definitions[index];
+        values[index].canonical_type.value = value_types[index];
+        values[index].category = index < 2 ? IR_VALUE_PLACE : IR_VALUE_VALUE;
+    }
+    IrBlock blocks[1] = {{.id = {.value = 0}, .first_instruction = {.value = 0}, .last_instruction = {.value = 12},
+                          .terminated = true, .sealed = true}};
+    IrValueId local_places[2] = {{.value = 0}, {.value = 1}};
+    IrFunction functions[1] = {{.name = S8("direct_variadic"), .symbol = {.value = 0}, .canonical_type = {.value = 4},
+                                .entry = {.value = 0}, .blocks = blocks, .instructions = instructions, .values = values,
+                                .local_places = local_places, .block_count = 1, .instruction_count = 13, .value_count = 8,
+                                .local_count = 2, .state = IR_FUNCTION_LOWERED}};
+    IrModule modules[1] = {{.name = S8("canonical_variadic"), .functions = functions, .function_count = 1,
+                            .lowered_function_count = 1}};
+    IrProgram program = {.arena = arena, .modules = modules, .module_count = 1, .lowered_function_count = 1,
+                         .types = {.types = types, .count = 5}, .symbols = {.symbols = symbols, .count = 1},
+                         .disable_local_promotion = true};
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.data_layout = S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    options.source_filename = S8("canonical_variadic.c");
+    options.validate_ir = true;
+    LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    if (!llvm_bitcode_artifact_is_valid(first))
+    {
+        arguments->show(arguments, S8("canonical variadic: {S8} {S8} instruction={u32}\n"),
+                        llvm_bitcode_error_code_name(first.error.code), first.error.message, first.error.instruction.value);
+    }
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
+    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                          !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+    BUSTER_TEST(arguments, first.stats.defined_function_count == 1 && first.stats.function_count == 4);
+    BUSTER_TEST(arguments, first.stats.instruction_count == 13);
     return result;
 }
 
@@ -1103,6 +1249,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult variadic_diagnostics = llvm_bitcode_test_variadic_diagnostics(arguments);
     result.test_count += variadic_diagnostics.test_count;
     result.succeeded_test_count += variadic_diagnostics.succeeded_test_count;
+    UnitTestResult canonical_variadics = llvm_bitcode_test_canonical_variadics(arguments);
+    result.test_count += canonical_variadics.test_count;
+    result.succeeded_test_count += canonical_variadics.succeeded_test_count;
     UnitTestResult win64_object = llvm_bitcode_test_variadic_win64_object(arguments);
     result.test_count += win64_object.test_count;
     result.succeeded_test_count += win64_object.succeeded_test_count;

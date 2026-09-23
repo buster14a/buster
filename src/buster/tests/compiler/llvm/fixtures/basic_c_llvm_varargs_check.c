@@ -52,16 +52,25 @@ int main(void)
 {
     int item = 19;
     int result = 0;
-    result += llvm_sum_ints(0) != 0;
-    result += llvm_sum_ints(4, 3, 5, 7, 11) != 26;
-    result += llvm_sum_ints(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) != 55;
-    result += llvm_sum_wide(7, 0x100000000LL, 2LL, 3LL, 4LL, 5LL, 6LL, 7LL) != 0x10000001BLL;
-    result += llvm_sum_doubles(0) != 0.0;
-    result += llvm_sum_doubles(10, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0) != 27.5;
-    result += llvm_mixed(2, 3.0, (short)4, (float)5.0, (void*)&item) != 15;
-    result += !llvm_copy_cursors(0, 13, 17);
-    result += llvm_to_clang_public(0, 2, 3) != 23;
-    result += clang_to_llvm_public(0, 4, 5) != 45;
-    result += !llvm_call_clang();
+    int failures[] = {
+        llvm_sum_ints(0) != 0,
+        llvm_sum_ints(4, 3, 5, 7, 11) != 26,
+        llvm_sum_ints(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) != 55,
+        llvm_sum_wide(7, 0x100000000LL, 2LL, 3LL, 4LL, 5LL, 6LL, 7LL) != 0x10000001BLL,
+        llvm_sum_doubles(0) != 0.0,
+        llvm_sum_doubles(10, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0) != 27.5,
+        llvm_mixed(2, 3.0, (short)4, (float)5.0, (void*)&item) != 15,
+        !llvm_copy_cursors(0, 13, 17),
+        llvm_to_clang_public(0, 2, 3) != 23,
+        clang_to_llvm_public(0, 4, 5) != 45,
+        !llvm_call_clang(),
+    };
+    for (unsigned index = 0; index < sizeof(failures) / sizeof(failures[0]); index += 1)
+    {
+        if (!result && failures[index])
+        {
+            result = (int)index + 1;
+        }
+    }
     return result;
 }
