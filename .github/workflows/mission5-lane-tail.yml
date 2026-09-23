@@ -1,0 +1,239 @@
+name: Mission 5 lane-tail diagnosis
+on:
+  push:
+    branches: [diagnostics/53-mission5-lane-tail]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 50
+    env:
+      BUSTER_TEST_JOBS: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Pin source and record audit context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mission5"
+          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/mission5/revision.txt"
+          git diff --stat bb96b5d08e570aff3cbd473441d71ab0dc691d67 HEAD | tee "$RUNNER_TEMP/mission5/branch-diff.txt"
+          test "$(git hash-object src/buster/lib/compiler/driver/driver.c)" = 3eb3efe928370bfffecb54ad043e7bc3b439f335
+          python3 tools/new_audit.py --newest | tee "$RUNNER_TEMP/mission5/newest-audit.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path('docs/performance-audits')
+          newest = max(p for p in root.glob('*.md') if re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{6}Z', p.stem))
+          print(newest, '\n', newest.read_text())
+          source = Path('src/buster/tests/compiler/driver/driver_test.c').read_text()
+          start = source.find(' compiler_driver_test_unit_batches(')
+          assert start >= 0
+          print('CURRENT REGISTERED TU FIXTURE:\n', source[start:start+22000])
+          PY
+          clang --version | tee "$RUNNER_TEMP/mission5/compiler.txt"
+          sha256sum "$(command -v clang)" >> "$RUNNER_TEMP/mission5/compiler.txt"
+          lscpu > "$RUNNER_TEMP/mission5/cpu.txt"
+      - name: Build immutable baseline and diagnostic producers
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/mission5"
+          exec > >(tee "$E/build.log") 2>&1
+          set -x
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/mission5-driver"
+          "$RUNNER_TEMP/mission5-driver" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/mission5-driver" build --config Release -t ide -- -j2
+          cp build/Release/ide "$E/baseline"
+          cp build/compile_commands.json "$E/baseline-compile-commands.json"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path('src/buster/lib/compiler/driver/driver.c')
+          text = p.read_text()
+          def once(old, new):
+              global text
+              assert text.count(old) == 1, (old[:100], text.count(old))
+              text = text.replace(old, new)
+          once('    CompilerDriverResult result;\n};\n\ntypedef struct CompilerDriverUnitBatch', '    CompilerDriverResult result;\n    u64 mission5[7];\n};\n\ntypedef struct CompilerDriverUnitBatch')
+          once('BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)', '''// Temporary hosted-only diagnostic. Not an acceptance producer.
+          BUSTER_GLOBAL_LOCAL u64 mission5_clock(int kind)
+          {
+              struct timespec value;
+              int status = clock_gettime(kind, &value);
+              BUSTER_CHECK(status == 0);
+              return (u64)value.tv_sec * 1000000000ull + (u64)value.tv_nsec;
+          }
+
+          BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)''')
+          once('        CompilerDriverUnit* unit = &batch->units[index];', '''        CompilerDriverUnit* unit = &batch->units[index];
+                  unit->mission5[0] = mission5_clock(CLOCK_MONOTONIC);
+                  unit->mission5[1] = mission5_clock(CLOCK_THREAD_CPUTIME_ID);
+                  unit->mission5[4] = lane_index();''')
+          once('        // A failed arena remains a null slot.', '''        unit->mission5[2] = mission5_clock(CLOCK_MONOTONIC);
+                  unit->mission5[3] = mission5_clock(CLOCK_THREAD_CPUTIME_ID);
+                  unit->mission5[5] = unit->arena ? unit->arena->position : 0;
+                  unit->mission5[6] = unit->arena ? unit->arena->os_position : 0;
+                  // A failed arena remains a null slot.''')
+          once('                    compiler_parallel_prewarm();\n                    units_prewarmed = true;', '''                    u64 mission5_prewarm = mission5_clock(CLOCK_MONOTONIC);
+                              compiler_parallel_prewarm();
+                              fprintf(stderr, "MISSION5_PREWARM,%llu,%llu\\n", (unsigned long long)mission5_prewarm,
+                                      (unsigned long long)mission5_clock(CLOCK_MONOTONIC));
+                              units_prewarmed = true;''')
+          once('                lane_run(unit_task_count, &compiler_driver_unit_lane, &batch);', '''                u64 mission5_start = mission5_clock(CLOCK_MONOTONIC);
+                          lane_run(unit_task_count, &compiler_driver_unit_lane, &batch);
+                          u64 mission5_end = mission5_clock(CLOCK_MONOTONIC);
+                          fprintf(stderr, "MISSION5_BATCH,%llu,%u,%u,%u,%llu\\n", (unsigned long long)mission5_start,
+                                  batch_first, unit_task_count, batch.workers, (unsigned long long)mission5_end);
+                          for (u32 mission5_index = 0; mission5_index < unit_task_count; mission5_index += 1)
+                          {
+                              CompilerDriverUnit* item = &unit_tasks[mission5_index];
+                              fprintf(stderr, "MISSION5_UNIT,%llu,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%u\\n",
+                                      (unsigned long long)mission5_start, batch_first + mission5_index,
+                                      (unsigned long long)item->mission5[4],
+                                      (unsigned long long)item->mission5[0], (unsigned long long)item->mission5[2],
+                                      (unsigned long long)(item->mission5[3] - item->mission5[1]),
+                                      (unsigned long long)item->result.preprocessed.tokens,
+                                      (unsigned long long)item->mission5[5], (unsigned long long)item->mission5[6],
+                                      (unsigned long long)item->result.direct_ssa.functions, (unsigned)item->result.error);
+                          }''')
+          # Standard host headers only in this disposable diagnostic source.
+          text = '#include <stdio.h>\n#include <time.h>\n' + text
+          p.write_text(text)
+          Path(os.environ['RUNNER_TEMP'], 'mission5', 'diagnostic-driver.c').write_text(text)
+          PY
+          git diff --check
+          git diff > "$E/diagnostic.patch"
+          "$RUNNER_TEMP/mission5-driver" build --config Release -t ide -- -j2
+          cp build/Release/ide "$E/diagnostic"
+          cp build/compile_commands.json "$E/diagnostic-compile-commands.json"
+          "$RUNNER_TEMP/mission5-driver" generate --build-dir build-mission5-single --cc clang --ci --linker DEFAULT -- -DBUSTER_SINGLE_THREADED=ON
+          "$RUNNER_TEMP/mission5-driver" build --build-dir build-mission5-single --config Release -t ide -- -j2
+          cp build-mission5-single/Release/ide "$E/single-threaded"
+          sha256sum "$E/baseline" "$E/diagnostic" "$E/single-threaded" "$E/diagnostic.patch" | tee "$E/producer-hashes.txt"
+      - name: Complete-compilation diagnostic census and exact-byte controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, subprocess, time
+          E = pathlib.Path(os.environ['RUNNER_TEMP']) / 'mission5'
+          W = pathlib.Path('build/mission5-inputs')
+          W.mkdir(parents=True, exist_ok=True)
+          attempts = []
+          failures = []
+          def command(name, args, timeout=180):
+              args = [str(x) for x in args]
+              started = time.monotonic_ns()
+              status = None
+              with (E / (name + '.stdout')).open('wb') as out, (E / (name + '.stderr')).open('wb') as err:
+                  try:
+                      status = subprocess.run(['/usr/bin/time', '-f', '%e,%U,%S,%M,%x', '-o', str(E/(name+'.time')), *args], stdout=out, stderr=err, timeout=timeout).returncode
+                  except subprocess.TimeoutExpired:
+                      status = 'timeout'
+              record = dict(name=name, argv=args, status=status, elapsed_ns=time.monotonic_ns()-started)
+              attempts.append(record)
+              (E/'attempts.json').write_text(json.dumps(attempts, indent=2))
+              print(json.dumps(record), flush=True)
+              if status != 0:
+                  failures.append(name)
+              return status
+          populations = {'tiny': [1]*17, 'dominant': [1]*7+[512]+[1]*9, 'mixed': [1,16,2,64,4,1,128,2,8,32,1,4,64,2,16,1,8]}
+          cases = []
+          for name, counts in populations.items():
+              directory = W/name
+              directory.mkdir(exist_ok=True)
+              paths = []
+              for i,n in enumerate(counts):
+                  p = directory/f'unit{i}.c'
+                  code = ''.join(f'int m5_{i}_{k}(int x) {{ return x + {k}; }}\n' for k in range(n))
+                  code += f'int m5_unit_{i}(void) {{ return m5_{i}_{n-1}(1); }}\n'
+                  if i == 0:
+                      code += ''.join(f'int m5_unit_{j}(void);\n' for j in range(1,len(counts)))
+                      code += 'int main(void) { return (' + '+'.join(f'm5_unit_{j}()' for j in range(len(counts))) + f') != {sum(counts)}; }}\n'
+                  p.write_text(code)
+                  paths.append(p)
+              cases.append((name,paths))
+          # The repository's current registered TU fixture is also executed below,
+          # via the ordinary whole test command rather than an invented module filter.
+          source_manifest = [{'path': str(p), 'sha256': hashlib.sha256(p.read_bytes()).hexdigest(), 'bytes':p.stat().st_size} for _,paths in cases for p in paths]
+          (E/'inputs.json').write_text(json.dumps(source_manifest,indent=2))
+          shutil.copytree(W, E/'inputs')
+          observations = []
+          for name,paths in cases:
+              output = W/'output'
+              oracle = W/'oracle'
+              if command(name+'-oracle-build', ['clang','-O0',*paths,'-o',oracle]) == 0:
+                  command(name+'-oracle-execute', [oracle])
+              reference = None
+              reference_diagnostics = None
+              # A/A replicates are diagnostic repeatability controls, not acceptance.
+              schedule = [(producer,jobs,r) for producer in ('baseline','diagnostic') for jobs in (1,2,4) for r in (0,1)]
+              schedule += [('single-threaded',1,0),('single-threaded',4,0)]
+              for producer,jobs,r in schedule:
+                  tag = f'{name}-{producer}-j{jobs}-{r}'
+                  output.unlink(missing_ok=True)
+                  status = command(tag, [E/producer,'cc','-O0','-fregister-allocator=fast',f'-fcompile-jobs={jobs}',*paths,'-o',output])
+                  err = (E/(tag+'.stderr')).read_bytes()
+                  ordinary = b''.join(line for line in err.splitlines(keepends=True) if not line.startswith(b'MISSION5_'))
+                  units, batches = [], {}
+                  for line in err.decode(errors='replace').splitlines():
+                      fields = line.split(',')
+                      if fields[0] == 'MISSION5_BATCH':
+                          start,first,count,workers,end = map(int,fields[1:])
+                          batches[start] = dict(start=start,first=first,count=count,workers=workers,end=end)
+                      elif fields[0] == 'MISSION5_UNIT':
+                          batch,index,lane,start,end,cpu,tokens,live,committed,ssa_functions,error = map(int,fields[1:])
+                          units.append(dict(batch=batch,index=index,lane=lane,start=start,end=end,cpu=cpu,tokens=tokens,live=live,committed=committed,ssa_functions=ssa_functions,error=error))
+                  summaries = []
+                  for key,batch in batches.items():
+                      group = [u for u in units if u['batch']==key]
+                      assert len(group)==batch['count']
+                      for u in group:
+                          assert u['end'] >= u['start'] and batch['end'] >= u['end']
+                          u['join_gap_ns'] = batch['end']-u['end']
+                      durations = [u['end']-u['start'] for u in group]
+                      ordered = sorted(group,key=lambda u:(-u['tokens'],u['index']))
+                      model_incumbent = max(durations)
+                      model_sorted = max(u['end']-u['start'] for u in ordered)
+                      assert model_sorted == model_incumbent
+                      summaries.append(dict(**batch, completion_order=[u['index'] for u in sorted(group,key=lambda u:(u['end'],u['index']))], token_order=[u['index'] for u in ordered], incumbent_model_ns=model_incumbent, token_order_model_ns=model_sorted, independent_task_lower_bound_ns=max(max(durations),sum(durations)/batch['workers']), retained_tu_live_sum=sum(u['live'] for u in group), retained_tu_commit_sum=sum(u['committed'] for u in group)))
+                  valid = status==0 and output.is_file() and output.stat().st_size>0
+                  identity = None
+                  if valid:
+                      data = output.read_bytes()
+                      identity = hashlib.sha256(data).hexdigest()
+                      ordinary_out = (E/(tag+'.stdout')).read_bytes()
+                      if reference is None:
+                          reference,reference_diagnostics = data,(ordinary_out,ordinary)
+                      if data != reference or (ordinary_out,ordinary) != reference_diagnostics:
+                          failures.append(tag+'-equivalence')
+                      shutil.copy2(output,E/(tag+'.artifact'))
+                      command(tag+'-execute',[output])
+                  observations.append(dict(tag=tag, producer=producer, jobs_requested=jobs, valid=valid, artifact_sha256=identity, units=units, batches=summaries))
+                  (E/'observations.json').write_text(json.dumps(observations,indent=2))
+          for producer in ('baseline','diagnostic'):
+              command('registered-'+producer, [E/producer,'test','--verbose=1','--ci=1'], timeout=1200)
+          (E/'failures.json').write_text(json.dumps(failures,indent=2))
+          # Print condensed authoritative fields; raw events and all attempts stay retained.
+          for row in observations:
+              largest = max(row['units'],key=lambda u:u['end']-u['start'],default=None)
+              summary = {k:row[k] for k in ('tag','valid','artifact_sha256')}
+              summary.update(time=(E/(row['tag']+'.time')).read_text().strip(), largest_task=largest, batches=row['batches'])
+              print('MISSION5_RESULT '+json.dumps(summary),flush=True)
+          print('MISSION5_FAILURES '+json.dumps(failures),flush=True)
+          raise SystemExit(bool(failures))
+          PY
+      - name: Preserve every attempt and source patch
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mission5-lane-tail-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mission5
+          if-no-files-found: error
+          retention-days: 30
