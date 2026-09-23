@@ -116,7 +116,9 @@ static int tp_retirement_campaign_command_copy(TpRetirementCampaignCommand* targ
     TpRetirementMeasuredCommand const* command, unsigned row, unsigned kind, unsigned variant)
 {
     char digest[65];
-    size_t artifact = command && command->artifact ? strlen(command->artifact) : 0;
+    size_t artifact = 0;
+    if (command && command->artifact)
+        while (artifact < sizeof(target->artifact) && command->artifact[artifact]) ++artifact;
     int ok = target && command && command->row == row && command->kind == kind &&
         command->variant == variant && command->timeout_seconds && command->timeout_seconds <= 86400 &&
         tp_retirement_digest(command->command_sha256) && tp_retirement_digest(command->output_sha256) &&
@@ -184,6 +186,8 @@ static int tp_retirement_campaign_freeze(TpRetirementCampaign* campaign, TpRetir
         aa_binary->descriptor == ab_baseline->descriptor &&
         !strcmp(aa_binary->sha256, ab_baseline->sha256) &&
         a->seed == plan->seed && b->seed == plan->seed && a->runtime_count == b->runtime_count &&
+        aa->rows != ab->rows && a->first_orders != b->first_orders &&
+        a->runtime_rows != b->runtime_rows && (!a->row_ids || a->row_ids != b->row_ids) &&
         b->rows == rows && a->expected == b->expected &&
         !a->sequence && !b->sequence && !a->failed && !b->failed &&
         !a->pending && !b->pending && aa->spool && ab->spool && aa->spool != ab->spool &&

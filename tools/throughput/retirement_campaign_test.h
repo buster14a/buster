@@ -188,7 +188,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     test_sample_close(&aa); test_sample_close(&ab);
 
     /* Every rejected frozen input invalidates this attempt before timing. */
-    for (unsigned scenario = 0; scenario < 6; ++scenario)
+    for (unsigned scenario = 0; scenario < 7; ++scenario)
     {
         CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
         CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
@@ -202,6 +202,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         if (scenario == 2) ab.execution.runtime_rows[0] = 1;
         if (scenario == 3) plan.pairs_per_round = 62;
         if (scenario == 4) frozen.valid = 0;
+        if (scenario == 6) ab.samples.rows = aa.samples.rows;
         int ok = tp_retirement_campaign_freeze(&campaign, &plan, &aa.samples, &ab.samples,
             &frozen, &frozen, &frozen, commands[0], commands[1], scenario == 5 ? NULL : snapshots, 8,
             identities, 3, 7, identity, identity);
