@@ -120,6 +120,23 @@ BUSTER_GLOBAL_LOCAL void object_test_write_u64(ByteSlice bytes, u64 offset, u64 
     }
 }
 
+BUSTER_GLOBAL_LOCAL bool object_test_coff_section_characteristics(ByteSlice bytes, u32 section_index, u32* characteristics)
+{
+    u16 section_count = 0;
+    bool result = false;
+    if (bytes.pointer && characteristics && bytes.length >= 20)
+    {
+        memcpy(&section_count, bytes.pointer + 2, sizeof(section_count));
+        u64 section = 20 + (u64)section_index * 40;
+        if (section_index < section_count && section <= bytes.length && 40 <= bytes.length - section)
+        {
+            memcpy(characteristics, bytes.pointer + section + 36, sizeof(*characteristics));
+            result = true;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool object_test_coff_named_section(ByteSlice bytes, String8 name, u32* raw_offset, u32* relocation_offset,
                                                          u16* relocation_count)
 {
@@ -910,6 +927,142 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_scaling(UnitTestArgument
     return result;
 }
 
+// COFF carries in-memory section alignment in IMAGE_SCN_ALIGN_* rather than
+// in PointerToRawData. Read the bytes directly so the writer test does not
+// certify its output through object_read's matching decoder.
+BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_section_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u8 data[] = {1, 2, 3, 4};
+    ObjectSectionKind kinds[] = {OBJECT_SECTION_TEXT, OBJECT_SECTION_READ_ONLY_DATA, OBJECT_SECTION_DATA, OBJECT_SECTION_ZERO};
+    u32 section_flags[] = {0x60000020, 0x40000040, 0xc0000040, 0xc0000080};
+    u32 alignments[] = {1, 2, 4, 8, 16, 32, 64, 4096, 8192};
+    u32 alignment_characteristics[] = {0x00100000, 0x00200000, 0x00300000, 0x00400000, 0x00500000,
+                                       0x00600000, 0x00700000, 0x00d00000, 0x00e00000};
+    for (u32 kind_index = 0; kind_index < BUSTER_ARRAY_LENGTH(kinds); kind_index += 1)
+    {
+        for (u32 alignment_index = 0; alignment_index < BUSTER_ARRAY_LENGTH(alignments); alignment_index += 1)
+        {
+            u32 alignment = alignments[alignment_index];
+            ObjectSection section = {
+                .name = object_section_name_for_kind(kinds[kind_index]),
+                .data = kinds[kind_index] == OBJECT_SECTION_ZERO ? (ByteSlice){0} : (ByteSlice)BUSTER_ARRAY_TO_SLICE(data),
+                .virtual_size = sizeof(data),
+                .kind = kinds[kind_index],
+                .alignment = alignment,
+            };
+            ObjectFile object = {
+                .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+                .sections = &section,
+                .section_count = 1,
+            };
+            ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
+            BUSTER_TEST_RAW(arguments, artifact.error == OBJECT_ERROR_NONE, S8("COFF alignment writer rejected a representable alignment"));
+            if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.pointer && artifact.bytes.length >= 60))
+            {
+                u32 characteristics = 0;
+                BUSTER_TEST(arguments, object_test_coff_section_characteristics(artifact.bytes, 0, &characteristics));
+                BUSTER_TEST(arguments, (characteristics & 0x00f00000) == alignment_characteristics[alignment_index]);
+                BUSTER_TEST(arguments, (characteristics & ~0x00f00000) == section_flags[kind_index]);
+                if (kinds[kind_index] != OBJECT_SECTION_ZERO)
+                {
+                    u32 raw_offset = 0;
+                    memcpy(&raw_offset, artifact.bytes.pointer + 40, sizeof(raw_offset));
+                    BUSTER_TEST(arguments, raw_offset == 60);
+                }
+                if (alignment == 64)
+                {
+                    ObjectFile restored = object_read(temporary.arena, artifact.bytes, object.target);
+                    BUSTER_TEST(arguments, restored.error == OBJECT_ERROR_NONE && restored.sections &&
+                                               restored.sections[kinds[kind_index]].alignment == alignment);
+                }
+            }
+            arena_set_position(temporary.arena, temporary.position);
+        }
+    }
+
+    ObjectSectionKind default_kinds[] = {
+        OBJECT_SECTION_TEXT, OBJECT_SECTION_READ_ONLY_DATA, OBJECT_SECTION_DATA, OBJECT_SECTION_ZERO,
+        OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_FINI_ARRAY, OBJECT_SECTION_UNWIND,
+        OBJECT_SECTION_WINDOWS_PDATA, OBJECT_SECTION_WINDOWS_XDATA, OBJECT_SECTION_DEBUG_INFO,
+    };
+    u32 default_alignments[] = {16, 16, 16, 16, 8, 8, 8, 4, 4, 1};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(default_kinds); index += 1)
+    {
+        ObjectSection section = {
+            .name = object_section_name_for_kind(default_kinds[index]),
+            .data = object_section_kind_is_zero_fill(default_kinds[index]) ? (ByteSlice){0} : (ByteSlice)BUSTER_ARRAY_TO_SLICE(data),
+            .virtual_size = sizeof(data),
+            .kind = default_kinds[index],
+            .alignment = 0,
+        };
+        ObjectFile object = {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            .sections = &section,
+            .section_count = 1,
+        };
+        ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
+        BUSTER_TEST_RAW(arguments, artifact.error == OBJECT_ERROR_NONE, S8("COFF default section alignment was rejected"));
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.pointer && artifact.bytes.length >= 60))
+        {
+            u32 characteristics = 0;
+            u32 alignment = default_alignments[index];
+            u32 code = 1;
+            while (alignment > 1)
+            {
+                alignment >>= 1;
+                code += 1;
+            }
+            BUSTER_TEST(arguments, object_section_default_alignment(default_kinds[index]) == default_alignments[index]);
+            BUSTER_TEST(arguments, object_test_coff_section_characteristics(artifact.bytes, 0, &characteristics));
+            BUSTER_TEST(arguments, (characteristics & 0x00f00000) == (code << 20));
+        }
+        arena_set_position(temporary.arena, temporary.position);
+    }
+
+    ObjectSectionKind stronger_kinds[] = {OBJECT_SECTION_INIT_ARRAY, OBJECT_SECTION_FINI_ARRAY, OBJECT_SECTION_UNWIND};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(stronger_kinds); index += 1)
+    {
+        ObjectSection section = {
+            .name = object_section_name_for_kind(stronger_kinds[index]),
+            .data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data),
+            .kind = stronger_kinds[index],
+            .alignment = 64,
+        };
+        ObjectFile object = {
+            .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+            .sections = &section,
+            .section_count = 1,
+        };
+        ObjectArtifact artifact = object_write(temporary.arena, &object, OBJECT_FORMAT_COFF);
+        BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
+        if (BUSTER_REQUIRE(arguments, artifact.error == OBJECT_ERROR_NONE && artifact.bytes.pointer && artifact.bytes.length >= 60))
+        {
+            u32 characteristics = 0;
+            BUSTER_TEST(arguments, object_test_coff_section_characteristics(artifact.bytes, 0, &characteristics));
+            BUSTER_TEST(arguments, (characteristics & 0x00f00000) == 0x00700000);
+        }
+        arena_set_position(temporary.arena, temporary.position);
+    }
+
+    ObjectSection unsupported_section = {
+        .name = S8(".data"),
+        .data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data),
+        .kind = OBJECT_SECTION_DATA,
+        .alignment = 16384,
+    };
+    ObjectFile unsupported_object = {
+        .target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        .sections = &unsupported_section,
+        .section_count = 1,
+    };
+    ObjectArtifact unsupported = object_write(temporary.arena, &unsupported_object, OBJECT_FORMAT_COFF);
+    BUSTER_TEST(arguments, unsupported.error == OBJECT_ERROR_UNSUPPORTED_ALIGNMENT && !unsupported.bytes.pointer && !unsupported.bytes.length);
+    scratch_end(temporary);
+    return result;
+}
+
 // Independent section names force the reader to recognize each DWARF 5
 // family. The object layer preserves bytes and relocations without decoding DIEs.
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_dwarf5_sections(UnitTestArguments* arguments)
@@ -991,6 +1144,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_dwarf5_sections(UnitTestArguments
 UnitTestResult object_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = object_test_assembly_index_order(arguments);
+    UnitTestResult coff_alignment = object_test_coff_section_alignment(arguments);
+    result.test_count += coff_alignment.test_count;
+    result.succeeded_test_count += coff_alignment.succeeded_test_count;
     UnitTestResult dwarf5 = object_test_dwarf5_sections(arguments);
     result.test_count += dwarf5.test_count;
     result.succeeded_test_count += dwarf5.succeeded_test_count;
