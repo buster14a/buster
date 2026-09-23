@@ -338,7 +338,7 @@ def predict(plan, edges):
             ready = [edge for edge in waiting if edge["phase"] == "build" or edge["tree"] in built]
             for edge in ready[:max(0, plan["outer_jobs"] - len(running))]:
                 waiting.remove(edge)
-                running.append((now + edge["end_us"] - now + edge["start_us"], edge))
+                running.append((now + edge["end_us"] - edge["start_us"], edge))
             require(bool(running), "prediction dependency deadlock")
             now = min(end for end, _ in running)
             finished = [edge for end, edge in running if end == now]
