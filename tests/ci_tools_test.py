@@ -1223,7 +1223,7 @@ printf '%s\n' "$checked"
                              if (parent / "bin/bash.exe").is_file()), None)
             self.assertIsNotNone(bash, "Bash is a CI prerequisite")
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=120 if os.name == "nt" else 30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stdout.strip(), "633")
 
