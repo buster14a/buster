@@ -147,6 +147,16 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         TpRetirementShard final;
         CHECK(tp_retirement_campaign_finish_stage(&campaign, tp_process_monotonic_ns(), &final));
         CHECK(final.records == 488 && active->samples.collected == 488);
+        CHECK(!tp_retirement_campaign_stage_ready(&campaign, stage));
+        if (stage)
+            CHECK(tp_retirement_campaign_outcome(&campaign).execution ==
+                  TP_RETIREMENT_CAMPAIGN_STATE_RUNNING);
+        FILE* numeric = tmpfile();
+        TpRetirementShard sample_shard;
+        CHECK(numeric && tp_retirement_samples_write_shard(&active->samples, numeric, &sample_shard) &&
+              sample_shard.records == 120 && tp_retirement_samples_finish(&active->samples));
+        CHECK(tp_retirement_campaign_stage_ready(&campaign, stage));
+        if (numeric) CHECK(fclose(numeric) == 0);
         if (!stage)
         {
             CHECK(campaign.phase == TP_RETIREMENT_CAMPAIGN_AWAIT_AA && !ab.samples.collected);

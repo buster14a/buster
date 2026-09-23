@@ -310,6 +310,26 @@ static void tp_retirement_campaign_poison(TpRetirementCampaign* campaign)
     }
 }
 
+/* Completion of the invocation cursor is not completion of its numeric
+ * evidence. Export verifies every spool row against the observed transcript. */
+static int tp_retirement_campaign_stage_ready(TpRetirementCampaign const* campaign, unsigned stage)
+{
+    TpRetirementSamples const* samples = campaign && stage < TP_RETIREMENT_CAMPAIGN_STAGES ?
+        campaign->samples[stage] : NULL;
+    TpRetirementTranscript const* transcript = samples ? samples->transcript : NULL;
+    int ok = samples && transcript && !samples->failed && !transcript->failed &&
+        transcript->finished && samples->finished && samples->exporting &&
+        samples->collected == campaign->capacity.invocations_per_stage &&
+        samples->exported == campaign->capacity.samples_per_stage &&
+        samples->shards == campaign->capacity.sample_shards_per_stage &&
+        tp_retirement_digest(samples->raw_sha256) &&
+        tp_retirement_digest(samples->descriptors_sha256) &&
+        transcript->attempt == campaign->attempt &&
+        !strcmp(transcript->job, campaign->job) &&
+        !strcmp(transcript->boot, campaign->boot);
+    return ok;
+}
+
 /* Collection completion is not a validity, A/B verdict, or admitted receipt.
  * The service and independent #511 replay own those separate decisions. */
 static inline TpRetirementCampaignOutcome tp_retirement_campaign_outcome(TpRetirementCampaign const* campaign)
@@ -319,7 +339,9 @@ static inline TpRetirementCampaignOutcome tp_retirement_campaign_outcome(TpRetir
     {
         if (campaign->phase == TP_RETIREMENT_CAMPAIGN_INVALID)
             outcome.execution = TP_RETIREMENT_CAMPAIGN_STATE_FAILED;
-        else if (campaign->phase == TP_RETIREMENT_CAMPAIGN_COLLECTED)
+        else if (campaign->phase == TP_RETIREMENT_CAMPAIGN_COLLECTED &&
+                 tp_retirement_campaign_stage_ready(campaign, 0) &&
+                 tp_retirement_campaign_stage_ready(campaign, 1))
             outcome.execution = TP_RETIREMENT_CAMPAIGN_STATE_COMPLETE;
         else if (campaign->phase != TP_RETIREMENT_CAMPAIGN_UNAVAILABLE)
             outcome.execution = TP_RETIREMENT_CAMPAIGN_STATE_RUNNING;
@@ -446,7 +468,7 @@ static int tp_retirement_campaign_admit_aa_fixture(TpRetirementCampaign* campaig
         !strcmp(checked_plan_sha256, campaign->plan_sha256) &&
         !strcmp(checked_context_sha256, campaign->context_sha256) &&
         tp_retirement_digest(aa_receipt_sha256) &&
-        campaign->samples[0]->transcript->finished && campaign->samples[0]->exporting &&
+        tp_retirement_campaign_stage_ready(campaign, 0) &&
         !campaign->samples[1]->collected && !campaign->samples[1]->failed;
     if (ok) campaign->phase = TP_RETIREMENT_CAMPAIGN_AB;
     else tp_retirement_campaign_poison(campaign);
