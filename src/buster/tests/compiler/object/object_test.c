@@ -5054,7 +5054,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, null_archive.error != OBJECT_ERROR_NONE);
         arena_set_position(arguments->arena, archive_scope.position);
     }
-    String8 clang_coff_fixture_path = os_get_environment_variable(S8("BUSTER_TEST_COFF_RELOCATION_FIXTURE"));
+    String8 clang_coff_fixture_path = arguments->coff_relocation_fixture_path;
     if (clang_coff_fixture_path.length)
     {
         TemporalArena clang_coff_scope = arena_begin_temporal(arguments->arena);

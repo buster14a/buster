@@ -146,6 +146,9 @@ struct CompilerProgram
     SliceString8 fuzz_arguments;
     String8 completion_census_output_path;
     String8 selection_benchmark_path;
+#if BUSTER_INCLUDE_TESTS
+    String8 coff_relocation_fixture_path;
+#endif
     CompilerCommand command;
 };
 
@@ -156,7 +159,7 @@ BUSTER_GLOBAL_LOCAL void compiler_print_usage(void)
 {
     string_print(S8("usage:\n"
                     "  ide cc <C compiler options and inputs>\n"
-                    "  ide test [--verbose=0|1] [--ci=0|1]\n"
+                    "  ide test [--verbose=0|1] [--ci=0|1] [--coff-relocation-fixture=<path>]\n"
                     "  ide metamorphic (configure through BUSTER_METAMORPHIC_* environment variables)\n"
                     "  ide bench\n"
                     "  ide bench-select <self-contained-source.c>\n"
@@ -199,9 +202,28 @@ ProcessResult process_arguments(void)
         compiler_state.command = string_equal(command, S8("metamorphic")) ? COMPILER_COMMAND_METAMORPHIC : COMPILER_COMMAND_TEST;
         for (u64 index = 2; index < arguments.length; index += 1)
         {
+            String8 argument = arguments.pointer[index];
+#if BUSTER_INCLUDE_TESTS
+            if (string_starts_with_sequence(argument, S8("--coff-relocation-fixture=")))
+            {
+                if (compiler_state.coff_relocation_fixture_path.length)
+                {
+                    string_print(S8("test: --coff-relocation-fixture may only be specified once\n"));
+                    return PROCESS_RESULT_FAILED;
+                }
+                compiler_state.coff_relocation_fixture_path =
+                    string_slice(argument, S8("--coff-relocation-fixture=").length, argument.length);
+                if (!compiler_state.coff_relocation_fixture_path.length)
+                {
+                    string_print(S8("test: expected a path after --coff-relocation-fixture=\n"));
+                    return PROCESS_RESULT_FAILED;
+                }
+            }
+            else
+#endif
             if (!compiler_process_common_argument(index))
             {
-                string_print(S8("test: unsupported option: {S8}\n"), arguments.pointer[index]);
+                string_print(S8("test: unsupported option: {S8}\n"), argument);
                 return PROCESS_RESULT_FAILED;
             }
         }
@@ -298,7 +320,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512)});
         if (arena)
         {
-            UnitTestArguments arguments = {arena, &default_show};
+            UnitTestArguments arguments = {
+                .arena = arena,
+                .show = &default_show,
+#if BUSTER_INCLUDE_TESTS
+                .coff_relocation_fixture_path = compiler_state.coff_relocation_fixture_path,
+#endif
+            };
 
             ThreadContext* application_context = thread_context_selected();
             ThreadContext* test_context = thread_context_allocate();

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import os
 from pathlib import Path
 import re
 import shutil
@@ -75,10 +74,8 @@ def main():
             cwd=repo, log_path=clang_readobj)
     check_extended_coff(clang_readobj)
 
-    env = os.environ.copy()
-    env["BUSTER_TEST_COFF_RELOCATION_FIXTURE"] = str(clang_input)
     test_log = output / "ide-test.log"
-    run([ide, "test", "--verbose=1", "--ci=1"], cwd=repo, env=env, log_path=test_log)
+    run([ide, "test", "--verbose=1", "--ci=1", "--coff-relocation-fixture=" + str(clang_input)], cwd=repo, log_path=test_log)
 
     buster_object = output / "buster-extended-relocations.obj"
     run(
