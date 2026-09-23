@@ -12,11 +12,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          fetch-depth: 4
       - name: Record exact source and narrow atomic implementation
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD HEAD^{tree} HEAD^
+          git rev-parse HEAD HEAD^{tree} bb96b5d08e570aff3cbd473441d71ab0dc691d67^{tree}
           git hash-object src/buster/lib/compiler/frontend/c/c_gen.c
           python3 - <<'PY'
           from pathlib import Path
