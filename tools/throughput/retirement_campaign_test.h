@@ -6,6 +6,8 @@
 #define TP_RETIREMENT_CAMPAIGN_FIXTURE_AA 1
 #include "retirement_campaign.h"
 #undef TP_RETIREMENT_CAMPAIGN_FIXTURE_AA
+#include "../bench_service/retirement_correctness.c"
+#include "../bench_service/retirement_campaign_binding.h"
 
 #ifdef __linux__
 static void test_retirement_campaign(char const* executable_path, char const* root)
@@ -73,9 +75,37 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     TpRetirementCampaign campaign = {0};
     TpRetirementCampaignCommand snapshots[8];
     unsigned identities[3];
-    CHECK(tp_retirement_campaign_freeze(&campaign, &plan, &aa.samples, &ab.samples,
-        &frozen, &frozen, &frozen, commands[0], commands[1], snapshots, 8,
-        identities, 3, 7, identity, identity));
+    BqRetirementTrustedRow trusted[7] = {0};
+    BqRetirementRowFact facts[7] = {0};
+    BqRetirementCorrectness gate = {0};
+    gate.prepared.rows = gate.rows_done = 7;
+    gate.eligible_rows = 1;
+    gate.finished = 1;
+    gate.trusted_rows = trusted;
+    gate.facts = facts;
+    memcpy(gate.prepared.binary_sha256[0], binary_sha, 65);
+    memcpy(gate.prepared.binary_sha256[1], binary_sha, 65);
+    for (unsigned row = 0; row < 7; ++row)
+    {
+        trusted[row].row = facts[row].row = row;
+    }
+    trusted[6].compiler_eligible = trusted[6].code_obligation = 1;
+    facts[6].runtime_eligible = facts[6].code_eligible = 1;
+    memcpy(trusted[6].independent_oracle_sha256, runtime_sha, 65);
+    for (unsigned variant = 0; variant < 2; ++variant)
+    {
+        BqRetirementObservedSide* side = &facts[6].side[variant];
+        memcpy(side->compiler_command_sha256, commands[1][variant].command_sha256, 65);
+        memcpy(side->artifact_sha256, artifact_sha, 65);
+        memcpy(side->code_sha256, code_sha, 65);
+        memcpy(side->runtime_command_sha256, commands[1][2 + variant].command_sha256, 65);
+        side->code_bytes = 13;
+    }
+    bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+    CHECK(bq_retirement_correctness_ready(&gate));
+    CHECK(bq_retirement_campaign_bind(&gate, &campaign, &plan, &aa.samples, &ab.samples,
+        &frozen, &frozen, commands[0], commands[1], snapshots, 8,
+        identities, 3, identity, identity));
     CHECK(campaign.phase == TP_RETIREMENT_CAMPAIGN_AA && campaign.row_ids[0] == 6 &&
           campaign.capacity.invocations_per_stage == 488 &&
           campaign.capacity.samples_per_stage == 120 &&
@@ -169,6 +199,26 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
           !ab.execution.sequence && aa.samples.failed && ab.samples.failed);
     commands[0][0].output_sha256 = artifact_sha;
     if (log >= 3) CHECK(close(log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
+    test_sample_close(&aa); test_sample_close(&ab);
+
+    /* A changed #1020 output oracle cannot be imported into a fresh timed
+     * attempt, even if the command still has its original plan digest. */
+    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
+    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
+        aa.runtime, 1, 60, aa.workspace, 5));
+    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
+        ab.runtime, 1, 60, ab.workspace, 5));
+    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    campaign = (TpRetirementCampaign){0};
+    facts[6].side[1].artifact_sha256[0] = 'e';
+    bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+    CHECK(bq_retirement_correctness_ready(&gate));
+    CHECK(!bq_retirement_campaign_bind(&gate, &campaign, &plan, &aa.samples, &ab.samples,
+        &frozen, &frozen, commands[0], commands[1], snapshots, 8,
+        identities, 3, identity, identity) &&
+        campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
+        aa.samples.failed && ab.samples.failed && !aa.execution.sequence);
+    facts[6].side[1].artifact_sha256[0] = 'd';
     test_sample_close(&aa); test_sample_close(&ab);
 
     /* No guessed A/A eligibility or partial campaign can reach A/B. */
