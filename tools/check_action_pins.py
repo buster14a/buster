@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the repository's restricted, block-style GitHub action references.
+"""Check restricted block-style references in workflows and approved local actions.
 
 This is a policy scanner, not a YAML parser. Action steps use a plain `uses`
 key and a single-line scalar. Nonempty flow mappings, mapping anchors/aliases, quoted
@@ -20,8 +20,9 @@ APPROVED = {
     "actions/cache/save": {"0057852bfaa89a56745cba8c7296529d2fc39830"},
 }
 # GitHub binds this literal reusable workflow to the caller's own commit.
-# This is not a general local-action exemption; review additions with the docs.
+# Local composite actions are allowed only by exact path and are scanned below.
 APPROVED_LOCAL_WORKFLOWS = {"./.github/workflows/throughput-real-source.yml"}
+APPROVED_LOCAL_ACTIONS = {"./.github/actions/native-artifact-upload"}
 ACTION = re.compile(r"\s*(?:-\s+)?uses:\s*(.*?)\s*$")
 BLOCK = re.compile(r"\s*(?:-\s+)?[A-Za-z_][A-Za-z0-9_-]*:\s*[|>][-+]?\s*$")
 QUOTED_KEY = re.compile(r"\s*(?:-\s+)?[\"']")
@@ -87,7 +88,7 @@ def check_text(text, path):
             value = action.group(1)
             if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
                 value = value[1:-1]
-            if value not in APPROVED_LOCAL_WORKFLOWS:
+            if value not in APPROVED_LOCAL_WORKFLOWS | APPROVED_LOCAL_ACTIONS:
                 match = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)@([0-9a-f]{40})", value)
                 if not match:
                     problem = "uses must contain a GitHub owner/repository action path and full lowercase commit SHA"
@@ -108,6 +109,8 @@ def main(arguments):
     if not paths:
         paths = sorted((root / ".github/workflows").glob("*.yml"))
         paths += sorted((root / ".github/workflows").glob("*.yaml"))
+        paths += sorted((root / ".github/actions").rglob("action.yml"))
+        paths += sorted((root / ".github/actions").rglob("action.yaml"))
     errors = []
     if not paths:
         errors.append("no GitHub workflows found")
@@ -119,7 +122,7 @@ def main(arguments):
     for error in errors:
         print(error, file=sys.stderr)
     if not errors:
-        print(f"Approved action references in {len(paths)} GitHub workflows")
+        print(f"Approved action references in {len(paths)} GitHub workflows/action definitions")
     return int(bool(errors))
 
 
