@@ -11154,6 +11154,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         {S8("static unsigned long invalid = sizeof (++42);"), false},
         {S8("int invalid[sizeof (++42)];"), false},
         {S8("int valid[sizeof (++*(volatile unsigned char *)0)];"), true},
+        {S8("int valid(int *pointer) { typeof(*pointer++) *q = &*pointer; return sizeof (++*q); }"), true},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(declarations); index += 1)
     {

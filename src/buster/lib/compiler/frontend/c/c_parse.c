@@ -3578,7 +3578,8 @@ BUSTER_C_INTERNAL bool c_parse_expression_place_shape(CParseResult* result, CPre
 // A type query retains the operand's qualifiers and does not evaluate it.
 // The place check is shared with address-of and asm output constraints; a
 // scalar type alone would also describe an enumerator, cast, call or rvalue.
-BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type)
+BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                          u32 start, u32 end, CTypeId type)
 {
     bool valid = type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
     if (valid)
@@ -3595,7 +3596,8 @@ BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, C
     if (valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
     {
         u32 use = c_parse_identifier_use_index(result, start);
-        CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity : C_ENTITY_ID_INVALID;
+        CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[start]);
         valid = entity.value < result->entity_count &&
                 (result->entities[entity.value].kind == C_ENTITY_OBJECT || result->entities[entity.value].kind == C_ENTITY_LOCAL ||
                  result->entities[entity.value].kind == C_ENTITY_PARAMETER) && !result->entities[entity.value].is_constexpr;
@@ -3896,7 +3898,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 CTypeKind kind = result->types[last.value].kind;
                 if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
-                    (!c_parse_update_operand_modifiable(result, preprocess, task->start + 1, task->end, last) ||
+                    (!c_parse_update_operand_modifiable(result, preprocess, scope, task->start + 1, task->end, last) ||
                      kind == C_TYPE_STRUCT || kind == C_TYPE_UNION || kind == C_TYPE_NULLPTR))
                 {
                     machine->expression_constraint = S8("increment or decrement operand is not a modifiable place");
@@ -18875,7 +18877,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 string_format(result->arena, S8("unsupported C function-body statement or expression near '{S8}'"),
                               c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start])), index, operand_start);
         }
-        else if (update && typed && !c_parse_update_operand_modifiable(result, preprocess, operand_start, operand_end, type_id))
+        else if (update && typed && !c_parse_update_operand_modifiable(result, preprocess, scope, operand_start, operand_end, type_id))
         {
             c_parse_lowering_constraint_consider(diagnostic, S8("increment or decrement operand is not a modifiable place"), index, operand_start);
         }
@@ -19519,7 +19521,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
             bool typed = place_start < place_end && c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result,
                                                                                     update_scope, place_start, place_end, &type);
             arena_set_position(machine->scratch_arena, query_mark);
-            if (typed && !c_parse_update_operand_modifiable(result, preprocess, place_start, place_end, type))
+            if (typed && !c_parse_update_operand_modifiable(result, preprocess, update_scope, place_start, place_end, type))
                 diagnostic = (CParseInitializerDiagnostic){.message = S8("increment or decrement operand is not a modifiable place"), .token = update};
         }
         if (grouped) index = close;
