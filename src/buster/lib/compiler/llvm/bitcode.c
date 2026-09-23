@@ -1814,8 +1814,10 @@ static u32 llvm_bc_address_constant(LlvmBcContext* context, IrSymbolId symbol_id
 {
     u32 result = LLVM_BC_INVALID_ID;
     IrSymbol* symbol = llvm_bc_ir_symbol(context, symbol_id);
-    if (!symbol || symbol->is_thread_local ||
-        context->symbol_value_ids[symbol_id.value] == LLVM_BC_INVALID_ID ||
+    u32 target = symbol ? context->symbol_value_ids[symbol_id.value] : LLVM_BC_INVALID_ID;
+    bool thread_local = symbol && (symbol->is_thread_local ||
+                                   (target < context->global_count && context->globals[target].is_thread_local));
+    if (!symbol || thread_local || target == LLVM_BC_INVALID_ID ||
         (symbol->kind != IR_SYMBOL_DATA && symbol->kind != IR_SYMBOL_FUNCTION))
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
@@ -1823,7 +1825,7 @@ static u32 llvm_bc_address_constant(LlvmBcContext* context, IrSymbolId symbol_id
     }
     else if (!addend)
     {
-        result = context->symbol_value_ids[symbol_id.value];
+        result = target;
     }
     else
     {
@@ -1842,8 +1844,7 @@ static u32 llvm_bc_address_constant(LlvmBcContext* context, IrSymbolId symbol_id
             // inbounds: a canonical addend may point before its named symbol.
             // The unflagged GEP record is understood by LLVM 18 and newer;
             // the newer flags-bearing record is not understood by LLVM 18.
-            u64 operands[5] = {context->i8_type_id, context->pointer_type_id,
-                               context->symbol_value_ids[symbol_id.value], index_type, offset};
+            u64 operands[5] = {context->i8_type_id, context->pointer_type_id, target, index_type, offset};
             result = llvm_bc_add_constant(context, context->pointer_type_id, LLVM_BC_CST_CE_GEP_OLD, operands, 5);
         }
     }

@@ -628,6 +628,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
     symbols[3].is_thread_local = true;
     LlvmBitcodeArtifact tls = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
     BUSTER_TEST(arguments, tls.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER && !tls.bytes.length);
+    symbols[3].is_thread_local = false;
+    globals[1].is_thread_local = true;
+    LlvmBitcodeArtifact global_tls = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, global_tls.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER && !global_tls.bytes.length);
 
     return result;
 }
