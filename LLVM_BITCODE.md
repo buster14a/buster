@@ -93,6 +93,9 @@ the source and canonical IR must supply a valid address for its use. TLS symbol
 references, label addresses, unsupported pointer index widths and malformed
 or overlapping relocation ranges remain explicit errors. This is LLVM
 constant emission, not native object relocation processing.
+Mach-O linking may reject unaligned pointer fixups even when the bitcode
+preserves their byte offsets; pointer slots in linkable Mach-O data need
+target-supported alignment.
 Aggregate function parameters and results follow the x86-64 System V or Win64
 C calling convention, including indirect calls, register exhaustion, by-value
 stack arguments, and hidden result pointers. LLVM parameter attributes describe
