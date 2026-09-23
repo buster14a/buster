@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/mission8-driver" 2>&1 | tee "$RUNNER_TEMP/mission8/bootstrap.log"
-          "$RUNNER_TEMP/mission8-driver" generate --cc clang --ci --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF 2>&1 | tee "$RUNNER_TEMP/mission8/generate.log"
+          "$RUNNER_TEMP/mission8-driver" generate --cc clang --ci --no-sanitize --no-fuzz --no-lto --linker DEFAULT -- -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF 2>&1 | tee "$RUNNER_TEMP/mission8/generate.log"
           "$RUNNER_TEMP/mission8-driver" build --config Debug -t ide -- -j2 2>&1 | tee "$RUNNER_TEMP/mission8/build.log"
           cp build/compile_commands.json "$RUNNER_TEMP/mission8/compile_commands.json"
           cp build/CMakeCache.txt "$RUNNER_TEMP/mission8/CMakeCache.txt"

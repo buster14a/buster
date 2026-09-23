@@ -155,7 +155,9 @@ def external(root, src, runner):
     for cc in ['clang', 'gcc']:
         for opt in ['O0', 'O2']:
             label = cc + '-' + opt
-            flags = [cc, *COMMON, '-' + opt, '-nostdinc', '-Wall', '-Wextra', '-Werror']
+            # These valid C tests intentionally mix signed and unsigned arms.
+            # Retain GCC's sign-compare warning without making it a rejection.
+            flags = [cc, *COMMON, '-' + opt, '-nostdinc', '-Wall', '-Wextra', '-Werror', '-Wno-error=sign-compare']
             flags += ['--target=x86_64-unknown-linux-gnu'] if cc == 'clang' else ['-m64']
             runner.command(label + '-ice-syntax', [*flags, '-fsyntax-only', src / 'ice.c'])
             runner.command(label + '-ice-object', [*flags, '-c', src / 'ice.c', '-o', objects / (label + '-ice.o')])
@@ -184,10 +186,12 @@ def buster(root, src, runner, ide):
                      '-fregister-allocator=' + mode, '-fverify-codegen', '-v']
             if mode != 'none':
                 flags.append('-fno-machine-fallback')
-            runner.command(label + '-ice-syntax', [*flags, '-fsyntax-only', src / 'ice.c'])
+            # Both verification gates are native-codegen-only driver contracts.
+            syntax_flags = [flag for flag in flags if flag not in ['-fverify-codegen', '-fno-machine-fallback']]
+            runner.command(label + '-ice-syntax', [*syntax_flags, '-fsyntax-only', src / 'ice.c'])
             runner.command(label + '-ice-object', [*flags, '-c', src / 'ice.c', '-o', objects / (label + '-ice.o')])
-            runner.reject(label + '-wrong-ICE', [*flags, '-fsyntax-only', src / 'wrong.c'], 'M8_wrong_expected_value')
-            runner.reject(label + '-non-ICE', [*flags, '-fsyntax-only', src / 'nonice.c'], 'M8_not_an_ICE')
+            runner.reject(label + '-wrong-ICE', [*syntax_flags, '-fsyntax-only', src / 'wrong.c'], 'M8_wrong_expected_value')
+            runner.reject(label + '-non-ICE', [*syntax_flags, '-fsyntax-only', src / 'nonice.c'], 'M8_not_an_ICE')
             ready = {}
             for unit in ['static', 'runtime', 'caller', 'same']:
                 obj = objects / (label + '-' + unit + '.o')
