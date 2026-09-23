@@ -704,6 +704,90 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
             }
         }
     }
+    // Combine two widths in one module so the declarations, constants, and
+    // relative call operands also work when their value IDs are interleaved.
+    types[1].bit_width = 8;
+    types[1].layout.size = 1;
+    types[1].layout.alignment = 1;
+    IrType mixed_types[5] = {types[0], types[1], types[2], types[1], types[2]};
+    mixed_types[3].id.value = 3;
+    mixed_types[3].bit_width = 64;
+    mixed_types[3].layout.size = 8;
+    mixed_types[3].layout.alignment = 8;
+    mixed_types[4].id.value = 4;
+    mixed_types[4].return_type.value = 3;
+    IrInstruction wide_instructions[6];
+    memcpy(wide_instructions, instructions, sizeof(instructions));
+    u64 wide_immediate = 1;
+    wide_instructions[0].immediates = &wide_immediate;
+    for (u32 index = 0; index < 6; index += 1)
+    {
+        if (wide_instructions[index].canonical_type.value == 1)
+        {
+            wide_instructions[index].canonical_type.value = 3;
+        }
+    }
+    IrValue wide_values[5];
+    memcpy(wide_values, values, sizeof(values));
+    for (u32 index = 0; index < 5; index += 1)
+    {
+        wide_values[index].canonical_type.value = 3;
+    }
+    IrSymbol mixed_symbols[2] = {symbol, symbol};
+    mixed_symbols[1].name = S8("canonical_counts64");
+    mixed_symbols[1].link_name = S8("canonical_counts64");
+    mixed_symbols[1].type.value = 4;
+    IrFunction mixed_functions[2] = {function, function};
+    mixed_functions[1].name = S8("canonical_counts64");
+    mixed_functions[1].symbol.value = 1;
+    mixed_functions[1].canonical_type.value = 4;
+    mixed_functions[1].instructions = wide_instructions;
+    mixed_functions[1].values = wide_values;
+    IrModule mixed_module = module;
+    mixed_module.functions = mixed_functions;
+    mixed_module.function_count = 2;
+    mixed_module.lowered_function_count = 2;
+    IrProgram mixed_program = program;
+    mixed_program.modules = &mixed_module;
+    mixed_program.types.types = mixed_types;
+    mixed_program.types.count = BUSTER_ARRAY_LENGTH(mixed_types);
+    mixed_program.symbols.symbols = mixed_symbols;
+    mixed_program.symbols.count = BUSTER_ARRAY_LENGTH(mixed_symbols);
+    mixed_program.lowered_function_count = 2;
+    LlvmBitcodeArtifact mixed = llvm_bitcode_emit_with_options(arena, &mixed_program, &mixed_module, 1, options);
+    LlvmBitcodeArtifact repeated = llvm_bitcode_emit_with_options(arena, &mixed_program, &mixed_module, 1, options);
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(mixed) && llvm_bitcode_artifact_is_valid(repeated));
+    BUSTER_TEST(arguments, mixed.bytes.length == repeated.bytes.length &&
+                          !memcmp(mixed.bytes.pointer, repeated.bytes.pointer, mixed.bytes.length));
+    BUSTER_TEST(arguments, mixed.stats.function_count == 8 && mixed.stats.defined_function_count == 2);
+    if (compiler.length && mixed.success)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* scratch = temporary.arena;
+        String8 bitcode = buster_test_temporary_path(scratch, S8("buster-count-mixed"), S8(".bc"));
+        String8 object = buster_test_temporary_path(scratch, S8("buster-count-mixed"), S8(".o"));
+        BUSTER_TEST(arguments, file_write(bitcode, mixed.bytes));
+        for (u32 optimization = 0; optimization < 2; optimization += 1)
+        {
+            String8 command[] = {compiler, optimization ? S8("-O2") : S8("-O0"), S8("-c"), bitcode, S8("-o"), object};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(scratch, spawned);
+                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                {
+                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM mixed count -O{u32}: {S8}\n"), optimization ? 2u : 0u,
+                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
     types[1].bit_width = 32;
     types[1].layout.size = 4;
     types[1].layout.alignment = 4;

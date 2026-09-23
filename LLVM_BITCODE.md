@@ -85,9 +85,10 @@ true`: canonical zero inputs are undefined, as with the native builtins;
 population count of zero remains zero. Wider integer-count operations produce
 an explicit diagnostic. Repeated operations reuse declarations, with stable
 type, constant, and value IDs. The canonical regression covers each width
-from 1 through 64 and rejection at 128, with independent LLVM compilation
-at widths 1, 8, 16, 32, and 64; the C fixture executes 32/64-bit
-builtins against a separately compiled caller at LLVM consumer `-O0` and
+from 1 through 64, rejection at 128, and mixed-width declarations in one
+module, with independent LLVM compilation at widths 1, 8, 16, 32, and 64.
+The C fixture executes 32/64-bit builtins against a separately compiled
+caller at LLVM consumer `-O0` and
 `-O2`, including guarded zero for count-leading/trailing and unguarded zero
 for population count.
 
