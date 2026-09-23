@@ -53,6 +53,18 @@ verified subjects, including for partial failures. The correctness lane must
 require `status=ready`, both completed subjects and the actual ready job,
 then recheck its materialized inputs.
 
+The supervisor now calls `bq_retirement_preparation_ready` after result-root
+creation and before unit launch. It independently rereads the private durable
+record, rechecks the installed inventory and source bytes without repeating the
+pre-copy free-space reservation, and hashes both materialized source copies.
+The exact canonical successful record must match the current job, token and
+request. It records each materialized copy's same-job inode closure in addition
+to its portable manifest identity, so a byte-equal replacement fails on
+readback. A missing, failed, changed or stale record, or a modified source copy,
+prevents launch. The returned service-owned record digest is an A handoff
+identity; matched build manifests and the authenticated B importer are still
+required before timing can become available.
+
 ## Capacity derivation
 
 At the inspected #923 head `ffdc9213e74128df5e759c76d52897eddfe4cd7e`,

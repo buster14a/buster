@@ -11,6 +11,7 @@ typedef struct BqRetirementSource
     char manifest_sha256[SHA256_HEX_CAPACITY];
     /* Same-job inode closure, never a portable or published identity. */
     char installed_identity_sha256[SHA256_HEX_CAPACITY];
+    char materialized_identity_sha256[SHA256_HEX_CAPACITY];
     u32 entries;
     u64 bytes;
     u32 directories;
@@ -29,9 +30,12 @@ typedef struct BqRetirementPreparation
 BUSTER_F_DECL BqError bq_retirement_preflight(int installed, int workspaces, BqRequest const* request,
                                                BqRetirementPreparation* preparation);
 BUSTER_F_DECL bool bq_retirement_verify_subject(int installed, int subject, int source, String8 revision,
-                                                 BqRetirementSource const* expected);
+                                                 BqRetirementSource* expected);
 BUSTER_F_DECL bool bq_retirement_preparation_record(BqQueue* queue, BqJob const* job,
                                                     BqRetirementPreparation const* preparation,
                                                     BqError outcome, u32 completed_subjects);
+BUSTER_F_DECL BqError bq_retirement_preparation_ready(BqQueue* queue, BqJob const* job,
+                                                     int installed, int workspaces,
+                                                     char record_sha256[SHA256_HEX_CAPACITY]);
 
 #endif
