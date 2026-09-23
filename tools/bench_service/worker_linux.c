@@ -54,6 +54,17 @@ BUSTER_GLOBAL_LOCAL u64 bq_worker_deadline(u64 now, u64 milliseconds)
     return result;
 }
 
+/* RuntimeMax is an inner unit limit. The coordinator also needs an absolute
+ * budget starting under the host lease, before materialization can do work.
+ * Reject an unrepresentable budget instead of silently disabling the cap. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_execution_deadline(u64 start, u64 runtime_usec, u64* deadline)
+{
+    u64 milliseconds = runtime_usec / 1000 + (runtime_usec % 1000 != 0);
+    bool ok = deadline && milliseconds && milliseconds <= UINT64_MAX - start;
+    if (ok) *deadline = start + milliseconds;
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL u32 bq_worker_remaining(u64 deadline)
 {
     u64 now = bq_worker_monotonic_milliseconds();
@@ -2908,9 +2919,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_join(BqQueue* queue, BqSystemdContex
 #endif
     BqError error = process >= 0 ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
     bool finished = false;
+    bool channel_closed = false;
     while (error == BQ_OK && !finished && !bq_worker_cancel_signal)
     {
-        struct pollfd waiting[] = {{channel->sequence < BQ_PHASE_MEASURED ? channel->descriptor : -1, POLLIN, 0},
+        /* Continue watching the channel after MEASURED. A duplicate or an
+         * unsolicited packet during sealing must not disappear before exit. */
+        struct pollfd waiting[] = {{channel_closed ? -1 : channel->descriptor, POLLIN, 0},
                                    {process, POLLIN, 0}};
         u32 remaining = bq_worker_remaining(deadline);
         int timeout = remaining > INT_MAX ? INT_MAX : (int)remaining;
@@ -2922,10 +2936,22 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_join(BqQueue* queue, BqSystemdContex
             if (waiting[0].revents & POLLIN)
             {
                 unsigned char message[BQ_PHASE_MESSAGE_BYTES] = {0};
-                error = bq_phase_receive(channel->descriptor, message) ?
-                        bq_worker_phase_accept(queue, channel, message, finalization) : BQ_WORKER_MISMATCH;
+                if (channel->sequence == BQ_PHASE_MEASURED)
+                {
+                    unsigned char pending = 0;
+                    ssize_t count = recv(channel->descriptor, &pending, 1, MSG_DONTWAIT | MSG_PEEK);
+                    if (count == 0 && (waiting[0].revents & POLLHUP)) channel_closed = true;
+                    else error = BQ_WORKER_MISMATCH;
+                }
+                else error = bq_phase_receive(channel->descriptor, message) ?
+                             bq_worker_phase_accept(queue, channel, message, finalization) : BQ_WORKER_MISMATCH;
             }
-            else if (waiting[0].revents & (POLLHUP | POLLERR | POLLNVAL)) error = BQ_WORKER_MISMATCH;
+            else if (waiting[0].revents & (POLLERR | POLLNVAL)) error = BQ_WORKER_MISMATCH;
+            else if (waiting[0].revents & POLLHUP)
+            {
+                if (channel->sequence != BQ_PHASE_MEASURED) error = BQ_WORKER_MISMATCH;
+                else channel_closed = true;
+            }
             if (error == BQ_OK && (waiting[1].revents & POLLIN))
             {
                 pid_t waited = waitpid(context->pid, status, WNOHANG);
@@ -2941,6 +2967,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_join(BqQueue* queue, BqSystemdContex
         }
     }
     if (bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
+    if (error == BQ_OK && finished)
+    {
+        /* A pidfd wake can win the race against a final queued packet.
+         * Require EOF after the launcher exits, with no leftover writer. */
+        unsigned char pending = 0;
+        ssize_t count = recv(channel->descriptor, &pending, 1, MSG_DONTWAIT | MSG_PEEK);
+        if (channel->sequence != BQ_PHASE_MEASURED || count != 0) error = BQ_WORKER_MISMATCH;
+    }
     if (process >= 0 && close(process) != 0 && error == BQ_OK) error = BQ_IO;
     if (error != BQ_OK) channel->failed = 1;
     return error;
@@ -3765,6 +3799,10 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         error = bq_worker_recover(queue, config, backend, lease_path, current_boot, job, &lease,
                                   &finalization);
     if (error == BQ_OK && !recovering && bq_worker_lease_acquire(lease_path, &lease) != 0) error = BQ_BUSY;
+    u64 execution_deadline = 0;
+    if (error == BQ_OK && !recovering &&
+        !bq_worker_execution_deadline(backend->clock(backend), config->limits.runtime_max_usec,
+                                      &execution_deadline)) error = BQ_CONFIGURATION_MISMATCH;
     if (error == BQ_OK && !recovering && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
     u64 token = 0;
     if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
@@ -3815,6 +3853,8 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     }
     if (error == BQ_OK && !recovering && production && !config->backend)
         error = bq_worker_lease_handoff_open(result_root, finalization.result_directory, &handoff) ? BQ_OK : BQ_IO;
+    if (error == BQ_OK && !recovering && backend->clock(backend) >= execution_deadline)
+        error = BQ_WORKER_TIMEOUT;
     if (error == BQ_OK && !recovering)
     {
         snprintf(unit_option, sizeof(unit_option), "--unit=%s", unit);
@@ -3904,18 +3944,18 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                                  bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
         if (error == BQ_OK && !bq_worker_instance_matches(config, &identity, &observed)) error = BQ_WORKER_MISMATCH;
     }
+    if (error == BQ_OK && !recovering && backend->clock(backend) >= execution_deadline)
+        error = BQ_WORKER_TIMEOUT;
     if (error == BQ_OK && !recovering && observed.result == BQ_WORKER_RUNNING)
         error = backend->signal(backend, unit, "CONT",
                                 bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
     int status = 0;
     if (error == BQ_OK && !recovering)
     {
-        u64 wait = config->limits.runtime_max_usec / 1000;
-        wait = wait <= UINT64_MAX - BQ_WORKER_STOP_MILLISECONDS ? wait + BQ_WORKER_STOP_MILLISECONDS : UINT64_MAX;
-        u64 deadline = bq_worker_deadline(backend->clock(backend), wait);
         error = phase_descriptor >= 0 ? bq_worker_phase_join(queue, backend->context, &phases, &status,
-                                                              deadline, &finalization) :
-                                        backend->join(backend, &status, deadline);
+                                                              execution_deadline, &finalization) :
+                                        backend->join(backend, &status, execution_deadline);
+        if (error == BQ_OK && backend->clock(backend) >= execution_deadline) error = BQ_WORKER_TIMEOUT;
     }
     bool interrupted_join = error == BQ_WORKER_CANCEL_SIGNAL;
     bool signal_cancelled = interrupted_join || (production && bq_worker_cancel_signal);
@@ -3949,11 +3989,19 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering && !signal_cancelled)
     {
         job = bq_job(&queue->state, *id);
+        bool expired = backend->clock(backend) >= execution_deadline;
         BqOutcome outcome = job->cancel_requested || observed.result == BQ_WORKER_CANCELLED_RESULT ? BQ_CANCELLED :
-                            observed.result == BQ_WORKER_SUCCEEDED ? BQ_SUCCEEDED : BQ_FAILED;
-        BqError reason = observed.result == BQ_WORKER_OOM ? BQ_WORKER_OOM_FAILURE :
+                            !expired && observed.result == BQ_WORKER_SUCCEEDED ? BQ_SUCCEEDED : BQ_FAILED;
+        BqError reason = expired ? BQ_WORKER_TIMEOUT : observed.result == BQ_WORKER_OOM ? BQ_WORKER_OOM_FAILURE :
                          observed.result == BQ_WORKER_TIMED_OUT ? BQ_WORKER_TIMEOUT : BQ_WORKER_FAILED;
         error = bq_worker_finish(queue, config, job, outcome, reason, &finalization);
+    }
+    else if (error == BQ_WORKER_TIMEOUT && !recovering && !launched && job &&
+             finalization.result_directory >= 0)
+    {
+        BqError finished = bq_worker_finish(queue, config, job, BQ_FAILED,
+                                           BQ_WORKER_TIMEOUT, &finalization);
+        if (finished != BQ_OK) error = finished;
     }
     else if (!recovering && job && queue->state.active_id == job->id)
     {

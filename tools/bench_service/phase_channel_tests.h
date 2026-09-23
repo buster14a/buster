@@ -3,6 +3,9 @@
 #ifndef BUSTER_BENCH_SERVICE_PHASE_CHANNEL_TESTS_H
 #define BUSTER_BENCH_SERVICE_PHASE_CHANNEL_TESTS_H
 
+BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver);
+BUSTER_GLOBAL_LOCAL void bq_test_phase_prelaunch_deadline(void);
+
 BUSTER_GLOBAL_LOCAL void bq_test_phase_packets(void)
 {
     int pair[2] = {-1, -1};
@@ -53,6 +56,45 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_packets(void)
     BQ_CHECK(!bq_phase_exchange(&sender, 1) && sender.failed);
     BQ_CHECK(!bq_phase_make(&sender, 1, message));
     close(pair[0]);
+    bq_test_phase_run(9, NULL);
+    bq_test_phase_prelaunch_deadline();
+}
+
+BUSTER_GLOBAL_LOCAL u32 bq_test_phase_deadline_clock_calls;
+
+BUSTER_GLOBAL_LOCAL u64 bq_test_phase_expired_clock(BqWorkerBackend* backend)
+{
+    BqWorkerFake* fake = backend->context;
+    bq_test_phase_deadline_clock_calls += 1;
+    if (bq_test_phase_deadline_clock_calls == 2) fake->elapsed = 3600000;
+    return fake->elapsed;
+}
+
+/* Model materialization consuming the entire fixed runtime without waiting an
+ * hour: no unit is launched, failure is durable, and admission is released. */
+BUSTER_GLOBAL_LOCAL void bq_test_phase_prelaunch_deadline(void)
+{
+    BqWorkerFixture fixture;
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqQueue* queue = &fixture.material.queue.queue;
+        BqRequest request = bq_test_real_request(218);
+        u64 id = 0;
+        bq_test_phase_deadline_clock_calls = 0;
+        fixture.backend.clock = bq_test_phase_expired_clock;
+        BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK);
+        BQ_CHECK(bq_worker_run(queue, &fixture.config, &id) == BQ_WORKER_TIMEOUT);
+        BqJob* job = bq_job(&queue->state, id);
+        BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED &&
+                 bq_failure_evidence(queue, job) == BQ_WORKER_TIMEOUT &&
+                 fixture.fake.starts == 0 && !queue->needs_reconciliation &&
+                 !queue->state.active_id && !bq_test_worker_probe_locked(fixture.lease));
+        BqRequest second = bq_test_real_request(219);
+        u64 next = 0, token = 0;
+        BQ_CHECK(bq_submit(queue, &second, &next) == BQ_OK &&
+                 bq_reserve(queue, &next, &token) == BQ_OK && next != id);
+        bq_test_worker_end(&fixture);
+    }
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver)
@@ -108,7 +150,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver)
             bool ok = bq_phase_init(&client, pair[1], id, token) && (fcntl(pair[1], F_GETFD) & FD_CLOEXEC);
             for (unsigned phase = 1; ok && phase <= 4; ++phase)
             {
-                if (defect >= 7)
+                if (defect == 7 || defect == 8)
                 {
                     unsigned char pending[BQ_PHASE_MESSAGE_BYTES];
                     struct pollfd waiting = {.fd = pair[1], .events = POLLIN};
@@ -142,6 +184,18 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver)
                      bq_record_name(record, name, id) &&
                      bq_record_read(queue, record, retained, sizeof(retained), &size) == BQ_OK && size > 0;
             }
+            if (ok && defect == 9)
+            {
+                /* A worker may still be sealing after MEASURED. A replayed
+                 * final packet during that window must poison the attempt. */
+                unsigned char duplicate[BQ_PHASE_MESSAGE_BYTES] = {0};
+                memcpy(duplicate, "BQPHASE1", 8);
+                bq_phase_put(duplicate + 8, id);
+                bq_phase_put(duplicate + 16, token);
+                bq_phase_put(duplicate + 24, BQ_PHASE_MEASURED);
+                bq_phase_put(duplicate + 32, client.last_time);
+                ok = send(pair[1], duplicate, sizeof(duplicate), MSG_NOSIGNAL) == sizeof(duplicate);
+            }
             close(pair[1]);
             _exit(ok ? 0 : 1);
         }
@@ -152,7 +206,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver)
         u64 before = bq_worker_monotonic_milliseconds();
         BqError result = bq_worker_phase_join(queue, &context, &phases, &status,
             bq_worker_deadline(before, defect == 2 ? 1000 : defect == 6 ? 30000 : 3000), &finalization);
-        BqError expected = defect >= 7 ? BQ_IO : defect == 0 || defect == 6 ? BQ_OK : defect == 2 ? BQ_WORKER_TIMEOUT :
+        BqError expected = (defect == 7 || defect == 8) ? BQ_IO : defect == 0 || defect == 6 ? BQ_OK : defect == 2 ? BQ_WORKER_TIMEOUT :
                            defect == 3 ? BQ_WORKER_CANCEL_SIGNAL : BQ_WORKER_MISMATCH;
         BQ_CHECK(result == expected);
         BQ_CHECK(bq_worker_monotonic_milliseconds() - before < (defect == 6 ? 30000u : 3000u));
@@ -175,7 +229,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver)
             BQ_CHECK(bq_worker_phases_validate(queue, job, &finalization) != BQ_OK);
         }
         close(finalization.result_directory);
-        BqPhase expected_phase = defect >= 4 && defect != 6 ? BQ_PREPARING : BQ_MEASURING;
+        BqPhase expected_phase = (defect == 4 || defect == 5 || defect == 7 || defect == 8) ? BQ_PREPARING : BQ_MEASURING;
         BQ_CHECK(bq_job(&queue->state, id)->phase == expected_phase);
         /* Even a completed exchange is not a performance verdict or cleanup
          * proof. A restart remains fenced until ordinary recovery completes. */
