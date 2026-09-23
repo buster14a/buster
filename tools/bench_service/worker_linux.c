@@ -3808,6 +3808,18 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
     if (!recovering) job = error == BQ_OK ? bq_job(&queue->state, *id) : NULL;
     if (error == BQ_OK && !recovering && job) error = bq_worker_result_open(config, job, &finalization, true);
+    if (error == BQ_OK && !recovering && job &&
+        string_equal(bq_field(&job->request, 2), S8("native-retirement-performance-v1")))
+    {
+        int installed = bq_open_absolute_directory(config->installed_root);
+        int workspaces = bq_open_absolute_directory(config->workspace_root);
+        char preparation_sha256[SHA256_HEX_CAPACITY];
+        error = installed >= 0 && workspaces >= 0 ?
+                bq_retirement_preparation_ready(queue, job, installed, workspaces, preparation_sha256) :
+                BQ_CONFIGURATION_MISMATCH;
+        if (installed >= 0 && close(installed) != 0 && error == BQ_OK) error = BQ_CONFIGURATION_MISMATCH;
+        if (workspaces >= 0 && close(workspaces) != 0 && error == BQ_OK) error = BQ_CONFIGURATION_MISMATCH;
+    }
     char unit[BQ_WORKER_UNIT_CAP];
     if (error == BQ_OK && !recovering && (!job || !bq_worker_unit_name(unit, job->id, job->token))) error = BQ_WORKER_MISMATCH;
     if (error == BQ_OK && !recovering) error = bq_worker_record_write(queue, job, current_boot, unit);

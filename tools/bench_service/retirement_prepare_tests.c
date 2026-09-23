@@ -177,6 +177,109 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_large_manifest(void)
     if (root[0] && ok) bq_prep_test_cleanup(root);
 }
 
+/* Exercise the service's durable producer/readback boundary through the real
+ * source copier. This internal test request cannot be submitted: the public
+ * registry still rejects the blocked retirement descriptor. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspaces,
+    BqRetirementPreparation* prepared, char const* profile)
+{
+    char queue_path[80] = "/tmp/bq-retirement-queue-XXXXXX";
+    bool ok = mkdtemp(queue_path) != NULL;
+    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
+    if (ok) ok = bq_open(&queue, queue_path) == BQ_OK;
+    BQ_PREP_CHECK(ok);
+    BqJob job = {.id = 1, .token = 2};
+    String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("handoff"),
+        S8("native-retirement-performance-v1"),
+        string_from_pointer(prepared->subjects[0].commit),
+        string_from_pointer(prepared->subjects[1].commit)};
+    for (u32 i = 0; ok && i < BQ_FIELD_COUNT; ++i)
+    {
+        ok = fields[i].length <= BQ_REQUEST_CAP - job.request.size - 4;
+        if (ok)
+        {
+            bq_put32(job.request.bytes + job.request.size, (u32)fields[i].length);
+            job.request.size += 4;
+            memcpy(job.request.bytes + job.request.size, fields[i].pointer, (size_t)fields[i].length);
+            job.request.size += (u32)fields[i].length;
+        }
+    }
+    if (ok) bq_request_digest(&job.request, job.digest);
+    char attempt[64];
+    if (ok) ok = bq_workspace_name(attempt, job.id, job.token) && mkdirat(workspaces, attempt, 0700) == 0;
+    int root = ok ? openat(workspaces, attempt, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && root >= 0;
+    for (u32 side = 0; ok && side < 2; ++side)
+    {
+        char const* name = side ? "candidate" : "base";
+        ok = mkdirat(root, name, 0700) == 0;
+        int parent = ok ? openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        ok = ok && parent >= 0 && mkdirat(parent, "source", 02750) == 0;
+        int source = ok ? openat(parent, "source", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        if (ok)
+        {
+            ok = source >= 0 && bq_copy_manifest(installed, source, fields[3 + side],
+                                                   BQ_RETIREMENT_SOURCE_MANIFEST_CAP) &&
+                 bq_make_sources_read_only(source) &&
+                 bq_retirement_verify_subject(installed, parent, source, fields[3 + side],
+                                              &prepared->subjects[side]);
+        }
+        if (source >= 0) close(source);
+        if (parent >= 0) close(parent);
+    }
+    BQ_PREP_CHECK(ok);
+    if (ok)
+    {
+        char digest[SHA256_HEX_CAPACITY];
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest) == BQ_NOT_FOUND && !digest[0]);
+        BQ_PREP_CHECK(bq_retirement_preparation_record(&queue, &job, prepared, BQ_OK, 2) &&
+                      bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), digest) == BQ_OK && strlen(digest) == 64);
+        BqJob other = job;
+        other.token += 1;
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &other, installed, workspaces,
+                      string_from_pointer(profile), digest) == BQ_CORRUPT && !digest[0]);
+        other = job;
+        other.digest[0] = other.digest[0] == 'a' ? 'b' : 'a';
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &other, installed, workspaces,
+                      string_from_pointer(profile), digest) == BQ_RECIPE_MISMATCH && !digest[0]);
+        char wrong_profile[512];
+        memcpy(wrong_profile, profile, strlen(profile) + 1);
+        char* pin = strstr(wrong_profile, "inventory-sha256=");
+        if (pin) pin[17] = pin[17] == 'a' ? 'b' : 'a';
+        BQ_PREP_CHECK(pin && bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(wrong_profile), digest) == BQ_RECIPE_MISMATCH && !digest[0]);
+        char copied_path[128];
+        int length = snprintf(copied_path, sizeof(copied_path), "%s/base/source/src", attempt);
+        int copied = length > 0 && (u32)length < sizeof(copied_path) ?
+                     bq_open_directory_path(workspaces, string_from_pointer(copied_path)) : -1;
+        BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
+                      renameat(copied, "main.c", copied, "old.c") == 0);
+        if (copied >= 0)
+        {
+            int replacement = openat(copied, "main.c", O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+            BQ_PREP_CHECK(replacement >= 0 && bq_write_all(replacement, (u8 const*)"int a;\n", 7) &&
+                          fchmod(replacement, 0400) == 0 && fchmod(copied, 0500) == 0);
+            if (replacement >= 0) close(replacement);
+            BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), digest) == BQ_SOURCE_MISMATCH && !digest[0]);
+            close(copied);
+        }
+        int record = openat(queue.directory_fd, "preparation-1", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(record >= 0 && fchmod(record, 0600) == 0);
+        if (record >= 0) close(record);
+        record = openat(queue.directory_fd, "preparation-1", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(record >= 0 && pwrite(record, "X", 1, 0) == 1 && fchmod(record, 0400) == 0);
+        if (record >= 0) close(record);
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest) == BQ_CORRUPT && !digest[0]);
+    }
+    if (root >= 0) close(root);
+    bq_close(&queue);
+    if (queue_path[0] && ok) bq_prep_test_cleanup(queue_path);
+}
+
 int main(void)
 {
     char installed[80] = {0}, workspaces[80] = {0}, profile[512] = {0};
@@ -194,6 +297,7 @@ int main(void)
         BqRetirementSource verified_base = preparation.subjects[0];
         BQ_PREP_CHECK(preparation.subjects[0].entries == 1 && preparation.subjects[1].entries == 1 &&
                       preparation.source_reservation_bytes > BQ_RETIREMENT_COPY_OVERHEAD);
+        bq_prep_test_ready_handoff(input, output, &preparation, profile);
 
         char wrong_profile[512];
         memcpy(wrong_profile, profile, sizeof(wrong_profile));
