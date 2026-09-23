@@ -138,8 +138,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
         BqError prepared = bq_transport_dispatch(queue, request.bytes, request.size, &response);
         if (prepared != BQ_OK) fprintf(stderr, "EXPORT_TEST prepare=%s\n", bq_error_name(prepared));
         BQ_CHECK(prepared == BQ_OK && bq_public_response_valid(&request, &response));
+        u64 full_index_checks = bq_export_index_full_checks;
         BQ_CHECK(bq_transport_dispatch(queue, request.bytes, request.size, &repeated) == BQ_OK &&
-                 response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size));
+                 response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size) &&
+                 bq_export_index_full_checks == full_index_checks);
         char published[80], pending[80];
         BQ_CHECK(bq_export_name(published, id, token, false) && bq_export_name(pending, id, token, true) &&
                  linkat(queue->directory_fd, published, queue->directory_fd, pending, 0) == 0 &&
@@ -161,8 +163,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
             bq_test_export_request(&request, job, cursor, digest);
             BQ_CHECK(bq_transport_dispatch(queue, request.bytes, request.size, &response) == BQ_OK &&
                      bq_public_response_valid(&request, &response));
+            /* Recovery of a pending export may replace spool metadata once;
+             * the immediately repeated read must reuse its verified index. */
+            full_index_checks = bq_export_index_full_checks;
             BQ_CHECK(bq_transport_dispatch(queue, request.bytes, request.size, &repeated) == BQ_OK &&
-                     response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size));
+                     response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size) &&
+                     bq_export_index_full_checks == full_index_checks);
             u8 const* body = response.bytes + BQ_CONTROL_HEADER;
             u32 count = bq_u32(body + 44);
             BQ_CHECK(count > 0 && count <= BQ_EXPORT_CHUNK_CAP && response.size <= BQ_PACKET_CAP);

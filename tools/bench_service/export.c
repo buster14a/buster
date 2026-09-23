@@ -39,6 +39,23 @@ typedef struct BqExportInventory
     u64 bytes;
 } BqExportInventory;
 
+/* Control requests are dispatched serially by the service. A sealed spool is
+ * immutable, but it can be replaced by the trusted service on a later job or
+ * after recovery. Reuse the full index check only for the same receipt and
+ * exact inode/metadata identity. Every response still checks its own chunk
+ * digest and brackets the read with fstat/fstatat. A restart starts cold. */
+typedef struct BqExportIndexCache
+{
+    struct stat identity;
+    char receipt_sha256[SHA256_HEX_CAPACITY];
+    bool valid;
+} BqExportIndexCache;
+
+BUSTER_GLOBAL_LOCAL BqExportIndexCache bq_export_index_cache;
+#ifdef BUSTER_BENCH_SERVICE_TEST
+BUSTER_GLOBAL_LOCAL u64 bq_export_index_full_checks;
+#endif
+
 BUSTER_GLOBAL_LOCAL bool bq_export_same(struct stat const* a, struct stat const* b)
 {
     bool same = a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_size == b->st_size &&
@@ -453,11 +470,20 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
         if (error == BQ_OK && cursor != UINT64_MAX && memcmp(expected_receipt, receipt_digest, 64)) error = BQ_CONFLICT;
         if (error == BQ_OK && cursor != UINT64_MAX && (cursor >= total || cursor % BQ_EXPORT_CHUNK_CAP)) error = BQ_BAD_REQUEST;
     }
+    bool cached = error == BQ_OK && bq_export_index_cache.valid &&
+                  bq_export_same(&before, &bq_export_index_cache.identity) &&
+                  !memcmp(receipt_digest, bq_export_index_cache.receipt_sha256, 64);
     Sha256 index;
-    sha256_init(&index);
+    if (error == BQ_OK && !cached)
+    {
+        sha256_init(&index);
+#ifdef BUSTER_BENCH_SERVICE_TEST
+        bq_export_index_full_checks += 1;
+#endif
+    }
     char expected_chunk[SHA256_HEX_CAPACITY] = {0};
     u64 index_size = ((total + BQ_EXPORT_CHUNK_CAP - 1) / BQ_EXPORT_CHUNK_CAP) * 64;
-    for (u64 offset = 0; error == BQ_OK && offset < index_size;)
+    for (u64 offset = 0; error == BQ_OK && !cached && offset < index_size;)
     {
         u8 bytes[BQ_EXPORT_CHUNK_CAP];
         u64 count = index_size - offset < sizeof(bytes) ? index_size - offset : sizeof(bytes);
@@ -470,7 +496,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
         }
         offset += count;
     }
-    if (error == BQ_OK)
+    if (error == BQ_OK && cached && cursor != UINT64_MAX)
+    {
+        u64 offset = cursor / BQ_EXPORT_CHUNK_CAP * 64;
+        error = bq_export_io(fd, expected_chunk, 64, BQ_EXPORT_RECEIPT_CAP + offset, false, deadline);
+    }
+    if (error == BQ_OK && !cached)
     {
         char actual[SHA256_HEX_CAPACITY];
         sha256_finish_hex(&index, (char8*)actual);
@@ -505,6 +536,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
         fstatat(queue->directory_fd, name, &named, AT_SYMLINK_NOFOLLOW) != 0 ||
         !bq_export_same(&before, &named))) error = BQ_EXPORT_CORRUPT;
     if (fd >= 0 && close(fd) != 0 && error == BQ_OK) error = BQ_IO;
+    if (error == BQ_OK && !cached)
+    {
+        bq_export_index_cache.identity = before;
+        memcpy(bq_export_index_cache.receipt_sha256, receipt_digest, sizeof(receipt_digest));
+        bq_export_index_cache.valid = true;
+    }
+    else if (error != BQ_OK) bq_export_index_cache.valid = false;
     if (error == BQ_OK)
     {
         memset(output, 0, BQ_EXPORT_REPLY_HEADER);
