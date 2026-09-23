@@ -291,7 +291,18 @@ unpacked tree instead. See
 The aggregate `CI complete` requires all twelve desktop combination jobs, six
 native jobs, three mobile jobs, workflow lint, UEFI and the analyzer. Its
 read-only Actions inventory rejects missing shard identities even when a
-smaller surviving matrix group reports success.
+smaller surviving matrix group reports success. It selects each logical job's
+latest attempt from the exact run and source head, then requires a unique
+successful record for every required desktop/native step. GitHub can briefly
+publish job or step metadata before those records are complete, so the gate
+re-reads inconsistent inventories with 1/2/4-second backoff, at most three
+refreshes and a 30-second total metadata budget. A later exact snapshot can
+recover a transient omission; a persistent empty, stale or ambiguous record
+fails closed. It never borrows required-step proof from an older attempt when a
+newer attempt shadows that job. The retained `desktop-partitions.json` records
+the exact run/head, final job attempts, observed required-step status and
+conclusion, refresh count, and any unresolved proof errors. A green job-level
+conclusion alone cannot pass the gate.
 
 The Android summary also exposes the existing wrapper records from
 `RUNNER_TEMP/buster-ci/android.log` in both `summary.md` / the job summary and
