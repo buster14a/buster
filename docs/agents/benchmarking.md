@@ -14,6 +14,14 @@ builds. An A/A test of one immutable binary measures runtime noise, not build-ro
 sensitivity. Matching paths does not eliminate source-induced layout sensitivity;
 keep conclusions scoped to the measured binaries and workloads. See the
 [matched-build #791 audit](../performance-audits/2026-09-20T050606Z.md).
+For dedicated 9700X calibration, retain a same-root rebuild control and a
+cross-root control beside the immutable-binary A/A capture. The
+[`zen5_build_control.py`](../../tools/zen5_build_control.py) reader checks their
+predeclared, fixed-count records and summarizes build, path, order and drift
+effects. Its schema and execution boundary are in the
+[dedicated-host guide](../../tools/throughput/DEDICATED.md#same-source-cross-build-controls).
+These offline checks cannot authenticate the capture or prove that the family
+was frozen before sampling; the admitted service receipt must bind both facts.
 
 - **`./build.sh bench_throughput`** provides deterministic startup, scaling,
   symbol, CFG, backend and frozen-source self-host workloads with raw paired
