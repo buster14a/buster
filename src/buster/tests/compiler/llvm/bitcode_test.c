@@ -196,7 +196,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    String8 source = S8(
+    String8 vla_source = S8(
         "// The independent caller observes only live VLA elements. Every scope exit\n"
         "// must preserve the outer VLA while discarding allocations made after it.\n"
         "extern int observe_bytes(volatile unsigned char* bytes, int count, int first, int last);\n"
@@ -289,7 +289,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
         String8 input = buster_test_temporary_path(arena, S8("buster-llvm-stack"), S8(".c"));
         String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-stack-caller"), S8(".c"));
         String8 output = buster_test_temporary_path(arena, S8("buster-llvm-stack"), S8(".bc"));
-        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(vla_source)));
         BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
         String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output,
                              input};
