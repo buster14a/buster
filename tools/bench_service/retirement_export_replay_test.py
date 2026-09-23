@@ -4,6 +4,7 @@
 import hashlib
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -186,6 +187,31 @@ class ExportReplayTest(unittest.TestCase):
             self.assertFalse((clean / "retirement-42-19.bqexport").exists())
         finally:
             replay.os.close(source)
+
+    def test_publisher_and_consumer_are_separate_cli_processes(self):
+        command = [sys.executable, str(Path(replay.__file__).resolve())]
+        identities = ["--bench-service", str(self.root / "reviewed-service"),
+                      "--repository-root", str(self.root), "--binding", "record.json",
+                      "--job", str(self.job), "--attempt", str(self.attempt),
+                      "--full-result-sha256", self.full_digest,
+                      "--export-receipt-sha256", self.receipt_sha256,
+                      "--trusted-execution-receipt-sha256", "b" * 64]
+        first = subprocess.run(command + [str(self.archive), "--publish-only",
+                                         "--test-publication", str(self.destination)] + identities,
+                               check=True, capture_output=True, text=True)
+        self.assertIn('"test_publication"', first.stdout)
+        published = self.destination / "retirement-42-19.bqexport"
+        self.assertEqual(published.read_bytes(), self.archive.read_bytes())
+        clean = self.root / "clean-consumer"
+        clean.mkdir(mode=0o700)
+        wrong = identities.copy()
+        wrong[wrong.index("--export-receipt-sha256") + 1] = "c" * 64
+        second = subprocess.run(command + [str(published), str(self.root / "new-result"),
+                                          "--consume-published", "--retrieval", str(clean)] + wrong,
+                                check=False, capture_output=True, text=True)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("independently supplied digest", second.stderr)
+        self.assertEqual(list(clean.iterdir()), [])
 
 
 if __name__ == "__main__":
