@@ -78,7 +78,19 @@ as a successful artifact.
 The implemented lowering covers the canonical scalar, pointer, aggregate,
 memory, atomic, call, cast, arithmetic, comparison, branch, switch, return,
 and unreachable forms used by the current C frontend. Canonical
-operations that do not yet have an LLVM record mapping, including stack
+scalar integer leading-zero count, trailing-zero count, and population count
+emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and `llvm.ctpop.iN`
+declarations for widths 1 through 64. The first two pass `is_zero_poison =
+true`: canonical zero inputs are undefined, as with the native builtins;
+population count of zero remains zero. Wider integer-count operations produce
+an explicit diagnostic. Repeated operations reuse declarations, with stable
+type, constant, and value IDs. The canonical regression covers widths 1, 8,
+16, 32, and 64 and rejection at 128; the C fixture executes 32/64-bit
+builtins against a separately compiled caller at LLVM consumer `-O0` and
+`-O2`, including guarded zero for count-leading/trailing and unguarded zero
+for population count.
+
+Canonical operations that do not yet have an LLVM record mapping, including stack
 save/restore, instruction-cache clearing, slice/reverse helpers, variadic
 intrinsics, inline assembly, SIMD, label addresses, indirect branches, and
 debug traps, are deliberate diagnostics.
