@@ -676,6 +676,18 @@ def _xcrun_json(arguments: list[str], description: str) -> Any:
         raise MobileCoverageError(f"{description} returned malformed JSON") from error
 
 
+def _ios_boot_disposition(lines: list[str]) -> str:
+    dispositions = [line.partition("=")[2] for line in lines if line.startswith("BUSTER_IOS_BOOT_DISPOSITION=")]
+    allowed = {
+        "first-attempt-success",
+        "continued-original-boot-success",
+        "recovered-infrastructure-failure",
+    }
+    if len(dispositions) != 1 or dispositions[0] not in allowed:
+        raise MobileCoverageError("iOS boot disposition is missing, duplicated, or unsuccessful")
+    return dispositions[0]
+
+
 def _ios_runtime(lines: list[str], architecture: str, output_directory: Path) -> dict[str, Any]:
     sdk_path = _run(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"], "iOS simulator SDK path").strip()
     sdk_version = _run(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"], "iOS simulator SDK version").strip()
@@ -749,10 +761,7 @@ def _ios_runtime(lines: list[str], architecture: str, output_directory: Path) ->
         raise MobileCoverageError(
             "iOS runtime log does not bind the final UUID to the selected or recovered buster-ci device exactly once"
         )
-    dispositions = [line.partition("=")[2] for line in lines if line.startswith("BUSTER_IOS_BOOT_DISPOSITION=")]
-    allowed_dispositions = {"first-attempt-success", "recovered-infrastructure-failure"}
-    if len(dispositions) != 1 or dispositions[0] not in allowed_dispositions:
-        raise MobileCoverageError("iOS boot disposition is missing, duplicated, or unsuccessful")
+    _ios_boot_disposition(lines)
 
     devices = _xcrun_json(["simctl", "list", "devices", "-j"], "iOS simulator device inventory")
     device_matches: list[tuple[str, dict[str, Any]]] = []
@@ -1169,6 +1178,28 @@ def run_self_test() -> int:
             case_count += 1
     if len(lanes) != 3:
         raise MobileCoverageError("self-test workflow lane census changed")
+    for disposition in (
+        "first-attempt-success",
+        "continued-original-boot-success",
+        "recovered-infrastructure-failure",
+    ):
+        if _ios_boot_disposition([f"BUSTER_IOS_BOOT_DISPOSITION={disposition}"]) != disposition:
+            raise MobileCoverageError(f"self-test rejected successful iOS boot disposition {disposition}")
+        case_count += 1
+    for name, lines in (
+        ("missing", []),
+        ("duplicate", ["BUSTER_IOS_BOOT_DISPOSITION=continued-original-boot-success"] * 2),
+        ("pending", ["BUSTER_IOS_BOOT_DISPOSITION=continued-original-pending-tests"]),
+        ("failed-tests", ["BUSTER_IOS_BOOT_DISPOSITION=continued-boot-but-test-failure"]),
+        ("unrecovered", ["BUSTER_IOS_BOOT_DISPOSITION=unrecovered-failure"]),
+    ):
+        try:
+            _ios_boot_disposition(lines)
+        except MobileCoverageError:
+            pass
+        else:
+            raise MobileCoverageError(f"self-test accepted {name} iOS boot disposition")
+        case_count += 1
     return case_count
 
 
