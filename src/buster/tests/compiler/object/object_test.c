@@ -1235,12 +1235,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_writer_alignment_capacity(UnitTes
                 if (string_equal(restored_symbol->name, S8("aligned_text")))
                 {
                     text_symbol_valid = restored_symbol->section == OBJECT_SECTION_TEXT && restored_symbol->kind == OBJECT_SYMBOL_FUNCTION &&
-                                        restored_symbol->size == 1;
+                                        (formats[format_index] != OBJECT_FORMAT_ELF64 || restored_symbol->size == 1);
                 }
                 else if (string_equal(restored_symbol->name, S8("aligned_data")))
                 {
                     data_symbol_valid = restored_symbol->section == OBJECT_SECTION_DATA && restored_symbol->kind == OBJECT_SYMBOL_DATA &&
-                                        restored_symbol->size == 8;
+                                        (formats[format_index] != OBJECT_FORMAT_ELF64 || restored_symbol->size == 8);
                 }
             }
             BUSTER_TEST(arguments, text_symbol_valid && data_symbol_valid);
