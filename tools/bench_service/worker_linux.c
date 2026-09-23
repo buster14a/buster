@@ -2967,6 +2967,14 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_phase_join(BqQueue* queue, BqSystemdContex
         }
     }
     if (bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
+    if (error == BQ_OK && finished)
+    {
+        /* A pidfd wake can win the race against a final queued packet.
+         * Require EOF after the launcher exits, with no leftover writer. */
+        unsigned char pending = 0;
+        ssize_t count = recv(channel->descriptor, &pending, 1, MSG_DONTWAIT | MSG_PEEK);
+        if (channel->sequence != BQ_PHASE_MEASURED || count != 0) error = BQ_WORKER_MISMATCH;
+    }
     if (process >= 0 && close(process) != 0 && error == BQ_OK) error = BQ_IO;
     if (error != BQ_OK) channel->failed = 1;
     return error;
