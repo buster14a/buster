@@ -79,11 +79,16 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(campaign.phase == TP_RETIREMENT_CAMPAIGN_AA && campaign.row_ids[0] == 6 &&
           campaign.capacity.invocations_per_stage == 488 &&
           campaign.capacity.samples_per_stage == 120 &&
+          campaign.capacity.total_invocations == 976 && campaign.capacity.total_samples == 240 &&
           campaign.capacity.spool_bytes_per_stage == 120 * TP_RETIREMENT_SAMPLE_RECORD_BYTES &&
-          campaign.capacity.transcript_shards_per_stage == 1);
+          campaign.capacity.total_spool_bytes == 240 * TP_RETIREMENT_SAMPLE_RECORD_BYTES &&
+          campaign.capacity.transcript_shards_per_stage == 1 &&
+          campaign.capacity.total_transcript_shards == 2);
     TpRetirementCampaignCapacity large;
     CHECK(tp_retirement_campaign_capacity(72672, 0, 60, &large) &&
-          large.samples_per_stage == UINT64_C(8720640));
+          large.samples_per_stage == UINT64_C(8720640) &&
+          large.total_samples == UINT64_C(17441280) &&
+          large.total_sample_partitions == 2);
     CHECK(!tp_retirement_campaign_capacity(72672, 72672, 254, &large));
     CHECK(!tp_retirement_campaign_capacity(0, 0, 60, &large));
     CHECK(!tp_retirement_campaign_capacity(1, 2, 60, &large));

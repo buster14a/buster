@@ -40,6 +40,8 @@ typedef struct TpRetirementCampaignCapacity
 {
     uint64_t invocations_per_stage, samples_per_stage, spool_bytes_per_stage;
     uint64_t transcript_shards_per_stage, sample_shards_per_stage, sample_partitions_per_stage;
+    uint64_t total_invocations, total_samples, total_spool_bytes;
+    uint64_t total_transcript_shards, total_sample_shards, total_sample_partitions;
 } TpRetirementCampaignCapacity;
 
 /* The command hash covers argv/cwd/environment; all other oracle fields are
@@ -98,6 +100,13 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
             capacity->sample_shards_per_stage = sample_shards;
             capacity->sample_partitions_per_stage =
                 (samples + TP_RETIREMENT_SAMPLE_PARTITION_RECORDS - 1) / TP_RETIREMENT_SAMPLE_PARTITION_RECORDS;
+            capacity->total_invocations = invocations * TP_RETIREMENT_CAMPAIGN_STAGES;
+            capacity->total_samples = samples * TP_RETIREMENT_CAMPAIGN_STAGES;
+            capacity->total_spool_bytes = capacity->spool_bytes_per_stage * TP_RETIREMENT_CAMPAIGN_STAGES;
+            capacity->total_transcript_shards = transcript_shards * TP_RETIREMENT_CAMPAIGN_STAGES;
+            capacity->total_sample_shards = sample_shards * TP_RETIREMENT_CAMPAIGN_STAGES;
+            capacity->total_sample_partitions =
+                capacity->sample_partitions_per_stage * TP_RETIREMENT_CAMPAIGN_STAGES;
         }
     }
     return ok;
