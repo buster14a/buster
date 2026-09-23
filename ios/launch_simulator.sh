@@ -50,6 +50,11 @@ bundle_id=${BUSTER_IOS_BUNDLE_ID:-dev.buster.ide}
 device_name=${BUSTER_IOS_SIMULATOR_DEVICE:-buster-ci}
 launch_timeout_seconds=${BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS:-180}
 boot_timeout_seconds=${BUSTER_IOS_BOOT_TIMEOUT_SECONDS:-180}
+# A hosted ARM64 device that times out during its first readiness check can
+# finish migration without starting over. One bounded continuation precedes
+# the existing one-device replacement; neither path accepts a Booted state as
+# readiness, and the replacement retains its original single readiness check.
+boot_continuation_seconds=${BUSTER_IOS_BOOT_CONTINUATION_SECONDS:-120}
 install_timeout_seconds=${BUSTER_IOS_INSTALL_TIMEOUT_SECONDS:-120}
 codesign_timeout_seconds=${BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS:-60}
 shutdown_timeout_seconds=${BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS:-30}
@@ -73,6 +78,7 @@ result_marker_failure="BUSTER_IOS_RESULT: FAILURE"
 for timeout_value in \
     "$launch_timeout_seconds" \
     "$boot_timeout_seconds" \
+    "$boot_continuation_seconds" \
     "$install_timeout_seconds" \
     "$codesign_timeout_seconds" \
     "$shutdown_timeout_seconds" \
@@ -138,19 +144,47 @@ with open(sys.argv[1] + ".capture-status.log", "w") as status:
 ' "$path"
 }
 
-lifecycle_context_collected=0
+observe_lifecycle_context() {
+    local name=$1
+    shift
+    local started=$SECONDS status
+    printf '%s\n' "----- iOS context $name -----"
+    if run_with_timeout "$monitor_command_timeout_seconds" "$@"; then
+        status=0
+    else
+        status=$?
+    fi
+    printf 'BUSTER_IOS_CONTEXT_PROBE name=%s status=%s elapsed_seconds=%s deadline_seconds=%s\n' \
+        "$name" "$status" "$((SECONDS - started))" "$monitor_command_timeout_seconds"
+}
+
 collect_lifecycle_context() {
-    local context_log="${console_log_base}.lifecycle-context.log"
-    if [[ $lifecycle_context_collected -eq 0 ]]; then
-        lifecycle_context_collected=1
+    local context_base=$1 attempt=$2
+    local context_log="${context_base}.lifecycle-context.log"
+    local context_status="${context_base}.lifecycle-context.status.log"
+    local capture_status=0 receipt=incomplete
+    if [[ ! -e $context_status ]]; then
         {
-            printf 'GITHUB_SHA=%s\nDEVELOPER_DIR=%s\nSIMULATOR_UDID=%s\n' \
-                "${GITHUB_SHA:-unavailable}" "${DEVELOPER_DIR:-default}" "$udid"
-            run_with_timeout "$monitor_command_timeout_seconds" git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse HEAD || true
-            run_with_timeout "$monitor_command_timeout_seconds" xcodebuild -version || true
-            run_with_timeout "$monitor_command_timeout_seconds" xcrun --sdk iphonesimulator --show-sdk-version || true
-            print_simulator_diagnostics
-        } 2>&1 | capture_lifecycle_output "$((5 * monitor_command_timeout_seconds + 10))" "$context_log" || true
+            printf 'GITHUB_SHA=%s\nDEVELOPER_DIR=%s\nSIMULATOR_UDID=%s\nSIMULATOR_RUNTIME=%s\nSIMULATOR_DEVICE_TYPE=%s\nATTEMPT=%s\n' \
+                "${GITHUB_SHA:-unavailable}" "${DEVELOPER_DIR:-default}" "${udid:-unavailable}" \
+                "${runtime:-unavailable}" "${device_type:-unavailable}" "$attempt"
+            observe_lifecycle_context source git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse HEAD
+            observe_lifecycle_context xcode xcodebuild -version
+            observe_lifecycle_context sdk xcrun --sdk iphonesimulator --show-sdk-version
+            observe_lifecycle_context devices xcrun simctl list devices
+            observe_lifecycle_context runtimes xcrun simctl list runtimes
+            # These small host probes distinguish a busy or full host from a
+            # stalled simulator without changing the simulator service.
+            observe_lifecycle_context memory vm_stat
+            observe_lifecycle_context disk df -h "$log_dir"
+        } 2>&1 | capture_lifecycle_output "$((7 * monitor_command_timeout_seconds + 10))" "$context_log" || capture_status=$?
+        if [[ $capture_status -eq 0 && -s ${context_log}.capture-status.log ]]; then
+            receipt=complete
+        fi
+        printf 'BUSTER_IOS_CONTEXT attempt=%s udid=%s runtime=%s source=%s capture_status=%s capture_receipt=%s output_log=%s\n' \
+            "$attempt" "${udid:-unavailable}" "${runtime:-unavailable}" "${GITHUB_SHA:-unavailable}" \
+            "$capture_status" "$receipt" "$context_log" >"$context_status" || true
+        cat "$context_status" >&2 || true
         echo "iOS lifecycle context: $context_log" >&2
     fi
 }
@@ -163,24 +197,51 @@ run_lifecycle_phase() {
     local native_log="${evidence_base}.${phase}.native-status.log"
     local started=$SECONDS
     local statuses native_status=unavailable outcome result
+    local capture_receipt=incomplete command_elapsed=unavailable capture_elapsed=unavailable
+    local command_elapsed_log="${evidence_base}.${phase}.command-elapsed.log"
+    local capture_elapsed_log="${evidence_base}.${phase}.capture-elapsed.log"
     mkdir -p "$(dirname "$evidence_base")"
-    rm -f "$native_log" "${output_log}.capture-status.log"
+    rm -f "$native_log" "${output_log}.capture-status.log" "$command_elapsed_log" "$capture_elapsed_log"
     # Record the command's own status before the timeout helper returns. This
     # distinguishes an ordinary exit 124 from the helper's deadline status.
-    if run_with_timeout "$seconds" "$BASH" -c '
+    if (
+        command_started=$SECONDS
+        if run_with_timeout "$seconds" "$BASH" -c '
         status_path=$1
         shift
         if "$@"; then status=0; else status=$?; fi
         printf "%s\n" "$status" >"$status_path"
         exit "$status"
-    ' bash "$native_log" "$@" 2>&1 | \
-        capture_lifecycle_output "$((seconds + 10 + monitor_command_timeout_seconds))" "$output_log"; then
+    ' bash "$native_log" "$@"; then command_status=0; else command_status=$?; fi
+        printf '%s\n' "$((SECONDS - command_started))" >"$command_elapsed_log"
+        exit "$command_status"
+    ) 2>&1 | (
+        capture_started=$SECONDS
+        if capture_lifecycle_output "$((seconds + 10 + monitor_command_timeout_seconds))" "$output_log"; then
+            capture_status=0
+        else
+            capture_status=$?
+        fi
+        printf '%s\n' "$((SECONDS - capture_started))" >"$capture_elapsed_log"
+        exit "$capture_status"
+    ); then
         statuses=("${PIPESTATUS[@]}")
     else
         statuses=("${PIPESTATUS[@]}")
     fi
     if [[ -f $native_log ]]; then
         read -r native_status <"$native_log" || native_status=unavailable
+    fi
+    if [[ -s $command_elapsed_log ]]; then
+        read -r command_elapsed <"$command_elapsed_log" || command_elapsed=unavailable
+    fi
+    if [[ -s $capture_elapsed_log ]]; then
+        read -r capture_elapsed <"$capture_elapsed_log" || capture_elapsed=unavailable
+    fi
+    if [[ ${statuses[1]} -eq 0 && -s ${output_log}.capture-status.log ]] \
+        && grep -Eq '^BUSTER_IOS_CAPTURE total_bytes=[0-9]+ retained_bytes=[0-9]+ truncated=[01]$' \
+            "${output_log}.capture-status.log"; then
+        capture_receipt=complete
     fi
     result=${statuses[0]}
     outcome=command-failure
@@ -195,17 +256,22 @@ run_lifecycle_phase() {
             *) outcome=signal-or-command-failure ;;
         esac
     fi
-    if [[ ${statuses[1]} -ne 0 && $result -eq 0 ]]; then
+    if [[ ( ${statuses[1]} -ne 0 || $capture_receipt != complete ) && $result -eq 0 ]]; then
         outcome=evidence-failure
         result=1
     fi
     if ! {
-        printf 'BUSTER_IOS_PHASE phase=%s label=%s outcome=%s status=%s native_status=%s capture_status=%s elapsed_seconds=%s deadline_seconds=%s output_limit_bytes=65536\n' \
-            "$phase" "$label" "$outcome" "${statuses[0]}" "$native_status" "${statuses[1]}" "$((SECONDS - started))" "$seconds"
+        printf 'BUSTER_IOS_PHASE phase=%s label=%s outcome=%s status=%s native_status=%s capture_status=%s elapsed_seconds=%s deadline_seconds=%s output_limit_bytes=65536 command_elapsed_seconds=%s capture_elapsed_seconds=%s capture_receipt=%s\n' \
+            "$phase" "$label" "$outcome" "${statuses[0]}" "$native_status" "${statuses[1]}" "$((SECONDS - started))" "$seconds" \
+            "$command_elapsed" "$capture_elapsed" "$capture_receipt"
         printf 'command:'
         printf ' %q' "$@"
         printf '\noutput_log=%s\n' "$output_log"
-        cat "${output_log}.capture-status.log"
+        if [[ -s ${output_log}.capture-status.log ]]; then
+            cat "${output_log}.capture-status.log"
+        else
+            printf 'BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt\n'
+        fi
     } >"$status_log"; then
         echo "error: could not retain iOS $phase status at $status_log" >&2
         result=1
@@ -217,7 +283,11 @@ run_lifecycle_phase() {
         # Full bounded raw output remains in the artifact, independent of the
         # console/result-marker logs that are reset for each app launch.
         tail -c 4096 "$output_log" >&2 || true
-        collect_lifecycle_context
+        if [[ $phase == boot || $phase == bootstatus || $phase == bootstatus-continue ]]; then
+            collect_lifecycle_context "${evidence_base}.${phase}" "$label"
+        else
+            collect_lifecycle_context "$console_log_base" general
+        fi
     fi
     return "$result"
 }
@@ -832,6 +902,7 @@ run_boot_readiness_attempt() {
     local boot_status=0
     local readiness_status=0
     local readiness_outcome=unavailable
+    local continued=0 first_readiness_status=unavailable first_readiness_outcome=unavailable
 
     # Keep boot and readiness evidence attempt-qualified. Recovery is decided
     # only from the readiness helper's proven deadline outcome below.
@@ -849,12 +920,30 @@ run_boot_readiness_attempt() {
         readiness_status=$?
         readiness_outcome=$last_lifecycle_outcome
     fi
-    if [[ $readiness_status -eq 0 ]]; then
+    if [[ $attempt -eq 1 && $boot_recovery_eligible -eq 1 && $readiness_outcome == timeout ]]; then
+        first_readiness_status=$readiness_status
+        first_readiness_outcome=$readiness_outcome
+        continued=1
+        echo "Continuing readiness on the same owned simulator $udid for at most ${boot_continuation_seconds}s" >&2
+        if run_lifecycle_phase bootstatus-continue "$attempt" "$evidence_base" "$boot_continuation_seconds" \
+            xcrun simctl bootstatus "$udid" -b; then
+            readiness_status=0
+            readiness_outcome=success-after-continuation
+        else
+            readiness_status=$?
+            readiness_outcome=$last_lifecycle_outcome
+        fi
+        printf 'BUSTER_IOS_BOOT_CONTINUATION attempt=%s udid=%s initial_status=%s initial_outcome=%s status=%s outcome=%s deadline_seconds=%s\n' \
+            "$attempt" "$udid" "$first_readiness_status" "$first_readiness_outcome" \
+            "$readiness_status" "$readiness_outcome" "$boot_continuation_seconds" >&2
+    fi
+    if [[ $readiness_status -eq 0 && $continued -eq 0 ]]; then
         readiness_outcome=success
     fi
     boot_attempt_boot_status=$boot_status
     boot_attempt_readiness_status=$readiness_status
     boot_attempt_readiness_outcome=$readiness_outcome
+    boot_attempt_continued=$continued
     boot_attempt_elapsed=$((SECONDS - started))
     printf 'BUSTER_IOS_BOOT_ATTEMPT attempt=%s udid=%s boot_status=%s readiness_status=%s readiness_outcome=%s elapsed_seconds=%s evidence_base=%s\n' \
         "$attempt" "$udid" "$boot_status" "$readiness_status" "$readiness_outcome" \
@@ -944,7 +1033,11 @@ printf 'BUSTER_IOS_BOOT_RECOVERY eligibility=%s owned=%s explicit_udid=%s github
     "${BUSTER_IOS_ARCH:-default}" >&2
 
 if run_boot_readiness_attempt 1; then
-    boot_disposition=first-attempt-success
+    if [[ $boot_attempt_continued -eq 1 ]]; then
+        boot_disposition=continued-original-pending-tests
+    else
+        boot_disposition=first-attempt-success
+    fi
 else
     first_readiness_status=$?
     if [[ $boot_recovery_eligible -eq 1 && $boot_attempt_readiness_outcome == timeout ]]; then
@@ -1156,6 +1249,12 @@ if [[ $boot_disposition == recovered-infrastructure-pending-tests ]]; then
     fi
 elif [[ $boot_disposition == first-attempt-success && $overall_status -ne 0 ]]; then
     boot_disposition=first-attempt-boot-success-but-test-failure
+elif [[ $boot_disposition == continued-original-pending-tests ]]; then
+    if [[ $overall_status -eq 0 ]]; then
+        boot_disposition=continued-original-boot-success
+    else
+        boot_disposition=continued-boot-but-test-failure
+    fi
 fi
 printf 'BUSTER_IOS_BOOT_DISPOSITION=%s\n' "$boot_disposition" >&2
 

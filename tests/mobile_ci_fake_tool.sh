@@ -245,6 +245,20 @@ case "$tool" in
                             sleep "${FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS:-60}"
                         fi
                         ;;
+                    timeout-first-device)
+                        if [[ ${1:-} == 00000000-0000-0000-0000-000000000001 ]]; then
+                            printf 'readiness diagnostic\n'
+                            sleep "${FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS:-60}"
+                        fi
+                        ;;
+                    continue-native-124)
+                        if [[ $bootstatus_count -eq 1 ]]; then
+                            printf 'first readiness diagnostic\n'
+                            sleep "${FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS:-60}"
+                        else
+                            exit 124
+                        fi
+                        ;;
                     always-timeout)
                         printf 'readiness diagnostic\n'
                         sleep "${FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS:-60}"
