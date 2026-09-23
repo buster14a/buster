@@ -743,6 +743,24 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_canonical_variadics(UnitTes
                           !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
     BUSTER_TEST(arguments, first.stats.defined_function_count == 1 && first.stats.function_count == 4);
     BUSTER_TEST(arguments, first.stats.instruction_count == 13);
+
+    // Reuse the same canonical instructions with the Win64 public list layout.
+    types[2].layout.size = 8;
+    options.target_triple = S8("x86_64-pc-windows-msvc");
+    options.data_layout = S8("e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    first = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    second = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    if (!llvm_bitcode_artifact_is_valid(first))
+    {
+        arguments->show(arguments, S8("canonical Win64 variadic: {S8} {S8} instruction={u32}\n"),
+                        llvm_bitcode_error_code_name(first.error.code), first.error.message, first.error.instruction.value);
+    }
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
+    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                          !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+    BUSTER_TEST(arguments, first.stats.defined_function_count == 1 && first.stats.function_count == 4);
+    BUSTER_TEST(arguments, first.stats.instruction_count == 13);
     return result;
 }
 

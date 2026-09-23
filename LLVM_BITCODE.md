@@ -91,7 +91,8 @@ the target's public `va_list` layout. `va_arg` accepts promoted 32- or 64-bit
 integers, `double`, and pointers. The list operations preserve separate cursor
 storage for copies; the writer declares `llvm.va_start`, `llvm.va_copy`, and
 `llvm.va_end` as needed and emits LLVM's typed `va_arg` instruction. Calls to
-variadic declarations with scalar anonymous arguments remain supported.
+variadic declarations with scalar anonymous arguments remain supported. Win64
+32-bit integer reads consume an eight-byte variadic slot before truncation.
 
 | Target of `-emit-llvm` | List operations | `va_arg` types |
 |---|---|---|

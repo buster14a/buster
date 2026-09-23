@@ -2555,7 +2555,17 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     case IR_OPCODE_VA_END:
         return llvm_bc_va_shape_supported(context, function, block, instruction) ? 0 : LLVM_BC_INVALID_ID;
     case IR_OPCODE_VA_ARG:
-        return llvm_bc_va_shape_supported(context, function, block, instruction) ? 1 : LLVM_BC_INVALID_ID;
+    {
+        u32 count = LLVM_BC_INVALID_ID;
+        if (llvm_bc_va_shape_supported(context, function, block, instruction))
+        {
+            IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+            // Generic Win64 VAARG advances by the LLVM result size; a C int
+            // still occupies a full eight-byte slot in the Win64 argument area.
+            count = context->abi_target.os == OPERATING_SYSTEM_WINDOWS && type->kind == IR_TYPE_INTEGER && type->bit_width == 32 ? 2 : 1;
+        }
+        return count;
+    }
     case IR_OPCODE_INLINE_ASSEMBLY:
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode inline assembly is not implemented"), function, block,
                      instruction, instruction->symbol);
@@ -3395,10 +3405,22 @@ BUSTER_GLOBAL_LOCAL void llvm_bc_emit_va_instruction(LlvmBcContext* context, Llv
     }
     if (instruction->opcode == IR_OPCODE_VA_ARG)
     {
-        u64 operands[3] = {context->pointer_type_id, (u32)(*current_value_id - source),
-                           context->ir_type_ids[instruction->canonical_type.value]};
+        IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+        bool win64_int = context->abi_target.os == OPERATING_SYSTEM_WINDOWS && type->kind == IR_TYPE_INTEGER && type->bit_width == 32;
+        u32 read_type = win64_int ? context->i64_type_id : context->ir_type_ids[instruction->canonical_type.value];
+        u64 operands[3] = {context->pointer_type_id, (u32)(*current_value_id - source), read_type};
         llvm_bc_record(&context->stream, LLVM_BC_FUNC_VAARG, operands, 3);
         *current_value_id += 1;
+        if (win64_int)
+        {
+            u64 cast[4];
+            u32 count = 0;
+            llvm_bc_push_value_and_type(cast, &count, *current_value_id, *current_value_id - 1, read_type);
+            cast[count++] = context->ir_type_ids[instruction->canonical_type.value];
+            cast[count++] = LLVM_BC_CAST_TRUNC;
+            llvm_bc_record(&context->stream, LLVM_BC_FUNC_CAST, cast, count);
+            *current_value_id += 1;
+        }
     }
     else
     {
