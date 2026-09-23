@@ -72,8 +72,9 @@ the referenced Git objects:
 ```sh
 bench_service gateway export JOB ATTEMPT FULL_SHA native-retirement-performance-v1 > /private/download.bqexport
 python3 tools/bench_service/retirement_export_replay.py \
-    /private/download.bqexport /private/new-result \
+    /private/download.bqexport \
     --test-publication /private/test-publication \
+    --publish-only \
     --bench-service /usr/local/libexec/buster-bench-service \
     --repository-root /private/pinned-checkout \
     --binding PATH_WITHIN_RESULT --job JOB --attempt ATTEMPT \
@@ -83,15 +84,45 @@ python3 tools/bench_service/retirement_export_replay.py \
 ```
 
 Check the gateway exit status and capture its stderr receipt before running the
-second command. The test publication directory must exist, be private and owned
-by the caller. The command exclusively creates
+publication command. The test publication directory must exist, be private and
+owned by the caller. The command exclusively creates
 `retirement-JOB-ATTEMPT.bqexport`, syncs it and its parent, reads back all
-bytes, and replays from that copy in a new private destination. An interrupted
+bytes, and reports only a published test copy, not a successful replay. An interrupted
 copy leaves `.pending` evidence; an existing pending or published name is a
 collision and is never overwritten. The original archive and result remain
 untouched. Real durable #510 publication is a separate operator action with
 its own approved destination and receipt. This local test copy is not a #512
 acceptance artifact.
+
+In a separate clean consumer workspace, obtain the published test object and
+the export and execution receipt digests through the authenticated control
+channel independently of that object. Use a reviewed service executable and an
+immutable checkout containing all referenced Git objects. Run the same script
+with the published object as input and a new private retrieval directory:
+
+```sh
+python3 tools/bench_service/retirement_export_replay.py \
+    /private/test-publication/retirement-JOB-ATTEMPT.bqexport /private/new-result \
+    --consume-published --retrieval /private/clean-retrieval \
+    --bench-service /usr/local/libexec/buster-bench-service \
+    --repository-root /private/pinned-checkout \
+    --binding PATH_WITHIN_RESULT --job JOB --attempt ATTEMPT \
+    --full-result-sha256 FULL_SHA \
+    --export-receipt-sha256 AUTHENTICATED_EXPORT_SHA \
+    --trusted-execution-receipt-sha256 AUTHENTICATED_EXECUTION_SHA
+```
+
+The consumer makes a new exclusive byte copy in a different private directory,
+syncs and reads it back, then runs native unpack and production binding replay
+against that retrieved copy. A duplicate retrieval or interrupted copy retains
+its evidence and cannot be reported as a replay. `--publish-only` never reports
+`verified-without-admission`; only the separate consumer can do so. For a test
+across machines, transfer the immutable publication through an approved test
+destination, then run the consumer there with independently captured receipt
+authority. This command does not implement or attest durable #510 publication.
+Both invocations report actual copied bytes and receipt-declared archive,
+indexed-file, entry, chunk and reserved spool sizes separately. These describe
+transported evidence; they do not count executed workloads or physical samples.
 
 The native unpacker checks every archived byte, canonical inventory and worker
 result binding. The production Python validator then reconstructs the entire

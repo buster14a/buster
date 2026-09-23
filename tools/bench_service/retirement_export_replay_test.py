@@ -3,6 +3,7 @@
 
 import hashlib
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -120,12 +121,71 @@ class ExportReplayTest(unittest.TestCase):
             repository_root=self.root, binding="record.json", job=self.job,
             attempt=self.attempt, full_result_sha256=self.full_digest,
             export_receipt_sha256=self.receipt_sha256,
-            trusted_execution_receipt_sha256="b" * 64)
+            trusted_execution_receipt_sha256="b" * 64,
+            consume_published=False, publish_only=False)
         with mock.patch.object(replay.subprocess, "run") as unpack:
             with self.assertRaisesRegex(ValueError, "no performance replay"):
                 replay.replay(arguments)
             unpack.assert_called_once()
         self.assertTrue((self.destination / "retirement-42-19.bqexport").exists())
+
+    def test_separate_consumer_retrieves_published_bytes_before_unpack(self):
+        clean = self.root / "clean-consumer"
+        clean.mkdir(mode=0o700)
+        arguments = mock.Mock(
+            download=self.archive, destination=self.root / "fresh",
+            test_publication=self.destination, retrieval=None,
+            bench_service=self.root / "trusted-utility", repository_root=self.root,
+            binding="record.json", job=self.job, attempt=self.attempt,
+            full_result_sha256=self.full_digest,
+            export_receipt_sha256=self.receipt_sha256,
+            trusted_execution_receipt_sha256="b" * 64,
+            consume_published=False, publish_only=True)
+        with mock.patch.object(replay.subprocess, "run") as unpack:
+            replay.replay(arguments)
+            unpack.assert_not_called()
+        published = self.destination / "retirement-42-19.bqexport"
+        arguments.download = published
+        arguments.test_publication = None
+        arguments.retrieval = clean
+        arguments.consume_published = True
+        arguments.publish_only = False
+        with mock.patch.object(replay.subprocess, "run",
+                               side_effect=subprocess.CalledProcessError(1, "unpack")) as unpack:
+            with self.assertRaises(subprocess.CalledProcessError):
+                replay.replay(arguments)
+            retrieved = clean / published.name
+            self.assertEqual(retrieved.read_bytes(), published.read_bytes())
+            self.assertEqual(unpack.call_args.args[0][2], str(retrieved))
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            replay.replay(arguments)
+
+    def test_retrieval_rejects_substitution_and_same_directory(self):
+        source, metadata, receipt = self.open_source()
+        try:
+            published = Path(replay.publish_test_copy(source, metadata, receipt,
+                                                      self.destination, self.job, self.attempt))
+        finally:
+            replay.os.close(source)
+        source, metadata, receipt = replay.archive_source(
+            published, self.receipt_sha256, self.job, self.attempt, self.full_digest)
+        try:
+            with self.assertRaisesRegex(ValueError, "separate private directory"):
+                replay.retrieve_test_copy(source, metadata, receipt, self.destination,
+                                          self.job, self.attempt, published)
+            clean = self.root / "clean"
+            clean.mkdir(mode=0o700)
+            published.chmod(0o600)
+            with published.open("r+b") as output:
+                output.seek(-1, 2)
+                output.write(b"X")
+            with self.assertRaisesRegex(ValueError, "differs"):
+                replay.retrieve_test_copy(source, metadata, receipt, clean,
+                                          self.job, self.attempt, published)
+            self.assertTrue((clean / "retirement-42-19.pending").exists())
+            self.assertFalse((clean / "retirement-42-19.bqexport").exists())
+        finally:
+            replay.os.close(source)
 
 
 if __name__ == "__main__":
