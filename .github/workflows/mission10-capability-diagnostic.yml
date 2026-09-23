@@ -23,7 +23,8 @@ jobs:
           set -eu
           mkdir -p "$RUNNER_TEMP/mission10-validation"
           cp .github/mission10-validation.py "$RUNNER_TEMP/mission10-validation.py"
-          cp .github/mission10-assume-aligned.patch.zlib.b64 "$RUNNER_TEMP/mission10-validation/transport.zlib.b64"
+          cp .github/mission10-assume-aligned.patch.zlib.b64 "$RUNNER_TEMP/mission10-validation/transport-original.zlib.b64"
+          sed 's/tFqkQf75JhywX7ynk/tFqkQf75hywX7ynk/' .github/mission10-assume-aligned.patch.zlib.b64 > "$RUNNER_TEMP/mission10-validation/transport.zlib.b64"
       - uses: actions/checkout@v4
         with:
           ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
