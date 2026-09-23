@@ -55,6 +55,7 @@ jobs:
           assert original_fixture.count(anchor) == 1 and original_fixture.count(tail) == 1
           candidate = original_fixture.replace(anchor, regression + anchor).replace(tail, 'atomic_builtins() && atomic_pointer_builtins() && atomic_or_preserves_overlapping_bits());')
           (evidence / 'regression.c').write_text(candidate)
+          require('regression-blob', ['git', 'hash-object', evidence / 'regression.c'])
           witness = '''int main(void)
           {
               _Atomic(unsigned int) value = 1;
@@ -65,13 +66,15 @@ jobs:
           '''
           (evidence / 'witness.c').write_text(witness)
           assert (1 | 1) == 1 and (1 ^ 1) == 0
-          (evidence / 'semantic-model.txt').write_text('OR: old=1, operand=1, new=1|1=1. XOR mutant: old=1, operand=1, new=1^1=0. Witness exit 2 identifies the wrong stored value, not wrong previous value.\n')
+          for old, operand in [(22, 1), (2, 8), ((1 << 64) | 0x57, 0x20)]:
+              assert (old & operand) == 0 and (old | operand) == (old ^ operand)
+          (evidence / 'semantic-model.txt').write_text('Existing OR inputs: 22|1, 2|8, ((1<<64)|0x57)|0x20. Each pair has disjoint bits, so OR and XOR agree over these tested domains. Discriminator: old=1, operand=1, OR new=1, XOR new=0. Witness exit 2 identifies wrong stored value, not wrong previous value.\n')
           for opt in ['0', '2']:
               out = evidence / ('clang-witness-O' + opt)
               require('clang-witness-compile-O' + opt, ['clang', '-std=c11', '-O' + opt, evidence / 'witness.c', '-o', out])
               require('clang-witness-run-O' + opt, [out])
           require('clang-witness-ir', ['clang', '-std=c11', '-O0', '-S', '-emit-llvm', evidence / 'witness.c', '-o', evidence / 'clang-witness.ll'])
-          require('clang-regression-compile', ['clang', '-std=c11', '-O0', evidence / 'regression.c', '-o', evidence / 'clang-regression'])
+          require('clang-regression-compile', ['clang', '-std=c11', '-O0', evidence / 'regression.c', '-latomic', '-o', evidence / 'clang-regression'])
           require('clang-regression-run', [evidence / 'clang-regression'])
           variants = [('original', None, None), ('or-as-xor', 'or', 'XOR'), ('xor-as-or', 'xor', 'OR')]
           for label, spelling, replacement in variants:
@@ -92,7 +95,7 @@ jobs:
               require(label + '-build', [driver, 'build', '--config', 'Release', '-t', 'ide'], directory)
               compiler = directory / 'build/Release/ide'
               print('COMPILER_SHA256', label, hashlib.sha256(compiler.read_bytes()).hexdigest(), flush=True)
-              fixtures = [('atomic', directory / 'tests/basic_c_atomic.c'), ('advertised', directory / 'tests/basic_c_has_builtin.c'), ('witness', evidence / 'witness.c'), ('regression', evidence / 'regression.c')]
+              fixtures = [('atomic', directory / 'tests/basic_c_atomic.c'), ('advertised', directory / 'tests/basic_c_has_builtin.c'), ('wide', directory / 'tests/basic_c_int128.c'), ('witness', evidence / 'witness.c'), ('regression', evidence / 'regression.c')]
               for name, fixture in fixtures:
                   output = evidence / (label + '-' + name)
                   status = run(label + '-' + name + '-compile', [compiler, 'cc', '-O0', fixture, '-o', output], directory)
@@ -100,9 +103,9 @@ jobs:
                       run(label + '-' + name + '-run', [output], directory)
               if label == 'original':
                   expected = [x for x in results if x['label'].startswith('original-') and (x['label'].endswith('-compile') or x['label'].endswith('-run'))]
-                  if len(expected) != 8 or any(x['exit'] for x in expected):
+                  if len(expected) != 10 or any(x['exit'] for x in expected):
                       raise SystemExit('Original focused prerequisite failed; do not interpret mutants')
-          expected_exits = {'or-as-xor-atomic-run': 0, 'or-as-xor-advertised-run': 0, 'or-as-xor-witness-run': 2, 'or-as-xor-regression-run': 1, 'xor-as-or-atomic-run': 1, 'xor-as-or-advertised-run': 8, 'xor-as-or-witness-run': 0, 'xor-as-or-regression-run': 1}
+          expected_exits = {'or-as-xor-atomic-run': 0, 'or-as-xor-advertised-run': 0, 'or-as-xor-wide-run': 0, 'or-as-xor-witness-run': 2, 'or-as-xor-regression-run': 1, 'xor-as-or-atomic-run': 1, 'xor-as-or-advertised-run': 8, 'xor-as-or-wide-run': 11, 'xor-as-or-witness-run': 0, 'xor-as-or-regression-run': 1}
           actual = {x['label']: x['exit'] for x in results}
           discrepancies = {key: {'expected': value, 'actual': actual.get(key)} for key, value in expected_exits.items() if actual.get(key) != value}
           (evidence / 'discrepancies.json').write_text(json.dumps(discrepancies, indent=2))
