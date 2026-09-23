@@ -5,6 +5,7 @@
 
 BUSTER_GLOBAL_LOCAL void bq_test_phase_run(unsigned defect, char const* driver);
 BUSTER_GLOBAL_LOCAL void bq_test_phase_prelaunch_deadline(void);
+BUSTER_GLOBAL_LOCAL void bq_test_phase_finalization_deadline(void);
 
 BUSTER_GLOBAL_LOCAL void bq_test_phase_packets(void)
 {
@@ -58,6 +59,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_packets(void)
     close(pair[0]);
     bq_test_phase_run(9, NULL);
     bq_test_phase_prelaunch_deadline();
+    bq_test_phase_finalization_deadline();
 }
 
 BUSTER_GLOBAL_LOCAL u32 bq_test_phase_deadline_clock_calls;
@@ -94,6 +96,46 @@ BUSTER_GLOBAL_LOCAL void bq_test_phase_prelaunch_deadline(void)
         BQ_CHECK(bq_submit(queue, &second, &next) == BQ_OK &&
                  bq_reserve(queue, &next, &token) == BQ_OK && next != id);
         bq_test_worker_end(&fixture);
+    }
+}
+
+/* Validation can cross the same fixed deadline even after the child has
+ * exited cleanly. A valid preexisting bundle cannot turn that into success. */
+BUSTER_GLOBAL_LOCAL void bq_test_phase_finalization_deadline(void)
+{
+    for (unsigned delayed = 0; delayed < 2; delayed += 1)
+    {
+        BqWorkerFixture fixture;
+        if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+        {
+            BqQueue* queue = &fixture.material.queue.queue;
+            BqRequest request = bq_test_real_request(220 + delayed);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(queue, &request, &id) == BQ_OK &&
+                     bq_materialize(queue, fixture.config.installed_root,
+                                    fixture.config.workspace_root, &id, &token) == BQ_OK);
+            BqJob* job = bq_job(&queue->state, id);
+            fixture.config.production_path = true;
+            BqWorkerFinalization finalization = {.config = &fixture.config, .result_directory = -1,
+                                                 .execution_deadline = 1000};
+            bool artifact = job && bq_test_worker_make_success_result(&fixture, job, &finalization);
+            fixture.fake.elapsed = delayed ? 0 : 1000;
+            bq_test_phase_deadline_clock_calls = 0;
+            fixture.backend.clock = delayed ? bq_test_phase_expired_clock : fixture.backend.clock;
+            BQ_CHECK(artifact && bq_worker_finish(queue, &fixture.config, job,
+                                                   BQ_SUCCEEDED, BQ_NOT_FOUND, &finalization) == BQ_OK);
+            BQ_CHECK(bq_worker_finalization_restore(&finalization) == BQ_OK);
+            job = bq_job(&queue->state, id);
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == BQ_FAILED &&
+                     bq_failure_evidence(queue, job) == BQ_WORKER_TIMEOUT &&
+                     !queue->state.active_id && !queue->needs_reconciliation);
+            BqRequest next_request = bq_test_real_request(222 + delayed);
+            u64 next = 0, next_token = 0;
+            BQ_CHECK(bq_submit(queue, &next_request, &next) == BQ_OK &&
+                     bq_reserve(queue, &next, &next_token) == BQ_OK && next != id);
+            if (finalization.result_directory >= 0) close(finalization.result_directory);
+            bq_test_worker_end(&fixture);
+        }
     }
 }
 
