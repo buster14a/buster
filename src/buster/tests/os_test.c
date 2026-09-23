@@ -1182,17 +1182,47 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     }
 
     // Releasing the selected context must clear TLS before its arenas go
-    // away. No scratch-backed operation is valid while TLS is empty, so
-    // restore the process's main context immediately after observing it.
+    // away. Direct scratch users still require a selected context; POSIX file
+    // path operations retain their prior teardown behavior with private arenas.
     ThreadContext* main_context = thread_context_selected();
     BUSTER_TEST(arguments, main_context != 0);
+    String8 contextless_path = buster_test_temporary_path(arguments->arena, S8("contextless-file"), S8(".bin"));
+    OsFileOpenResult contextless_setup = os_file_open_checked(contextless_path, (OpenFlags){.write = 1, .create = 1, .truncate = 1},
+                                                               (OpenPermissions){.read = 1, .write = 1});
+    bool contextless_setup_ok = contextless_setup.file != 0;
+    if (contextless_setup.file)
+    {
+        OsFileTransferResult written = os_file_write_checked(contextless_setup.file, BUSTER_SLICE_TO_BYTE_SLICE(S8("contextless")));
+        OsError closed = os_file_close_checked(contextless_setup.file);
+        contextless_setup_ok &= !written.error.v && written.transferred == S8("contextless").length && !closed.v;
+    }
+    BUSTER_TEST(arguments, contextless_setup_ok);
     ThreadContext* temporary_context = thread_context_allocate();
     thread_context_select(temporary_context);
     thread_context_release(temporary_context);
     bool released_context_was_cleared = thread_context_selected() == 0;
+#if !BUSTER_WINDOWS
+    bool contextless_open_ok = false;
+    bool contextless_stats_ok = false;
+    bool contextless_delete_ok = false;
+    if (released_context_was_cleared && contextless_setup_ok)
+    {
+        OsFileOpenResult opened = os_file_open_checked(contextless_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        contextless_open_ok = opened.file != 0 && !opened.error.v;
+        if (opened.file) contextless_open_ok &= !os_file_close_checked(opened.file).v;
+        FileStats stats = os_file_replacement_target_stats(contextless_path);
+        contextless_stats_ok = stats.valid && stats.kind == OS_FILE_KIND_REGULAR;
+        contextless_delete_ok = !os_file_delete_checked(contextless_path).v;
+    }
+#endif
     thread_context_select(main_context);
     BUSTER_TEST(arguments, released_context_was_cleared);
     BUSTER_TEST(arguments, thread_context_selected() == main_context);
+#if !BUSTER_WINDOWS
+    BUSTER_TEST(arguments, contextless_open_ok);
+    BUSTER_TEST(arguments, contextless_stats_ok);
+    BUSTER_TEST(arguments, contextless_delete_ok);
+#endif
 
     // Generic OS-thread teardown must unmap parked arenas before its TLS pool
     // root disappears. Run twice so this remains a reclamation regression even

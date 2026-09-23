@@ -1845,6 +1845,67 @@ BUSTER_GLOBAL_LOCAL OsError os_file_invalid_error(void)
 #endif
 }
 
+typedef struct OsTemporaryArenaScope OsTemporaryArenaScope;
+struct OsTemporaryArenaScope
+{
+    TemporalArena scratch;
+    Arena* arena;
+    bool owns_arena;
+};
+
+// POSIX path calls historically did not need a thread scratch arena. Keep
+// them usable during teardown, when the selected ThreadContext has already
+// been released, by using a short lived private arena for their terminated
+// path copies. Windows callers already required scratch storage before these
+// conversions, so preserve that contract there.
+BUSTER_GLOBAL_LOCAL OsTemporaryArenaScope os_temporary_arena_begin(Arena** conflicts, u64 conflict_count)
+{
+    OsTemporaryArenaScope result = {0};
+    if (thread_context_selected())
+    {
+        result.scratch = scratch_begin(conflicts, conflict_count);
+        result.arena = result.scratch.arena;
+    }
+#if defined(__linux__) || defined(__APPLE__)
+    else
+    {
+        result.arena = arena_create((ArenaCreation){.flags = {.no_pool = true}});
+        result.owns_arena = true;
+    }
+#else
+    else
+    {
+        result.scratch = scratch_begin(conflicts, conflict_count);
+        result.arena = result.scratch.arena;
+    }
+#endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_temporary_arena_end(OsTemporaryArenaScope scope)
+{
+    if (scope.owns_arena)
+    {
+        if (scope.arena)
+        {
+            arena_destroy(scope.arena, 1);
+        }
+    }
+    else
+    {
+        scratch_end(scope.scratch);
+    }
+}
+
+BUSTER_GLOBAL_LOCAL OsError os_temporary_arena_error(void)
+{
+#if defined(_WIN32)
+    return (OsError){ERROR_NOT_ENOUGH_MEMORY};
+#else
+    return (OsError){ENOMEM};
+#endif
+}
+
 BUSTER_GLOBAL_LOCAL OsError os_file_zero_write_error(void)
 {
 #if defined(_WIN32)
@@ -1918,14 +1979,18 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
 #endif
     if (path.pointer && !error.v)
     {
-        TemporalArena scratch = scratch_begin(0, 0);
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            error = os_temporary_arena_error();
+        }
 #if defined(__linux__) || defined(__APPLE__)
         String8Z path_z = {0};
-        if (!string8z_copy_arena(scratch.arena, path, &path_z))
+        if (!error.v && !string8z_copy_arena(scratch.arena, path, &path_z))
         {
             error = os_file_invalid_error();
         }
-        else
+        else if (!error.v)
         {
             int o = 0;
             if (flags.read & flags.write)
@@ -2025,11 +2090,11 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
         }
 
         String16Z path_w = {0};
-        if (!string16z_from_string8_arena(scratch.arena, path, &path_w))
+        if (!error.v && !string16z_from_string8_arena(scratch.arena, path, &path_w))
         {
             error = os_file_invalid_error();
         }
-        else
+        else if (!error.v)
         {
             HANDLE fd = CreateFileW(path_w.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
             if (fd != INVALID_HANDLE_VALUE)
@@ -2048,7 +2113,7 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             }
         }
 #endif
-        scratch_end(scratch);
+        os_temporary_arena_end(scratch);
     }
     if (!result && !error.v) error = os_file_invalid_error();
 #if BUSTER_INCLUDE_TESTS
@@ -2332,24 +2397,28 @@ OsError os_file_delete_checked(String8 path)
 #endif
     if (!result.v)
     {
-        TemporalArena scratch = scratch_begin(0, 0);
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            result = os_temporary_arena_error();
+        }
 #if defined(__linux__) || defined(__APPLE__)
         String8Z path_z = {0};
-        if (!string8z_copy_arena(scratch.arena, path, &path_z))
+        if (!result.v && !string8z_copy_arena(scratch.arena, path, &path_z))
         {
             result = os_file_invalid_error();
         }
-        else if (unlink((const char*)path_z.pointer) != 0 && errno != ENOENT)
+        else if (!result.v && unlink((const char*)path_z.pointer) != 0 && errno != ENOENT)
         {
             result = os_get_last_error();
         }
 #elif defined(_WIN32)
         String16Z path_w = {0};
-        if (!string16z_from_string8_arena(scratch.arena, path, &path_w))
+        if (!result.v && !string16z_from_string8_arena(scratch.arena, path, &path_w))
         {
             result = os_file_invalid_error();
         }
-        else if (!DeleteFileW(path_w.pointer))
+        else if (!result.v && !DeleteFileW(path_w.pointer))
         {
             OsError error = os_get_last_error();
             if (error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
@@ -2361,7 +2430,7 @@ OsError os_file_delete_checked(String8 path)
         BUSTER_UNUSED(path);
         result = os_file_invalid_error();
 #endif
-        scratch_end(scratch);
+        os_temporary_arena_end(scratch);
     }
     return result;
 }
@@ -2379,14 +2448,18 @@ FileStats os_file_replacement_target_stats(String8 path)
     }
     else if (!result.error.v)
     {
-        TemporalArena scratch = scratch_begin(0, 0);
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            result.error = os_temporary_arena_error();
+        }
 #if defined(__linux__) || defined(__APPLE__)
         String8Z path_z = {0};
-        if (!string8z_copy_arena(scratch.arena, path, &path_z))
+        if (!result.error.v && !string8z_copy_arena(scratch.arena, path, &path_z))
         {
             result.error = os_file_invalid_error();
         }
-        else
+        else if (!result.error.v)
         {
             // O_NONBLOCK keeps a FIFO without a reader from blocking, and O_NOCTTY
             // keeps a terminal from becoming the controlling terminal.
@@ -2434,11 +2507,11 @@ FileStats os_file_replacement_target_stats(String8 path)
         }
 #elif defined(_WIN32)
         String16Z path_w = {0};
-        if (!string16z_from_string8_arena(scratch.arena, path, &path_w))
+        if (!result.error.v && !string16z_from_string8_arena(scratch.arena, path, &path_w))
         {
             result.error = os_file_invalid_error();
         }
-        else
+        else if (!result.error.v)
         {
             // Attribute-only access never conflicts with other handles' share
             // modes; the reparse flag inspects a link rather than its target.
@@ -2467,7 +2540,7 @@ FileStats os_file_replacement_target_stats(String8 path)
 #else
         result.error = os_file_invalid_error();
 #endif
-        scratch_end(scratch);
+        os_temporary_arena_end(scratch);
     }
     return result;
 }
@@ -2480,10 +2553,10 @@ BUSTER_GLOBAL_LOCAL AtomicU64 os_file_staging_counter;
 OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions)
 {
     OsFileStagingResult result = {0};
-    TemporalArena validation_scratch = scratch_begin(&arena, 1);
+    u64 validation_position = arena->position;
     String8Z validated_destination = {0};
-    bool destination_valid = string8z_copy_arena(validation_scratch.arena, destination, &validated_destination) && validated_destination.pointer;
-    scratch_end(validation_scratch);
+    bool destination_valid = string8z_copy_arena(arena, destination, &validated_destination) && validated_destination.pointer;
+    arena_set_position(arena, validation_position);
     // The staging name replaces only the final component, keeping the rename
     // within one directory without lengthening the destination's name.
     u64 directory_length = destination_valid ? destination.length : 0;
@@ -2610,18 +2683,22 @@ OsError os_file_replace(String8 path, String8 destination)
     if (!result.v)
     {
 #if defined(__linux__) || defined(__APPLE__)
-        TemporalArena scratch = scratch_begin(0, 0);
+        OsTemporaryArenaScope scratch = os_temporary_arena_begin(0, 0);
+        if (!scratch.arena)
+        {
+            result = os_temporary_arena_error();
+        }
         String8Z path_z = {0};
         String8Z destination_z = {0};
-        if (!string8z_copy_arena(scratch.arena, path, &path_z) || !string8z_copy_arena(scratch.arena, destination, &destination_z))
+        if (!result.v && (!string8z_copy_arena(scratch.arena, path, &path_z) || !string8z_copy_arena(scratch.arena, destination, &destination_z)))
         {
             result = os_file_invalid_error();
         }
-        else if (rename((const char*)path_z.pointer, (const char*)destination_z.pointer) != 0)
+        else if (!result.v && rename((const char*)path_z.pointer, (const char*)destination_z.pointer) != 0)
         {
             result = os_get_last_error();
         }
-        scratch_end(scratch);
+        os_temporary_arena_end(scratch);
 #elif defined(_WIN32)
         TemporalArena scratch = scratch_begin(0, 0);
         String16Z path_w = {0};
@@ -5611,21 +5688,24 @@ bool os_unreserve(void* address, u64 size)
 OsModuleHandle* os_dynamic_library_load(String8 library)
 {
     OsModuleHandle* result = 0;
-    TemporalArena temp = scratch_begin(0, 0);
+    OsTemporaryArenaScope temp = os_temporary_arena_begin(0, 0);
+    if (temp.arena)
+    {
 #if defined(_WIN32)
-    String16Z library_w = {0};
-    if (string16z_from_string8_arena(temp.arena, library, &library_w))
-    {
-        result = (OsModuleHandle*)LoadLibraryW(library_w.pointer);
-    }
+        String16Z library_w = {0};
+        if (string16z_from_string8_arena(temp.arena, library, &library_w))
+        {
+            result = (OsModuleHandle*)LoadLibraryW(library_w.pointer);
+        }
 #else
-    String8Z library_z = {0};
-    if (string8z_copy_arena(temp.arena, library, &library_z))
-    {
-        result = (OsModuleHandle*)dlopen(library_z.pointer, RTLD_NOW | RTLD_LOCAL);
-    }
+        String8Z library_z = {0};
+        if (string8z_copy_arena(temp.arena, library, &library_z))
+        {
+            result = (OsModuleHandle*)dlopen(library_z.pointer, RTLD_NOW | RTLD_LOCAL);
+        }
 #endif
-    scratch_end(temp);
+    }
+    os_temporary_arena_end(temp);
     return result;
 }
 
@@ -6721,15 +6801,14 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
 #endif
             };
 
-            TemporalArena candidate_scratch = scratch_begin(&temp.arena, 1);
-            String8 full_path = string_join_arena(candidate_scratch.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+            String8 full_path = string_join_arena(temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
             String8Z full_path_z = {0};
-            bool path_valid = string8z_copy_arena(candidate_scratch.arena, full_path, &full_path_z);
+            bool path_valid = string8z_copy_arena(temp.arena, full_path, &full_path_z);
 
             bool found;
 #if defined(_WIN32)
             String16Z full_path_w = {0};
-            bool wide_path_valid = path_valid && string16z_from_string8_arena(candidate_scratch.arena, full_path, &full_path_w);
+            bool wide_path_valid = path_valid && string16z_from_string8_arena(temp.arena, full_path, &full_path_w);
             DWORD file_attributes = wide_path_valid ? GetFileAttributesW(full_path_w.pointer) : INVALID_FILE_ATTRIBUTES;
             found = wide_path_valid && file_attributes != INVALID_FILE_ATTRIBUTES && (file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 #else
@@ -6741,10 +6820,8 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
             if (found)
             {
                 result = string_duplicate_arena(arena, (String8){.pointer = full_path_z.pointer, .length = full_path_z.length}, true);
-                scratch_end(candidate_scratch);
                 break;
             }
-            scratch_end(candidate_scratch);
 
             if (is_end)
             {
