@@ -1139,18 +1139,6 @@ BUSTER_GLOBAL_LOCAL u32 codegen_inline_assembly_type_class(IrType* type)
     return IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID;
 }
 
-// What GNU's 'x' may carry, and the mirror of c_ir_inline_assembly_vector_operand
-// in the frontend: a float of the width the scalar SSE instructions operate on.
-// The x87 `long double` is a different register file and is not one of these.
-
-// The atomic and inline-assembly rows this asks about are rare — six of the
-// 3,814 functions in a self-compile hold one — so the opcode summary the
-// builder already accumulated answers for every other function without
-// reading a single row.
-#define CODEGEN_X64_SHAPE_OPCODES                                                                                                      \
-    (IR_OPCODE_BIT(IR_OPCODE_ATOMIC_LOAD) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_STORE) | IR_OPCODE_BIT(IR_OPCODE_ATOMIC_READ_MODIFY_WRITE) | \
-     IR_OPCODE_BIT(IR_OPCODE_ATOMIC_COMPARE_EXCHANGE) | IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY))
-
 BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_gpr(X64Register register_index, u16 width)
 {
     return (BusterX86MetadataPhysicalOperand){
@@ -2251,16 +2239,6 @@ void codegen_test_emit_scalar(CodegenBuffer* buffer, u32 byte_count, u64 value)
     }
 }
 #endif
-
-typedef struct CodegenRegisterAllocation CodegenRegisterAllocation;
-struct CodegenRegisterAllocation
-{
-    u8* registers;
-    u32 allocated_count;
-    u32 spilled_count;
-};
-
-#define CODEGEN_REGISTER_UNALLOCATED UINT8_MAX
 
 bool codegen_x64_emit_windows_stack_allocate(CodegenBuffer* buffer, u32 size, CodegenFunctionDescriptor* descriptor, u32 action_capacity,
                                                           u32 function_offset)
@@ -3801,34 +3779,6 @@ void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_numb
     codegen_emit_u32(buffer, 0x8b000000 | (offset_register << 16) | (base_register << 5) | register_number);
 }
 
-// EVEX encoding for the target-fixed 512-bit vocabulary. Everything here is
-// L'L=10 (512-bit), never broadcasts, and never reaches the extended register
-// halves, so the three prefix payload bytes reduce to a handful of fields.
-typedef struct X64Evex X64Evex;
-struct X64Evex
-{
-    u8 map;     // 1 = 0F, 2 = 0F38, 3 = 0F3A
-    u8 prefix;  // 0 = none, 1 = 66, 2 = F3, 3 = F2
-    u8 opcode;
-    u8 reg;     // reg field: a zmm, a k register, or an opcode extension
-    u8 vvvv;    // the encoded non-destructive source, 0 when the form has none
-    u8 mask;    // k1..k7, or 0 for an unmasked operation
-    bool zeroing;
-    bool wide;  // EVEX.W — every operation in this vocabulary is W0 today
-};
-
-// The descriptor is intentionally kept at the call sites so the vocabulary
-// remains easy to audit.  It now only chooses a checked metadata shape; the
-// metadata encoder owns prefix, ModRM/SIB, displacement, and register bits.
-
-// KMOVQ moves a whole 64-lane mask between a k register and a frame slot in
-// one instruction, so a mask never needs a general-purpose register on the way
-// through memory. VEX.L0.W1 0F 90 loads, 91 stores.
-// Moves one ABI part between an SSE/AVX register and a frame slot. This is the
-// only thing that decides which part sizes the canonical ABI can carry in a
-// vector register — every caller reports CODEGEN_ERROR_UNSUPPORTED_ABI on a
-// false return rather than repeating the size test, so the two cannot drift.
-
 // Raw x87 memory forms keep the backend independent of the host C ABI.  A
 // disp32 addressing form is used even for zero offsets: it makes RBP/R13 and
 // RSP/R12 unambiguous and keeps every frame access the same fixed shape.
@@ -3914,88 +3864,6 @@ bool codegen_canonical_x64_store_f80_constant(CodegenBuffer* buffer, s32 displac
     codegen_canonical_x64_zero_f80_padding(buffer, X64_REGISTER_RBP, displacement);
     return buffer->error == CODEGEN_ERROR_NONE;
 }
-
-// x87 arithmetic is emitted as memory-to-memory transactions: each sequence
-// below pushes its operands from frame slots, operates, stores the result
-// back, and leaves the x87 stack exactly as empty as it found it.  Nothing is
-// ever live in an ST register across a machine instruction boundary, so the
-// register allocators need no x87 class and no interference model, and the
-// eight-deep stack cannot overflow.  `x87_depth` is the running proof of that
-// invariant rather than a scheduling resource; every helper here balances it.
-//
-// The scratch area is the one piece of frame the value slots cannot supply:
-// FILD/FISTP need a plain integer image, the u64 correction needs an f80
-// constant, and the truncating conversion needs somewhere to park the two
-// control words.  Its layout, all relative to the area's own displacement:
-//   +0  sixteen-byte f80 temporary (the 2^63 or 2^64 correction constant)
-//   +16 eight-byte integer temporary for FILD/FISTP
-//   +24 saved x87 control word
-//   +26 truncating x87 control word
-#define CODEGEN_X64_X87_SCRATCH_SIZE 32
-#define CODEGEN_X64_X87_SCRATCH_FLOAT_OFFSET 0
-#define CODEGEN_X64_X87_SCRATCH_INTEGER_OFFSET 16
-#define CODEGEN_X64_X87_SCRATCH_CONTROL_OFFSET 24
-#define CODEGEN_X64_X87_SCRATCH_TRUNCATE_OFFSET 26
-// 2^64 as an 80-bit value: an explicit leading significand bit and a biased
-// exponent of 16383 + 64.  Adding it turns FILD's signed reading of a
-// negative eightbyte back into the unsigned value, exactly, because f80
-// carries all 64 significand bits.
-#define CODEGEN_X64_F80_TWO_POWER_64_SIGNIFICAND UINT64_C(0x8000000000000000)
-#define CODEGEN_X64_F80_TWO_POWER_64_SIGN_EXPONENT UINT16_C(0x403f)
-// 2^63, the bias the unsigned eightbyte conversion subtracts and puts back as
-// the result's sign bit.  The significand is the same explicit leading bit;
-// only the biased exponent differs by one.
-#define CODEGEN_X64_F80_TWO_POWER_63_SIGNIFICAND UINT64_C(0x8000000000000000)
-#define CODEGEN_X64_F80_TWO_POWER_63_SIGN_EXPONENT UINT16_C(0x403e)
-// Rounding-control field set to "round toward zero", which is what a C
-// floating-point-to-integer conversion means.
-#define CODEGEN_X64_X87_CONTROL_TRUNCATE UINT16_C(0x0c00)
-
-// FLD/FILD from memory; `width` is 32/64/80 for FLD and 16/32/64 for FILD.
-
-// FSTP/FISTP to memory, popping the value it wrote.
-
-// FSTP ST(0): drop the top of the stack without writing it anywhere.
-
-// One two-register x87 row.  The Intel-derived tables spell the popping
-// arithmetic as ST(i), ST(0) -- the destination is the deeper slot -- and the
-// integer-flag compares as ST(0), ST(i), so both indices are explicit here
-// rather than assumed.
-
-// result = left <operation> right.  The left operand is pushed first, so it
-// ends up in ST(1) and the popping forms compute ST(1) op ST(0) in the source
-// order the C expression wrote.
-
-// Leave EFLAGS holding the comparison of `left` against `right` with the
-// same ZF/PF/CF meaning UCOMISS/UCOMISD produce, so the SETcc sequence the
-// narrow float path already emits applies unchanged.  FUCOMIP is the quiet
-// form: a QNaN operand sets the unordered result without raising invalid,
-// which is what the C comparison operators want.
-
-// f32/f64 to f80 and back.  FLD and FSTP convert between the memory format
-// and the register format on their own, so the widening direction is exact
-// and the narrowing direction rounds once, per the control word this backend
-// deliberately leaves at its default extended precision.
-
-// RAX already holds the integer, sign- or zero-extended to eight bytes by the
-// caller.  FILD reads it as signed, so an unsigned eightbyte whose top bit is
-// set is corrected by one exact addition of 2^64.
-
-// x87 stores integers under the rounding-control field rather than through a
-// dedicated truncating opcode, so a C conversion switches the control word to
-// round-toward-zero for the store and restores it afterwards.  The SSE3
-// FISTTP form is deliberately not used: it is not in the x86-64 baseline this
-// backend targets.  PC (precision) is left alone -- extended precision is what
-// long double wants.
-
-// Pop the x87 top into the scratch eightbyte and read it back into RAX.
-
-// RAX receives the truncated eightbyte.
-
-// RAX receives the truncated unsigned eightbyte.  FISTP only writes a signed
-// image, so a value at or above 2^63 is biased down by that constant, stored,
-// and the sign bit put back -- the same shape the SSE path uses, but exact,
-// because f80 carries the bias subtraction without rounding.
 
 BUSTER_GLOBAL_LOCAL String8 codegen_global_assembly_trim(String8 value)
 {
