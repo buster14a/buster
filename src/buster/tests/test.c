@@ -999,8 +999,12 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_create(void)
     bool probe_contained = string_starts_with_sequence(probe_path, buster_test_temporary_root) && probe_path.length > buster_test_temporary_root.length &&
                            probe_path.pointer[buster_test_temporary_root.length] == '/';
     BUSTER_CHECK(probe_contained);
-    OsFileDescriptor* probe = os_file_open(probe_path, (OpenFlags){.read = 1, .write = 1, .create = 1},
-                                           (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* probe = os_file_open(
+        probe_path,
+        (OpenFlags){ .create = 1 },
+        (OsFileAccess){ .read = 1, .write = 1 },
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
     bool result = probe != 0;
     if (probe)
     {

@@ -37,24 +37,53 @@ struct MapFlags
     u64 reserved : 58;
 };
 
+// Creation and truncation are operations; handle access, file mode, and
+// Windows sharing are separate arguments to os_file_open.
 typedef struct OpenFlags OpenFlags;
 struct OpenFlags
 {
     u64 truncate : 1;
-    u64 execute : 1;
-    u64 write : 1;
-    u64 read : 1;
     u64 create : 1;
     u64 directory : 1;
-    u64 reserved : 58;
+    u64 reserved : 61;
 };
 
-typedef struct OpenPermissions OpenPermissions;
-struct OpenPermissions
+// Access requested by this handle.
+typedef struct OsFileAccess OsFileAccess;
+struct OsFileAccess
 {
     u64 read : 1;
     u64 write : 1;
-    u64 execute : 1;
+    u64 reserved : 62;
+};
+
+// POSIX creation mode, applied before umask. DEFAULT is 0644, PRIVATE is 0600,
+// EXECUTABLE is 0755, and EXPLICIT_POSIX uses posix_permissions (0777 maximum).
+// Windows inherits the containing directory's ACL for DEFAULT and EXECUTABLE;
+// PRIVATE and EXPLICIT_POSIX fail with ERROR_NOT_SUPPORTED when creating a file.
+typedef enum OsFileCreateModeKind
+{
+    OS_FILE_CREATE_MODE_DEFAULT = 0,
+    OS_FILE_CREATE_MODE_PRIVATE,
+    OS_FILE_CREATE_MODE_EXECUTABLE,
+    OS_FILE_CREATE_MODE_EXPLICIT_POSIX,
+} OsFileCreateModeKind;
+
+typedef struct OsFileCreateMode OsFileCreateMode;
+struct OsFileCreateMode
+{
+    OsFileCreateModeKind kind;
+    u32 posix_permissions;
+};
+
+// Windows sharing policy. POSIX has no open-time sharing mode and ignores these
+// bits; each supported process may open the same file subject to filesystem rules.
+typedef struct OsFileShareFlags OsFileShareFlags;
+struct OsFileShareFlags
+{
+    u64 read : 1;
+    u64 write : 1;
+    u64 delete : 1;
     u64 reserved : 61;
 };
 
@@ -365,9 +394,10 @@ struct OsFileStagingResult
 #define OS_FILE_STAGING_PREFIX S8(".buster-staging-")
 #define OS_FILE_STAGING_SUFFIX S8(".tmp")
 // Exclusively creates a new, empty, write-only file in `destination`'s
-// directory. Only name collisions are retried. Permissions map as for
-// os_file_open.
-BUSTER_F_DECL OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions);
+// directory. Only name collisions are retried. Creation mode and Windows
+// sharing map as for os_file_open.
+BUSTER_F_DECL OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OsFileCreateMode create_mode,
+                                                         OsFileShareFlags share_flags);
 // Renames `path` over `destination` on one filesystem: rename(2), or
 // FileRenameInfoEx with replace/POSIX semantics, without a copy fallback. An existing
 // destination entry, including a link, is replaced, never followed or deleted
@@ -378,8 +408,10 @@ BUSTER_F_DECL OsError os_file_replace(String8 path, String8 destination);
 // fchmod restricted to the 0777 permission bits.
 BUSTER_F_DECL OsError os_file_set_permissions(OsFileDescriptor* file_descriptor, u32 permissions);
 #endif
-BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OpenPermissions permissions);
-BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermissions permissions);
+BUSTER_F_DECL OsFileDescriptor* os_file_open(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
+                                              OsFileShareFlags share_flags);
+BUSTER_F_DECL OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OsFileAccess access, OsFileCreateMode create_mode,
+                                                    OsFileShareFlags share_flags);
 BUSTER_F_DECL OsFileTransferResult os_file_write_checked(OsFileDescriptor* file_descriptor, ByteSlice buffer);
 // Flush is explicit: ordinary artifact writes promise completion, not crash
 // durability. Close always consumes the descriptor, including on failure.

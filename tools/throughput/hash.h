@@ -7,7 +7,12 @@
 
 static int tp_hash_file(char const* path, char digest[65], uint64_t* bytes, uint64_t* lines)
 {
-    OsFileDescriptor* file = os_file_open(string_from_pointer(path), (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* file = os_file_open(
+        string_from_pointer(path),
+        (OpenFlags){0},
+        (OsFileAccess){ .read = 1 },
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){ .read = 1 });
     int ok = file != NULL;
     *bytes = 0;
     *lines = 0;
