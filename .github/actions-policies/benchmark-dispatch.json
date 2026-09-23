@@ -1,0 +1,33 @@
+{
+  "name": "9700X benchmark dispatch administrators",
+  "enforcement": "active",
+  "conditions": {
+    "workflow_path": {
+      "include": [
+        ".github/workflows/9700x-service-dispatch.yml"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "restrict_actions_actors",
+      "parameters": {
+        "allowed_actors": [
+          {
+            "id": 5,
+            "type": "RepositoryRole"
+          }
+        ]
+      }
+    },
+    {
+      "type": "restrict_action_events",
+      "parameters": {
+        "allowed_events": [
+          "workflow_dispatch"
+        ]
+      }
+    }
+  ]
+}
