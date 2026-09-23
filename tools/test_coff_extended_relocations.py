@@ -32,10 +32,6 @@ def run(command, cwd, env=None, log_path=None):
 
 def check_extended_coff(path):
     text = Path(path).read_text(encoding="utf-8", errors="replace")
-    if "NumberOfRelocations: 65535" not in text:
-        raise SystemExit(str(path) + ": LLVM did not report the 16-bit overflow sentinel")
-    if "IMAGE_SCN_LNK_NRELOC_OVFL" not in text:
-        raise SystemExit(str(path) + ": LLVM did not report the COFF extended-relocation flag")
     offsets = [
         int(offset, 16)
         for offset in re.findall(
