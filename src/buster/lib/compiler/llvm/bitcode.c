@@ -1540,29 +1540,34 @@ static bool llvm_bc_add_function_entity(LlvmBcContext* context, IrFunction* func
 
 static bool llvm_bc_add_stack_intrinsic(LlvmBcContext* context, bool save)
 {
+    bool result;
     String8 name = llvm_bc_s8(save ? "llvm.stacksave" : "llvm.stackrestore");
     if (!llvm_bc_name_available(context, name, 0))
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM stack intrinsic collides with a module symbol"),
                      0, 0, 0, IR_SYMBOL_ID_INVALID);
-        return false;
-    }
-    u64 signature[3] = {0, save ? context->pointer_type_id : context->void_type_id, context->pointer_type_id};
-    u32 type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, signature, save ? 2 : 3);
-    llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
-                        sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
-    u32 index = context->function_count++;
-    context->functions[index] = (LlvmBcFunction){.name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
-                                                 .type_id = type_id, .declaration = true, .synthetic = true};
-    if (save)
-    {
-        context->stack_save_function_index = index;
+        result = false;
     }
     else
     {
-        context->stack_restore_function_index = index;
+        u64 signature[3] = {0, save ? context->pointer_type_id : context->void_type_id, context->pointer_type_id};
+        u32 type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, signature, save ? 2 : 3);
+        llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
+                            sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
+        u32 index = context->function_count++;
+        context->functions[index] = (LlvmBcFunction){.name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
+                                                     .type_id = type_id, .declaration = true, .synthetic = true};
+        if (save)
+        {
+            context->stack_save_function_index = index;
+        }
+        else
+        {
+            context->stack_restore_function_index = index;
+        }
+        result = true;
     }
-    return true;
+    return result;
 }
 
 static bool llvm_bc_collect_entities(LlvmBcContext* context)

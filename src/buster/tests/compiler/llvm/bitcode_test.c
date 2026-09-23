@@ -566,6 +566,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_records(UnitTestArgum
     LlvmBitcodeArtifact malformed = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
     BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(malformed) && !malformed.bytes.length);
     BUSTER_TEST(arguments, malformed.error.code == LLVM_BITCODE_ERROR_IR_VALIDATION && malformed.error.instruction.value == 7);
+    instructions[7].operand_count = 1;
+    symbols[0].link_name = S8("llvm.stacksave");
+    LlvmBitcodeArtifact collision = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(collision) && !collision.bytes.length);
+    BUSTER_TEST(arguments, collision.error.code == LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL);
     return result;
 }
 
