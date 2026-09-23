@@ -1,6 +1,7 @@
 #include <stdarg.h>
 
 extern int llvm_sum_ints(int count, ...);
+extern long long llvm_sum_wide(int count, ...);
 extern double llvm_sum_doubles(int count, ...);
 extern int llvm_mixed(int named, double fixed, ...);
 extern int llvm_copy_cursors(int named, ...);
@@ -54,6 +55,7 @@ int main(void)
     result += llvm_sum_ints(0) != 0;
     result += llvm_sum_ints(4, 3, 5, 7, 11) != 26;
     result += llvm_sum_ints(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) != 55;
+    result += llvm_sum_wide(7, 0x100000000LL, 2LL, 3LL, 4LL, 5LL, 6LL, 7LL) != 0x10000001BLL;
     result += llvm_sum_doubles(0) != 0.0;
     result += llvm_sum_doubles(10, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0) != 27.5;
     result += llvm_mixed(2, 3.0, (short)4, (float)5.0, (void*)&item) != 15;

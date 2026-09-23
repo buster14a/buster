@@ -141,6 +141,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
             arguments->show(arguments, S8("LLVM fixture {S8}: {S8}\n"), fixtures[fixture].source, emitted.diagnostic);
         }
         BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (fixtures[fixture].both_optimizations && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            command[2] = buster_test_temporary_path(arena, S8("buster-llvm-repeat"), S8(".bc"));
+            CompilerDriverResult repeated = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            BUSTER_TEST(arguments, repeated.error == COMPILER_DRIVER_ERROR_NONE && llvm_bitcode_artifact_is_valid(repeated.llvm_bitcode));
+            BUSTER_TEST(arguments, emitted.llvm_bitcode.bytes.length == repeated.llvm_bitcode.bytes.length &&
+                                  !memcmp(emitted.llvm_bitcode.bytes.pointer, repeated.llvm_bitcode.bytes.pointer,
+                                          emitted.llvm_bitcode.bytes.length));
+        }
         if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
         {
             for (u32 optimization = 0; optimization < (fixtures[fixture].both_optimizations ? 2u : 1u); optimization += 1)
@@ -503,6 +513,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArg
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    (void)arguments;
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_WINDOWS)
     String8 targets[] = {S8("aarch64-unknown-linux-gnu"), S8("x86_64-apple-macosx"),
 #if BUSTER_WINDOWS
@@ -548,6 +559,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_diagnostics(UnitTe
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_win64_object(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    (void)arguments;
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     TemporalArena temporary = scratch_begin(&arguments->arena, 1);
     Arena* arena = temporary.arena;

@@ -17,6 +17,19 @@ int llvm_sum_ints(int count, ...)
     return result;
 }
 
+long long llvm_sum_wide(int count, ...)
+{
+    va_list ap;
+    va_start(ap, count);
+    long long result = 0;
+    for (int index = 0; index < count; index += 1)
+    {
+        result += va_arg(ap, long long);
+    }
+    va_end(ap);
+    return result;
+}
+
 double llvm_sum_doubles(int count, ...)
 {
     va_list ap;
