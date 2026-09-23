@@ -291,6 +291,14 @@ verifier from the trusted checkout, never the candidate. Missing, stale, or
 invalid attestation retains the generated-ownership failure; merge conflicts
 remain blocking. Offline checks without live status evidence stay conservative.
 
+On `merge_group`, the synthetic queue SHA is not treated as the published PR
+head. When its tree contains generated changes, preflight delegates to the
+trusted merge-group verifier. That path checks current `main` as the first
+parent, the exact attested PR head as the second parent, the conflict-free
+combined tree, the latest successful writer attempt, and equality with the
+writer's final tree. Wrong parents, altered trees, stale or failed publication,
+and generated-only candidates remain blocked.
+
 Install this compatibility bootstrap on main before relying on the exception.
 Landing it advances main, so existing attested heads need fresh trusted
 integration. Do not hand-edit generated artifacts or post replacement statuses.

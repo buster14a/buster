@@ -155,6 +155,24 @@ class GitHubApi:
         except json.JSONDecodeError as error:
             raise PreflightError(f"GitHub API {method} {path} returned invalid JSON") from error
 
+    def request(self, path: str, *, method: str = "GET", body: dict | None = None,
+                **query):
+        url = f"/repos/{self.repository}/{path}"
+        if query:
+            url += "?" + urllib.parse.urlencode(query)
+        return self._request(method, url, body)
+
+    def all(self, path: str, **query) -> list:
+        result = []
+        for page in range(1, MAX_API_PAGES + 1):
+            rows = self.request(path, per_page=100, page=page, **query)
+            if not isinstance(rows, list):
+                raise PreflightError(f"GitHub API {path} response is not a list")
+            result.extend(rows)
+            if len(rows) < 100:
+                return result
+        raise PreflightError(f"GitHub API pagination exceeded {MAX_API_PAGES} pages")
+
     def open_pull_requests(self, base: str) -> list[dict]:
         pulls: list[dict] = []
         for page in range(1, MAX_API_PAGES + 1):
@@ -501,7 +519,8 @@ def _previous_state(repo: Path, previous: PreviousResult | None, main: str, head
 
 
 def analyze(repo: Path, main_revision: str, head_revision: str,
-            previous: PreviousResult | None = None, retirement_status: dict | None = None) -> dict:
+            previous: PreviousResult | None = None, retirement_status: dict | None = None,
+            retirement_event: str = "pull_request", retirement_api=None) -> dict:
     started = time.monotonic_ns()
     repo = repo.resolve()
     main = _commit(repo, main_revision)
@@ -528,17 +547,33 @@ def analyze(repo: Path, main_revision: str, head_revision: str,
     )
     stale = not _is_ancestor(repo, main, head)
     attestation = {"verified": False, "reason": "No live trusted integration evidence supplied"}
-    if generated_changed and merge.clean and retirement_status is not None:
+    if (generated_changed and merge.clean and
+            (retirement_status is not None or retirement_event == "merge_group")):
         try:
-            # This module is loaded beside the trusted preflight, never from the PR tree.
-            with tempfile.TemporaryDirectory(prefix="preflight-attestation-") as temporary:
-                status_path = Path(temporary) / "status.json"
-                status_path.write_text(json.dumps(retirement_status))
-                verified = retirement_gate.check_pull_request(
-                    repo, main, head, main, status_path, False)
-            if verified.get("mode") != "trusted-integration":
-                raise retirement_gate.AdmissionError("head is not a trusted integration")
-            attestation = {"verified": True, "record": verified}
+            if retirement_event == "merge_group":
+                # A queue SHA is a synthetic two-parent commit, not the published
+                # PR head. Verify it through the gate's exact-tree writer path.
+                verified = retirement_gate.check_merge_group(
+                    repo, main, head, main, retirement_api)
+                expected_mode = "trusted-integration-merge-group"
+            elif retirement_event == "pull_request":
+                if retirement_status is None:
+                    raise retirement_gate.AdmissionError(
+                        "trusted integration status evidence is required")
+                # This module is loaded beside the trusted preflight, never from the PR tree.
+                with tempfile.TemporaryDirectory(prefix="preflight-attestation-") as temporary:
+                    status_path = Path(temporary) / "status.json"
+                    status_path.write_text(json.dumps(retirement_status))
+                    verified = retirement_gate.check_pull_request(
+                        repo, main, head, main, status_path, False)
+                expected_mode = "trusted-integration"
+            else:
+                raise retirement_gate.AdmissionError(
+                    f"unsupported retirement verification event: {retirement_event!r}")
+            if verified.get("mode") != expected_mode:
+                raise retirement_gate.AdmissionError(
+                    f"head is not a {expected_mode} publication")
+            attestation = {"verified": True, "mode": expected_mode, "record": verified}
         except (retirement_gate.AdmissionError, retirement_gate.integration.IntegrationError,
                 ValueError, KeyError, TypeError) as error:
             attestation = {"verified": False, "reason": str(error)}
@@ -844,10 +879,14 @@ def _github_merge_group_event(repo: Path, api: GitHubApi, event: dict, report_di
         raise PreflightError(
             f"merge-group head moved: event {head_sha}, fetched {fetched_head}; refusing a stale result"
         )
-    report = analyze(repo, main, fetched_head, api.previous_status(fetched_head, context))
+    report = analyze(
+        repo, main, fetched_head, api.previous_status(fetched_head, context),
+        retirement_event="merge_group", retirement_api=api)
     current_main = _fetch_ref(repo, base_ref, local_main)
     if current_main != main:
-        report = analyze(repo, current_main, fetched_head, api.previous_status(fetched_head, context))
+        report = analyze(
+            repo, current_main, fetched_head, api.previous_status(fetched_head, context),
+            retirement_event="merge_group", retirement_api=api)
     output = report_dir / f"merge-group-{fetched_head}.json"
     _write_report(report, output, summary, "Merge-group conflict preflight")
     api.publish_status(fetched_head, report, context, _target_url())
