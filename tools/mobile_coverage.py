@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 from typing import Any, Mapping, MutableMapping
+from unittest.mock import patch
 
 
 SCHEMA_VERSION = 1
@@ -761,7 +762,7 @@ def _ios_runtime(lines: list[str], architecture: str, output_directory: Path) ->
         raise MobileCoverageError(
             "iOS runtime log does not bind the final UUID to the selected or recovered buster-ci device exactly once"
         )
-    _ios_boot_disposition(lines)
+    disposition = _ios_boot_disposition(lines)
 
     devices = _xcrun_json(["simctl", "list", "devices", "-j"], "iOS simulator device inventory")
     device_matches: list[tuple[str, dict[str, Any]]] = []
@@ -801,7 +802,7 @@ def _ios_runtime(lines: list[str], architecture: str, output_directory: Path) ->
         "device_name": device["name"],
         "udid": udid,
         "state": device["state"],
-        "boot_disposition": dispositions[0],
+        "boot_disposition": disposition,
         "shutdown_status": int(record["shutdown"]),
         "shutdown_outcome": record["outcome"],
         "shutdown_disposition": record["disposition"],
@@ -1200,6 +1201,34 @@ def run_self_test() -> int:
         else:
             raise MobileCoverageError(f"self-test accepted {name} iOS boot disposition")
         case_count += 1
+    # Exercise the full runtime consumer, not just its disposition parser:
+    # the successful value must survive the device/SDK binding into coverage.
+    fixture_udid = "00000000-0000-0000-0000-000000000001"
+    fixture_runtime = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+    fixture_disposition = "continued-original-boot-success"
+    fixture_lines = [
+        "iOS Debug tests passed.",
+        "iOS Release tests passed.",
+        f"Using simulator buster-ci ({fixture_udid})",
+        f"BUSTER_IOS_BOOT_DISPOSITION={fixture_disposition}",
+        f"BUSTER_IOS_CLEANUP simulator_udid={fixture_udid} prior_status=0 "
+        "shutdown_status=0 shutdown_outcome=success postcondition_eligibility=1 "
+        "postcondition_probe_status=not-run postcondition_parser_status=not-run "
+        "postcondition_state=unavailable shutdown_disposition=direct-success result_status=0",
+    ]
+    fixture_devices = {"devices": {fixture_runtime: [{"udid": fixture_udid, "name": "buster-ci", "state": "Shutdown"}]}}
+    fixture_runtimes = {"runtimes": [{"identifier": fixture_runtime, "version": "26.5", "isAvailable": True}]}
+    with patch(__name__ + "._run", side_effect=lambda arguments, description: (
+        "/fixture/sdk" if "--show-sdk-path" in arguments else "26.5"
+    )), patch(__name__ + "._bounded_text", return_value="BUSTER_IOS_RESULT: SUCCESS\n"), patch(
+        __name__ + "._xcrun_json", side_effect=lambda arguments, description: (
+            fixture_devices if "devices" in arguments else fixture_runtimes
+        )
+    ):
+        runtime = _ios_runtime(fixture_lines, "aarch64", Path("/fixture"))
+    if runtime["boot_disposition"] != fixture_disposition or runtime["udid"] != fixture_udid:
+        raise MobileCoverageError("self-test lost the continued iOS runtime identity or disposition")
+    case_count += 1
     return case_count
 
 
