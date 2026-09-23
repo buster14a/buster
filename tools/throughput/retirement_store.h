@@ -78,8 +78,10 @@ int tp_retirement_store_authority_matches(TpRetirementStore* store, int authorit
     char const* job, uint64_t attempt, char const* plan_sha256, char const* context_sha256,
     TpRetirementReceiptAuthority const* trusted);
 /* Fresh export/replay consumer: trusted must arrive on the authenticated
- * control channel; the result bundle cannot supply it. This checks the two
- * sealed files without relying on the producer's in-memory store state. */
+ * control channel; the result bundle cannot supply it. This reopens the
+ * private reference, receipt and every receipt shard without producer memory.
+ * The complete result bundle still needs the service's separate manifest and
+ * full-tree validation before an experiment can be acknowledged. */
 int tp_retirement_store_authority_reopen(int result_root, int authority_root,
     char const* job, uint64_t attempt, char const* plan_sha256, char const* context_sha256,
     TpRetirementReceiptAuthority const* trusted);
