@@ -1681,11 +1681,21 @@ struct BqWorkerFinalization
     char result_root[BQ_PATH_CAP + 1];
     bool result_bound;
     bool phases_required;
+    /* Zero on recovery: an interrupted attempt never inherits a fresh budget. */
+    u64 execution_deadline;
     char result_digest[SHA256_HEX_CAPACITY];
     char bundle_digest[SHA256_HEX_CAPACITY];
     char full_digest[SHA256_HEX_CAPACITY];
     BqRecipeFiles recipe;
 };
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_finalization_expired(BqWorkerFinalization const* finalization)
+{
+    BqWorkerBackend* backend = finalization && finalization->config ? finalization->config->backend : NULL;
+    u64 now = backend ? backend->clock(backend) : bq_worker_monotonic_milliseconds();
+    bool expired = finalization && finalization->execution_deadline && now >= finalization->execution_deadline;
+    return expired;
+}
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_finalization_recipe(BqJob const* job, BqWorkerFinalization* finalization)
 {
@@ -3327,7 +3337,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finish(BqQueue* queue, BqWorkerConfig cons
         error = BQ_CONFIGURATION_MISMATCH;
     if (error == BQ_OK && finalization && finalization->phases_required && outcome == BQ_SUCCEEDED)
         error = bq_worker_phases_validate(queue, job, finalization);
+    if (error == BQ_OK && production && outcome == BQ_SUCCEEDED && bq_worker_finalization_expired(finalization))
+        error = BQ_WORKER_TIMEOUT;
     if (error == BQ_OK && production && outcome == BQ_SUCCEEDED) error = bq_worker_result_validate(config, job, finalization);
+    /* Result validation may sync and hash a large tree. It cannot consume the
+     * remaining job budget and still permit a successful journal transition. */
+    if (error == BQ_OK && production && outcome == BQ_SUCCEEDED && bq_worker_finalization_expired(finalization))
+        error = BQ_WORKER_TIMEOUT;
     if (production && outcome == BQ_SUCCEEDED && error != BQ_OK)
     {
         reason = error;
@@ -3803,6 +3819,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering &&
         !bq_worker_execution_deadline(backend->clock(backend), config->limits.runtime_max_usec,
                                       &execution_deadline)) error = BQ_CONFIGURATION_MISMATCH;
+    if (error == BQ_OK && !recovering) finalization.execution_deadline = execution_deadline;
     if (error == BQ_OK && !recovering && bq_worker_cancel_signal) error = BQ_WORKER_CANCEL_SIGNAL;
     u64 token = 0;
     if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
