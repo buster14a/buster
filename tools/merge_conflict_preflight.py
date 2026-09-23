@@ -229,6 +229,9 @@ class GitHubApi:
             try:
                 with urllib.request.urlopen(request, timeout=min(30, remaining)) as response:
                     body = response.read()
+                if attempt > 1:
+                    print(f"merge-conflict-preflight: recovered GitHub API {method} {path} "
+                          f"after {attempt} attempts", file=sys.stderr)
                 break
             except urllib.error.HTTPError as error:
                 detail = error.read().decode("utf-8", "replace")

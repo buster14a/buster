@@ -433,10 +433,12 @@ class GitHubTransportTests(unittest.TestCase):
     def test_get_500_recovers_but_repeated_500_exhausts_three_attempts(self):
         with (mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
                                 side_effect=[self.http_error(500), self.response()]) as urlopen,
-              mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
+              mock.patch.object(PREFLIGHT.time, "sleep") as sleep,
+              mock.patch.object(PREFLIGHT.sys, "stderr", new_callable=io.StringIO) as log):
             self.assertEqual(self.api._request("GET", "/test"), {"ok": True})
             self.assertEqual(urlopen.call_count, 2)
             sleep.assert_called_once_with(1.0)
+            self.assertIn("recovered GitHub API GET /test after 2 attempts", log.getvalue())
         with (mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
                                 side_effect=[self.http_error(500) for _ in range(3)]) as urlopen,
               mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
@@ -446,6 +448,7 @@ class GitHubTransportTests(unittest.TestCase):
             self.assertTrue(caught.exception.retryable)
             self.assertTrue(caught.exception.retry_exhausted)
             self.assertFalse(caught.exception.systemic)
+            self.assertIn("after 3 attempt(s)", str(caught.exception))
             self.assertEqual(urlopen.call_count, 3)
             self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 2.0])
 
