@@ -2,6 +2,8 @@
  *
  * bq_retirement_preflight checks the compiled recipe's inventory pin, both
  * complete manifests and their source bytes, and two-copy storage capacity.
+ * bq_retirement_tree_closed checks the entire installed/copied directory
+ * closure independently of the manifest paths.
  * bq_retirement_verify_subject makes a second independent copy, checks both
  * copies against that same pin, and removes the temporary copy by inode.
  * bq_retirement_preparation_record retains the verified identities for the
