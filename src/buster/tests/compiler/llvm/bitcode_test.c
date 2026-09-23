@@ -576,6 +576,39 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
     BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
     BUSTER_TEST(arguments, first.bytes.pointer && second.bytes.pointer && first.bytes.length == second.bytes.length &&
                            !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
+    // The negative canonical addend is not a C source fixture. Have an
+    // independent LLVM consumer parse and lower this exact module as well.
+    String8 compiler = executable_resolve_in_path(arena, S8("clang"));
+    if (compiler.length && first.success)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 bitcode = buster_test_temporary_path(temporary.arena, S8("buster-llvm-negative-addend"), S8(".bc"));
+        String8 object = buster_test_temporary_path(temporary.arena, S8("buster-llvm-negative-addend"), S8(".o"));
+        bool written = file_write(bitcode, first.bytes);
+        BUSTER_TEST(arguments, written);
+        if (written)
+        {
+            String8 command[] = {compiler, S8("-c"), bitcode, S8("-o"), object};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                    .capture = ((u64)1 << STANDARD_STREAM_ERROR)});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(temporary.arena, spawned);
+                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                {
+                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM rejected negative addend: {S8}\n"),
+                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
 
     relocations[0].offset = 23;
     LlvmBitcodeArtifact range = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
