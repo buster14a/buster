@@ -6,155 +6,69 @@ on:
     paths: ['.github/workflows/mission10-capability-diagnostic.yml']
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
 
 jobs:
-  baseline:
+  prototype:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
           persist-credentials: false
-      - name: Prepare independent source and record hosted provenance
-        shell: bash
+      - name: Stage temporary transport outside the source checkout
         run: |
-          set -euo pipefail
-          evidence="$RUNNER_TEMP/mission10-baseline"
-          mkdir -p "$evidence"
-          git rev-parse HEAD HEAD^{tree} | tee "$evidence/source-identity.txt"
-          { uname -a; clang --version; gcc --version; cmake --version; ninja --version; } > "$evidence/tools.txt"
-          cat > "$evidence/record.sh" <<'EOF'
-          record() {
-              name="$1"; shift
-              printf '%q ' "$@" > "$evidence/$name.command"
-              printf '\n' >> "$evidence/$name.command"
-              set +e
-              "$@" > "$evidence/$name.log" 2>&1
-              LAST=$?
-              set -e
-              printf '%s\t%s\n' "$name" "$LAST" | tee -a "$evidence/status.tsv"
-              cat "$evidence/$name.log"
-              return 0
-          }
-          EOF
-          cat > "$evidence/packet.c" <<'EOF'
-          #if !__has_builtin(__builtin_assume_aligned)
-          #error assume_aligned is not advertised
-          #endif
-          _Alignas(32) static unsigned char storage[64];
-          static volatile unsigned int prefix = 5;
-          static int pointer_calls;
-          static int offset_calls;
-          static unsigned char *payload(void)
-          {
-              pointer_calls += 1;
-              return storage + prefix;
-          }
-          static unsigned int payload_offset(void)
-          {
-              offset_calls += 1;
-              return prefix;
-          }
-          int main(void)
-          {
-              for (unsigned int i = 0; i < 64; i += 1) storage[i] = (unsigned char)i;
-          #if RUNTIME
-              unsigned char *p = __builtin_assume_aligned(payload(), 32, payload_offset());
-          #else
-              unsigned char *p = __builtin_assume_aligned(payload(), 32, 5);
-          #endif
-              unsigned int checksum = 0;
-              for (unsigned int i = 0; i < 8; i += 1) checksum += p[i];
-              int valid = p == storage + 5 && checksum == 68 && pointer_calls == 1;
-          #if RUNTIME
-              valid = valid && offset_calls == 1;
-          #else
-              valid = valid && offset_calls == 0;
-          #endif
-              return valid ? 0 : 1;
-          }
-          EOF
-          cat > "$evidence/result-type.c" <<'EOF'
-          _Alignas(32) static unsigned char storage[64];
-          int main(void)
-          {
-              return _Generic(__builtin_assume_aligned(storage, 32), void *: 0, default: 1);
-          }
-          EOF
-          cat > "$evidence/invalid-offset.c" <<'EOF'
-          void *f(void *p, void *offset) { return __builtin_assume_aligned(p, 32, offset); }
-          EOF
-          cat > "$evidence/invalid-alignment.c" <<'EOF'
-          void *f(void *p, int alignment) { return __builtin_assume_aligned(p, alignment); }
-          EOF
-          sha256sum "$evidence"/*.c > "$evidence/inputs.sha256"
-          source "$evidence/record.sh"
-          for cc in clang gcc; do
-            for opt in 0 2; do
-              for runtime in 0 1; do
-                name="$cc-O$opt-runtime$runtime"
-                record "$name-compile" "$cc" -std=gnu11 -O"$opt" -DRUNTIME="$runtime" "$evidence/packet.c" -o "$evidence/$name"
-                if [ "$LAST" -eq 0 ]; then record "$name-execute" "$evidence/$name"; fi
-              done
-              name="$cc-O$opt-result-type"
-              record "$name-compile" "$cc" -std=gnu11 -O"$opt" "$evidence/result-type.c" -o "$evidence/$name"
-              if [ "$LAST" -eq 0 ]; then record "$name-execute" "$evidence/$name"; fi
-            done
-            for case in invalid-offset invalid-alignment; do
-              record "$cc-$case" "$cc" -std=gnu11 -Wall -Werror -c "$evidence/$case.c" -o "$evidence/$cc-$case.o"
-            done
-          done
-      - name: Build pinned Buster through the hosted bootstrap exception
-        shell: bash
+          set -eu
+          mkdir -p "$RUNNER_TEMP/mission10-validation"
+          cp .github/mission10-validation.py "$RUNNER_TEMP/mission10-validation.py"
+          cp .github/mission10-assume-aligned.patch.zlib.b64 "$RUNNER_TEMP/mission10-validation/transport.zlib.b64"
+      - uses: actions/checkout@v4
+        with:
+          ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
+          path: work
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: mission10-baseline-a0ef63e3e867ab825d8aea5484efe14cd85a7fbf
+          run-id: 35818031844
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/mission10-prior
+      - name: Verify source transport and execute independent compiler oracles
+        working-directory: work
+        run: python3 "$RUNNER_TEMP/mission10-validation.py" prepare "$RUNNER_TEMP/mission10-validation/transport.zlib.b64"
+      - name: Build and execute the unchanged baseline with valid mode options
+        working-directory: work
+        run: python3 "$RUNNER_TEMP/mission10-validation.py" baseline
+      - name: Apply prototype one without regenerating the build tree
+        id: apply
+        working-directory: work
+        run: python3 "$RUNNER_TEMP/mission10-validation.py" apply
+      - name: Build and execute prototype one
+        id: candidate
+        working-directory: work
+        run: python3 "$RUNNER_TEMP/mission10-validation.py" candidate
+      - name: Run the registered Release suite
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        working-directory: work
+        run: python3 "$RUNNER_TEMP/mission10-validation.py" suite
+      - name: Preserve candidate self-host evidence
+        if: ${{ !cancelled() && steps.apply.outcome == 'success' }}
+        working-directory: work
         run: |
-          set -euo pipefail
-          evidence="$RUNNER_TEMP/mission10-baseline"
-          source "$evidence/record.sh"
-          record build-driver clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/mission10-driver"
-          test "$LAST" -eq 0
-          record configure "$RUNNER_TEMP/mission10-driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_UNITY_BUILD=OFF
-          test "$LAST" -eq 0
-          record build "$RUNNER_TEMP/mission10-driver" build --config Release -t ide
-          test "$LAST" -eq 0
-          sha256sum build/Release/ide > "$evidence/compiler.sha256"
-      - name: Run unchanged baseline through all native allocator and frontend modes
-        shell: bash
-        run: |
-          set -euo pipefail
-          evidence="$RUNNER_TEMP/mission10-baseline"
-          source "$evidence/record.sh"
-          for mode in none mir-stack fast quality; do
-            for frontend in -fc-direct-ssa -fno-c-direct-ssa; do
-              for runtime in 0 1; do
-                name="buster-$mode-$frontend-runtime$runtime"
-                record "$name-compile" build/Release/ide cc -std=gnu11 -fregister-allocator="$mode" -fno-machine-fallback -fverify-codegen "$frontend" -DRUNTIME="$runtime" "$evidence/packet.c" -o "$evidence/$name"
-                if [ "$LAST" -eq 0 ]; then record "$name-execute" "$evidence/$name"; fi
-              done
-              name="buster-$mode-$frontend-result-type"
-              record "$name-compile" build/Release/ide cc -std=gnu11 -fregister-allocator="$mode" -fno-machine-fallback -fverify-codegen "$frontend" "$evidence/result-type.c" -o "$evidence/$name"
-              if [ "$LAST" -eq 0 ]; then record "$name-execute" "$evidence/$name"; fi
-            done
-          done
-          for case in invalid-offset invalid-alignment; do
-            record "buster-$case-object" build/Release/ide cc -c "$evidence/$case.c" -o "$evidence/buster-$case.o"
-            record "buster-$case-syntax" build/Release/ide cc -fsyntax-only "$evidence/$case.c"
-          done
-      - name: Preserve baseline self-host fixed-point evidence
-        if: ${{ success() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          evidence="$RUNNER_TEMP/mission10-baseline"
-          source "$evidence/record.sh"
-          record self-host "$RUNNER_TEMP/mission10-driver" test_self_host --config Release
-          test "$LAST" -eq 0
+          test -f "$RUNNER_TEMP/mission10-validation/candidate-base-with-staged-patch-compiler.sha256"
+          python3 "$RUNNER_TEMP/mission10-validation.py" self-host
+      - name: Publish immutable source objects for integration review without writing refs
+        if: ${{ !cancelled() && steps.apply.outcome == 'success' }}
+        working-directory: work
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 "$RUNNER_TEMP/mission10-validation.py" publish-objects
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mission10-baseline-${{ github.sha }}
-          path: ${{ runner.temp }}/mission10-baseline
+          name: mission10-prototype1-${{ github.sha }}
+          path: ${{ runner.temp }}/mission10-validation
           if-no-files-found: error
           retention-days: 30
