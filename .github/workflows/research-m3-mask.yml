@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
-      M3_EVIDENCE: ${{ runner.temp }}/m3-evidence
+      M3_EVIDENCE: /tmp/m3-evidence-${{ github.run_id }}-${{ github.run_attempt }}
       BUSTER_TEST_JOBS: '2'
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
     steps:
@@ -110,6 +110,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: m3-mask-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/m3-evidence
+          path: ${{ env.M3_EVIDENCE }}
           if-no-files-found: error
           retention-days: 90
