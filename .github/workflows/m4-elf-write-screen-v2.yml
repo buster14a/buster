@@ -1,0 +1,98 @@
+name: Mission 4 ELF write-set screen v2 (temporary)
+on:
+  push:
+    branches: [research/m4-elf-write-screen-bb96b5d]
+    paths: [.github/workflows/m4-elf-write-screen-v2.yml]
+permissions:
+  contents: read
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 05ba0efba2d2a46734ce9cfa7a691e797d0c6ed3
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Replay the first screen with formatting repaired, retaining all attempts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git rev-parse bb96b5d08e570aff3cbd473441d71ab0dc691d67 bb96b5d08e570aff3cbd473441d71ab0dc691d67^{tree} > evidence/base-identity.txt
+          git rev-parse HEAD HEAD^{tree} > evidence/harness-source-identity.txt
+          test "$(git hash-object src/buster/lib/compiler/object/object.c)" = 7290b4010a1b0d407a78206d6509110852fd499e
+          git diff --exit-code bb96b5d08e570aff3cbd473441d71ab0dc691d67 -- src
+          uname -a > evidence/host.txt
+          lscpu >> evidence/host.txt
+          clang --version > evidence/clang-version.txt
+          gcc --version > evidence/gcc-version.txt
+          git archive --format=tar.gz bb96b5d08e570aff3cbd473441d71ab0dc691d67 src/buster/lib/compiler/object src/buster/lib/compiler/driver src/buster/lib/arena.c src/buster/lib/arena.h docs/agents > evidence/source-context.tar.gz
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, textwrap, subprocess
+          workflow = Path('.github/workflows/m4-elf-write-screen.yml').read_text()
+          programs = [textwrap.dedent(m.group(1)) for m in re.finditer(r"python3 - <<'PY'\n(.*?)\n\s*PY(?:\n|$)", workflow, re.S)]
+          assert len(programs) == 2
+          bad = "new = '\\n'.join(line[10:] if i else line for i, line in enumerate(new.splitlines()))\n"
+          assert programs[0].count(bad) == 1
+          programs[0] = programs[0].replace(bad, '').replace("'prototype_revision':1", "'prototype_revision':2")
+          for i, program in enumerate(programs):
+              path = Path('evidence') / ('screen-step-' + str(i) + '.py')
+              path.write_text(program)
+              subprocess.run(['python3', str(path)], check=True)
+          subprocess.run(['git','apply','--check','--whitespace=error-all','evidence/candidate.patch'],check=True)
+          PY
+      - name: Independent missing-final-field negative control
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, subprocess
+          source = Path('evidence/probe.c').read_text()
+          prefix = source[:source.index('int main(void)')]
+          start = prefix.index('__attribute__((noinline)) void emit_candidate(')
+          end = prefix.index('\n}', start) + 2
+          body = prefix[start:end]
+          store = 'object_write_s64_at(buffer, offset + 16, relocation->addend);'
+          assert body.count(store) == 1
+          mutant = prefix[:start] + body.replace(store, '/* Negative control: omit final field. */') + prefix[end:]
+          main = '''int main(void)
+          {
+              u8 output[24], expected[24];
+              ObjectBuffer buffer = {output, 0, sizeof(output), OBJECT_ERROR_NONE};
+              ObjectRelocation relocation = {.addend = INT64_MIN, .offset = UINT64_MAX, .symbol = 1};
+              u32 indices[] = {0, UINT32_MAX};
+              emit_candidate(&buffer, &relocation, indices, 2);
+              expected_record(expected, &relocation, indices, 2);
+              return memcmp(output, expected, sizeof(output)) != 0;
+          }
+          '''
+          records = []
+          for name, text in [('msan-initialized-control',prefix),('msan-missing-final-field',mutant)]:
+              path = Path('evidence') / (name+'.c')
+              path.write_text(text+main)
+              command = ['clang','-std=c11','-O1','-g','-Wall','-Wextra','-Werror','-fwrapv','-fno-strict-aliasing','-funsigned-char','-fsanitize=memory','-fPIE','-pie',str(path),'-o','evidence/'+name]
+              build = subprocess.run(command,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+              run_exit, output = None, ''
+              if not build.returncode:
+                  run = subprocess.run(['evidence/'+name],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=30)
+                  run_exit, output = run.returncode, run.stdout
+              Path('evidence/'+name+'-build.log').write_text(build.stdout)
+              Path('evidence/'+name+'-run.log').write_text(output)
+              records.append({'name':name,'compile_argv':command,'compile_exit':build.returncode,'run_exit':run_exit,'msan_uninitialized_diagnostic':'MemorySanitizer: use-of-uninitialized-value' in output})
+              print(name, 'build_exit', build.returncode, 'run_exit', run_exit, output)
+          Path('evidence/negative-control-attempts.json').write_text(json.dumps(records,indent=2)+'\n')
+          print(json.dumps(records,indent=2))
+          PY
+      - name: Preserve complete source and diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m4-elf-write-screen-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 90
+          if-no-files-found: error
