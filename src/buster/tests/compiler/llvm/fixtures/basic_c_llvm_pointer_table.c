@@ -10,11 +10,12 @@ int local_function(void)
 
 struct __attribute__((packed)) Entry
 {
-    unsigned char marker;
     int *pointer;
+    unsigned char marker;
     int tag;
+    unsigned char padding[3];
 };
-struct Entry entries[2] = {{3, &first, 7}, {4, &second, 9}};
+struct Entry entries[2] __attribute__((aligned(8))) = {{&first, 3, 7, {0}}, {&second, 4, 9, {0}}};
 int *table[5] = {&first, 0, &second, &first, &external_value};
 int (*callbacks[2])(void) = {local_function, external_function};
 
