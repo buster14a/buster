@@ -112,12 +112,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
     {
         String8 source;
         String8 caller;
+        bool generated;
     } LlvmBitcodeConsumerFixture;
     LlvmBitcodeConsumerFixture fixtures[] = {
         {.source = S8("tests/basic_c_llvm_scalars.c")},
         {.source = S8("tests/basic_c_llvm_layout.c")},
-        {.source = S8("src/buster/tests/compiler/llvm/fixtures/bit_counts.c"),
-         .caller = S8("src/buster/tests/compiler/llvm/fixtures/bit_counts_main.c")},
+        {.generated = true},
 #if BUSTER_CPU_ARCH_X86_64
         {.source = S8("tests/basic_c_llvm_aggregate_abi_callee.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_caller.c")},
         {.source = S8("tests/basic_c_llvm_aggregate_abi_caller.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_callee.c")},
@@ -130,7 +130,67 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
         String8 output = buster_test_temporary_path(arena, S8("buster-llvm-consumer"), S8(".bc"));
-        bool bit_counts = string_equal(fixtures[fixture].source, S8("src/buster/tests/compiler/llvm/fixtures/bit_counts.c"));
+        bool bit_counts = fixtures[fixture].generated;
+        String8 source = fixtures[fixture].source;
+        String8 caller = fixtures[fixture].caller;
+        if (bit_counts)
+        {
+            // The Android test app packages the test module, not arbitrary
+            // source fixtures. Write both sides of this LLVM execution oracle
+            // into the test's own temporary directory.
+            String8 source_code = S8(
+                "unsigned bit_counts32(unsigned value)\n"
+                "{\n"
+                "    unsigned count = (unsigned)__builtin_popcount(value);\n"
+                "    if (value != 0)\n"
+                "    {\n"
+                "        count += (unsigned)__builtin_clz(value);\n"
+                "        count += (unsigned)__builtin_ctz(value);\n"
+                "    }\n"
+                "    return count;\n"
+                "}\n"
+                "unsigned long long bit_counts64(unsigned long long value)\n"
+                "{\n"
+                "    unsigned long long count = (unsigned)__builtin_popcountll(value);\n"
+                "    if (value != 0)\n"
+                "    {\n"
+                "        count += (unsigned)__builtin_clzll(value);\n"
+                "        count += (unsigned)__builtin_ctzll(value);\n"
+                "    }\n"
+                "    return count;\n"
+                "}\n"
+                "int bit_first32(int value) { return __builtin_ffs(value); }\n"
+                "int bit_first64(long long value) { return __builtin_ffsll(value); }\n");
+            String8 caller_code = S8(
+                "extern unsigned bit_counts32(unsigned);\n"
+                "extern unsigned long long bit_counts64(unsigned long long);\n"
+                "extern int bit_first32(int);\n"
+                "extern int bit_first64(long long);\n"
+                "int main(void)\n"
+                "{\n"
+                "    unsigned inputs32[] = {0, 1, 0x80000000u, 0xaaaaaaaau, 0xffffffffu};\n"
+                "    unsigned expected32[] = {0, 32, 32, 17, 32};\n"
+                "    unsigned long long inputs64[] = {0, 1, 0x8000000000000000ull, 0xaaaaaaaaaaaaaaaaull, 0xffffffffffffffffull};\n"
+                "    unsigned long long expected64[] = {0, 64, 64, 33, 64};\n"
+                "    int failures = 0;\n"
+                "    for (unsigned index = 0; index < 5; index += 1)\n"
+                "    {\n"
+                "        failures += bit_counts32(inputs32[index]) != expected32[index];\n"
+                "        failures += bit_counts64(inputs64[index]) != expected64[index];\n"
+                "    }\n"
+                "    failures += bit_first32(0) != 0;\n"
+                "    failures += bit_first32(1) != 1;\n"
+                "    failures += bit_first32(0x80000000u) != 32;\n"
+                "    failures += bit_first64(0) != 0;\n"
+                "    failures += bit_first64(1) != 1;\n"
+                "    failures += bit_first64(0x8000000000000000ull) != 64;\n"
+                "    return failures;\n"
+                "}\n");
+            source = buster_test_temporary_path(arena, S8("buster-llvm-bit-counts"), S8(".c"));
+            caller = buster_test_temporary_path(arena, S8("buster-llvm-bit-counts-main"), S8(".c"));
+            BUSTER_TEST(arguments, file_write(source, (ByteSlice){.pointer = (u8*)source_code.pointer, .length = source_code.length}));
+            BUSTER_TEST(arguments, file_write(caller, (ByteSlice){.pointer = (u8*)caller_code.pointer, .length = caller_code.length}));
+        }
         String8 command[5];
         u32 command_count = 0;
         command[command_count++] = S8("-emit-llvm");
@@ -140,12 +200,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         }
         command[command_count++] = S8("-o");
         command[command_count++] = output;
-        command[command_count++] = fixtures[fixture].source;
+        command[command_count++] = source;
         CompilerDriverResult emitted = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = command_count}));
         if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
         {
-            arguments->show(arguments, S8("LLVM fixture {S8}: {S8}\n"), fixtures[fixture].source, emitted.diagnostic);
+            arguments->show(arguments, S8("LLVM fixture {S8}: {S8}\n"), source, emitted.diagnostic);
         }
         BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
         if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
@@ -164,9 +224,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
                 compile[compile_count++] = compiler;
                 compile[compile_count++] = optimization == 0 && bit_counts ? S8("-O0") : S8("-O2");
                 compile[compile_count++] = output;
-                if (fixtures[fixture].caller.length)
+                if (caller.length)
                 {
-                    compile[compile_count++] = fixtures[fixture].caller;
+                    compile[compile_count++] = caller;
                 }
                 compile[compile_count++] = S8("-o");
                 compile[compile_count++] = executable;
@@ -180,7 +240,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
                     if (compiled.result != PROCESS_RESULT_SUCCESS)
                     {
                         ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
-                        arguments->show(arguments, S8("LLVM consumer rejected {S8}: {S8}\n"), fixtures[fixture].source,
+                        arguments->show(arguments, S8("LLVM consumer rejected {S8}: {S8}\n"), source,
                                         (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
                     }
                     BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
