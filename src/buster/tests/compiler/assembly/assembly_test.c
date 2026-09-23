@@ -3043,7 +3043,7 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                string_equal(metadata_authority_probe.symbols[metadata_authority_probe.relocations[2].symbol].name,
                                             S8("external2")));
 
-    // Independently assembled in tests/x86_64_source_layout_oracle.s.  In
+    // Independently assembled in docs/x86-64-source-layout-oracle.s.  In
     // particular the unresolved base displacement cannot take the disp8
     // form merely because the relocation placeholder is zero.
     u8 const expected_lea_layout[] = {
