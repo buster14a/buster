@@ -36,7 +36,10 @@ Each `sources/<commit>/source.manifest` retains the existing sorted
 `BQ-SOURCE-V1` format. Preflight hashes its exact bytes, walks every listed
 regular read-only file through `O_NOFOLLOW` descriptors, verifies each SHA-256,
 checks strict path ordering, counts unique directories and path components,
-and compares every measured bound with the inventory. It rejects unknown,
+independently traverses the installed directory closure, and compares every
+measured bound with the inventory. The traversal rejects unlisted regular
+files, empty extra directories, links, and non-regular entries, and rechecks
+held directory identities against their names before releasing them. It rejects unknown,
 stale, missing, duplicate, replaced or content-mismatched entries before any
 timing. The preflight retains the same-job source inode closure so a byte-equal
 replacement between preflight and the independent second copy fails.
@@ -101,7 +104,7 @@ Compile and run `retirement_prepare_tests.c` alongside
 `BUSTER_SINGLE_THREADED=1`, C11 and warnings-as-errors flags. The fixture
 checks the pinned inventory, mismatched pin, invalid source request, impossible
 entry bound, unavailable storage query, source mutation, missing file, duplicate
-manifest entry, byte-equal inode replacement, two verified copies and removal
-of the temporary copy. The #923 integration owner registers this dedicated
+manifest entry, unlisted file/directory/symlink, byte-equal inode replacement,
+two verified copies and removal of the temporary copy. The #923 integration owner registers this dedicated
 test alongside the native and sanitizer service suite, then proves its exact
 submitted head on hosted runners.
