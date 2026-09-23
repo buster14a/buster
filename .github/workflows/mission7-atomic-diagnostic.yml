@@ -41,6 +41,10 @@ jobs:
           source_path = 'src/buster/lib/compiler/frontend/c/c_gen.c'
           require('source-blob', ['git', 'hash-object', source_path])
           original_source = (root / source_path).read_text()
+          lines = original_source.splitlines()
+          excerpt = '\n'.join(f'{i+1}: {lines[i]}' for lo, hi in [(2280, 2440), (19500, 19780)] for i in range(lo, hi))
+          (evidence / 'lowering-source.txt').write_text(excerpt)
+          print(excerpt, flush=True)
           original_fixture = (root / 'tests/basic_c_atomic.c').read_text()
           regression = '''static int atomic_or_preserves_overlapping_bits(void)
           {
@@ -65,6 +69,7 @@ jobs:
           }
           '''
           (evidence / 'witness.c').write_text(witness)
+          (evidence / 'isolated-regression.c').write_text(regression + 'int main(void)\n{\n    return !atomic_or_preserves_overlapping_bits();\n}\n')
           assert (1 | 1) == 1 and (1 ^ 1) == 0
           for old, operand in [(22, 1), (2, 8), ((1 << 64) | 0x57, 0x20)]:
               assert (old & operand) == 0 and (old | operand) == (old ^ operand)
@@ -74,8 +79,12 @@ jobs:
               require('clang-witness-compile-O' + opt, ['clang', '-std=c11', '-O' + opt, evidence / 'witness.c', '-o', out])
               require('clang-witness-run-O' + opt, [out])
           require('clang-witness-ir', ['clang', '-std=c11', '-O0', '-S', '-emit-llvm', evidence / 'witness.c', '-o', evidence / 'clang-witness.ll'])
-          require('clang-regression-compile', ['clang', '-std=c11', '-O0', evidence / 'regression.c', '-latomic', '-o', evidence / 'clang-regression'])
-          require('clang-regression-run', [evidence / 'clang-regression'])
+          require('clang-isolated-regression-compile', ['clang', '-std=c11', '-O0', evidence / 'isolated-regression.c', '-o', evidence / 'clang-isolated-regression'])
+          require('clang-isolated-regression-run', [evidence / 'clang-isolated-regression'])
+          # Legacy fixture is preserved exactly, but its whole-file Clang result
+          # is NOT the oracle for this new regression. Retain the disagreement.
+          if run('clang-legacy-comparison-compile', ['clang', '-std=c11', '-O0', evidence / 'regression.c', '-latomic', '-o', evidence / 'clang-legacy-comparison']) == 0:
+              run('clang-legacy-comparison-run', [evidence / 'clang-legacy-comparison'])
           variants = [('original', None, None), ('or-as-xor', 'or', 'XOR'), ('xor-as-or', 'xor', 'OR')]
           for label, spelling, replacement in variants:
               directory = pathlib.Path(os.environ['RUNNER_TEMP']) / ('mission7-' + label)
@@ -101,6 +110,8 @@ jobs:
                   status = run(label + '-' + name + '-compile', [compiler, 'cc', '-O0', fixture, '-o', output], directory)
                   if status == 0:
                       run(label + '-' + name + '-run', [output], directory)
+                      if name in ['atomic', 'witness']:
+                          run(label + '-' + name + '-disassembly', ['objdump', '-d', output], directory)
               if label == 'original':
                   expected = [x for x in results if x['label'].startswith('original-') and (x['label'].endswith('-compile') or x['label'].endswith('-run'))]
                   if len(expected) != 10 or any(x['exit'] for x in expected):
