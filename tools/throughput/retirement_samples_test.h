@@ -13,9 +13,10 @@ typedef struct TpSampleTest
     unsigned workspace[TP_SAMPLE_TEST_ROWS * 4], metrics[TP_SAMPLE_TEST_ROWS], runtime[TP_SAMPLE_TEST_ROWS];
     FILE* stream;
     FILE* spool;
+    int zero_candidate_code;
 } TpSampleTest;
 
-static int test_sample_open(TpSampleTest* test, unsigned rows)
+static int test_sample_open_code(TpSampleTest* test, unsigned rows, int zero_baseline)
 {
     memset(test, 0, sizeof(*test));
     test->stream = tmpfile();
@@ -26,6 +27,9 @@ static int test_sample_open(TpSampleTest* test, unsigned rows)
     {
         test->metrics[row] = (row % 3 != 2 ? TP_RETIREMENT_SAMPLE_CODE : 0) |
                             (row % 3 != 1 ? TP_RETIREMENT_SAMPLE_RUNTIME : 0);
+        if (!row && zero_baseline)
+            test->metrics[row] = (test->metrics[row] & ~TP_RETIREMENT_SAMPLE_CODE) |
+                TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE;
         if (test->metrics[row] & TP_RETIREMENT_SAMPLE_RUNTIME) test->runtime[runtime_count++] = row;
     }
     ok = ok && tp_retirement_execution_init(&test->execution, 1, rows, test->runtime,
@@ -34,6 +38,11 @@ static int test_sample_open(TpSampleTest* test, unsigned rows)
         tp_retirement_transcript_begin_shard(&test->transcript, test->stream) &&
         tp_retirement_samples_init(&test->samples, &test->transcript, test->spool, test->rows, test->metrics, rows);
     return ok;
+}
+
+static int test_sample_open(TpSampleTest* test, unsigned rows)
+{
+    return test_sample_open_code(test, rows, 0);
 }
 
 static void test_sample_close(TpSampleTest* test)
@@ -56,10 +65,15 @@ static int test_sample_observe(TpSampleTest* test, int bypass, int wrong_code)
             .finished_ns = test->transcript.last_end + 1 + elapsed, .valid = 1};
         TpProcess process = {.wall_seconds = (double)elapsed / 1000000000.0,
             .peak_rss_bytes = (double)(4096 + invocation.row + invocation.variant)};
-        int code = !invocation.kind && !!(test->rows[invocation.row].metrics & TP_RETIREMENT_SAMPLE_CODE);
+        int code = !invocation.kind && !!(test->rows[invocation.row].metrics &
+            (TP_RETIREMENT_SAMPLE_CODE | TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE));
         if (wrong_code) code = !code;
-        TpRetirementOutput output = {hash, hash, hash, code ? hash : NULL,
-            code ? 32 + invocation.row + invocation.variant : 0};
+        int zero = code && ((!invocation.variant &&
+            (test->rows[invocation.row].metrics & TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE)) ||
+            (test->zero_candidate_code && invocation.variant));
+        TpRetirementOutput output = {hash, hash, hash,
+            zero ? "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" :
+            code ? hash : NULL, code && !zero ? 32 + invocation.row + invocation.variant : 0};
         ok = bypass ? tp_retirement_transcript_append(&test->transcript, &observed, &process, &output) :
             tp_retirement_samples_append(&test->samples, &observed, &process, &output);
     }
@@ -150,6 +164,47 @@ static void test_sample_manifest_partitions(char const* root)
 static void test_retirement_samples(char const* root)
 {
     test_sample_manifest_partitions(root);
+    /* A parsed zero-byte candidate code section is an observed zero, not an
+     * absent metric. The baseline remains the positive ratio denominator. */
+    TpSampleTest* zero_code = (TpSampleTest*)malloc(sizeof(*zero_code));
+    CHECK(zero_code != NULL);
+    if (zero_code)
+    {
+        CHECK(test_sample_open(zero_code, 1));
+        zero_code->zero_candidate_code = 1;
+        CHECK(test_sample_collect(zero_code));
+        CHECK(tp_retirement_samples_begin_export(&zero_code->samples));
+        FILE* shard_file = tmpfile();
+        TpRetirementShard shard;
+        CHECK(shard_file && tp_retirement_samples_write_shard(&zero_code->samples, shard_file, &shard));
+        CHECK(shard.records == 120 && tp_retirement_samples_finish(&zero_code->samples));
+        char sample_line[TP_RETIREMENT_SAMPLE_LINE_CAP];
+        CHECK(shard_file && fseek(shard_file, 0, SEEK_SET) == 0 &&
+              fgets(sample_line, sizeof(sample_line), shard_file) != NULL &&
+              strstr(sample_line, "\"generated_code_bytes\":{\"baseline\":32,\"candidate\":0}") != NULL);
+        if (shard_file) CHECK(fclose(shard_file) == 0);
+        test_sample_close(zero_code);
+        free(zero_code);
+    }
+    TpSampleTest* zero_baseline = (TpSampleTest*)malloc(sizeof(*zero_baseline));
+    CHECK(zero_baseline != NULL);
+    if (zero_baseline)
+    {
+        CHECK(test_sample_open_code(zero_baseline, 1, 1));
+        CHECK(test_sample_collect(zero_baseline));
+        CHECK(tp_retirement_samples_begin_export(&zero_baseline->samples));
+        FILE* shard_file = tmpfile();
+        TpRetirementShard shard;
+        CHECK(shard_file && tp_retirement_samples_write_shard(&zero_baseline->samples, shard_file, &shard));
+        CHECK(shard.records == 120 && tp_retirement_samples_finish(&zero_baseline->samples));
+        char sample_line[TP_RETIREMENT_SAMPLE_LINE_CAP];
+        CHECK(shard_file && fseek(shard_file, 0, SEEK_SET) == 0 &&
+              fgets(sample_line, sizeof(sample_line), shard_file) != NULL &&
+              strstr(sample_line, "generated_code_bytes") == NULL);
+        if (shard_file) CHECK(fclose(shard_file) == 0);
+        test_sample_close(zero_baseline);
+        free(zero_baseline);
+    }
     CHECK(tp_retirement_samples_count(100000, 60) == UINT64_C(12000000));
     CHECK(tp_retirement_samples_count(77184, 254) == UINT64_C(39209472));
     CHECK(tp_retirement_samples_count(77791, 254) == UINT64_C(39517828));
@@ -240,7 +295,7 @@ static void test_retirement_samples(char const* root)
             TpRetirementSamples bad;
             FILE* empty = tmpfile();
             CHECK(empty != NULL);
-            if (failure == 0) test->metrics[0] = 4;
+            if (failure == 0) test->metrics[0] = 8;
             if (failure == 1) test->metrics[1] |= TP_RETIREMENT_SAMPLE_RUNTIME;
             if (failure == 2) CHECK(fputs("old samples", empty) >= 0 && fflush(empty) == 0);
             CHECK(!tp_retirement_samples_init(&bad, &test->transcript, failure == 3 ? test->stream : empty,

@@ -271,9 +271,11 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
             fstat(output_directory, &output_root) == 0 && S_ISDIR(output_root.st_mode) &&
             output_root.st_uid == geteuid() && !(output_root.st_mode & 0022) &&
             fstatat(output_directory, command->artifact, &artifact, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT &&
-            !!command->code_section_bytes == !!(samples->rows[invocation.dense].metrics & TP_RETIREMENT_SAMPLE_CODE) &&
-            (command->code_section_bytes ? tp_retirement_digest(command->code_section_sha256) :
-                                          command->code_section_sha256 == NULL);
+            ((samples->rows[invocation.dense].metrics & (TP_RETIREMENT_SAMPLE_CODE |
+                TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE)) ?
+                command->code_section_sha256 != NULL : !command->code_section_bytes) &&
+            (command->code_section_sha256 ? tp_retirement_digest(command->code_section_sha256) :
+                                             !command->code_section_bytes);
     if (ok && invocation.kind)
         ok = command->artifact == NULL && !command->code_section_bytes && !command->code_section_sha256;
     TpProcessObservation observed = {0};
@@ -310,7 +312,7 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
         TpRetirementArtifact facts;
         ok = tp_retirement_artifact_file(output, &facts) && facts.file_bytes == bytes &&
             !strcmp(facts.file_sha256, output_digest) && facts.code_bytes == command->code_section_bytes &&
-            (!facts.code_bytes || !strcmp(facts.code_sha256, command->code_section_sha256));
+            (!command->code_section_sha256 || !strcmp(facts.code_sha256, command->code_section_sha256));
     }
     if (output >= 0 && close(output) != 0) ok = 0;
     if (ok)

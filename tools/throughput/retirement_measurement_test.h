@@ -32,6 +32,7 @@ static int test_retirement_measurement_child(int argc, char** argv)
                     FILE* output = fopen(argv[3], "wb");
                     unsigned char artifact[1024];
                     unsigned count = test_artifact_fixture(artifact, 1, 1);
+                    if (!strcmp(argv[4], "zero-code")) test_artifact_put(artifact, 136, 2, 8);
                     ok = output && (!strcmp(argv[4], "wrong") ? fputs(bytes, output) >= 0 :
                         fwrite(artifact, 1, count, output) == count);
                     if (output && fclose(output) != 0) ok = 0;
@@ -237,6 +238,101 @@ static void test_retirement_measurement(char const* executable_path, char const*
     CHECK(unlinkat(cwd, "child.log", 0) == 0);
     CHECK(unlinkat(cwd, "artifact.bin", 0) == 0);
     test_sample_close(&test);
+
+    /* The candidate may emit a valid artifact with no executable section.
+     * Bind the empty code digest and retain the actual zero in the transcript. */
+    unsigned char zero_artifact[1024];
+    unsigned zero_bytes = test_artifact_fixture(zero_artifact, 1, 1);
+    test_artifact_put(zero_artifact, 136, 2, 8);
+    char zero_artifact_sha[65], empty_code_sha[65];
+    sha256_init(&hash); sha256_add(&hash, zero_artifact, zero_bytes);
+    sha256_finish_hex(&hash, zero_artifact_sha);
+    sha256_init(&hash); sha256_finish_hex(&hash, empty_code_sha);
+    CHECK(test_sample_open(&test, 1));
+    test.transcript.cpu = tp_first_allowed_cpu();
+    for (unsigned variant = 0; variant < 2; ++variant)
+    {
+        CHECK(tp_retirement_execution_peek(&test.execution, &invocation) == TP_RETIREMENT_NEXT_READY &&
+              invocation.variant == variant && !invocation.kind);
+        arguments[4] = variant ? "zero-code" : "ok";
+        command.kind = 0;
+        command.row = invocation.row;
+        command.variant = variant;
+        command.artifact = "artifact.bin";
+        command.code_section_bytes = variant ? 0 : 13;
+        command.code_section_sha256 = variant ? empty_code_sha : expected_output;
+        command.output_sha256 = variant ? zero_artifact_sha : expected_artifact;
+        CHECK(tp_retirement_command_hash(&command, command_digest));
+        int zero_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        TpProcessInputs zero_inputs = {binary, cwd, zero_log, environment};
+        TpRetirementMeasurementResult zero_result;
+        CHECK(zero_log >= 3 && tp_retirement_measurement_run(&test.samples, &command, &executable,
+                                                             &zero_inputs, cwd, &zero_result));
+        CHECK(zero_result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE &&
+              zero_result.output_bytes == zero_bytes);
+        if (zero_log >= 0) CHECK(close(zero_log) == 0);
+        CHECK(unlinkat(cwd, "child.log", 0) == 0 && unlinkat(cwd, "artifact.bin", 0) == 0);
+    }
+    char first_record[TP_RETIREMENT_EXECUTION_LINE_CAP];
+    CHECK(fseek(test.stream, 0, SEEK_SET) == 0);
+    CHECK(fgets(first_record, sizeof(first_record), test.stream) != NULL &&
+          fgets(first_record, sizeof(first_record), test.stream) != NULL &&
+          strstr(first_record, "\"code_section_bytes\":0,\"code_section_sha256\":\"") != NULL &&
+          strstr(first_record, empty_code_sha) != NULL);
+    test_sample_close(&test);
+    arguments[4] = "ok";
+
+    /* With a parsed zero-byte baseline, a nonzero candidate remains in the
+     * authenticated transcript while the numeric code ratio is absent. */
+    CHECK(test_sample_open_code(&test, 1, 1));
+    test.transcript.cpu = tp_first_allowed_cpu();
+    for (unsigned variant = 0; variant < 2; ++variant)
+    {
+        CHECK(tp_retirement_execution_peek(&test.execution, &invocation) == TP_RETIREMENT_NEXT_READY &&
+              invocation.variant == variant && !invocation.kind);
+        arguments[4] = variant ? "ok" : "zero-code";
+        command.kind = 0;
+        command.row = invocation.row;
+        command.variant = variant;
+        command.artifact = "artifact.bin";
+        command.code_section_bytes = variant ? 13 : 0;
+        command.code_section_sha256 = variant ? expected_output : empty_code_sha;
+        command.output_sha256 = variant ? expected_artifact : zero_artifact_sha;
+        CHECK(tp_retirement_command_hash(&command, command_digest));
+        int zero_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        TpProcessInputs zero_inputs = {binary, cwd, zero_log, environment};
+        TpRetirementMeasurementResult zero_result;
+        CHECK(zero_log >= 3 && tp_retirement_measurement_run(&test.samples, &command, &executable,
+                                                             &zero_inputs, cwd, &zero_result));
+        CHECK(zero_result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE);
+        if (zero_log >= 0) CHECK(close(zero_log) == 0);
+        CHECK(unlinkat(cwd, "child.log", 0) == 0 && unlinkat(cwd, "artifact.bin", 0) == 0);
+    }
+    test_sample_close(&test);
+    arguments[4] = "ok";
+
+    /* A zero count with an invented, nonempty code digest cannot pass the
+     * independent artifact inspection or advance the sample cursor. */
+    CHECK(test_sample_open(&test, 1));
+    test.transcript.cpu = tp_first_allowed_cpu();
+    arguments[4] = "zero-code";
+    command.kind = command.variant = command.row = 0;
+    command.artifact = "artifact.bin";
+    command.code_section_bytes = 0;
+    command.code_section_sha256 = expected_output;
+    command.output_sha256 = zero_artifact_sha;
+    CHECK(tp_retirement_command_hash(&command, command_digest));
+    int bad_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    TpProcessInputs bad_inputs = {binary, cwd, bad_log, environment};
+    TpRetirementMeasurementResult bad_result;
+    CHECK(bad_log >= 3 && !tp_retirement_measurement_run(&test.samples, &command, &executable,
+                                                         &bad_inputs, cwd, &bad_result));
+    CHECK(bad_result.status == TP_RETIREMENT_MEASUREMENT_OUTPUT_INVALID &&
+          test.samples.failed && !test.execution.sequence);
+    if (bad_log >= 0) CHECK(close(bad_log) == 0);
+    CHECK(unlinkat(cwd, "child.log", 0) == 0 && unlinkat(cwd, "artifact.bin", 0) == 0);
+    test_sample_close(&test);
+    arguments[4] = "ok";
 
     /* A failed command cannot advance or restart the same attempt. All output
      * remains present for the service's failure retention/sealing path. */

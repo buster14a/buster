@@ -12,6 +12,9 @@
 
 #define TP_RETIREMENT_SAMPLE_CODE 1u
 #define TP_RETIREMENT_SAMPLE_RUNTIME 2u
+/* Parsed deterministic code with a zero baseline has no ratio denominator.
+ * Its candidate observation still belongs in the execution transcript. */
+#define TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE 4u
 #define TP_RETIREMENT_SAMPLE_RECORD_BYTES 72u
 #define TP_RETIREMENT_SAMPLE_LINE_CAP 1024u
 #define TP_RETIREMENT_SAMPLE_PARTITION_RECORDS UINT64_C(16777216)
@@ -113,7 +116,10 @@ static int tp_retirement_samples_init(TpRetirementSamples* samples, TpRetirement
     for (unsigned row = 0; ok && row < rows; ++row)
     {
         int applicable = runtime < execution->runtime_count && execution->runtime_rows[runtime] == row;
-        ok = !(metrics[row] & ~(TP_RETIREMENT_SAMPLE_CODE | TP_RETIREMENT_SAMPLE_RUNTIME)) &&
+        ok = !(metrics[row] & ~(TP_RETIREMENT_SAMPLE_CODE | TP_RETIREMENT_SAMPLE_RUNTIME |
+                                TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE)) &&
+             !((metrics[row] & TP_RETIREMENT_SAMPLE_CODE) &&
+               (metrics[row] & TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE)) &&
              !!(metrics[row] & TP_RETIREMENT_SAMPLE_RUNTIME) == applicable;
         if (applicable) ++runtime;
     }
@@ -182,7 +188,14 @@ static int tp_retirement_samples_append(TpRetirementSamples* samples,
     if (ok) ok = tp_retirement_execution_record(checked, sizeof(checked), &invocation, observed,
         process, output, transcript->job, transcript->attempt, transcript->boot, transcript->cpu) > 0;
     if (ok && !invocation.kind)
-        ok = !!output->code_section_bytes == !!(samples->rows[invocation.dense].metrics & TP_RETIREMENT_SAMPLE_CODE);
+    {
+        unsigned metrics = samples->rows[invocation.dense].metrics;
+        ok = (metrics & TP_RETIREMENT_SAMPLE_CODE) ?
+            output->code_section_sha256 != NULL && (invocation.variant || output->code_section_bytes) :
+            (metrics & TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE) ?
+            output->code_section_sha256 != NULL && (invocation.variant || !output->code_section_bytes) :
+            !output->code_section_bytes && output->code_section_sha256 == NULL;
+    }
     uint64_t wall = ok ? observed->finished_ns - observed->started_ns : 0;
     uint64_t rss = ok && !invocation.kind ? (uint64_t)process->peak_rss_bytes : 0;
     uint64_t code = ok && !invocation.kind ? output->code_section_bytes : 0;
@@ -242,7 +255,10 @@ static int tp_retirement_sample_values(uint64_t const values[9], unsigned metric
         ok = values[variant] && values[variant] <= UINT64_C(86400000000000) &&
             values[2 + variant] && values[2 + variant] <= UINT64_C(9007199254740991);
         ok = ok && ((metrics & TP_RETIREMENT_SAMPLE_CODE) ?
-            values[4 + variant] && values[4 + variant] <= INT64_MAX : !values[4 + variant]);
+            (variant || values[4 + variant]) && values[4 + variant] <= INT64_MAX :
+            (metrics & TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE) ?
+            (variant || !values[4 + variant]) && values[4 + variant] <= INT64_MAX :
+            !values[4 + variant]);
         ok = ok && ((metrics & TP_RETIREMENT_SAMPLE_RUNTIME) ?
             values[6 + variant] && values[6 + variant] <= UINT64_C(86400000000000) : !values[6 + variant]);
     }
@@ -275,7 +291,8 @@ static size_t tp_retirement_sample_record(char* bytes, size_t capacity, unsigned
     size_t result = 0;
     char wall[2][32], runtime[2][32], code_text[128] = "", runtime_text[128] = "";
     int ok = bytes && capacity && capacity <= TP_RETIREMENT_SAMPLE_LINE_CAP &&
-        !(metrics & ~(TP_RETIREMENT_SAMPLE_CODE | TP_RETIREMENT_SAMPLE_RUNTIME)) &&
+        !(metrics & ~(TP_RETIREMENT_SAMPLE_CODE | TP_RETIREMENT_SAMPLE_RUNTIME |
+                      TP_RETIREMENT_SAMPLE_ZERO_BASELINE_CODE)) &&
         tp_retirement_sample_values(values, metrics);
     for (unsigned variant = 0; ok && variant < 2; ++variant)
     {

@@ -723,6 +723,11 @@ whose whole-file hash nevertheless matches the supplied oracle. Format tests
 cover both architectures, every truncated fixture prefix, reversed section
 order, overlap, empty code, PE padding and the actual host test executable.
 Independent Python checks decode the saved fixtures without this C reader.
+For a parsed zero-byte candidate section, the invocation retains the empty
+SHA-256 and the paired numeric record retains `0` against a positive baseline.
+If the baseline has zero code bytes, both parsed code observations remain in
+the invocation transcript but the numeric code ratio is absent because it has
+no denominator. Native fixtures exercise both cases with actual child output.
 
 The encoder emits the existing canonical JSONL invocation schema in at most
 8,192 bytes. It checks successful child status, required hashes, exact interval

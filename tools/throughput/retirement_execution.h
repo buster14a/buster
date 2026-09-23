@@ -323,9 +323,11 @@ static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
             invocation->warmup == -1 && invocation->position >= 0 && invocation->position < 2 :
             invocation->round == -1 && invocation->pair == -1 && invocation->position == -1 &&
             invocation->warmup >= 0 && (unsigned)invocation->warmup < TP_RETIREMENT_WARMUPS;
-        ok = ok && (output->code_section_bytes ? !invocation->kind &&
-            output->code_section_bytes <= INT64_MAX && tp_retirement_digest(output->code_section_sha256) :
-            output->code_section_sha256 == NULL);
+        ok = ok && (output->code_section_sha256 ? !invocation->kind &&
+            output->code_section_bytes <= INT64_MAX && tp_retirement_digest(output->code_section_sha256) &&
+            (output->code_section_bytes || !strcmp(output->code_section_sha256,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")) :
+            !output->code_section_bytes);
         ok = ok && (invocation->kind || (isfinite(process->peak_rss_bytes) &&
             process->peak_rss_bytes > 0 && process->peak_rss_bytes <= 9007199254740991.0 &&
             floor(process->peak_rss_bytes) == process->peak_rss_bytes));
@@ -342,7 +344,7 @@ static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
     {
         char code_bytes[32] = "null", code_hash[68] = "null", rss[32] = "null";
         char round[16] = "null", pair[16] = "null", warmup[16] = "null", position[16] = "null";
-        if (output->code_section_bytes)
+        if (output->code_section_sha256)
         {
             snprintf(code_bytes, sizeof(code_bytes), "%" PRIu64, output->code_section_bytes);
             snprintf(code_hash, sizeof(code_hash), "\"%s\"", output->code_section_sha256);
