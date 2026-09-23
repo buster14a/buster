@@ -337,6 +337,16 @@ int main(void)
         struct stat info = {0};
         BQ_PREP_CHECK(fstatat(subject, "verification-source", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
 
+        int copied_src = source >= 0 ? openat(source, "src", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        BQ_PREP_CHECK(copied_src >= 0 && fchmod(copied_src, 0700) == 0);
+        int planted = copied_src >= 0 ? openat(copied_src, "extra.c", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
+        BQ_PREP_CHECK(planted >= 0 && close(planted) == 0 && fchmod(copied_src, 0500) == 0 &&
+                      !bq_retirement_verify_subject(input, subject, source,
+                                                    string_from_pointer(subjects[0].commit), &verified_base));
+        BQ_PREP_CHECK(copied_src >= 0 && fchmod(copied_src, 0700) == 0 &&
+                      unlinkat(copied_src, "extra.c", 0) == 0 && fchmod(copied_src, 0500) == 0);
+        if (copied_src >= 0) close(copied_src);
+
         char source_path[512], directory_path[512], old_path[512], manifest_path[512];
         int length = snprintf(source_path, sizeof(source_path), "%s/sources/%s/src/main.c", installed, subjects[0].commit);
         BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(source_path));
@@ -348,7 +358,29 @@ int main(void)
                       bq_prep_test_write(source_path, "int a;\n") && chmod(directory_path, 0500) == 0);
         BQ_PREP_CHECK(!bq_retirement_verify_subject(input, subject, source,
                                                     string_from_pointer(subjects[0].commit), &verified_base));
+        BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && unlink(old_path) == 0 &&
+                      chmod(directory_path, 0500) == 0);
         BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, output, &request, pinned, &preparation) == BQ_OK);
+
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && bq_prep_test_write(old_path, "extra") &&
+                      chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && unlink(old_path) == 0 &&
+                      chmod(directory_path, 0500) == 0);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && mkdir(old_path, 0500) == 0 &&
+                      chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && rmdir(old_path) == 0 &&
+                      symlink("main.c", old_path) == 0 && chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && unlink(old_path) == 0 &&
+                      chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned, &preparation) == BQ_OK);
 
         BQ_PREP_CHECK(chmod(source_path, 0600) == 0);
         int altered = open(source_path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);

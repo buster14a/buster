@@ -2,6 +2,8 @@
  *
  * bq_retirement_preflight checks the compiled recipe's inventory pin, both
  * complete manifests and their source bytes, and two-copy storage capacity.
+ * bq_retirement_tree_closed checks the entire installed/copied directory
+ * closure independently of the manifest paths.
  * bq_retirement_verify_subject makes a second independent copy, checks both
  * copies against that same pin, and removes the temporary copy by inode.
  * bq_retirement_preparation_record retains the verified identities for the
@@ -10,11 +12,116 @@
  * Included from workspace.c after its descriptor and cleanup helpers.
  */
 #include "retirement_prepare.h"
+#include <dirent.h>
 #include <sys/statvfs.h>
 
 #define BQ_RETIREMENT_INVENTORY_CAP 4096u
 #define BQ_RETIREMENT_PREPARATION_RECORD_CAP 1024u
 #define BQ_RETIREMENT_COPY_OVERHEAD (1024ull * 1024ull)
+
+typedef struct BqRetirementWalk
+{
+    DIR* stream;
+    int parent;
+    char name[BQ_PATH_CAP + 1];
+    dev_t device;
+    ino_t inode;
+    u32 path_bytes;
+    u32 depth;
+} BqRetirementWalk;
+
+/* A manifest must enumerate the entire installed tree. Verify the directory
+ * closure independently of the per-path manifest scan, using held descriptors
+ * and checking names again before releasing each directory. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_tree_closed(int root, char const* manifest_name,
+                                                   BqRetirementSource const* expected)
+{
+    BqRetirementWalk* stack = calloc(BQ_CLEANUP_DEPTH_CAP + 1, sizeof(*stack));
+    struct stat root_info = {0};
+    bool ok = stack && fstat(root, &root_info) == 0 && S_ISDIR(root_info.st_mode);
+    u32 active = 0, files = 0, directories = 0, manifests = 0;
+    if (ok)
+    {
+        int held = fcntl(root, F_DUPFD_CLOEXEC, 3);
+        stack[0].stream = held >= 0 ? fdopendir(held) : NULL;
+        if (!stack[0].stream && held >= 0) close(held);
+        ok = stack[0].stream != NULL;
+        stack[0].parent = -1;
+        stack[0].device = root_info.st_dev;
+        stack[0].inode = root_info.st_ino;
+        directories = 1;
+        active = ok ? 1 : 0;
+    }
+    while (ok && active)
+    {
+        BqRetirementWalk* current = &stack[active - 1];
+        errno = 0;
+        struct dirent* entry = readdir(current->stream);
+        if (!entry)
+        {
+            ok = errno == 0;
+            if (ok && current->parent >= 0)
+            {
+                struct stat named = {0};
+                ok = fstatat(current->parent, current->name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+                     S_ISDIR(named.st_mode) && named.st_dev == current->device && named.st_ino == current->inode;
+            }
+            if (closedir(current->stream) != 0) ok = false;
+            current->stream = NULL;
+            active -= 1;
+        }
+        else if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
+        {
+            size_t length = strlen(entry->d_name);
+            u32 path_bytes = current->path_bytes + (current->depth ? 1u : 0u) + (u32)length;
+            struct stat named = {0};
+            int parent = dirfd(current->stream);
+            bool manifest = !current->depth && !strcmp(entry->d_name, manifest_name);
+            ok = length > 0 && length <= BQ_PATH_CAP && (manifest || path_bytes <= expected->max_path) &&
+                 fstatat(parent, entry->d_name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 named.st_dev == root_info.st_dev &&
+                 (named.st_uid == 0 || named.st_uid == geteuid()) && (named.st_mode & 0222) == 0;
+            if (ok && S_ISDIR(named.st_mode))
+            {
+                int child = openat(parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                struct stat held_info = {0};
+                ok = current->depth + 1 <= expected->max_depth && active <= BQ_CLEANUP_DEPTH_CAP &&
+                     ++directories <= expected->directories && child >= 0 && fstat(child, &held_info) == 0 &&
+                     held_info.st_dev == named.st_dev && held_info.st_ino == named.st_ino;
+                if (ok)
+                {
+                    BqRetirementWalk* next = &stack[active];
+                    next->stream = fdopendir(child);
+                    ok = next->stream != NULL;
+                    if (ok)
+                    {
+                        next->parent = parent;
+                        memcpy(next->name, entry->d_name, length + 1);
+                        next->device = named.st_dev;
+                        next->inode = named.st_ino;
+                        next->path_bytes = path_bytes;
+                        next->depth = current->depth + 1;
+                        active += 1;
+                    }
+                }
+                if (!ok && child >= 0 && (!stack[active].stream)) close(child);
+            }
+            else if (ok && S_ISREG(named.st_mode) && named.st_nlink == 1)
+            {
+                if (manifest) manifests += 1;
+                else files += 1;
+                ok = files <= expected->entries && manifests <= 1;
+            }
+            else ok = false;
+        }
+    }
+    while (active)
+    {
+        if (closedir(stack[--active].stream) != 0) ok = false;
+    }
+    free(stack);
+    return ok && files == expected->entries && directories == expected->directories && manifests == 1;
+}
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_hex(String8 input, u32 size)
 {
@@ -237,7 +344,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_scan(int root, char const* manifest_name,
             previous = path;
         }
     }
-    ok = ok && observed->entries > 0 && offset == manifest.length;
+    ok = ok && observed->entries > 0 && offset == manifest.length &&
+         bq_retirement_tree_closed(root, manifest_name, observed);
     if (ok)
     {
         struct stat named = {0};
