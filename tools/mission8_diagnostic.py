@@ -36,7 +36,7 @@ def generate(root):
     src = root / "sources"
     src.mkdir(parents=True, exist_ok=True)
     header = ['#ifndef M8_CASES_H', '#define M8_CASES_H',
-              '_Static_assert(__CHAR_BIT__ == 8, "M8 byte model");',
+              '_Static_assert((unsigned char)255 == 255 && (unsigned char)256 == 0, "M8 byte model");',
               '_Static_assert(sizeof(short) == 2 && sizeof(int) == 4, "M8 integer model");',
               '_Static_assert(sizeof(long) == 8 && sizeof(void *) == 8, "M8 LP64 model");',
               '_Static_assert(sizeof(unsigned long long) == 8, "M8 observer width");',
@@ -121,11 +121,15 @@ class Runner:
 
     def command(self, name, argv, timeout=60):
         rec, out, err = self.run(name, argv, timeout)
-        return self.check(name, rec['status'] == 0 and not rec['timed_out'], '' if rec['status'] == 0 else err[-1800:])
+        return self.check(name, rec['status'] == 0 and not rec['timed_out'], '' if rec['status'] == 0 else (out + err)[-1800:])
 
     def reject(self, name, argv, marker):
         rec, out, err = self.run(name, argv)
-        return self.check(name, 0 < rec['status'] < 126 and not rec['timed_out'] and marker in err, err[-800:])
+        diagnostic = out + err
+        matched = marker in diagnostic and 'static assertion' in diagnostic
+        if self.phase == 'buster' and marker == 'M8_not_an_ICE':
+            matched = 'nonice.c:' in diagnostic and 'static assertion expression is not an integer constant expression' in diagnostic
+        return self.check(name, 0 < rec['status'] < 126 and not rec['timed_out'] and matched, diagnostic[-800:])
 
     def execute(self, name, exe, routes):
         rec, out, err = self.run(name, [exe], 10)
