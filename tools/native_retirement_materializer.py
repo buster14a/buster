@@ -121,6 +121,7 @@ ARCHIVED_FRONTENDS = ("local-backed-canonical", "direct-ssa")
 ARCHIVED_PICS = ("0", "1")
 ARCHIVED_ALLOCATORS = ("mir-stack", "fast", "quality")
 SUPPORT_CONTRACT_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
+NEXT_SUPPORT_CONTRACT_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
 NETWORK_PROVENANCE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*:|[^/\\:@]+@[^/\\:]+:|[^/\\:]+:[^/\\].*)",
     re.IGNORECASE,
@@ -882,7 +883,8 @@ def _verify_archived_fixture_inputs(replay, source_root):
     contract = Path(source_root) / "docs" / "native-retirement-support-v1.tsv"
     contract_data = _read_no_follow(contract, "support contract")
     contract_sha256 = hashlib.sha256(contract_data).hexdigest()
-    if not contract_data or contract_sha256 != SUPPORT_CONTRACT_SHA256:
+    if not contract_data or contract_sha256 not in (
+            SUPPORT_CONTRACT_SHA256, NEXT_SUPPORT_CONTRACT_SHA256):
         _fail("archived replay support contract identity mismatch")
     approved = {}
     try:
