@@ -175,6 +175,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_group_reaping(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
 {
+    u64 absolute = 0;
+    BQ_CHECK(!bq_worker_execution_deadline(1, 0, &absolute));
+    BQ_CHECK(!bq_worker_execution_deadline(UINT64_MAX, 1, &absolute));
+    BQ_CHECK(!bq_worker_execution_deadline(0, 1000, NULL));
+    BQ_CHECK(bq_worker_execution_deadline(200, 1, &absolute) && absolute == 201);
+    BQ_CHECK(bq_worker_execution_deadline(200, 1001, &absolute) && absolute == 202);
+    BQ_CHECK(bq_worker_execution_deadline(0, 60ull * 60 * 1000000, &absolute) && absolute == 3600000);
+
     struct sigaction action = {0}, prior = {0};
     action.sa_handler = bq_test_alarm_handler;
     sigemptyset(&action.sa_mask);
