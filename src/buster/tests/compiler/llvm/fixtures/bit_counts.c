@@ -1,5 +1,5 @@
 // Compiled by Buster into bitcode; the independent expected answers are in
-// basic_c_llvm_bit_counts_main.c.
+// bit_counts_main.c.
 unsigned bit_counts32(unsigned value)
 {
     unsigned count = (unsigned)__builtin_popcount(value);

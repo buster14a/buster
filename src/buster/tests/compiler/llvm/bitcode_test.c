@@ -116,7 +116,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
     LlvmBitcodeConsumerFixture fixtures[] = {
         {.source = S8("tests/basic_c_llvm_scalars.c")},
         {.source = S8("tests/basic_c_llvm_layout.c")},
-        {.source = S8("tests/basic_c_llvm_bit_counts.c"), .caller = S8("tests/basic_c_llvm_bit_counts_main.c")},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/bit_counts.c"),
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/bit_counts_main.c")},
 #if BUSTER_CPU_ARCH_X86_64
         {.source = S8("tests/basic_c_llvm_aggregate_abi_callee.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_caller.c")},
         {.source = S8("tests/basic_c_llvm_aggregate_abi_caller.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_callee.c")},
@@ -129,7 +130,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
         String8 output = buster_test_temporary_path(arena, S8("buster-llvm-consumer"), S8(".bc"));
-        bool bit_counts = string_equal(fixtures[fixture].source, S8("tests/basic_c_llvm_bit_counts.c"));
+        bool bit_counts = string_equal(fixtures[fixture].source, S8("src/buster/tests/compiler/llvm/fixtures/bit_counts.c"));
         String8 command[5];
         u32 command_count = 0;
         command[command_count++] = S8("-emit-llvm");
