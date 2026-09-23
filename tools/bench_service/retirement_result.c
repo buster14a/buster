@@ -247,6 +247,8 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_file(TpRetirementStore const* store,
                 fstat(fd, &before) == 0 && S_ISREG(before.st_mode) &&
                 before.st_dev == file->device && before.st_ino == file->inode &&
                 before.st_uid == file->owner && before.st_uid == geteuid() &&
+                before.st_ctim.tv_sec == file->changed.tv_sec &&
+                before.st_ctim.tv_nsec == file->changed.tv_nsec &&
                 before.st_nlink == 1 && (before.st_mode & 0777) == 0400 &&
                 before.st_size >= 0 && (uint64_t)before.st_size == file->bytes &&
                 named.st_dev == before.st_dev && named.st_ino == before.st_ino;
@@ -341,6 +343,9 @@ int tp_retirement_store_publish(TpRetirementStore* store, TpRetirementPending* p
         published.parent_device = parent_info.st_dev;
         published.parent_inode = parent_info.st_ino;
         published.owner = temporary.st_uid;
+        valid = fstatat(parent, leaf, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+                named.st_dev == published.device && named.st_ino == published.inode;
+        if (valid) published.changed = named.st_ctim;
     }
     if (parent >= 0 && close(parent) != 0) valid = 0;
     if (valid) valid = tp_retirement_store_file(store, &published, NULL);
@@ -440,16 +445,41 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_text(char const* bytes, size
     return valid;
 }
 
+/* A restarted consumer has no producer-side inventory. Reconstruct each
+ * descriptor from the named, independently opened inode before replaying the
+ * existing receipt parser. Never use bundle bytes as the authority reference. */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_reopen_file(TpRetirementStore* store, char const* path,
+    char const* digest, uint64_t maximum, TpRetirementStoredFile* reopened, uint64_t* lines);
+
+/* The private authority binds inode closure at sealing time. A digest of
+ * candidate file bytes alone cannot distinguish an unlinked/replaced inode. */
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_identity(Sha256* hash, TpRetirementStoredFile const* file)
+{
+    char record[512];
+    int length = snprintf(record, sizeof(record), "%s\n%s\n%" PRIu64 "\n%ju\n%ju\n%ju\n%ju\n%ju\n%jd\n%jd\n",
+        file->path, file->sha256, file->bytes, (uintmax_t)file->device,
+        (uintmax_t)file->inode, (uintmax_t)file->parent_device,
+        (uintmax_t)file->parent_inode, (uintmax_t)file->owner,
+        (intmax_t)file->changed.tv_sec, (intmax_t)file->changed.tv_nsec);
+    int valid = length > 0 && (size_t)length < sizeof(record);
+    if (valid) sha256_add(hash, record, (u64)length);
+    return valid;
+}
+
 /* Reject self-consistent but unbound candidate receipts before writing any
  * private service reference. This accepts only the existing encoder's sorted,
  * unescaped JSON and joins every shard to a previously sealed store entry. */
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* store,
-    char const* job, uint64_t attempt, char const* plan, char const* context)
+    char const* job, uint64_t attempt, char const* plan, char const* context,
+    int reopen_shards, char identity_sha256[65])
 {
     TpRetirementStoredFile const* receipt = NULL;
     for (unsigned i = 0; store && i < store->count; ++i)
         if (!strcmp(store->files[i].path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH)) receipt = store->files + i;
     int valid = receipt && receipt->bytes && receipt->bytes <= UINT64_C(1048576);
+    Sha256 identity;
+    sha256_init(&identity);
+    if (valid) valid = tp_retirement_store_identity(&identity, receipt);
     char leaf[193] = {0};
     struct stat parent_info = {0};
     int parent = valid ? tp_retirement_store_parent(store, receipt->path, leaf, &parent_info) : -1;
@@ -506,7 +536,8 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
     unsigned shards = 0;
     uint64_t previous_records = 32768;
     char previous[TP_RETIREMENT_STORE_PATH_BYTES + 1] = {0};
-    while (valid && offset < used && bytes[offset] == '{' && shards < store->count)
+    while (valid && offset < used && bytes[offset] == '{' &&
+           shards < (reopen_shards ? store->capacity - 1 : store->count))
     {
         uint64_t shard_bytes = 0, shard_records = 0;
         char path[TP_RETIREMENT_STORE_PATH_BYTES + 1], shard_digest[65];
@@ -526,18 +557,37 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
                 shard_bytes && shard_bytes <= TP_RETIREMENT_STORE_FILE_BYTES &&
                 shard_records && shard_records <= 32768 &&
                 records <= invocations && shard_records <= invocations - records;
+        if (valid && reopen_shards)
+        {
+            TpRetirementStoredFile* entry = store->files + store->count;
+            uint64_t lines = 0;
+            valid = tp_retirement_store_reopen_file(store, path, shard_digest, shard_bytes, entry, &lines) &&
+                    entry->bytes == shard_bytes && lines == shard_records &&
+                    store->total <= TP_RETIREMENT_STORE_TOTAL_BYTES - entry->bytes;
+            if (valid)
+            {
+                ++store->count;
+                store->total += entry->bytes;
+            }
+        }
         unsigned matches = 0;
+        TpRetirementStoredFile const* matched = NULL;
         for (unsigned i = 0; valid && i < store->count; ++i)
             if (!strcmp(store->files[i].path, path) && store->files[i].bytes == shard_bytes &&
                 !strcmp(store->files[i].sha256, shard_digest))
             {
                 uint64_t lines = 0;
-                if (tp_retirement_store_file(store, store->files + i, &lines) && lines == shard_records)
+                if ((reopen_shards || tp_retirement_store_file(store, store->files + i, &lines)) &&
+                    (reopen_shards || lines == shard_records))
+                {
                     ++matches;
+                    matched = store->files + i;
+                }
             }
         valid = valid && matches == 1;
         if (valid)
         {
+            valid = tp_retirement_store_identity(&identity, matched);
             records += shard_records;
             previous_records = shard_records;
             strcpy(previous, path);
@@ -549,6 +599,7 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_receipt_validate(TpRetirementStore* 
     valid = valid && shards && records == invocations &&
             tp_retirement_store_receipt_literal(bytes, used, &offset, "],\"version\":1}\n") &&
             offset == used && tp_retirement_store_validate(store);
+    if (valid && identity_sha256) sha256_finish_hex(&identity, (char8*)identity_sha256);
     if (bytes != MAP_FAILED) munmap(bytes, (size_t)receipt->bytes);
     return valid;
 }
@@ -559,13 +610,14 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_authority_bytes(TpRetirementReceiptA
     int valid = authority && tp_retirement_store_token(authority->job) && authority->attempt &&
                 tp_retirement_store_digest(authority->plan_sha256) &&
                 tp_retirement_store_digest(authority->context_sha256) &&
-                tp_retirement_store_digest(authority->receipt_sha256);
+                tp_retirement_store_digest(authority->receipt_sha256) &&
+                tp_retirement_store_digest(authority->identity_sha256);
     int count = valid ? snprintf(name, TP_RETIREMENT_STORE_PATH_BYTES + 1,
                                  "authority-%s-%" PRIu64 ".txt", authority->job, authority->attempt) : -1;
     valid = valid && count > 0 && count <= (int)TP_RETIREMENT_STORE_PATH_BYTES - 8;
-    count = valid ? snprintf(body, 512, "BQ-RETIREMENT-AUTHORITY-V1\n%s\n%" PRIu64 "\n%s\n%s\n%s\n",
+    count = valid ? snprintf(body, 512, "BQ-RETIREMENT-AUTHORITY-V2\n%s\n%" PRIu64 "\n%s\n%s\n%s\n%s\n",
         authority->job, authority->attempt, authority->plan_sha256,
-        authority->context_sha256, authority->receipt_sha256) : -1;
+        authority->context_sha256, authority->receipt_sha256, authority->identity_sha256) : -1;
     valid = valid && count > 0 && count < 512;
     if (length) *length = valid ? (size_t)count : 0;
     return valid;
@@ -592,9 +644,10 @@ int tp_retirement_store_receipt_authority(TpRetirementStore* store, int authorit
     TpRetirementStoredFile const* receipt = NULL;
     for (unsigned i = 0; valid && i < store->count; ++i)
         if (!strcmp(store->files[i].path, path)) receipt = store->files + i;
-    valid = valid && receipt &&
-            tp_retirement_store_receipt_validate(store, job, attempt, plan_sha256, context_sha256);
     if (authority) *authority = (TpRetirementReceiptAuthority){0};
+    valid = valid && receipt &&
+            tp_retirement_store_receipt_validate(store, job, attempt, plan_sha256, context_sha256,
+                0, authority->identity_sha256);
     if (valid)
     {
         strcpy(authority->job, job);
@@ -635,12 +688,13 @@ int tp_retirement_store_receipt_authority(TpRetirementStore* store, int authorit
 }
 
 BUSTER_GLOBAL_LOCAL int tp_retirement_store_reopen_file(TpRetirementStore* store, char const* path,
-                                                        char const* digest, uint64_t maximum)
+    char const* digest, uint64_t maximum, TpRetirementStoredFile* reopened, uint64_t* lines)
 {
-    struct stat info = {0};
-    int valid = store && tp_retirement_store_root(store) && tp_retirement_store_path(path) &&
-                tp_retirement_store_digest(digest) &&
-                fstatat(store->root, path, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+    char leaf[193] = {0};
+    struct stat info = {0}, directory = {0};
+    int parent = store && tp_retirement_store_digest(digest) ?
+                 tp_retirement_store_parent(store, path, leaf, &directory) : -1;
+    int valid = parent >= 0 && fstatat(parent, leaf, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
                 S_ISREG(info.st_mode) && info.st_size > 0 && (uint64_t)info.st_size <= maximum;
     if (valid)
     {
@@ -651,10 +705,13 @@ BUSTER_GLOBAL_LOCAL int tp_retirement_store_reopen_file(TpRetirementStore* store
         file.device = info.st_dev;
         file.inode = info.st_ino;
         file.owner = info.st_uid;
-        file.parent_device = store->root_identity.st_dev;
-        file.parent_inode = store->root_identity.st_ino;
-        valid = tp_retirement_store_file(store, &file, NULL);
+        file.parent_device = directory.st_dev;
+        file.parent_inode = directory.st_ino;
+        file.changed = info.st_ctim;
+        valid = tp_retirement_store_file(store, &file, lines);
+        if (valid && reopened) *reopened = file;
     }
+    if (parent >= 0 && close(parent) != 0) valid = 0;
     return valid;
 }
 
@@ -668,6 +725,7 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
                 tp_retirement_store_digest(trusted->plan_sha256) &&
                 tp_retirement_store_digest(trusted->context_sha256) &&
                 tp_retirement_store_digest(trusted->receipt_sha256) &&
+                tp_retirement_store_digest(trusted->identity_sha256) &&
                 tp_retirement_store_digest(trusted->authority_sha256) &&
                 !strcmp(trusted->job, job) && trusted->attempt == attempt &&
                 !strcmp(trusted->plan_sha256, plan_sha256) &&
@@ -684,15 +742,27 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
         valid = !strcmp(expected, trusted->authority_sha256);
     }
     TpRetirementStore result_store, private_store;
-    TpRetirementStoredFile result_file, private_file;
-    int result_open = valid && tp_retirement_store_open(&result_store, result_root, &result_file, 1);
+    TpRetirementStoredFile private_file;
+    TpRetirementStoredFile* result_files = valid ? mmap(NULL, sizeof(*result_files) * TP_RETIREMENT_STORE_FILES,
+        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    int result_open = valid && result_files != MAP_FAILED &&
+        tp_retirement_store_open(&result_store, result_root, result_files, TP_RETIREMENT_STORE_FILES);
     int private_open = result_open && tp_retirement_store_open(&private_store, authority_root, &private_file, 1);
     valid = private_open && tp_retirement_store_private_root(&result_store, &private_store);
-    if (valid) valid = tp_retirement_store_reopen_file(&private_store, name, expected, length) &&
+    if (valid) valid = tp_retirement_store_reopen_file(&private_store, name, expected, length, NULL, NULL) &&
                        tp_retirement_store_reopen_file(&result_store, TP_RETIREMENT_EXECUTION_RECEIPT_PATH,
-                                                       trusted->receipt_sha256, UINT64_C(1048576));
+                                                       trusted->receipt_sha256, UINT64_C(1048576), result_files, NULL);
+    if (valid)
+    {
+        result_store.count = 1;
+        result_store.total = result_files[0].bytes;
+        char identity[65];
+        valid = tp_retirement_store_receipt_validate(&result_store, job, attempt,
+            plan_sha256, context_sha256, 1, identity) && !strcmp(identity, trusted->identity_sha256);
+    }
     if (private_open) tp_retirement_store_close(&private_store);
     if (result_open) tp_retirement_store_close(&result_store);
+    if (result_files != MAP_FAILED) munmap(result_files, sizeof(*result_files) * TP_RETIREMENT_STORE_FILES);
     return valid;
 }
 
@@ -707,7 +777,7 @@ int tp_retirement_store_authority_matches(TpRetirementStore* store, int authorit
         if (!strcmp(store->files[i].path, path) &&
             !strcmp(store->files[i].sha256, trusted->receipt_sha256)) ++found;
     valid = valid && found == 1 &&
-            tp_retirement_store_receipt_validate(store, job, attempt, plan_sha256, context_sha256) &&
+            tp_retirement_store_receipt_validate(store, job, attempt, plan_sha256, context_sha256, 0, NULL) &&
             tp_retirement_store_authority_reopen(store->root, authority_root,
                 job, attempt, plan_sha256, context_sha256, trusted);
     if (store && !valid) store->failed = 1;
