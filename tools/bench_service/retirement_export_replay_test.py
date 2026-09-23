@@ -2,6 +2,7 @@
 """Failure-first tests for the offline retirement export handoff."""
 
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -202,16 +203,22 @@ class ExportReplayTest(unittest.TestCase):
         self.assertIn('"test_publication"', first.stdout)
         published = self.destination / "retirement-42-19.bqexport"
         self.assertEqual(published.read_bytes(), self.archive.read_bytes())
-        clean = self.root / "clean-consumer"
+        consumer = tempfile.TemporaryDirectory(prefix="retirement-independent-consumer-")
+        self.addCleanup(consumer.cleanup)
+        clean_root = Path(consumer.name)
+        clean = clean_root / "retrieval"
         clean.mkdir(mode=0o700)
         wrong = identities.copy()
         wrong[wrong.index("--export-receipt-sha256") + 1] = "c" * 64
-        second = subprocess.run(command + [str(published), str(self.root / "new-result"),
+        second = subprocess.run(command + [str(published), str(clean_root / "new-result"),
                                           "--consume-published", "--retrieval", str(clean)] + wrong,
+                                cwd=clean_root, env={"PATH": os.environ.get("PATH", ""),
+                                                     "LANG": "C"},
                                 check=False, capture_output=True, text=True)
         self.assertNotEqual(second.returncode, 0)
         self.assertIn("independently supplied digest", second.stderr)
         self.assertEqual(list(clean.iterdir()), [])
+        self.assertFalse((clean_root / "new-result").exists())
 
 
 if __name__ == "__main__":

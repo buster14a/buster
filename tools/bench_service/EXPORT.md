@@ -94,7 +94,8 @@ untouched. Real durable #510 publication is a separate operator action with
 its own approved destination and receipt. This local test copy is not a #512
 acceptance artifact.
 
-In a separate clean consumer workspace, obtain the published test object and
+In a separate clean consumer workspace with no producer working directory,
+result tree or environment inherited, obtain the published test object and
 the export and execution receipt digests through the authenticated control
 channel independently of that object. Use a reviewed service executable and an
 immutable checkout containing all referenced Git objects. Run the same script
@@ -214,42 +215,49 @@ than truncating a successful archive. Filesystem syscalls still depend on a
 responsive local filesystem; the preparation child provides the outer deadline
 for exhaustive validation and file reads.
 
-For the proposed 60-pair retirement population, 8,720,640 paired numeric
-records alone require at least 1,569,715,200 bytes at 180 bytes per record,
-before transcripts, manifests, binaries or logs. An operator must provision
-space for the retained result, sealed export, downloaded archive and clean
-replay, each independently bounded by its own copy. The larger limits here
+For the proposed 60-pair retirement population, 17,441,280 paired numeric
+records across A/A and A/B alone require at least 3,139,430,400 bytes at
+180 bytes per record, before transcripts, manifests, binaries or logs. An
+operator must provision space for every retained copy below. The larger limits
 only remove a transport ceiling; the recipe remains blocked until its complete
 producer, validators and service tests are reviewed.
 
-Arithmetic capacity for the declared 78,912-row census and 72,672
-compiler-eligible rows, **not a transferred or executed retirement run**:
+Arithmetic capacity for the historical 78,912-row census and 72,672
+compiler-eligible rows, **not a current trusted support/census population,
+transferred archive or executed retirement run**. Recompute every row count
+from the trusted support/census inputs at the exact attempt before sizing or
+admission:
 
-| Component | Declared maximum at 60 pairs | Relevant ceiling |
+| Component | Modeled two-stage maximum at 60 pairs | Relevant ceiling |
 |---|---:|---:|
-| Compiler invocations, including warmups | 17,731,968 | Transcript: 32,768 records and 64 MiB per shard |
-| Additional runtime invocations if every compiler row is runtime eligible | 17,731,968 | Same transcript ceilings |
-| Transcript shards for both campaigns at that upper bound | 1,083 | 4,096 transcript shards; 4,096 bundle entries shared with all files/directories |
-| Paired numeric records | 8,720,640 | 16,777,216 records per partition; 16 GiB total #615 input per manifest |
-| Numeric shards at 32,768 records each | 267 | 64 MiB per published file; remaining entry budget for all controls, binaries, logs and directories: 2,746 |
-| Combined shard bytes if every shard reached 64 MiB | 86,400 MiB | 128 GiB indexed payload including every other retained file |
+| Compiler invocations, including warmups | 35,463,936 (17,731,968 per stage) | Transcript: 32,768 records and 64 MiB per shard |
+| Additional runtime invocations if every compiler row is runtime eligible | 35,463,936 | Same transcript ceilings |
+| Transcript shards for compiler and runtime at that upper bound | 2,166 (1,083 per stage) | 4,096 transcript shards; 4,096 bundle entries shared with all files/directories |
+| Paired numeric records | 17,441,280 (8,720,640 per stage) | 16,777,216 records per partition; 16 GiB total #615 input per manifest |
+| Numeric shards at 32,768 records each | 534 (267 per stage) | 64 MiB per published file; 1,396 bundle entries remain for controls, binaries, logs and directories |
+| Transcript bytes if every shard reached 64 MiB | 145,357,799,424 bytes | Exceeds the 128 GiB indexed-payload ceiling even before numeric shards |
 
-The combined shard bound leaves approximately 43.6 GiB for other indexed files
-before the 128 GiB total limit, but an actual producer must inventory **every**
-retained file and directory and respect the 64 MiB per-file, 192-byte path,
+This modeled worst case cannot establish whether actual compact transcript lines
+fit. The actual producer must inventory **every** retained file and directory
+and respect the 64 MiB per-file, 192-byte path,
 8 MiB index and 1 MiB execution-receipt bounds. A fixed transcript shard also
 fails before its 32,768th record if its JSONL lines exceed 64 MiB in total.
 These arithmetic figures cannot establish that real lines, logs and binaries
 fit. The existing service tests transfer small smoke archives; no full
 retirement export or clean replay has been completed at this point.
 
-At maximum capacity, reserve roughly five independent copies: retained
-service result, service sealed spool (including its chunk index), gateway
-download, immutable test publication and extracted clean replay. The
-128 GiB payload ceiling therefore implies **over 640 GiB** plus index,
-filesystem and #510 publication headroom. Export preparation, native unpack
-and independent binding replay have separate 24-hour budgets; bound the full
-end-to-end operator window as the sum of their observed times, not the
+At maximum capacity, reserve six independent copies: retained service result,
+sealed service spool (including its chunk index), gateway download, immutable
+test publication, fresh retrieval and extracted clean replay. The
+128 GiB indexed-payload ceiling therefore implies **over 768 GiB** plus
+archive headers, index, filesystem and #510 publication headroom. At the
+archive ceiling of 137,448,259,584 bytes, the sealed spool reserves
+137,582,487,424 bytes including the 1,024-byte receipt and 2,097,294
+64-byte chunk digests. These are reservations, not transferred bytes. The
+reviewed whole-job deadline must also accommodate both stages; the current
+3,600-second smoke-unit limit does not prove this population fits. Export
+preparation, native unpack and independent binding replay have separate 24-hour
+budgets; bound the full end-to-end operator window as the sum of their observed times, not the
 per-operation receipt wait alone.
 
 Export request body:
