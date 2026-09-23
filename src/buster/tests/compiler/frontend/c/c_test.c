@@ -11113,6 +11113,118 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unevaluated_call_arity_diagnostics(Uni
     return result;
 }
 
+// A sizeof operand is unevaluated, but every update still requires a
+// modifiable real or pointer place. The same constraint must be reported by
+// syntax-only and by either canonical-IR lowering form.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 expression;
+        bool valid;
+    } cases[] = {
+        {S8("sizeof (++42)"), false},
+        {S8("sizeof ++42"), false},
+        {S8("sizeof (++(1 + 2))"), false},
+        {S8("sizeof ((int) ++42)"), false},
+        {S8("sizeof (42++)"), false},
+        {S8("sizeof ((item + 1)++)"), false},
+        {S8("sizeof (++read_only)"), false},
+        {S8("sizeof (read_only++)"), false},
+        {S8("sizeof (++ENUM_VALUE)"), false},
+        {S8("sizeof (++(item ? item : values[0]))"), false},
+        {S8("sizeof ((0, ++42))"), false},
+        {S8("sizeof (item ? ++42 : 0)"), false},
+        {S8("sizeof no_link(++42)"), false},
+        {S8("sizeof values[++42]"), false},
+        {S8("sizeof ((const int){1}++)"), false},
+        {S8("sizeof (++((const int [2]){0, 1})[0])"), false},
+        {S8("sizeof (readonly_pair->member++)"), false},
+        {S8("sizeof (++*pointer)"), true},
+        {S8("sizeof ((int) ++item)"), true},
+        {S8("sizeof (++*narrow)"), true},
+        {S8("sizeof ((*narrow)++)"), true},
+        {S8("sizeof (values[index]++)"), true},
+        {S8("sizeof (++((int [2]){0, 1})[0])"), true},
+        {S8("sizeof (++pair.member)"), true},
+        {S8("sizeof (pointer++)"), true},
+        {S8("sizeof ((void)&no_link, ++*pointer)"), true},
+        {S8("sizeof ((void)no_link(1), ++*pointer)"), true},
+        {S8("sizeof (++*pointer + 1)"), true},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            String8 source = string_format(temporary.arena,
+                S8("int no_link(int); enum {{ ENUM_VALUE = 1 }}; struct Pair {{ int member; }};"
+                   " int probe(int *pointer, volatile unsigned char *narrow, int index) {{"
+                   " int item = 0; const int read_only = 0; int values[2] = {{0}};"
+                   " struct Pair pair = {{0}}; const struct Pair *readonly_pair = &pair;"
+                   " return (int)({S8}); }}"), cases[case_index].expression);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, source,
+                (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                     .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, source);
+            BUSTER_TEST_RAW(arguments, (semantic.diagnostic_count == 0) == cases[case_index].valid, source);
+            if (!cases[case_index].valid && semantic.diagnostic_count)
+            {
+                BUSTER_TEST_RAW(arguments,
+                    string_ends_with_sequence(semantic.diagnostics[0].message,
+                        S8("increment or decrement operand is not a modifiable place")), source);
+            }
+            CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("sizeof-update-operand.c"), tokens, syntax,
+                                                            target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, (lowered.diagnostic_count == 0 && lowered.program != 0) == cases[case_index].valid, source);
+            if (!cases[case_index].valid && semantic.diagnostic_count && lowered.diagnostic_count)
+                BUSTER_STRING_TEST(arguments, semantic.diagnostics[0].message, lowered.diagnostics[0].message);
+            if (cases[case_index].valid && lowered.program)
+            {
+                IrModule* module = lowered.program->modules;
+                for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                {
+                    IrFunction* function = module->functions + function_index;
+                    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        BUSTER_TEST_RAW(arguments, function->instructions[instruction_index].opcode != IR_OPCODE_CALL, source);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    struct
+    {
+        String8 source;
+        bool valid;
+    } declarations[] = {
+        {S8("static unsigned long invalid = sizeof (++42);"), false},
+        {S8("int invalid[sizeof (++42)];"), false},
+        {S8("int valid[sizeof (++*(volatile unsigned char *)0)];"), true},
+        {S8("int valid(int *pointer) { typeof(*pointer++) *q = &*pointer; return sizeof (++*q); }"), true},
+        {S8("int valid(void) { for (unsigned long long start = 0; start < 1;) {"
+            " unsigned long long end = start; while (end < 2) ++end; start = end; } return 0; }"), true},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(declarations); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, declarations[index].source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analyzed = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, declarations[index].source);
+        BUSTER_TEST_RAW(arguments, (analyzed.diagnostic_count == 0) == declarations[index].valid, declarations[index].source);
+        if (!declarations[index].valid && analyzed.diagnostic_count)
+            BUSTER_TEST_RAW(arguments, string_ends_with_sequence(analyzed.diagnostics[0].message,
+                S8("increment or decrement operand is not a modifiable place")), declarations[index].source);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // This narrow semantic seam has C bindings/types as inputs, not a canonical
 // program. It is not an assertion that syntax-only as a whole is IR-free.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestArguments* arguments)
@@ -20782,6 +20894,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unprototyped_call_arguments);
     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
