@@ -271,7 +271,7 @@ static int tp_retirement_measurement_run(TpRetirementSamples* samples,
             fstat(output_directory, &output_root) == 0 && S_ISDIR(output_root.st_mode) &&
             output_root.st_uid == geteuid() && !(output_root.st_mode & 0022) &&
             fstatat(output_directory, command->artifact, &artifact, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT &&
-            !!command->code_section_bytes == !!(samples->rows[invocation.row].metrics & TP_RETIREMENT_SAMPLE_CODE) &&
+            !!command->code_section_bytes == !!(samples->rows[invocation.dense].metrics & TP_RETIREMENT_SAMPLE_CODE) &&
             (command->code_section_bytes ? tp_retirement_digest(command->code_section_sha256) :
                                           command->code_section_sha256 == NULL);
     if (ok && invocation.kind)

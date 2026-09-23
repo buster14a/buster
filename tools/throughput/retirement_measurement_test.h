@@ -206,6 +206,38 @@ static void test_retirement_measurement(char const* executable_path, char const*
     }
     test_sample_close(&test);
 
+    /* The authenticated census ID may be sparse. The real launcher must use
+     * the dense collector index for eligibility while binding the command to
+     * the original canonical row. */
+    CHECK(test_sample_open(&test, 1));
+    unsigned sparse_row[] = {6};
+    CHECK(tp_retirement_execution_init_rows(&test.execution, 1, 1, sparse_row, 7,
+        test.runtime, 1, 60, test.workspace, 5));
+    test.transcript.cpu = tp_first_allowed_cpu();
+    CHECK(tp_retirement_execution_peek(&test.execution, &invocation) == TP_RETIREMENT_NEXT_READY &&
+          invocation.row == 6 && invocation.dense == 0 && !invocation.kind);
+    command.row = invocation.row;
+    command.kind = invocation.kind;
+    command.variant = invocation.variant;
+    command.artifact = "artifact.bin";
+    command.code_section_bytes = 13;
+    command.code_section_sha256 = expected_output;
+    command.output_sha256 = expected_artifact;
+    arguments[2] = "compiler";
+    CHECK(tp_retirement_command_hash(&command, command_digest));
+    int sparse_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    CHECK(sparse_log >= 3);
+    TpProcessInputs sparse_inputs = {binary, cwd, sparse_log, environment};
+    TpRetirementMeasurementResult sparse_result;
+    CHECK(tp_retirement_measurement_run(&test.samples, &command, &executable,
+                                        &sparse_inputs, cwd, &sparse_result));
+    CHECK(sparse_result.status == TP_RETIREMENT_MEASUREMENT_COMPLETE &&
+          sparse_result.output_bytes == artifact_bytes && test.execution.sequence == 1);
+    if (sparse_log >= 0) CHECK(close(sparse_log) == 0);
+    CHECK(unlinkat(cwd, "child.log", 0) == 0);
+    CHECK(unlinkat(cwd, "artifact.bin", 0) == 0);
+    test_sample_close(&test);
+
     /* A failed command cannot advance or restart the same attempt. All output
      * remains present for the service's failure retention/sealing path. */
     for (unsigned failure = 0; failure < 23; ++failure)
