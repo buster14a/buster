@@ -3134,8 +3134,8 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_emit_object_output(Arena* arena, Compil
         result->error = COMPILER_DRIVER_ERROR_LINK;
         result->native_link.error = linked.error;
         result->native_link.symbol = linked.symbol;
-        result->diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
-                                                 : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
+        result->diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with {S8} on symbol '{S8}'"), link_error_name(linked.error), linked.symbol)
+                                                 : string_format(arena, S8("C object linking failed with {S8}"), link_error_name(linked.error));
         return;
     }
     String8 output = invocation.output_path.length ? invocation.output_path : compiler_driver_default_executable_path(invocation.target);
@@ -4701,8 +4701,8 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
         result.error = COMPILER_DRIVER_ERROR_LINK;
         result.native_link.error = linked.error;
         result.native_link.symbol = linked.symbol;
-        result.diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with error {u32} on symbol '{S8}'"), (u32)linked.error, linked.symbol)
-                                                 : string_format(arena, S8("C object linking failed with error {u32}"), (u32)linked.error);
+        result.diagnostic = linked.symbol.length ? string_format(arena, S8("C object linking failed with {S8} on symbol '{S8}'"), link_error_name(linked.error), linked.symbol)
+                                                 : string_format(arena, S8("C object linking failed with {S8}"), link_error_name(linked.error));
         goto finish;
     }
     result.object = linked.object;

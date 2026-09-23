@@ -484,6 +484,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_link_code(LinkError error)
         [LINK_ERROR_ENTRY_SYMBOL] = S8_INITIALIZER("link.entry-symbol"),
         [LINK_ERROR_RELOCATION] = S8_INITIALIZER("link.relocation"),
         [LINK_ERROR_SYMBOL_VERSION] = S8_INITIALIZER("link.symbol-version"),
+        [LINK_ERROR_TLS_SYMBOL_MISMATCH] = S8_INITIALIZER("link.tls-symbol-mismatch"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == LINK_ERROR_COUNT);
     return (u32)error < (u32)BUSTER_ARRAY_LENGTH(names) ? names[error] : S8("link.unknown");
