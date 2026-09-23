@@ -129,7 +129,8 @@ BUSTER_GLOBAL_LOCAL bool gpu_tools_profile(GpuTools* settings, u32 profile)
     Arena* arena = evidence->arena;
     settings->directory = path_join(arena, evidence->out, gpu_tools_profiles[profile]);
     bool ok = d_create_output(arena, settings->directory);
-    String8 artifact = path_join(arena, settings->directory, S8("artifact"));
+    String8 artifact_name = profile == 0 ? S8("artifact.spv") : S8("artifact");
+    String8 artifact = path_join(arena, settings->directory, artifact_name);
     String8 invalid = path_join(arena, settings->directory, S8("invalid"));
     String8 source = gpu_tools_fixtures[profile == 4 ? 0 : profile].path;
     String8 malformed = S8("DXBC\0\0\0\0\0\0\0\0\0\0\0\0");
