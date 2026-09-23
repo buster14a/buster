@@ -570,7 +570,19 @@ class NativeObservationTest(unittest.TestCase):
         )
         self.assertIn("${{ runner.temp }}/native-ci-upload/", workflow)
         native = workflow[workflow.index("  native:"):workflow.index("  mobile:")]
-        self.assertNotRegex(native, r"(?m)^\s*continue-on-error:")
+        self.assertEqual(native.count("continue-on-error: true"), 1)
+        primary_upload = native.split("      - name: Retain native logs\n", 1)[1].split(
+            "      - name:", 1)[0]
+        retry_upload = native.split("      - name: Retain native logs (retry)\n", 1)[1].split(
+            "      - name:", 1)[0]
+        self.assertIn("if: ${{ !cancelled() && steps.pack.outcome == 'success' }}", primary_upload)
+        self.assertIn("id: native_upload", primary_upload)
+        self.assertIn("continue-on-error: true", primary_upload)
+        self.assertNotIn("overwrite: true", primary_upload)
+        self.assertIn("steps.native_upload.outcome == 'failure'", retry_upload)
+        self.assertIn("overwrite: true", retry_upload)
+        self.assertNotIn("continue-on-error", retry_upload)
+        self.assertIn("sleep 15", native)
 
 
 if __name__ == "__main__":
