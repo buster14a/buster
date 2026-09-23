@@ -11,8 +11,9 @@ until every item below is complete.
 ## 1. Install the repository controls
 
 Use an administration token with repository Administration write permission.
-Choose a user or team that can approve benchmark dispatches and obtain its
-numeric GitHub ID. From a trusted checkout of protected `main`, run:
+Choose a user or team other than the dispatcher that can approve benchmark
+dispatches and obtain its numeric GitHub ID. From a trusted checkout of
+protected `main`, run:
 
 ```sh
 bash tools/bench_service/deploy/configure_github_admission.sh \
@@ -25,13 +26,25 @@ idempotent. It creates or updates:
 - the active `Benchmark dispatch main protection` ruleset from
   `.github/rulesets/benchmark-main.json`;
 - the protected `benchmark-9700x` environment with required review,
-  self-review disabled and deployment restricted to protected branches; and
+  self-review disabled and one exact `main` deployment branch policy; and
 - the repository variable `BENCH_SERVICE_DISPATCH_ENABLED=false`.
 
-The ruleset has no bypass actors. It blocks deletion and force-push, requires a
-reviewed pull request with stale approvals dismissed and the last push approved
-by another reviewer, and requires both `CI complete` and
-`Benchmark service workflow policy` against current `main`.
+The installer first disables dispatch and compares repository ruleset
+`22537199` (`main`) with `.github/main-merge-queue.ruleset.json`. A mismatch
+stops installation with dispatch disabled. It does not replace that ruleset or
+its eight required checks, one-build/one-merge queue, `ALLGREEN` policy, and
+no-bypass boundary. The additional benchmark ruleset has no bypass actors.
+It blocks deletion and force-push, requires a reviewed pull request with stale
+approvals dismissed and the last push approved by another reviewer. It
+separately requires `CI complete` and `Benchmark service workflow policy`.
+Its non-strict status checks preserve the queue's combined-tree validation policy.
+
+Read back both active rulesets after installation. Verify the benchmark
+environment has an independent required reviewer, self-review disabled, and
+only the exact `main` deployment branch policy. The policy selects the branch
+already protected by the active repository merge-queue ruleset; it does not
+rely on GitHub's separate legacy branch-protection setting. If no distinct
+reviewer is available, leave dispatch disabled and do not submit a job.
 
 ## 2. Verify the host boundary before activation
 
