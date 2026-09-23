@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Phase contract regressions, including byte-preserving production replay.
+"""Replay unmodified production phase journals through the real analyzer.
 
-Run normally for terminal-status unit controls. Set BUSTER_PHASE_BRIDGE_INPUT
-(to an unpacked desktop artifact), SOURCE, TREE, RUN and ATTEMPT to replay a
-separately identified real producer. RETAIN optionally keeps every negative
-copy beside the original artifact. Replay never rewrites producer identities,
-paths, versions or records, and does not replace live coverage qualification.
+Set BUSTER_PHASE_BRIDGE_INPUT to an unpacked desktop artifact and SOURCE,
+TREE, RUN and ATTEMPT to its independently selected producer identity.
+RETAIN optionally preserves every negative copy; originals are never edited.
+Replay does not replace live compiler/coverage qualification in ci_summary.
 """
 import copy
 import hashlib
@@ -25,7 +24,7 @@ class TerminalResultTests(unittest.TestCase):
         for result in (False, True, 0.0, None, "0", 1):
             with self.subTest(result=repr(result)), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                _, coverage = fixture(root)
+                coverage = fixture(root)
                 terminal = phases.read(root / "terminal.json")
                 terminal["result"] = result
                 (root / "terminal.json").write_text(json.dumps(terminal) + "\n", encoding="utf-8")
@@ -33,7 +32,7 @@ class TerminalResultTests(unittest.TestCase):
                     phases.analyze(root, coverage)
 
 
-@unittest.skipUnless(os.environ.get("BUSTER_PHASE_BRIDGE_INPUT"), "requires a retained production desktop artifact")
+@unittest.skipUnless(os.environ.get("BUSTER_PHASE_BRIDGE_INPUT"), "requires a production desktop artifact")
 class ProductionPhaseBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -85,17 +84,18 @@ class ProductionPhaseBridgeTests(unittest.TestCase):
 
     def test_legitimate_empty_and_inapplicable_populations(self):
         report = self.analyze()
-        # Pooled command argv is deliberately late-bound by the real producer.
+        # A complete zero-tree journal is not admitted. Empty argv is legitimate
+        # in the plan for a late-bound pooled command, not in its actual record.
         self.assertTrue(any(task["argv"] == [] for task in self.plan["tasks"]))
         compile_only = [tree for tree in report["trees"] if tree["compiler"] != "clang"]
         self.assertTrue(compile_only)
         for tree in compile_only:
             self.assertFalse(any(task["tree"] == tree["id"] and task["phase"] == "test" for task in self.plan["tasks"]))
             self.assertEqual(tree["elapsed_us"]["test"], 0)
-        callbacks = [event for event in report["events"] if event["authority"] == "driver_callback"] if all("authority" in event for event in report["events"]) else [event for event in report["events"] if event.get("authority") == "driver_callback"]
+        callbacks = [event for event in report["events"] if event.get("authority") == "driver_callback"]
         self.assertTrue(callbacks)
         for event in callbacks:
-            # A real callback has no child-process result population to invent.
+            # A real in-driver callback has no child-process result population.
             self.assertNotIn("spawned", event)
             self.assertNotIn("platform_status", event)
         for event in report["events"]:
