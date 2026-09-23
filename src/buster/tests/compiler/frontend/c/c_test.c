@@ -11080,6 +11080,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         {S8("sizeof (++42)"), false},
         {S8("sizeof ++42"), false},
         {S8("sizeof (++(1 + 2))"), false},
+        {S8("sizeof ((int) ++42)"), false},
         {S8("sizeof (42++)"), false},
         {S8("sizeof ((item + 1)++)"), false},
         {S8("sizeof (++read_only)"), false},
@@ -11094,6 +11095,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         {S8("sizeof (++((const int [2]){0, 1})[0])"), false},
         {S8("sizeof (readonly_pair->member++)"), false},
         {S8("sizeof (++*pointer)"), true},
+        {S8("sizeof ((int) ++item)"), true},
         {S8("sizeof (++*narrow)"), true},
         {S8("sizeof ((*narrow)++)"), true},
         {S8("sizeof (values[index]++)"), true},
@@ -11155,6 +11157,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         {S8("int invalid[sizeof (++42)];"), false},
         {S8("int valid[sizeof (++*(volatile unsigned char *)0)];"), true},
         {S8("int valid(int *pointer) { typeof(*pointer++) *q = &*pointer; return sizeof (++*q); }"), true},
+        {S8("int valid(void) { for (unsigned long long start = 0; start < 1;) {"
+            " unsigned long long end = start; while (end < 2) ++end; start = end; } return 0; }"), true},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(declarations); index += 1)
     {

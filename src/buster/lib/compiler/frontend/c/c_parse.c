@@ -3578,8 +3578,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_place_shape(CParseResult* result, CPre
 // A type query retains the operand's qualifiers and does not evaluate it.
 // The place check is shared with address-of and asm output constraints; a
 // scalar type alone would also describe an enumerator, cast, call or rvalue.
-BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
-                                                          u32 start, u32 end, CTypeId type)
+BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type)
 {
     bool valid = type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
     if (valid)
@@ -3596,8 +3595,9 @@ BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, C
     if (valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
     {
         u32 use = c_parse_identifier_use_index(result, start);
+        CScopeId operand_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
         CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
-                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[start]);
+                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
         valid = entity.value < result->entity_count &&
                 (result->entities[entity.value].kind == C_ENTITY_OBJECT || result->entities[entity.value].kind == C_ENTITY_LOCAL ||
                  result->entities[entity.value].kind == C_ENTITY_PARAMETER) && !result->entities[entity.value].is_constexpr;
@@ -3898,7 +3898,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 CTypeKind kind = result->types[last.value].kind;
                 if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
-                    (!c_parse_update_operand_modifiable(result, preprocess, scope, task->start + 1, task->end, last) ||
+                    (!c_parse_update_operand_modifiable(result, preprocess, task->start + 1, task->end, last) ||
                      kind == C_TYPE_STRUCT || kind == C_TYPE_UNION || kind == C_TYPE_NULLPTR))
                 {
                     machine->expression_constraint = S8("increment or decrement operand is not a modifiable place");
@@ -18468,6 +18468,27 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPr
     return cursor;
 }
 
+BUSTER_C_INTERNAL bool c_parse_update_after_cast(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                   u32 start, u32 update, u32 const* openers)
+{
+    bool cast = false;
+    if (update > start && c_token_is_punctuator(&preprocess.tokens[update - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u32 open = openers[update - 1 - start];
+        if (open >= start && open + 1 < update - 1)
+        {
+            u32 cursor = open + 1;
+            CTypeId type = c_parse_machineless_base_type(result, preprocess, scope, cursor, update - 1, &cursor);
+            if (type.value < result->type_count)
+            {
+                type = c_parse_pointer_chain(result, preprocess, type, &cursor, update - 1);
+                cast = type.value < result->type_count && cursor == update - 1;
+            }
+        }
+    }
+    return cast;
+}
+
 BUSTER_C_INTERNAL bool c_parse_incompatible_function_initializer(CTypeParseMachine* machine, CParseResult* result,
                                                                     CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
                                                                     u32 start, u32 end);
@@ -18796,9 +18817,19 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             continue;
         }
         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
-        bool prefix = update && (!c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]) ||
+        bool control_prefix = false;
+        if (update && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            u32 open = openers[index - 1 - start];
+            control_prefix = open > start && open < index && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[open - 1],
+                C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(FOR) |
+                C_SYMBOL_WELL_KNOWN_BIT(SWITCH));
+        }
+        bool prefix = update && (control_prefix || c_parse_update_after_cast(result, preprocess, scope, start, index, openers) ||
+                                 !c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]) ||
                                  c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
-                                     C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF)));
+                                     C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(ELSE) | C_SYMBOL_WELL_KNOWN_BIT(DO) |
+                                     C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF)));
         u32 operand_start = prefix ? index + 1 : update ? c_parse_constraint_postfix_start(result, preprocess, scope, start, index, openers)
                                                       : c_parse_constraint_expression_start(result, preprocess, start, index, openers);
         u32 operand_end = prefix ? c_parse_update_prefix_operand_end(result, preprocess, index + 1, end) : index;
@@ -18877,7 +18908,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 string_format(result->arena, S8("unsupported C function-body statement or expression near '{S8}'"),
                               c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start])), index, operand_start);
         }
-        else if (update && typed && !c_parse_update_operand_modifiable(result, preprocess, scope, operand_start, operand_end, type_id))
+        else if (update && typed && !c_parse_update_operand_modifiable(result, preprocess, operand_start, operand_end, type_id))
         {
             c_parse_lowering_constraint_consider(diagnostic, S8("increment or decrement operand is not a modifiable place"), index, operand_start);
         }
@@ -19510,10 +19541,11 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                     }
                 }
             }
-            bool prefix = update == operand_start || !c_parse_expression_token_ends_operand(preprocess.tokens[update - 1]) ||
+            CScopeId update_scope = c_parse_scope_for_token(result, scope, update);
+            bool prefix = update == operand_start || c_parse_update_after_cast(result, preprocess, update_scope, start, update, openers) ||
+                          !c_parse_expression_token_ends_operand(preprocess.tokens[update - 1]) ||
                           c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[update - 1],
                               C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF));
-            CScopeId update_scope = c_parse_scope_for_token(result, scope, update);
             u32 place_start = prefix ? update + 1 : c_parse_constraint_postfix_start(result, preprocess, update_scope, start, update, openers);
             u32 place_end = prefix ? c_parse_update_prefix_operand_end(result, preprocess, update + 1, operand_end) : update;
             CTypeId type = C_TYPE_ID_INVALID;
@@ -19521,7 +19553,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
             bool typed = place_start < place_end && c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result,
                                                                                     update_scope, place_start, place_end, &type);
             arena_set_position(machine->scratch_arena, query_mark);
-            if (typed && !c_parse_update_operand_modifiable(result, preprocess, update_scope, place_start, place_end, type))
+            if (typed && !c_parse_update_operand_modifiable(result, preprocess, place_start, place_end, type))
                 diagnostic = (CParseInitializerDiagnostic){.message = S8("increment or decrement operand is not a modifiable place"), .token = update};
         }
         if (grouped) index = close;
