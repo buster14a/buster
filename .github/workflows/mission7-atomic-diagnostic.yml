@@ -1,0 +1,35 @@
+name: Mission 7 atomic diagnostic (not acceptance)
+on:
+  push:
+    branches: [audit/m7-atomic-rmw-diagnostic-bb96b5d0]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Record exact source and narrow atomic implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD HEAD^{tree} HEAD^
+          git hash-object src/buster/lib/compiler/frontend/c/c_gen.c
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ['src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/c_test.c']:
+              lines = Path(name).read_text().splitlines()
+              hits = [i for i, line in enumerate(lines) if 'atomic_fetch_xor' in line or 'C_ATOMIC_OP' in line]
+              selected = set()
+              for i in hits[:24]:
+                  selected.update(range(max(0, i - 20), min(len(lines), i + 35)))
+              print('\nFILE', name, 'hits', len(hits))
+              for i in sorted(selected):
+                  print(f'{i + 1}: {lines[i]}')
+          print('\nBUILD GUIDE\n' + Path('docs/agents/build.md').read_text())
+          print('\nBUILD ENTRY\n' + Path('build.sh').read_text())
+          print('\nCMAKE ENTRY\n' + '\n'.join(Path('CMakeLists.txt').read_text().splitlines()[:200]))
+          PY
