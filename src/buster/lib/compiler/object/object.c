@@ -11730,7 +11730,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
                               : object_section_kind_is_debug(source->kind)     ? 0x42000040
                               : object_section_kind_is_zero_fill(source->kind) ? 0xc0000080
                                                                                : 0xc0000040;
-        characteristics = (characteristics & ~OBJECT_COFF_SECTION_ALIGNMENT_MASK) | alignment_characteristics;
+        characteristics = (characteristics & ~(u32)OBJECT_COFF_SECTION_ALIGNMENT_MASK) | alignment_characteristics;
         if (relocation_counts[section] > UINT16_MAX)
         {
             characteristics |= OBJECT_COFF_SECTION_LINK_NRELOC_OVFL;

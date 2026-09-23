@@ -964,7 +964,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_coff_section_alignment(UnitTestAr
                 u32 characteristics = 0;
                 BUSTER_TEST(arguments, object_test_coff_section_characteristics(artifact.bytes, 0, &characteristics));
                 BUSTER_TEST(arguments, (characteristics & 0x00f00000) == alignment_characteristics[alignment_index]);
-                BUSTER_TEST(arguments, (characteristics & ~0x00f00000) == section_flags[kind_index]);
+                BUSTER_TEST(arguments, (characteristics & ~(u32)0x00f00000) == section_flags[kind_index]);
                 if (kinds[kind_index] != OBJECT_SECTION_ZERO)
                 {
                     u32 raw_offset = 0;
