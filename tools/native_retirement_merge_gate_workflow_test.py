@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Regression tests for admission self-tests on clean, older feature heads.
+
+The combined tree supplies tests; it never supplies merge-admission authority.
+The real workflow shell body is also executed against a temporary Git history
+where main introduces the tests after the feature branch has diverged (#932).
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import textwrap
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github/workflows/api-migration-policy.yml"
+SUITES = (
+    "native_retirement_merge_gate_test.py",
+    "native_retirement_merge_gate_workflow_test.py",
+)
+
+
+def git(repo: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *arguments],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode:
+        raise AssertionError(result.stderr or result.stdout)
+    return result.stdout.strip()
+
+
+class AdmissionWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.admission = WORKFLOW.read_text().split(
+            "  native-retirement-admission:\n", 1
+        )[1]
+
+    def step(self, name: str) -> str:
+        matches = re.findall(
+            r"^      - name: " + re.escape(name) + r"\n(.*?)(?=^      - name:|\Z)",
+            self.admission, re.MULTILINE | re.DOTALL,
+        )
+        self.assertEqual(len(matches), 1, name)
+        return matches[0]
+
+    def script(self) -> str:
+        step = self.step("Test native-retirement merge admission")
+        return textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+    def test_selftests_use_immutable_combined_checkout_not_old_head(self):
+        checkout = self.step("Check out exact combined validation tree")
+        self.assertIn("          ref: ${{ github.sha }}\n", checkout)
+        self.assertIn("          path: validation\n", checkout)
+        self.assertIn("          fetch-depth: 1\n", checkout)
+        self.assertIn("          persist-credentials: false\n", checkout)
+        self.assertNotIn("        if:", checkout)
+        test = self.step("Test native-retirement merge admission")
+        self.assertIn("        shell: bash\n", test)
+        self.assertIn("        working-directory: validation\n", test)
+        self.assertNotIn("        if:", test)
+        self.assertNotIn("continue-on-error", test)
+        self.assertEqual(self.script().strip().splitlines(), [
+            "python3 -B tools/" + name + " -v" for name in SUITES
+        ])
+
+    def test_exact_candidate_and_trusted_base_keep_admission_authority(self):
+        candidate = self.step("Check out exact candidate")
+        self.assertIn("github.event.pull_request.head.sha", candidate)
+        self.assertIn("github.event.merge_group.head_sha", candidate)
+        self.assertIn("          path: candidate\n", candidate)
+        self.assertIn("          persist-credentials: false\n", candidate)
+        trusted = self.step("Check out the previously trusted admission policy")
+        self.assertIn("github.event.pull_request.base.sha", trusted)
+        self.assertIn("github.event.merge_group.base_sha", trusted)
+        self.assertIn("          path: trusted\n", trusted)
+        self.assertIn("          persist-credentials: false\n", trusted)
+        enforce = self.step("Enforce trusted native-retirement integration")
+        self.assertIn('tool="$GITHUB_WORKSPACE/trusted/tools/native_retirement_merge_gate.py"', enforce)
+        self.assertIn('--repo-root "$GITHUB_WORKSPACE/candidate"', enforce)
+        self.assertIn('--base "$BASE_SHA"', enforce)
+        self.assertIn('--head "$HEAD_SHA"', enforce)
+        self.assertIn('--current-main "$current_main"', enforce)
+        self.assertNotIn("$GITHUB_WORKSPACE/validation", enforce)
+        self.assertNotIn("--allow-pending", enforce)
+
+    def history(self, root: Path) -> tuple[Path, Path, Path, str, str]:
+        repo = root / "repo"
+        git(root, "init", "-b", "main", str(repo))
+        git(repo, "config", "user.name", "Admission Test")
+        git(repo, "config", "user.email", "test@example.invalid")
+        (repo / "source.txt").write_text("base\n")
+        git(repo, "add", ".")
+        git(repo, "commit", "-m", "base before admission rollout")
+        git(repo, "checkout", "-b", "feature")
+        (repo / "source.txt").write_text("feature\n")
+        git(repo, "commit", "-am", "unrelated feature")
+        head = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "main")
+        (repo / "tools").mkdir()
+        for index, name in enumerate(SUITES):
+            # These stand-ins exercise the workflow, not the admission algorithm
+            # (whose full existing test suite remains independently mandatory).
+            (repo / "tools" / name).write_text(
+                "import os\nfrom pathlib import Path\n"
+                "value = Path('source.txt').read_text()\n"
+                "assert value == 'feature\\n', value\n"
+                f"with Path('trace').open('a') as trace: trace.write('{index}:' + value)\n"
+                f"raise SystemExit({index + 7} if os.environ.get('FAIL_SUITE') == '{index}' else 0)\n"
+            )
+        git(repo, "add", "tools")
+        git(repo, "commit", "-m", "introduce admission tests on main")
+        base = git(repo, "rev-parse", "HEAD")
+        candidate = root / "candidate"
+        git(repo, "worktree", "add", "--detach", str(candidate), head)
+        git(repo, "merge", "--no-commit", "--no-ff", head)
+        tree = git(repo, "write-tree")
+        combined = git(repo, "commit-tree", tree, "-p", base, "-p", head,
+                       "-m", "immutable combined validation revision")
+        validation = root / "validation"
+        git(repo, "worktree", "add", "--detach", str(validation), combined)
+        return repo, candidate, validation, base, head
+
+    def run_script(self, directory: Path, fail: str = "") -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", self.script()],
+            cwd=directory, env={**os.environ, "FAIL_SUITE": fail},
+            capture_output=True, text=True, check=False,
+        )
+
+    def test_clean_old_head_uses_new_main_tests_without_branch_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo, candidate, validation, base, head = self.history(Path(directory))
+            self.assertFalse((candidate / "tools" / SUITES[0]).exists())
+            old = self.run_script(candidate)
+            self.assertEqual(old.returncode, 2, old.stderr)
+            actual = self.run_script(validation)
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            self.assertEqual((validation / "trace").read_text(), "0:feature\n1:feature\n")
+            self.assertEqual(git(repo, "rev-parse", "feature"), head)
+            self.assertEqual(git(repo, "rev-parse", "main"), base)
+            self.assertEqual(git(candidate, "rev-parse", "HEAD"), head)
+
+    def test_existing_admission_test_failure_is_not_hidden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, validation, _, _ = self.history(Path(directory))
+            result = self.run_script(validation, "0")
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual((validation / "trace").read_text(), "0:feature\n")
+
+    def test_new_workflow_test_failure_is_not_hidden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, validation, _, _ = self.history(Path(directory))
+            result = self.run_script(validation, "1")
+            self.assertEqual(result.returncode, 8, result.stderr)
+            self.assertEqual((validation / "trace").read_text(), "0:feature\n1:feature\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

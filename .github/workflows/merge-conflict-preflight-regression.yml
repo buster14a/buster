@@ -1,0 +1,31 @@
+name: Merge conflict preflight regression
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-conflict-preflight-regression-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: Preflight regression tests
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check out candidate for unprivileged tests
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Exercise merge-tree fixtures and workflow policy
+        run: |
+          python3 -B tools/merge_conflict_preflight_test.py -v
+          python3 -B tools/merge_conflict_preflight_attestation_test.py -v

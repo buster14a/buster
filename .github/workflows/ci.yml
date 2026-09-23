@@ -231,7 +231,9 @@ jobs:
       - name: Workflow tool regression tests
         id: workflow_tools
         if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
-        timeout-minutes: 2
+        # Thirteen suites include native fixture builds and process launches.
+        # Windows ARM64 exceeded 120s with passing tests in run 35733354799.
+        timeout-minutes: ${{ matrix.platform == 'windows' && 5 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -247,10 +249,11 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
           "$BUSTER_CI_PYTHON" tools/native_producer_profile_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-producer-profile.log"
           "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
+          "$BUSTER_CI_PYTHON" tools/ci_matrix_phases_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-phases-test.log"
           "$BUSTER_CI_PYTHON" tools/ci_native_observation_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-observation-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the
-      # policy suites' shared two-minute budget; see docs/ci-bootstrap-wrapper.md.
+      # policy suites' shared budget; see docs/ci-bootstrap-wrapper.md.
       - name: Bootstrap wrapper regression tests
         id: bootstrap_wrappers
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.zig_cache_policy.outcome == 'success' }}
@@ -385,6 +388,8 @@ jobs:
 
       - name: Combination matrix (Linux, macOS)
         id: combinations_unix
+        env:
+          BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
         if: ${{ !cancelled() && matrix.platform == 'unix' && steps.tools_unix.outcome == 'success' && (matrix.os != 'linux' || steps.mold.outcome == 'success') }}
         shell: bash
         run: |
@@ -400,6 +405,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'windows' && steps.zig_cache_evidence.outcome == 'success' }}
         shell: powershell
         env:
+          BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
           CLANG_ARCH: ${{ matrix.clang_arch }}
@@ -465,6 +471,7 @@ jobs:
           BUSTER_CI_REQUIRED: ${{ matrix.shard == 'release' && (matrix.platform == 'unix' && 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy workflow_tools bootstrap_wrappers zig_cache_gate zig zig_cache_evidence combinations_windows') || (matrix.platform == 'unix' && 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_unix' || 'zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_windows') }}
           BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=${{ matrix.shard }} and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
           BUSTER_CI_ZIG_CACHE_HIT: ${{ steps.zig_cache.outputs.cache-hit }}
+          BUSTER_MATRIX_PHASE_OUTPUT: ${{ runner.temp }}/buster-ci/matrix-phases
           BUSTER_CI_COVERAGE_OUTPUT: ${{ runner.temp }}/buster-ci/coverage.json
           BUSTER_CI_COVERAGE_REQUIRED: "1"
           BUSTER_CI_COVERAGE_PLATFORM: ${{ matrix.os }}
@@ -476,7 +483,7 @@ jobs:
       # Rebuild the upload root from readable regular files only, without
       # preserving links or source permissions.
       - name: Sanitize desktop logs
-        if: ${{ !cancelled() }}
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         timeout-minutes: 2
         shell: bash
         run: |
@@ -539,7 +546,7 @@ jobs:
           PYTHON
 
       - name: Retain desktop logs
-        if: ${{ !cancelled() }}
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}

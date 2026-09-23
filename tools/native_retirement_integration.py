@@ -35,6 +35,7 @@ RESERVED_MATERIALIZATION_ROOTS = (
     "external",
 )
 TRUST_IMPLEMENTATION_PATHS = frozenset((
+    ".github/workflows/api-migration-policy.yml",
     ".github/workflows/native-retirement-contract.yml",
     ".github/workflows/native-retirement-integration.yml",
     ".github/workflows/native-retirement-rebind.yml",
@@ -43,6 +44,7 @@ TRUST_IMPLEMENTATION_PATHS = frozenset((
     "tools/native_retirement_dependency_binding.py",
     "tools/native_retirement_external.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_materializer.py",
     "tools/native_retirement_rebind.py",
     "tools/native_retirement_rebind_contract.py",
@@ -55,11 +57,13 @@ POLICY_SCHEMA_PATHS = frozenset((
     "tools/native_retirement_census.c",
 ))
 TRANSITION_KINDS = ("ordinary", "bootstrap", "policy")
+AUTHORIZATION_MODES = ("independent-review", "solo-maintainer")
 TRUSTED_FILE_PATHS = (
     "tools/native_retirement_contract.py",
     "tools/native_retirement_dependency_binding.py",
     "tools/native_retirement_external.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_materializer.py",
     "tools/native_retirement_rebind.py",
     "tools/native_retirement_rebind_contract.py",
@@ -597,9 +601,51 @@ class GitHub:
         return permission
 
 
+def authorize_solo_maintainer(api: GitHub, actor: str, actor_permission: str,
+                              context: dict) -> dict:
+    """Explicit admin dispatch, using context supplied only by trusted main.
+
+    This is a separate authorization policy, never an independent PR review.
+    A new dispatch is required after either input changes or a run is retried.
+    """
+    if (not actor or actor != context.get("configured_login") or
+            actor_permission != "admin"):
+        raise IntegrationError("solo authorization requires the configured repository admin")
+    expected_workflow = (
+        api.repository + "/.github/workflows/native-retirement-integration.yml@refs/heads/main"
+    )
+    if (context.get("event_name") != "workflow_dispatch" or
+            context.get("workflow_ref") != expected_workflow or
+            context.get("triggering_actor") != actor or
+            context.get("run_attempt") != "1"):
+        raise IntegrationError("solo authorization requires a fresh admin dispatch from main")
+    base = context.get("expected_base", "")
+    _require_hex(base, HEX40, "solo authorization expected main")
+    if context.get("workflow_sha") != base:
+        raise IntegrationError("solo authorization workflow revision differs from approved main")
+    run_id = context.get("run_id", "")
+    if not isinstance(run_id, str) or re.fullmatch(r"[1-9][0-9]*", run_id) is None:
+        raise IntegrationError("solo authorization requires a GitHub Actions run identity")
+    current_main = api.request("git/ref/heads/main")["object"]["sha"]
+    if current_main != base:
+        raise StaleMain("main changed after solo authorization; start a fresh dispatch")
+    return {
+        "mode": "solo-maintainer",
+        "base": base,
+        "actor": actor,
+        "run_id": run_id,
+        "run_attempt": 1,
+        "workflow_ref": expected_workflow,
+        "workflow_sha": base,
+    }
+
+
 def authorize(api: GitHub, pull_request: int, expected_head: str, transition_kind: str,
-              actor: str) -> dict:
+              actor: str, *, authorization_mode: str = "independent-review",
+              solo_context: dict | None = None) -> dict:
     _require_hex(expected_head, HEX40, "expected PR head")
+    if transition_kind not in TRANSITION_KINDS or authorization_mode not in AUTHORIZATION_MODES:
+        raise IntegrationError("unknown integration transition or authorization mode")
     pr = api.request("pulls/" + str(pull_request))
     if (pr["state"] != "open" or pr["draft"] or pr["base"]["ref"] != "main" or
             pr["base"]["repo"]["full_name"] != api.repository or
@@ -617,7 +663,15 @@ def authorize(api: GitHub, pull_request: int, expected_head: str, transition_kin
         )
 
     reviewers = []
-    if transition_kind != "ordinary":
+    authorization = {"mode": "dispatcher" if transition_kind == "ordinary"
+                     else "independent-review"}
+    if authorization_mode == "solo-maintainer":
+        if transition_kind == "ordinary":
+            raise IntegrationError("solo authorization is only for bootstrap or policy transitions")
+        authorization = authorize_solo_maintainer(
+            api, actor, actor_permission, solo_context or {}
+        )
+    elif transition_kind != "ordinary":
         latest = {}
         for review in api.all("pulls/" + str(pull_request) + "/reviews"):
             login = review["user"]["login"]
@@ -646,7 +700,30 @@ def authorize(api: GitHub, pull_request: int, expected_head: str, transition_kin
         "dispatcher_permission": actor_permission,
         "transition_kind": transition_kind,
         "maintainer_approvals": reviewers,
+        "authorization": authorization,
     }
+
+
+def resolve_dispatch(base: str, head: str, kind: str, *, expected_base: str,
+                     expected_head: str, requested_kind: str, requested_mode: str,
+                     workflow_sha: str, configured_login: str, actor: str) -> dict:
+    """Resolve convenience inputs once; authorize() still enforces permission."""
+    _require_hex(base, HEX40, "resolved main")
+    _require_hex(head, HEX40, "resolved candidate")
+    if base != workflow_sha or (expected_base and expected_base != base):
+        raise StaleMain("main moved since dispatch; start a fresh run")
+    if expected_head and expected_head != head:
+        raise StaleHead("candidate differs from the explicitly requested head")
+    if kind not in TRANSITION_KINDS or requested_kind not in ("auto", kind):
+        raise IntegrationError("requested transition differs from trusted classification")
+    mode = requested_mode
+    if mode == "configured":
+        mode = ("solo-maintainer" if kind != "ordinary" and configured_login and
+                configured_login == actor else "independent-review")
+    if mode not in AUTHORIZATION_MODES:
+        raise IntegrationError("unknown authorization mode")
+    return {"base": base, "head": head, "classification": kind,
+            "authorization_mode": mode}
 
 
 def _read_json(path: Path) -> dict:
@@ -700,18 +777,44 @@ def _parser() -> argparse.ArgumentParser:
     publish_parser.add_argument("--evidence", type=Path, required=True)
     publish_parser.add_argument("--message", required=True)
 
+    resolve = subparsers.add_parser("resolve-dispatch")
+    resolve.add_argument("--repo-root", type=Path, required=True)
+    resolve.add_argument("--base", required=True)
+    resolve.add_argument("--head", required=True)
+    resolve.add_argument("--source-head", help="Verified source candidate for an attested retry")
+    resolve.add_argument("--expected-base", default="")
+    resolve.add_argument("--expected-head", default="")
+    resolve.add_argument("--transition-kind", default="auto")
+    resolve.add_argument("--authorization-mode", default="configured")
+
     authorize_parser = subparsers.add_parser("authorize")
     authorize_parser.add_argument("--pull-request", type=int, required=True)
     authorize_parser.add_argument("--expected-head", required=True)
     authorize_parser.add_argument("--transition-kind", choices=TRANSITION_KINDS,
                                   required=True)
+    authorize_parser.add_argument("--authorization-mode", choices=AUTHORIZATION_MODES,
+                                  default="independent-review")
+    authorize_parser.add_argument("--expected-base", default="")
     return parser
 
 
 def main(argv=None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        if arguments.command == "classify":
+        if arguments.command == "resolve-dispatch":
+            classification = classify_candidate(arguments.repo_root, arguments.base,
+                                                arguments.source_head or arguments.head)
+            enforce_classification(classification, classification.kind, True)
+            report = resolve_dispatch(
+                arguments.base, arguments.head, classification.kind,
+                expected_base=arguments.expected_base, expected_head=arguments.expected_head,
+                requested_kind=arguments.transition_kind,
+                requested_mode=arguments.authorization_mode,
+                workflow_sha=os.environ.get("GITHUB_WORKFLOW_SHA", ""),
+                configured_login=os.environ.get("NATIVE_RETIREMENT_SOLO_MAINTAINER", ""),
+                actor=os.environ.get("GITHUB_ACTOR", ""))
+            print(canonical_json(report), end="")
+        elif arguments.command == "classify":
             reject_reserved_materialization_roots(arguments.repo_root)
             classification = classify_candidate(
                 arguments.repo_root, arguments.base, arguments.head
@@ -747,7 +850,18 @@ def main(argv=None) -> int:
         elif arguments.command == "authorize":
             api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
             report = authorize(api, arguments.pull_request, arguments.expected_head,
-                               arguments.transition_kind, os.environ["GITHUB_ACTOR"])
+                               arguments.transition_kind, os.environ["GITHUB_ACTOR"],
+                               authorization_mode=arguments.authorization_mode,
+                               solo_context={
+                                   "configured_login": os.environ.get("NATIVE_RETIREMENT_SOLO_MAINTAINER", ""),
+                                   "expected_base": arguments.expected_base,
+                                   "event_name": os.environ.get("GITHUB_EVENT_NAME", ""),
+                                   "workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF", ""),
+                                   "workflow_sha": os.environ.get("GITHUB_WORKFLOW_SHA", ""),
+                                   "triggering_actor": os.environ.get("GITHUB_TRIGGERING_ACTOR", ""),
+                                   "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                                   "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+                               })
             print(canonical_json(report), end="")
         return 0
     except StaleMain as error:

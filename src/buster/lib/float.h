@@ -16,6 +16,7 @@ BUSTER_F_DECL f32 cos_f32(f32 v);
 BUSTER_F_DECL f64 cos_f64(f64 v);
 BUSTER_F_DECL f32 acos_f32(f32 v);
 BUSTER_F_DECL f64 acos_f64(f64 v);
+// Clear the sign bit while preserving all other representation bits.
 BUSTER_F_DECL f32 fabs_f32(f32 v);
 BUSTER_F_DECL f64 fabs_f64(f64 v);
 BUSTER_F_DECL f32 round_f32(f32 v);

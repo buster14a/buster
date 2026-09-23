@@ -6810,7 +6810,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_storage_address(CIntegerIrBuilde
 
 // One piece of that span as a place of its own width, at `offset` bytes in.
 BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_piece_place(CIntegerIrBuilder* builder, IrValueId byte_address, u32 offset, IrTypeId piece_type,
-                                                            IrSourceRange source)
+                                                            bool is_volatile, IrSourceRange source)
 {
     IrTypeId byte_type = c_ir_builder_scalar_type(builder, C_TYPE_UNSIGNED_CHAR);
     IrValueId address = byte_address;
@@ -6824,7 +6824,14 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_bit_field_piece_place(CIntegerIrBuilder* b
     IrValueId cast = address.value != IR_ID_UNDERLYING_INVALID && piece_pointer_type.value != IR_ID_UNDERLYING_INVALID
                          ? c_ir_emit_cast(builder, address, piece_pointer_type, source)
                          : IR_VALUE_ID_INVALID;
-    return cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    IrValueId result = cast.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_dereference_place(builder, cast, source) : IR_VALUE_ID_INVALID;
+    if (result.value < builder->function->value_count)
+    {
+        // The unsigned piece type describes storage, not the qualifications
+        // of the original field. Preserve its volatile access on every piece.
+        builder->function->values[result.value].is_volatile |= is_volatile;
+    }
+    return result;
 }
 
 // The bits of `field` that lie in one piece of its span, as the half-open
@@ -6873,7 +6880,8 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
         }
         IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
         IrValueId piece_place =
-            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type,
+                                                                                            builder->function->values[place.value].is_volatile, source)
                                                          : IR_VALUE_ID_INVALID;
         IrValueId loaded = piece_place.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_load_place_raw(builder, piece_place, piece_type, source)
                                                                         : IR_VALUE_ID_INVALID;
@@ -6957,7 +6965,8 @@ BUSTER_C_INTERNAL bool c_ir_emit_split_bit_field_store(CIntegerIrBuilder* builde
         u32 piece_bits = (u32)pieces[index].size * 8;
         IrTypeId piece_type = c_ir_unsigned_type_of_size(builder, pieces[index].size);
         IrValueId piece_place =
-            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type, source)
+            piece_type.value != IR_ID_UNDERLYING_INVALID ? c_ir_emit_bit_field_piece_place(builder, address, pieces[index].offset, piece_type,
+                                                                                            builder->function->values[place.value].is_volatile, source)
                                                          : IR_VALUE_ID_INVALID;
         if (piece_place.value == IR_ID_UNDERLYING_INVALID)
         {
@@ -8748,7 +8757,42 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value_typed(CIntegerIrBuilder* bui
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_integer_value(CIntegerIrBuilder* builder, u64 value, bool is_negative, CToken token)
 {
+    // Synthetic int operands only; enumerators use their published semantic
+    // type through c_ir_emit_enumerator, including full-width constants.
     return c_ir_emit_integer_value_typed(builder, value, is_negative, token, builder->s32_type);
+}
+
+// Canonical integer constants carry one magnitude limb. Assemble a rare
+// full-width enumerator with ordinary canonical operations, preserving that
+// instruction contract for every backend and the canonical validator.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_enumerator(CIntegerIrBuilder* builder, CEntity const* entity, CToken token)
+{
+    IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : IR_TYPE_ID_INVALID;
+    IrValueId value = IR_VALUE_ID_INVALID;
+    if (type.value != IR_ID_UNDERLYING_INVALID)
+    {
+        u64 high = entity->enum_member_plus_one && entity->enum_member_plus_one <= builder->parse.enum_member_count
+                       ? builder->parse.enum_members[entity->enum_member_plus_one - 1].integer_constant.magnitude_high : 0;
+        if (high)
+        {
+            CIrWideInteger bits = {.low = entity->constant_value, .high = high};
+            if (entity->constant_is_negative)
+            {
+                bits = c_ir_wide_negate(bits);
+            }
+            IrSourceRange source = c_ir_token_source_range(builder, token);
+            IrValueId low_value = c_ir_emit_integer_value_at(builder, bits.low, false, source, type);
+            IrValueId high_value = c_ir_emit_integer_value_at(builder, bits.high, false, source, type);
+            IrValueId shift = c_ir_emit_integer_value_at(builder, 64, false, source, type);
+            high_value = c_ir_emit_binary_value(builder, high_value, shift, type, IR_BINARY_SHIFT_LEFT, source);
+            value = c_ir_emit_binary_value(builder, low_value, high_value, type, IR_BINARY_INTEGER_BITWISE_OR, source);
+        }
+        else
+        {
+            value = c_ir_emit_integer_value_typed(builder, entity->constant_value, entity->constant_is_negative, token, type);
+        }
+    }
+    return value;
 }
 
 typedef struct CIrVlaLayout CIrVlaLayout;
@@ -25858,7 +25902,8 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     }
     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
     {
-        type = builder->s32_type;
+        CTypeId declared = builder->parse.entities[entity.value].type;
+        type = declared.value < builder->parse.type_count ? builder->c_type_ir_map[declared.value] : IR_TYPE_ID_INVALID;
     }
     else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_OBJECT)
     {
@@ -28227,7 +28272,7 @@ c_ir_expression_core_loop:
                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
                 {
                     CEntity* enumerator = &builder->parse.entities[entity.value];
-                    value = c_ir_emit_integer_value(builder, enumerator->constant_value, enumerator->constant_is_negative, token);
+                    value = c_ir_emit_enumerator(builder, enumerator, token);
                 }
                 else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_FUNCTION)
                 {
@@ -31179,7 +31224,8 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_nonconditional_expression_type_attempt(C
             }
             else if (entity.value < builder->parse.entity_count && builder->parse.entities[entity.value].kind == C_ENTITY_ENUMERATOR)
             {
-                candidate = builder->s32_type;
+                CTypeId declared = builder->parse.entities[entity.value].type;
+                candidate = declared.value < builder->parse.type_count ? builder->c_type_ir_map[declared.value] : IR_TYPE_ID_INVALID;
             }
             else
             {
@@ -43512,15 +43558,19 @@ BUSTER_C_INTERNAL bool c_ir_constant_identifier(CIntegerIrBuilder* builder, u32 
     if (entity_id.value < builder->parse.entity_count)
     {
         CEntity* entity = builder->parse.entities + entity_id.value;
-        if (entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value))
+        if ((entity->kind == C_ENTITY_ENUMERATOR || (entity->is_constexpr && entity->has_constant_value)) &&
+            entity->type.value < builder->parse.type_count &&
+            builder->c_type_ir_map[entity->type.value].value != IR_ID_UNDERLYING_INVALID)
         {
-            IrTypeId type = entity->type.value < builder->parse.type_count ? builder->c_type_ir_map[entity->type.value] : builder->s32_type;
-            u64 value = entity->constant_value;
-            if (entity->constant_is_negative)
+            IrTypeId type = builder->c_type_ir_map[entity->type.value];
+            CIrWideInteger bits = {.low = entity->constant_value};
+            if (entity->enum_member_plus_one && entity->enum_member_plus_one <= builder->parse.enum_member_count)
             {
-                value = 0 - value;
+                bits.high = builder->parse.enum_members[entity->enum_member_plus_one - 1].integer_constant.magnitude_high;
             }
-            *result = c_ir_constant_integer(type.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : type, value);
+            if (entity->constant_is_negative) bits = c_ir_wide_negate(bits);
+            *result = c_ir_constant_integer(type, bits.low);
+            result->integer_high = bits.high;
             return true;
         }
         // A function-local static is C_ENTITY_LOCAL with a symbol -- the
@@ -48253,7 +48303,21 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
         CType* c_type = &parse.types[type_index];
         if (c_type->kind == C_TYPE_ENUM && !c_type->has_unqualified_type)
         {
-            c_type_ir_map[type_index] = c_type->element_type.value < parse.type_count ? c_type_ir_map[c_type->element_type.value] : s32_type;
+            // Completion owns compatible-type selection. An incomplete tag
+            // can be a pointee, but has no integer layout to guess here.
+            if (c_type->element_type.value < parse.type_count)
+            {
+                c_type_ir_map[type_index] = c_type_ir_map[c_type->element_type.value];
+            }
+            else if (!c_type->is_complete)
+            {
+                c_type_ir_map[type_index] = ir_program_add_type(program, (IrType){
+                    .name = c_type->tag,
+                    .kind = IR_TYPE_ENUM,
+                    .element_type = IR_TYPE_ID_INVALID,
+                    .return_type = IR_TYPE_ID_INVALID,
+                });
+            }
             continue;
         }
         if ((c_type->kind != C_TYPE_STRUCT && c_type->kind != C_TYPE_UNION) || c_type->has_unqualified_type)
@@ -48459,6 +48523,22 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     }
                     continue;
                 }
+                if (c_type->kind == C_TYPE_ENUM)
+                {
+                    // A fixed base can be an aligned typedef whose mapping
+                    // was pending during the seed pass. Reuse that resolved
+                    // mapping when it becomes available, without a range scan.
+                    if (c_type->element_type.value < parse.type_count)
+                    {
+                        IrTypeId underlying = c_type_ir_map[c_type->element_type.value];
+                        if (underlying.value != IR_ID_UNDERLYING_INVALID && underlying.value != c_type_ir_map[type_index].value)
+                        {
+                            c_type_ir_map[type_index] = underlying;
+                            progress = true;
+                        }
+                    }
+                    continue;
+                }
                 if (c_type->kind == C_TYPE_FUNCTION && c_type_ir_map[type_index].value == IR_ID_UNDERLYING_INVALID)
                 {
                     if (c_type->return_type.value >= parse.type_count)
@@ -48610,33 +48690,9 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         break;
                     }
                     IrTypeId field_type_id = c_type_ir_map[member->type.value];
-                    // A bit-field of enumerated type is read with the
-                    // signedness C leaves to the implementation, and the
-                    // choice GCC and Clang make is the enum's own underlying
-                    // type: unsigned when no enumerator is negative. Read as
-                    // a signed field instead, QuickJS's
-                    // `JSClosureTypeEnum closure_type : 3` answers -3 for the
-                    // enumerator 5 and its switch falls to `default: abort()`.
-                    if (member->is_bit_field)
-                    {
-                        CType const* enumeration = &parse.types[member->type.value];
-                        if (enumeration->has_unqualified_type && enumeration->unqualified_type.value < parse.type_count)
-                        {
-                            enumeration = &parse.types[enumeration->unqualified_type.value];
-                        }
-                        if (enumeration->kind == C_TYPE_ENUM && enumeration->element_type.value >= parse.type_count)
-                        {
-                            bool negative_enumerator = false;
-                            for (u32 enum_index = 0; enum_index < enumeration->enum_member_count; enum_index += 1)
-                            {
-                                negative_enumerator |= parse.enum_members[enumeration->enum_member_start + enum_index].is_negative;
-                            }
-                            if (!negative_enumerator)
-                            {
-                                field_type_id = constant_builder.scalar_types[C_TYPE_UNSIGNED_INT];
-                            }
-                        }
-                    }
+                    // Enum members use the same resolved compatible/fixed type
+                    // as ordinary objects. Width, packing and access_size below
+                    // describe storage; none may select another semantic type.
                     IrType* field_type = ir_type_from_id(&program->types, field_type_id);
                     // A `void` member lays out beside the others rather than
                     // holding the whole definition unresolved, exactly as a

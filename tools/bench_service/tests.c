@@ -321,6 +321,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
         {"contract-sha256=", "docs/native-retirement-performance-contract.md"},
         {"support-declaration-sha256=", "docs/native-retirement-support-v1.tsv"},
         {"binding-validator-sha256=", "tools/native_retirement_performance_binding.py"},
+        {"binding-schema-sha256=", "tools/native_retirement_performance_schema.py"},
         {"statistics-sha256=", "tools/throughput/retirement_stats.h"},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(pins); index += 1)

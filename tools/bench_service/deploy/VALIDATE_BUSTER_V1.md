@@ -3,12 +3,13 @@
 This checklist is for the first real `validate-buster-v1` execution on
 `buster-zen5-9700x`. It is not an installer or a deployment approval. Stop before
 submission if an identity, authorization, host fact or cleanup proof is missing.
-Keep #437, #512 and #36 open. Keep `native-retirement-performance-v1` blocked.
+Keep #437, #880, #512 and #36 open. Keep `native-retirement-performance-v1` blocked.
 One-pair smoke observations are not A/A qualification or a performance verdict.
 
 Read [the service contract](../README.md), [deployment references](README.md),
 [benchmarking guidance](../../../docs/agents/benchmarking.md) and issues
 [#437](https://github.com/buster14a/buster/issues/437),
+[#880](https://github.com/buster14a/buster/issues/880),
 [#422](https://github.com/buster14a/buster/issues/422),
 [#426](https://github.com/buster14a/buster/issues/426) and
 [#512](https://github.com/buster14a/buster/issues/512). Resolve current main's
@@ -27,29 +28,35 @@ full commit and tree and check active service PRs before changing the inventory.
   identity. Authorize only the fixed installed `gateway` subcommand, with no
   environment or executable override. Never expose direct `submit`, `protocol`, `rpc`,
   `materialize`, `worker-run` or `workspace-reconcile` to Actions.
-- A bounded result exporter is still required. `client result JOB` and
-  `gateway result JOB` invoke the service's exhaustive result validation and
-  print the bound result root, manifest, bundle and full-result digests after
-  validating the response payload. There is no public file-download operation.
-  Do not treat `client result` stdout
-  or `client logs` (journal transitions only) as a downloaded result bundle.
-- The exporter must select by authenticated job/attempt identity, not a
-  caller-supplied path. Reuse the existing manifest/bundle validator and fixed
-  limits; retain every indexed file and separately bound control record.
-  Include the supervisor/journal/host evidence needed for the lifecycle claim.
-  No recursive copy of a caller-selected directory or glob is an exporter.
+- The bounded authenticated exporter from #878 is available as `gateway
+  export JOB ATTEMPT FULL_SHA`. It selects only the authenticated finalized
+  job/attempt and expected full-result digest, never a caller-supplied path,
+  and returns a digest-bound receipt plus the complete immutable result archive.
+  Capture stdout as binary, check the exit status before publishing it, and
+  retain the `export-receipt-sha256` printed on stderr. `gateway result` and
+  journal logs are receipts, not downloaded result bytes. See
+  [the export contract](../EXPORT.md).
+- Reconstruct an exported archive in a new private destination with
+  `bench_service unpack-export ARCHIVE DESTINATION RECEIPT_SHA`. Use a new
+  absolute destination whose parent is private and trusted. That command
+  reruns the exhaustive manifest, bundle and full-result validators without
+  opening the original host path or executing downloaded content. Retain the
+  sealed service export, the exact downloaded copy, the exporting/replay tool
+  identities and every separately bound lifecycle control. Durable publication
+  under #510 remains operator work; an Actions artifact alone is not sufficient.
 - `.github/workflows/9700x-service-dispatch.yml` is the reviewed smoke
   submission path. It is manual, main-only, protected-environment gated and
   fail-closed unless `BENCH_SERVICE_DISPATCH_ENABLED` is exactly `true`. It
   performs no checkout and invokes only literal installed `gateway
   capabilities`, `gateway submit` and `gateway result` commands. Keep it
   disabled until the repository controls and host verifier in
-  `GITHUB_ADMISSION.md` are complete. It prints authenticated receipts but
-  still is not a result-bundle exporter.
+  `GITHUB_ADMISSION.md` are complete. It does not invoke `gateway export` or
+  publish result bytes; use only a separately reviewed fixed operator path for
+  that transfer rather than granting the runner broader service or host access.
 
-
-These missing components are implementation work, not permissions that an
-operator should compensate for by broadening account or socket access.
+The remaining authorization, durable-publication and physical-host evidence
+are qualification work, not permissions that an operator should compensate for
+by broadening account or socket access.
 
 ## One-time operator provisioning
 
@@ -214,28 +221,36 @@ acknowledgment; never change the key to hide a failed or unknown attempt.
 4. Retain success or failure evidence. Require exhaustive `BQ-BUNDLE-V1`
    replay: 4,096 entries, 512 MiB total, 64 MiB/file, 256 levels, 192-byte
    relative paths, 8 MiB index. Include separately bound manifest/outcome
-   controls and reject missing/unlisted/unsafe files. The existing service
-   status/result operation revalidates its bound durable result. Replaying
-   native throughput uses the prebuilt `buster-bench-throughput compare
-   --output RETRIEVED_THROUGHPUT_DIRECTORY` on a separate retrieval copy, after
-   bundle validation, away from an active measurement. It is not an outer
-   service receipt validator; no standalone outer export/replay CLI exists yet.
-5. After recursive cleanup and durable terminal publication, demonstrate a
-   subsequent benign admission. Use that second job for the planned recovery
-   scenario: an operator-controlled SIGTERM of the exact long-lived service
-   main process after reservation/materialization and before terminal
-   publication. Record the observed boundary and signal. Current SIGTERM
-   semantics are cancellation; do not relabel that outcome as success or as a
-   demonstrated SIGKILL crash. No reboot is necessary.
-6. Preserve the service journal, terminal/partial evidence and relevant system
-   journal before controlled restart. Reopen deterministically and reconcile
-   exact boot/unit/invocation/cgroup identities. Prove the outer and all five
-   stage units and recursive cgroups absent, including descendants, before
-   admission/lease release. Ambiguity means quarantine, not force-unlock.
+   controls and reject missing/unlisted/unsafe files. Obtain every finalized
+   attempt through `gateway export JOB ATTEMPT FULL_SHA`, retain the reported
+   export-receipt digest, publish the exact bytes durably, download them into a
+   clean private workspace and run `bench_service unpack-export` with that
+   receipt. Replaying native throughput uses the prebuilt
+   `buster-bench-throughput compare --output RETRIEVED_THROUGHPUT_DIRECTORY`
+   on the reconstructed copy, after outer and bundle validation and away from
+   an active measurement.
+5. Predeclare and retain separate real-systemd attempts for #880: normal
+   completion with a materialized source manifest larger than 4 KiB;
+   interruption after `validate-buster-v1.prepare.manifest` exists;
+   interruption after a completed stage manifest exists; worker/coordinator
+   restart after bundle publication but before the final manifest; and a
+   connected lease-handoff peer that never acknowledges. Use reviewed binaries
+   and the fixed real recipe, not stub executables or the injected manager test
+   backend. Record the exact observed boundary, signal/restart action and
+   journal identity for each attempt. Never relabel an interrupted or partial
+   result as success.
+6. Preserve the service journal, terminal/partial evidence, export outcome and
+   relevant system journal before each controlled restart. Reopen
+   deterministically and reconcile exact boot/unit/invocation/cgroup identities.
+   Prove `.lease-handoff`, the outer and all five stage units, recursive cgroups
+   and every descendant process absent before admission or lease release. The
+   lease must remain continuously owned through that proof. Ambiguity means
+   quarantine, not force-unlock.
 7. Admit a later benign request only after durable reconciliation and absence
-   proof. Retain its actual reservation and terminal evidence too. This is a
-   planned follow-up, not a retry of the interrupted job. The other live-systemd
-   scenarios in #437 remain outstanding unless separately exercised.
+   proof, then retain its actual reservation and terminal evidence. This is a
+   new job, not a retry of an interrupted attempt. Repeat export, durable
+   publication, clean download and independent replay for every finalized
+   attempt; preserve unavailable or failed exports as failures.
 
 Keep `execution_outcome`, `measurement_validity` and `statistical_decision`
 separate. For this slice validity/decision remain `not_evaluated`. Service
@@ -244,7 +259,7 @@ success, a replayed bundle, or successful next-job admission cannot establish
 
 ## Evidence required before reporting completion
 
-Update #437 and #512 with main commit/tree; implementation head/tree and merge
+Update #437, #880 and #512 with main commit/tree; implementation head/tree and merge
 identity; independent final-head review; exact-head warning/native/ASan/UBSan/
 throughput/recipe/workflow checks; installed executable/profile/source digests;
 workflow run/job IDs; service job/attempt/request identities; host/boot facts;

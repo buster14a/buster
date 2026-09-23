@@ -90,8 +90,28 @@ the first lands.
 path. It is a default-branch `workflow_dispatch` workflow with one fixed,
 non-cancelling concurrency group. Protect the
 `native-retirement-integration` environment with the intended reviewers.
-Dispatch it with an open non-draft PR number, its exact reviewed 40-hex head,
-and the trusted transition class.
+Dispatch it with an open non-draft PR number. The default `auto` class and
+`configured` authorization mode resolve the immutable request from trusted main.
+Optional SHA and class overrides remain strict assertions.
+
+For a previously attested head, preparation first verifies its original trusted
+publication and recovers the original source candidate. It requires the recorded
+base to be an ancestor of current main, a still-valid successful writer attempt,
+and a clean source merge. The source is reclassified against current main and
+the normal authorization policy is applied to the live PR head. All three jobs
+reconstruct from that source and current main; the publication lease targets the
+live PR head. The replacement integration has current main and original source
+as parents, so generated commits can be replaced without losing source history.
+Manual generated edits, edits stacked on unrecognized integration output and
+genuine conflicts remain blocked. A fresh dispatch is still required after main
+advances; this recovery does not grant automated dispatcher authority.
+
+Merge-group admission is read-only: GitHub's single-candidate synthetic commit
+must have current main first, the attested integration head second, and exactly
+the attested final tree. It resolves live publication evidence for that PR head,
+including the successful latest writer attempt. Combined-head CI remains required
+on the synthetic SHA. Rebinding checks that existing generated pair in place;
+it does not refresh it into a different, untested group tree.
 
 The workflow has three separately permissioned jobs:
 
@@ -103,23 +123,59 @@ The workflow has three separately permissioned jobs:
   candidate's affected tests and census self-test.
 - **publish** is the sole `contents: write` job. It independently reconstructs
   and compares the same tree but never executes candidate code. It reauthorizes
-  the PR immediately before one `--force-with-lease` ref update whose merge
-  commit contains both the candidate and the generated state.
+  the PR immediately before a leased update of its same-repository head branch.
+  The two-parent commit contains current main, the candidate, and generated
+  state. A temporary branch makes the commit available for the bot-authored
+  `Native retirement trusted integration` status before the PR head moves.
+  Publication leaves main unchanged; normal merge admission follows.
+
+The required `Native retirement merge admission` check refuses ordinary merge
+for a candidate that changes an admitted repository source, trusted implementation,
+or reviewed policy/schema. It admits the writer-produced head only after
+checking the exact parents, evidence trailers, generated-only post-candidate
+delta, current-main identity, and GitHub Actions attestation. A main-push run
+invalidates every open integration head whose recorded base no longer equals
+current `main`; dispatching the writer again reconstructs it without requiring
+a manual feature-branch rebase. The independent `API migration policy` check
+continues to enforce bounded API compatibility. Configure admission as a
+required GitHub Actions check (integration ID `15368`) without enabling strict
+required-status-check policy or removing any existing required check.
 
 Evidence records base/head commits and trees, the pre-generation combined tree,
 the final tree, the old trusted rebinder revision/tree and file digests, the
 exact next-trusted file digests in the final tree, both generated artifact
-digests, and the policy/receipt/project/ledger identities. The merge commit
-records the evidence digest, base, candidate, and final tree.
+digests, and the policy/receipt/project/ledger identities. The integration
+commit records the evidence digest, base, candidate, transition kind, and final
+tree.
 
 The writer rechecks both `main` and the PR head immediately before publication.
 A moved PR head fails closed. A moved `main` discards the prepared result and
-fails closed before any ref update. A maintainer/admin must start a fresh
+fails closed before any branch update. A maintainer/admin must start a fresh
 trusted dispatch, which reconstructs from the new current `main`; no previous
 snapshot or quartet is reused. The workflow deliberately has no
 `actions: write` permission, so stale recovery cannot silently continue under
 the identity of `github-actions[bot]`. Publication is one leased ref update, so
-a failure or cancellation cannot leave a partially published generated state.
+a failure or cancellation cannot leave a partially published generated state
+on the PR head. A failure after staging can leave a temporary
+`native-retirement-staging/` branch; it does not authorize another commit.
+
+Configure `NATIVE_RETIREMENT_PUBLICATION_TOKEN` as an Actions secret in the
+protected `native-retirement-integration` environment to trigger PR CI from
+the publication push automatically. Use a fine-grained personal access token
+restricted to this repository with Contents read/write and Workflows read/write
+(for candidates changing workflow files). Give it an expiry and rotate it.
+Never paste the token into a PR, workflow input, log, or chat.
+
+The secret is exposed only to the final publication step, after independent
+read-only validation and reauthorization. The attestation API uses the built-in
+GitHub Actions token so the admission gate still verifies the bot creator.
+The publication credential does not grant permission to skip required checks.
+
+Without the secret, publication remains compatible with the built-in token,
+but emits a warning: approve the new PR workflow runs in GitHub. GitHub may
+require this additional approval for PR updates using its built-in token.
+See [GitHub workflow triggering](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow). Verify checks belong
+to the published SHA before merging; old-head checks are not evidence for it.
 
 ## Trust transitions
 
@@ -133,8 +189,10 @@ Candidates are classified before any privileged operation:
 - a candidate that changes both implementation and policy/schema is rejected
   and must be split.
 
-`bootstrap` and `policy` dispatches require a maintainer/admin dispatcher and an
-approval from a different maintainer/admin. The publisher always executes the
+By default, `bootstrap` and `policy` dispatches require a maintainer/admin
+dispatcher and an approval from a maintainer/admin other than the PR author
+on the exact candidate head. An explicitly configured solo-maintainer repository
+can instead use the admin-dispatch authorization described below. The publisher always executes the
 implementation from the old/current trusted `main`, never the candidate's
 version. In the read-only validation job, the candidate authority must then
 accept the exact generated state produced by that old authority for the final
@@ -142,6 +200,63 @@ tree. A bootstrap that would immediately make `main` stale therefore fails
 before publication. A schema change that the old implementation cannot
 understand must land as a backwards-compatible bootstrap first, then as a
 separate policy transition after that bootstrap is trusted.
+
+### Solo-maintainer authorization
+
+`authorization_mode: solo-maintainer` is explicit owner authorization of one
+bootstrap or policy transition. It is recorded separately from independent
+review; `maintainer_approvals` remains empty. The CLI default remains `independent-review`. The workflow default `configured`
+selects solo mode only for a trust transition dispatched by the explicitly
+configured account; all other dispatchers retain independent-review policy.
+Missing reviews never select the solo route.
+Ordinary integrations retain their existing dispatcher authorization.
+
+After this implementation is installed on trusted `main`, configure the
+repository Actions variable `NATIVE_RETIREMENT_SOLO_MAINTAINER` with the exact
+GitHub login of the solo maintainer (`davidgmbb` for this repository). That
+account must currently have the `admin` role. A candidate file cannot set this
+configuration. The variable is captured by each workflow run; removing it
+disables future dispatches, so cancel any already-running solo dispatch when
+revoking the configuration. Current admin permission is checked again before
+publication.
+
+To authorize an integration, open **Actions -> Native retirement trusted
+integration -> Run workflow**, select `main`, enter the PR number, and run.
+Leave `expected_head` and `expected_base` blank, `transition_kind` at `auto`,
+and `authorization_mode` at `configured`. No SHA copying is needed.
+
+The run checks out its immutable workflow revision, resolves the current PR
+head once, classifies it with trusted tools, records both SHAs/class/mode in
+the job summary, and reuses them across validation and publication. If you
+need to approve a specific head rather than the current head when preparation
+starts, fill the optional exact-head override. Explicit overrides must match.
+The configured account must still have current admin permission, use attempt 1,
+and pass the existing fresh-dispatch checks. Main/head movement fails closed;
+start a new run for the changed request. No background process renews approval.
+
+This manual dispatch is the approval action. It must originate from the
+configured admin account, use the default-branch writer at the approved base,
+and be attempt 1 of a fresh workflow run. Re-running jobs is not fresh approval:
+start a new dispatch after a failure or cancellation. If either main or the
+candidate changes, inspect the new revisions and dispatch again. Approval is
+checked during preparation and immediately before publication. Both resulting
+`authorization.json` records are retained alongside the generated-tree evidence
+and contain the PR/head, base, actor, transition, workflow revision and run ID.
+
+Solo authorization does not skip the old-trusted-tool reconstruction, separate
+read-only candidate validation, second-refresh equality check, protected writer
+environment, generated-file ownership rules, or leased publication. A writer
+environment configured to require another person's approval is still blocking
+for a solo maintainer; this option does not bypass environment protection.
+
+**Installation is a separate policy change.** A PR introducing this mode cannot
+authorize its own privileged execution. Review and install this source-only
+prerequisite through the repository's existing permitted change process before
+setting the variable or dispatching solo mode. Do not run the candidate workflow
+with write credentials or manufacture a successful admission status. This
+prerequisite does not install #927's PR-head publisher or attest #927; that
+publisher transition remains separate work after the authorization policy is
+trusted.
 
 Generated files are never an escape hatch: manual edits to either generated
 artifact fail for all classes. External/SDK pins remain reviewed policy and
@@ -162,5 +277,29 @@ recomputes the materializer ledger, and cross-checks the receipt/project closure
 rather than trusting producer output. Evidence without the generated snapshot
 is treated as legacy only when all frozen previous identities match exactly.
 
-This ownership cutover does not enable a GitHub merge queue/ruleset (#867) and
-does not implement the general conflict-preflight mechanism (#869).
+The required admission gate is selective to retirement-sensitive PRs. General
+multi-PR serialization remains #867, and conflict preflight remains #869.
+
+### PR-head publisher bootstrap for #927
+
+Install the publisher-only prerequisite on main before dispatching retirement
+integration for #927. This prerequisite changes publication and its status
+permission without installing the new merge-admission gate or changing
+generated artifacts. Once installed, update #927 against current main and
+start a fresh authorized dispatch for its exact head and base. A successful
+run attests the new PR head; it does not itself merge the PR.
+
+### Merge-conflict preflight and generated output
+
+Preflight keeps reporting generated paths, but a live GitHub PR check accepts
+those paths only when the trusted retirement verifier validates the exact head:
+current-main first parent, candidate second parent, matching tree/evidence
+trailers, no manual generated edits in the source candidate, generated-only
+post-candidate changes, and the bot-authored evidence status. It loads the
+verifier from the trusted checkout, never the candidate. Missing, stale, or
+invalid attestation retains the generated-ownership failure; merge conflicts
+remain blocking. Offline checks without live status evidence stay conservative.
+
+Install this compatibility bootstrap on main before relying on the exception.
+Landing it advances main, so existing attested heads need fresh trusted
+integration. Do not hand-edit generated artifacts or post replacement statuses.

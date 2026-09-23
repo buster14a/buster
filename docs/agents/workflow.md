@@ -1,6 +1,6 @@
 # Forge, issues, and pull requests
 
-[Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
+[Agent instructions](../../AGENTS.md) · [Research lifecycle](research.md) · Paths and commands below are relative to the repository root.
 
 ## Forge, issues, and pull requests
 
@@ -59,6 +59,13 @@ validate the fix (which oracle, which harness, which counters), and a
 definition of done. State what was measured and when, so a stale claim is
 recognisable as stale; the tree moves fast enough that a count quoted without
 a date is a trap. Issues #537-#549 are examples of the form.
+
+Research, performance, experiment, and architecture issues also carry at most
+one primary lifecycle label for their immediate evidence gate. Keep area,
+architecture, kind, and priority labels orthogonal; preserve historical bodies
+and update the live state in issue metadata plus a compact comment. See the
+[research lifecycle](research.md) for the vocabulary, transition rules, and
+required evidence/disposition fields.
 
 ## Cross-cutting internal API migrations
 
@@ -165,8 +172,14 @@ Ordinary feature branches do not own
 `tools/native_retirement_dependency_binding.generated.h`. Do not run
 `native_retirement_rebind.py refresh` and commit its output merely because
 an admitted source changed. The read-only rebinding workflow reconstructs the
-exact candidate state in a disposable checkout; only the serialized trusted
-integration workflow may publish it.
+exact candidate state in a disposable checkout. The repository ruleset's
+required `Native retirement merge admission` check is the merge-admission
+authority. `API migration policy` remains a separate compatibility check. For
+retirement-sensitive changes it accepts only a current-main, two-parent
+integration head with a successful exact-head
+`Native retirement trusted integration` status from `github-actions[bot]`.
+When `main` advances that status is invalidated; rerun the protected writer
+instead of hand-editing generated state or requiring a manual rebase.
 
 Changes to rebinder/materializer/validator/workflow implementation are a
 `bootstrap` transition. Changes to reviewed policy, generated schema, or
@@ -176,6 +189,59 @@ must accept the exact state produced by the old trusted authority before it
 can become trusted; then dispatch the separate policy transition. Manual
 generated-file edits are rejected for every class. See
 [native-retirement rebinding](../native-retirement-rebinding.md).
+
+## Merge-conflict preflight
+
+The `merge-conflict-preflight` status is a cheap read-only answer for one exact
+triple: current `main`, candidate head and merge base. Its description embeds
+the full main and head SHAs; the retained JSON also records their trees, every
+merge-base SHA/tree and the exact combined tree when clean. A result for
+`m=<old-main> h=<head>` is not authoritative after `main` moves, even when the
+same head still shows a green status. The default-branch refresh rewrites the
+status for open PRs, and the later merge-group admission path must validate its
+own exact combined head rather than reuse a historical PR-head result.
+
+The preflight never checks out, rebases, merges or updates a PR branch. It uses
+`git merge-tree` plumbing, reports every unmerged path and Git's conflict kind,
+and does not choose `ours`, `theirs`, a union driver or a semantic resolution.
+Respond to its numbered classification exactly as follows:
+
+1. **Generated/integration-owned workflow violation.** Remove
+   `docs/native-retirement-repository-sources-v1.json` and/or
+   `tools/native_retirement_dependency_binding.generated.h` from the PR. Do not
+   hand-resolve hashes or refresh generated state on the feature branch; rerun
+   ephemeral validation and let the serialized trusted writer publish the
+   integrated result.
+2. **Genuine source overlap.** Stop the expensive matrix and inspect the exact
+   named paths. Choose an intentional order, rebase or explicit stack; preserve
+   both changes where required, run the affected focused tests, then let the
+   preflight evaluate the new immutable head. Never auto-resolve merely because
+   textual hunks appear disjoint.
+3. **Clean but stale.** Do not rebase solely to make the branch pointer current.
+   Keep the clean branch directly mergeable under the loose-check policy, but
+   require validation of the reported exact combined tree (or the later
+   merge-group head). Rerun that validation whenever either main or the head
+   SHA changes.
+4. **Policy/schema/trust-boundary overlap.** Use the reviewed native-retirement
+   bootstrap/policy transition procedure. Do not let candidate-modified trust
+   code approve its own output, and do not combine a trust implementation
+   bootstrap with its dependent policy/schema transition. Resolve ordering and
+   the applicable exact-head authorization before running expensive acceptance
+   again: independent review by default, or the explicitly configured admin
+   dispatch in the documented solo-maintainer policy.
+
+For a local diagnosis with already-fetched immutable commits, run:
+
+```sh
+python3 -B tools/merge_conflict_preflight.py analyze \
+  --repo . --main <main-sha> --head <head-sha> \
+  --summary /tmp/merge-conflict-preflight.md --fail-on-blocking
+```
+
+This command may write ordinary Git merge-tree objects to the local object
+database, but it does not change refs, the index, the worktree or either input
+branch. The hosted trusted job records the same machine-readable report without
+executing candidate code.
 
 **Push a rebase before you re-verify it.** A rebase onto a moved `main` is
 followed by a full local pass — `test_all`, `test_self_host`, whichever compat
@@ -187,3 +253,28 @@ with `--force-with-lease`, never a bare `--force`, so a branch someone else
 advanced is not overwritten. This is a rebase rule, not a general one: a branch
 whose content is still changing waits for the local pass, because a red CI run
 on a commit you already know is incomplete tells nobody anything.
+
+## Serialized main integration rollout
+
+`Main integration admission` distinguishes PR readiness from exact merge-group
+admission. The group checker executes from the immutable trusted base, binds
+all six required workflows to the group SHA and latest attempt, and rejects
+stale main/group identities. It delegates retirement admission to the existing
+trusted gate; it is neither another writer nor a replacement queue.
+Sensitive groups must have the full tree of a successfully published attested
+integration head. The gate rechecks the live PR, latest status and writer attempt.
+After main advances, a fresh authorized dispatch recovers the original source
+from verified writer output and regenerates against current main; enqueue the
+replacement head after its checks pass. No manual generated-file repair is needed.
+
+The main merge queue was enabled and read back on 2026-09-22 after #945 landed.
+All eight documented checks are required from GitHub Actions, with one build and
+one merge at a time, ALLGREEN, merge commits, and no bypass. Live acceptance is
+tracked in #867 and remains distinct from activation. Keep
+`strict_required_status_checks_policy: false`: a conflict-free branch does not
+need a manual update just because main advanced. Use the queue to validate the
+new combined tree; never reuse the original PR-head green as that evidence. The required-check audit,
+fork and cancellation policy, activation/read-back steps, remaining live
+acceptance tests, and emergency restrictions are in
+[serialized main integration](../merge-queue-admission.md). No manual success
+status or temporary bypass is authorized by that guide.
