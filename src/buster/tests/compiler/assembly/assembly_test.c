@@ -3043,6 +3043,62 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                string_equal(metadata_authority_probe.symbols[metadata_authority_probe.relocations[2].symbol].name,
                                             S8("external2")));
 
+    // Independently assembled in docs/x86-64-source-layout-oracle.s.  In
+    // particular the unresolved base displacement cannot take the disp8
+    // form merely because the relocation placeholder is zero.
+    u8 const expected_lea_layout[] = {
+        0x48, 0x8d, 0x45, 0x00, 0x49, 0x8d, 0x45, 0x00,
+        0x4b, 0x8d, 0x44, 0x8c, 0x7f,
+        0x4b, 0x8d, 0x84, 0x8c, 0x80, 0x00, 0x00, 0x00,
+        0x4b, 0x8d, 0x84, 0x8c, 0x00, 0x00, 0x00, 0x00,
+        0x8d, 0x05, 0x00, 0x00, 0x00, 0x00,
+    };
+    String8 const lea_layout_sources[] = {
+        S8("lea rax, [rbp]\n"
+           "lea rax, [r13]\n"
+           "lea rax, [r12+r9*4+127]\n"
+           "lea rax, [r12+r9*4+128]\n"
+           "lea rax, [r12+r9*4+external_disp]\n"
+           "lea eax, [rip+external_rip]\n"),
+        S8("leaq (%rbp), %rax\n"
+           "leaq (%r13), %rax\n"
+           "leaq 127(%r12,%r9,4), %rax\n"
+           "leaq 128(%r12,%r9,4), %rax\n"
+           "leaq external_disp(%r12,%r9,4), %rax\n"
+           "leal external_rip(%rip), %eax\n"),
+    };
+    for (u32 syntax_index = 0; syntax_index < BUSTER_ARRAY_LENGTH(lea_layout_sources); syntax_index += 1)
+    {
+        AssemblyEncodeResult layout = assembly_encode(
+            arguments->arena, lea_layout_sources[syntax_index],
+            (AssemblyEncodeOptions){.target = x86_target,
+                                    .syntax = syntax_index ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, layout.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(layout.bytes, expected_lea_layout, sizeof(expected_lea_layout)));
+        BUSTER_TEST(arguments, layout.relocation_count == 2 &&
+                                   layout.relocations[0].offset == 25 && layout.relocations[0].addend == 0 &&
+                                   layout.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
+                                   layout.relocations[1].offset == 31 && layout.relocations[1].addend == -4 &&
+                                   layout.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                   layout.relocations[0].symbol < layout.symbol_count &&
+                                   layout.relocations[1].symbol < layout.symbol_count &&
+                                   string_equal(layout.symbols[layout.relocations[0].symbol].name, S8("external_disp")) &&
+                                   string_equal(layout.symbols[layout.relocations[1].symbol].name, S8("external_rip")));
+    }
+    AssemblyEncodeResult lea_invalid_after_valid = assembly_encode(
+        arguments->arena, S8("lea rax, [r12+r9*4+external_disp]\n"
+                             "lea rax, [r13+2147483648]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 const expected_lea_before_failure[] = {0x4b, 0x8d, 0x84, 0x8c, 0x00, 0x00, 0x00, 0x00};
+    BUSTER_TEST(arguments, lea_invalid_after_valid.diagnostic_count == 1 &&
+                               assembly_test_bytes_equal(lea_invalid_after_valid.bytes, expected_lea_before_failure,
+                                                         sizeof(expected_lea_before_failure)) &&
+                               lea_invalid_after_valid.relocation_count == 1 &&
+                               lea_invalid_after_valid.relocations[0].offset == 4 &&
+                               lea_invalid_after_valid.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
+                               lea_invalid_after_valid.symbol_count == 1 &&
+                               string_equal(lea_invalid_after_valid.symbols[0].name, S8("external_disp")));
+
     // Opmask instructions use the checked metadata producer for both Intel
     // and AT&T operand orderings; keep one register-only cohort here because
     // the legacy assembler's size validator intentionally rejects KMOV
