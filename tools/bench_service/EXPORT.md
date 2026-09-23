@@ -65,7 +65,10 @@ exhaustion fail closed. Directory entries count toward the same bounded
 inventory, including empty directories.
 
 A fixed service-owned child constructs `export-JOB-ATTEMPT.pending` in the
-private queue directory. The parent enforces a five-minute deadline, then a
+private queue directory. The parent enforces a five-minute deadline for the
+admitted smoke recipe; the blocked retirement recipe has a separate 24-hour
+capacity budget for future admission. This is not a host execution deadline.
+After the deadline there is a
 one-second kill/reap allowance. An unreapable child keeps the inherited queue
 lock and poisons the daemon; it cannot admit another worker. The snapshot is
 synced and made mode `0400`, published without replacement by `linkat`, and
@@ -77,9 +80,11 @@ remove only that uncommitted pending artifact before retrying. A corrupt sealed
 receipt is never replaced automatically.
 
 The sealed file contains a durable receipt, a digest-bound chunk index, and
-original archive bytes. Every chunk rechecks the receipt against durable job
-state, the receipt's chunk-index digest, the selected chunk hash, and the
-opened/named inode and timestamps before replying. The client independently
+original archive bytes. The first read verifies the complete index digest;
+subsequent reads reuse that check only while the exact receipt, inode, size,
+owner, mode and nanosecond timestamps remain unchanged. Every chunk checks
+its own indexed digest and the opened/named inode before replying. A service
+restart verifies the complete index again. The client independently
 hashes the complete archive. A modified snapshot or partial transfer cannot
 be reported as success. An identical retry, including after daemon restart,
 returns the same receipt and bytes. No cursor, queue event or journal record is
@@ -108,22 +113,31 @@ operation 13 (`EXPORT`). Existing request and ordinary reply limits stay fixed.
 | Chunk and cursor quantum | 65,536 bytes |
 | Entries, including directories and control files | 4,096 |
 | Individual file | 64 MiB |
-| Existing indexed non-control payload | 512 MiB |
+| Existing indexed non-control payload | 512 MiB for smoke; 128 GiB reserved for blocked retirement recipe |
 | Existing bundle index | 8 MiB |
-| Total archive, including controls and entry headers | 546,177,024 bytes |
+| Total archive, including controls and entry headers | 546,177,024 bytes for smoke; 137,448,259,584 bytes reserved for retirement |
 | Relative path | 192 bytes |
 | Depth | Fewer than 256 components; path bound also applies |
 | Receipt | 1,024 bytes |
-| Preparation / chunk operation / client transfer budget | 300 / 30 / 300 seconds |
-| Socket send/receive wait | 1 second; initial client receipt wait 305 seconds |
+| Preparation / chunk operation / client transfer budget | 300 / 30 / 300 seconds for smoke; 86,400 / 30 / 86,400 seconds reserved for retirement |
+| Socket send/receive wait | 1 second; initial receipt wait bounded at 86,405 seconds because the request contains no recipe identity; smoke preparation still stops at 300 seconds |
 
 The inventory is one fixed-capacity mapping; payload buffers are 64 KiB.
-The durable chunk index has at most 8,334 fixed 64-byte hashes. No allocation
+The smoke chunk index has at most 8,334 fixed 64-byte hashes; the reserved
+retirement offset allows at most 2,097,294 hashes. No allocation
 or response size is proportional to an unchecked request value. Index and
 payload hashing stream in fixed buffers. Capacity exhaustion fails rather
 than truncating a successful archive. Filesystem syscalls still depend on a
 responsive local filesystem; the preparation child provides the outer deadline
 for exhaustive validation and file reads.
+
+For the proposed 60-pair retirement population, 8,720,640 paired numeric
+records alone require at least 1,569,715,200 bytes at 180 bytes per record,
+before transcripts, manifests, binaries or logs. An operator must provision
+space for the retained result, sealed export, downloaded archive and clean
+replay, each independently bounded by its own copy. The larger limits here
+only remove a transport ceiling; the recipe remains blocked until its complete
+producer, validators and service tests are reviewed.
 
 Export request body:
 

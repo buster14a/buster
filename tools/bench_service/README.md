@@ -113,8 +113,11 @@ The trusted recipe writes a `BQ-BUNDLE-V1` index beside the final manifest.
 Every non-control result file is listed as `sha256 size relative/path`; the
 worker reopens and hashes every listed file, rejects unlisted regular files,
 symlinks, traversal components and non-private directories, and enforces
-4,096 entries, 512 MiB total bytes, 64 MiB per file, 256 directory levels and
-192-byte relative paths. The index itself is bounded to 8 MiB. The final
+4,096 entries, 512 MiB total bytes for the admitted smoke recipe, 64 MiB per
+file, 256 directory levels and 192-byte relative paths. A separate 128 GiB
+ceiling is reserved for the still-blocked retirement recipe's full population;
+it grants no execution or performance admission. The index itself is bounded
+to 8 MiB. The final
 manifest, bundle and failure/cancellation outcome record are separately bound
 control records, so later retrieval does not change the measured bundle. A
 failed, cancelled, or interrupted recipe publishes a digest-bound

@@ -13,10 +13,15 @@
 #define BQ_EXPORT_BODY_CAP (BQ_EXPORT_REPLY_HEADER + BQ_EXPORT_CHUNK_CAP)
 #define BQ_EXPORT_TOTAL_CAP (BQ_WORKER_BUNDLE_TOTAL_CAP + BQ_WORKER_BUNDLE_CAP + \
                             2ull * 32768 + BQ_WORKER_BUNDLE_ENTRY_CAP * (16ull + BQ_PATH_CAP))
+#define BQ_EXPORT_RETIREMENT_TOTAL_CAP (BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP + BQ_WORKER_BUNDLE_CAP + \
+                                       2ull * 32768 + BQ_WORKER_BUNDLE_ENTRY_CAP * (16ull + BQ_PATH_CAP))
 #define BQ_EXPORT_CHUNKS ((BQ_EXPORT_TOTAL_CAP + BQ_EXPORT_CHUNK_CAP - 1) / BQ_EXPORT_CHUNK_CAP)
 #define BQ_EXPORT_INDEX_CAP (BQ_EXPORT_CHUNKS * 64u)
 #define BQ_EXPORT_DATA_OFFSET (BQ_EXPORT_RECEIPT_CAP + BQ_EXPORT_INDEX_CAP)
+#define BQ_EXPORT_RETIREMENT_CHUNKS ((BQ_EXPORT_RETIREMENT_TOTAL_CAP + BQ_EXPORT_CHUNK_CAP - 1) / BQ_EXPORT_CHUNK_CAP)
+#define BQ_EXPORT_RETIREMENT_DATA_OFFSET (BQ_EXPORT_RECEIPT_CAP + BQ_EXPORT_RETIREMENT_CHUNKS * 64u)
 #define BQ_EXPORT_PREPARE_MILLISECONDS 300000u
+#define BQ_EXPORT_RETIREMENT_PREPARE_MILLISECONDS 86400000u
 #define BQ_EXPORT_READ_MILLISECONDS 30000u
 #define BQ_EXPORT_PRINCIPAL "github-actions"
 
@@ -56,6 +61,40 @@ BUSTER_GLOBAL_LOCAL BqExportIndexCache bq_export_index_cache;
 BUSTER_GLOBAL_LOCAL u64 bq_export_index_full_checks;
 #endif
 
+BUSTER_GLOBAL_LOCAL u64 bq_export_total_cap(BqRecipe recipe)
+{
+    u64 result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ?
+                 BQ_EXPORT_RETIREMENT_TOTAL_CAP : BQ_EXPORT_TOTAL_CAP;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 bq_export_data_offset(BqRecipe recipe)
+{
+    u64 result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ?
+                 BQ_EXPORT_RETIREMENT_DATA_OFFSET : BQ_EXPORT_DATA_OFFSET;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 bq_export_prepare_milliseconds(BqRecipe recipe)
+{
+    u64 result = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ?
+                 BQ_EXPORT_RETIREMENT_PREPARE_MILLISECONDS : BQ_EXPORT_PREPARE_MILLISECONDS;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BqRecipe bq_export_receipt_recipe(u8 const receipt[BQ_EXPORT_RECEIPT_CAP])
+{
+    BqRequest request = {0};
+    u32 size = bq_u32(receipt + 992);
+    if (size <= BQ_REQUEST_CAP)
+    {
+        request.size = size;
+        memcpy(request.bytes, receipt + 672, size);
+    }
+    BqRecipe result = bq_request_valid(&request) ? bq_request_recipe(&request) : BQ_RECIPE_UNKNOWN;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_export_same(struct stat const* a, struct stat const* b)
 {
     bool same = a->st_dev == b->st_dev && a->st_ino == b->st_ino && a->st_size == b->st_size &&
@@ -87,7 +126,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_io(int fd, void* bytes, u64 size, u64 offs
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_export_inventory(int root, BqExportInventory* inventory, u64 deadline)
+BUSTER_GLOBAL_LOCAL BqError bq_export_inventory(int root, BqExportInventory* inventory, u64 total_cap, u64 deadline)
 {
     memset(inventory, 0, sizeof(*inventory));
     /* A bounded breadth-first walk also inventories empty directories. Every
@@ -137,7 +176,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_inventory(int root, BqExportInventory* inv
                         inventory->files += 1;
                         inventory->bytes += (u64)info->st_size;
                     }
-                    if (inventory->bytes > BQ_EXPORT_TOTAL_CAP) error = BQ_EXPORT_OVERSIZED;
+                    if (inventory->bytes > total_cap) error = BQ_EXPORT_OVERSIZED;
                     inventory->count += 1;
                 }
             }
@@ -182,7 +221,7 @@ BUSTER_GLOBAL_LOCAL bool bq_export_receipt_valid(u8 const receipt[BQ_EXPORT_RECE
     u32 entries = bq_u32(receipt + 44);
     BqRequest request = {.size = bq_u32(receipt + 992)};
     bool valid = !memcmp(receipt, "BQEXP001", 8) && bq_u64(receipt + 8) && bq_u64(receipt + 16) &&
-                 bytes > 0 && bytes <= BQ_EXPORT_TOTAL_CAP && bq_u64(receipt + 32) <= bytes &&
+                 bytes > 0 && bytes <= BQ_EXPORT_RETIREMENT_TOTAL_CAP && bq_u64(receipt + 32) <= bytes &&
                  bq_u32(receipt + 40) <= entries && entries && entries <= BQ_WORKER_BUNDLE_ENTRY_CAP &&
                  request.size <= BQ_REQUEST_CAP && bq_u32(receipt + 1012) >= BQ_SUCCEEDED &&
                  bq_u32(receipt + 1012) <= BQ_INTERRUPTED && bq_u32(receipt + 1016) != BQ_INVALID &&
@@ -196,6 +235,7 @@ BUSTER_GLOBAL_LOCAL bool bq_export_receipt_valid(u8 const receipt[BQ_EXPORT_RECE
         String8 principal = bq_field(&request, 0), recipe = bq_field(&request, 2);
         String8 profile = bq_recipe_profile(bq_request_recipe(&request));
         valid = bq_request_valid(&request) && bq_recipe_service(bq_request_recipe(&request)) &&
+                bytes <= bq_export_total_cap(bq_request_recipe(&request)) &&
                 !memcmp(digest, receipt + 48, 64) && string_equal(principal, S8(BQ_EXPORT_PRINCIPAL)) &&
                 principal.length < 64 && recipe.length < 48 &&
                 !memcmp(receipt + 496, principal.pointer, (size_t)principal.length) && !receipt[496 + principal.length] &&
@@ -209,13 +249,16 @@ BUSTER_GLOBAL_LOCAL bool bq_export_receipt_valid(u8 const receipt[BQ_EXPORT_RECE
 
 BUSTER_GLOBAL_LOCAL BqError bq_export_snapshot(BqJob const* job, int output, u64 deadline)
 {
+    BqRecipe selected = bq_request_recipe(&job->request);
+    u64 total_cap = bq_export_total_cap(selected);
+    u64 data_offset = bq_export_data_offset(selected);
     int root = bq_worker_open_trusted_directory(string_from_pointer(job->result_root), true, false);
     struct stat root_before = {0}, root_after = {0};
     BqError error = root < 0 ? BQ_EXPORT_MISSING : fstat(root, &root_before) != 0 ? BQ_IO : BQ_OK;
     BqExportInventory* inventory = mmap(NULL, sizeof(*inventory), PROT_READ | PROT_WRITE,
                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (inventory == MAP_FAILED) error = BQ_FULL;
-    if (error == BQ_OK) error = bq_export_inventory(root, inventory, deadline);
+    if (error == BQ_OK) error = bq_export_inventory(root, inventory, total_cap, deadline);
     if (error == BQ_OK && bq_worker_result_binding_validate_at(job, root) != BQ_OK) error = BQ_EXPORT_INVALID;
     u64 offset = 0;
     for (u32 i = 0; error == BQ_OK && i < inventory->count; i += 1)
@@ -228,10 +271,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_snapshot(BqJob const* job, int output, u64
         bq_put32(header, regular ? 2 : 1);
         bq_put32(header + 4, length);
         bq_put64(header + 8, size);
-        if (offset + sizeof(header) + length + size > BQ_EXPORT_TOTAL_CAP) error = BQ_EXPORT_OVERSIZED;
-        if (error == BQ_OK) error = bq_export_io(output, header, sizeof(header), BQ_EXPORT_DATA_OFFSET + offset, true, deadline);
+        if (size > total_cap || offset > total_cap - size || sizeof(header) + length > total_cap - size - offset)
+            error = BQ_EXPORT_OVERSIZED;
+        if (error == BQ_OK) error = bq_export_io(output, header, sizeof(header), data_offset + offset, true, deadline);
         offset += sizeof(header);
-        if (error == BQ_OK) error = bq_export_io(output, (void*)entry->path, length, BQ_EXPORT_DATA_OFFSET + offset, true, deadline);
+        if (error == BQ_OK) error = bq_export_io(output, (void*)entry->path, length, data_offset + offset, true, deadline);
         offset += length;
         int input = regular && error == BQ_OK ? bq_worker_bundle_open_relative(root, entry->path) : -1;
         struct stat before = {0}, after = {0};
@@ -242,7 +286,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_snapshot(BqJob const* job, int output, u64
         {
             u64 count = size - copied < sizeof(bytes) ? size - copied : sizeof(bytes);
             error = bq_export_io(input, bytes, count, copied, false, deadline);
-            if (error == BQ_OK) error = bq_export_io(output, bytes, count, BQ_EXPORT_DATA_OFFSET + offset + copied, true, deadline);
+            if (error == BQ_OK) error = bq_export_io(output, bytes, count, data_offset + offset + copied, true, deadline);
             copied += count;
         }
         if (input >= 0)
@@ -269,7 +313,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_snapshot(BqJob const* job, int output, u64
         u8 bytes[BQ_EXPORT_CHUNK_CAP];
         u64 count = offset - cursor < sizeof(bytes) ? offset - cursor : sizeof(bytes);
         char digest[SHA256_HEX_CAPACITY];
-        error = bq_export_io(output, bytes, count, BQ_EXPORT_DATA_OFFSET + cursor, false, deadline);
+        error = bq_export_io(output, bytes, count, data_offset + cursor, false, deadline);
         if (error == BQ_OK)
         {
             bq_digest(bytes, (u32)count, digest);
@@ -383,7 +427,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_prepare(BqQueue* queue, BqJob const* job)
         {
             signal(SIGTERM, SIG_DFL);
             signal(SIGINT, SIG_DFL);
-            u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_EXPORT_PREPARE_MILLISECONDS);
+            u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(),
+                                              bq_export_prepare_milliseconds(bq_request_recipe(&job->request)));
 #ifdef BUSTER_BENCH_SERVICE_TEST
             if (bq_export_test_stall) while (true) pause();
 #endif
@@ -394,7 +439,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_prepare(BqQueue* queue, BqJob const* job)
         if (error == BQ_OK)
         {
             int status = 0;
-            u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_EXPORT_PREPARE_MILLISECONDS);
+            u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(),
+                                              bq_export_prepare_milliseconds(bq_request_recipe(&job->request)));
 #ifdef BUSTER_BENCH_SERVICE_TEST
             if (bq_export_test_stall) deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), 30);
 #endif
@@ -443,6 +489,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_authorize(BqQueue* queue, u8 const* reques
 BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64 cursor,
                                             u8 const expected_receipt[64], u8* output, u32* size)
 {
+    u64 data_offset = bq_export_data_offset(bq_request_recipe(&job->request));
     char name[80];
     BqError error = bq_export_name(name, job->id, job->token, false) ? BQ_OK : BQ_BAD_REQUEST;
     int fd = error == BQ_OK ? openat(queue->directory_fd, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC) : -1;
@@ -461,7 +508,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
     if (error == BQ_OK)
     {
         bq_digest(receipt, sizeof(receipt), receipt_digest);
-        error = bq_export_receipt_valid(receipt) && (u64)before.st_size == BQ_EXPORT_DATA_OFFSET + total &&
+        error = bq_export_receipt_valid(receipt) && (u64)before.st_size == data_offset + total &&
                 bq_u64(receipt + 8) == job->id && bq_u64(receipt + 16) == job->token &&
                 !memcmp(receipt + 48, job->digest, 64) && !memcmp(receipt + 112, job->result_manifest_digest, 64) &&
                 !memcmp(receipt + 176, job->result_bundle_digest, 64) && !memcmp(receipt + 240, job->result_full_digest, 64) &&
@@ -518,7 +565,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
         else
         {
             count = (u32)(total - cursor < BQ_EXPORT_CHUNK_CAP ? total - cursor : BQ_EXPORT_CHUNK_CAP);
-            error = bq_export_io(fd, output + BQ_EXPORT_REPLY_HEADER, count, BQ_EXPORT_DATA_OFFSET + cursor, false, deadline);
+            error = bq_export_io(fd, output + BQ_EXPORT_REPLY_HEADER, count, data_offset + cursor, false, deadline);
             char actual[SHA256_HEX_CAPACITY];
             if (error == BQ_OK) bq_digest(output + BQ_EXPORT_REPLY_HEADER, count, actual);
             if (error == BQ_OK && memcmp(actual, expected_chunk, 64)) error = BQ_EXPORT_CORRUPT;
@@ -528,7 +575,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_export_read(BqQueue* queue, BqJob const* job, u64
     if (error == BQ_OK && bq_export_test_mutation_fd >= 0)
     {
         u8 changed = 0xff;
-        ssize_t written = pwrite(bq_export_test_mutation_fd, &changed, 1, BQ_EXPORT_DATA_OFFSET);
+        ssize_t written = pwrite(bq_export_test_mutation_fd, &changed, 1, data_offset);
         if (written != 1) error = BQ_IO;
     }
 #endif

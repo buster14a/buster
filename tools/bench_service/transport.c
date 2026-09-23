@@ -352,7 +352,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
                 BqError receive_error = bq_transport_receive_timeout(client, response->bytes, &received,
                                                                       bq_u32(request + 8) == BQ_OP_EXPORT && request_size == BQ_CONTROL_HEADER + BQ_EXPORT_REQUEST_CAP &&
                                                                       bq_u64(request + BQ_CONTROL_HEADER + 80) == UINT64_MAX ?
-                                                                      BQ_EXPORT_PREPARE_MILLISECONDS + 5000 : BQ_TRANSPORT_CLIENT_MILLISECONDS,
+                                                                      BQ_EXPORT_RETIREMENT_PREPARE_MILLISECONDS + 5000 : BQ_TRANSPORT_CLIENT_MILLISECONDS,
                                                                       BQ_PACKET_CAP);
                 bool response_valid = receive_error == BQ_OK && received >= BQ_CONTROL_HEADER + 4 &&
                                       !memcmp(response->bytes, "BQP1", 4) &&

@@ -1938,6 +1938,13 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_bundle_reserved(BqRecipeFiles const* recipe, 
     return reserved;
 }
 
+BUSTER_GLOBAL_LOCAL u64 bq_worker_bundle_total_cap(BqRecipeFiles const* recipe)
+{
+    u64 result = recipe && !strcmp(recipe->name, "native-retirement-performance-v1") ?
+                 BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP : BQ_WORKER_BUNDLE_TOTAL_CAP;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL int bq_worker_bundle_relative(char output[BQ_WORKER_BUNDLE_PATH_CAP + 1],
                                                    char const* parent, char const* leaf)
 {
@@ -2131,6 +2138,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_recipe(int result_director
     }
     bool valid = opened;
     u64 cursor = 0, declared_bytes = 0;
+    u64 total_cap = bq_worker_bundle_total_cap(recipe);
     u64 declared_entries = 0;
     char line[BQ_WORKER_BUNDLE_LINE_CAP];
     if (valid)
@@ -2142,7 +2150,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_recipe(int result_director
                                                                             &declared_entries);
         valid = valid && bq_worker_bundle_next_line(bytes, size, &cursor, line) &&
                 !strncmp(line, "bytes=", 6) && bq_worker_bundle_decimal(line + 6,
-                                                                          BQ_WORKER_BUNDLE_TOTAL_CAP,
+                                                                          total_cap,
                                                                           &declared_bytes);
     }
     for (u64 index = 0; valid && index < declared_entries; index += 1)
@@ -2172,7 +2180,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_bundle_validate_recipe(int result_director
             char actual_digest[SHA256_HEX_CAPACITY];
             valid = bq_worker_bundle_file_digest(root, entries[index].path, &actual_size, actual_digest) &&
                     actual_size == entries[index].size && !memcmp(actual_digest, entries[index].digest, SHA256_HEX_CAPACITY) &&
-                    measured_bytes <= BQ_WORKER_BUNDLE_TOTAL_CAP - actual_size;
+                    measured_bytes <= total_cap - actual_size;
             if (valid) measured_bytes += actual_size;
         }
         valid = valid && measured_bytes == declared_bytes;
@@ -3043,7 +3051,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_failure_bundle_publish(BqWorkerFinalizatio
                      (child_info.st_uid == 0 || child_info.st_uid == geteuid()) &&
                      (child_info.st_mode & 022) == 0 && child_info.st_size >= 0 &&
                      (u64)child_info.st_size <= BQ_WORKER_BUNDLE_FILE_CAP &&
-                     total <= BQ_WORKER_BUNDLE_TOTAL_CAP - (u64)child_info.st_size;
+                     total <= bq_worker_bundle_total_cap(&finalization->recipe) - (u64)child_info.st_size;
                 if (ok)
                 {
                     int evidence = bq_worker_bundle_open_relative(finalization->result_directory, relative);

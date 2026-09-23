@@ -149,6 +149,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
                  response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size));
         u8 receipt[BQ_EXPORT_RECEIPT_CAP];
         memcpy(receipt, response.bytes + BQ_CONTROL_HEADER + BQ_EXPORT_REPLY_HEADER, sizeof(receipt));
+        u8 oversized[BQ_EXPORT_RECEIPT_CAP];
+        memcpy(oversized, receipt, sizeof(oversized));
+        bq_put64(oversized + 24, BQ_EXPORT_TOTAL_CAP + 1);
+        BQ_CHECK(bq_export_receipt_recipe(receipt) == BQ_RECIPE_VALIDATE_BUSTER &&
+                 !bq_export_receipt_valid(oversized));
         char digest[SHA256_HEX_CAPACITY];
         bq_digest(receipt, sizeof(receipt), digest);
         u64 total = bq_u64(receipt + 24);
@@ -255,6 +260,17 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
 
 BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
 {
+    BqRecipeFiles smoke = {0}, retirement = {0};
+    BQ_CHECK(bq_recipe_files(BQ_RECIPE_VALIDATE_BUSTER, &smoke) &&
+             bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &retirement) &&
+             bq_worker_bundle_total_cap(&smoke) == BQ_WORKER_BUNDLE_TOTAL_CAP &&
+             bq_worker_bundle_total_cap(&retirement) == BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP &&
+             bq_export_total_cap(BQ_RECIPE_VALIDATE_BUSTER) == BQ_EXPORT_TOTAL_CAP &&
+             bq_export_data_offset(BQ_RECIPE_VALIDATE_BUSTER) == BQ_EXPORT_DATA_OFFSET &&
+             bq_export_total_cap(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) > UINT64_C(8720640) * 180 &&
+             bq_export_data_offset(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) > BQ_EXPORT_DATA_OFFSET &&
+             bq_export_prepare_milliseconds(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) >
+                 BQ_EXPORT_PREPARE_MILLISECONDS);
     char path[BQ_PATH_CAP + 1] = "/tmp/bq-export-paths-XXXXXX";
     BQ_CHECK(bq_test_mkdtemp_physical(path, sizeof(path)));
     int root = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -265,20 +281,20 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
     if (root >= 0 && inventory != MAP_FAILED)
     {
         int file = openat(root, "regular", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        BQ_CHECK(file >= 0 && write(file, "a", 1) == 1 && bq_export_inventory(root, inventory, deadline) == BQ_OK &&
+        BQ_CHECK(file >= 0 && write(file, "a", 1) == 1 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_OK &&
                  inventory->files == 1 && inventory->bytes == 1 && bq_export_inventory_unchanged(root, inventory));
         BQ_CHECK(pwrite(file, "b", 1, 0) == 1 && !bq_export_inventory_unchanged(root, inventory));
-        BQ_CHECK(bq_export_inventory(root, inventory, deadline) == BQ_OK);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_OK);
         BQ_CHECK(renameat(root, "regular", root, "replacement") == 0 && !bq_export_inventory_unchanged(root, inventory));
         BQ_CHECK(renameat(root, "replacement", root, "regular") == 0);
-        BQ_CHECK(linkat(root, "regular", root, "alias", 0) == 0 && bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(linkat(root, "regular", root, "alias", 0) == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "alias", 0) == 0);
         BQ_CHECK(ftruncate(file, (off_t)BQ_WORKER_BUNDLE_FILE_CAP + 1) == 0 &&
-                 bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_OVERSIZED);
+                 bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
         BQ_CHECK(ftruncate(file, 1) == 0);
-        BQ_CHECK(symlinkat("../outside", root, "alias") == 0 && bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(symlinkat("../outside", root, "alias") == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "alias", 0) == 0);
-        BQ_CHECK(mkfifoat(root, "fifo", 0600) == 0 && bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(mkfifoat(root, "fifo", 0600) == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "fifo", 0) == 0);
         u8 byte = 0;
         BQ_CHECK(bq_export_io(file, &byte, 1, 0, false, 0) == BQ_EXPORT_TIMEOUT);
@@ -293,7 +309,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
             directory = child;
         }
         if (directory >= 0) close(directory);
-        BQ_CHECK(bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_OVERSIZED);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
         BQ_CHECK(bq_remove_workspace_payload(root));
         for (u32 i = 0; i <= BQ_WORKER_BUNDLE_ENTRY_CAP; i += 1)
         {
@@ -303,7 +319,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
             BQ_CHECK(fd >= 0);
             if (fd >= 0) close(fd);
         }
-        BQ_CHECK(bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_OVERSIZED);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
         /* The generic worker cleanup intentionally has the same entry cap. */
         for (u32 i = 0; i <= BQ_WORKER_BUNDLE_ENTRY_CAP; i += 1)
         {
