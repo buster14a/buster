@@ -11,7 +11,7 @@ import tempfile
 from zen5_aa_noise import canonical_bytes, sha256_bytes, sha256_file, write_json
 from zen5_aa_noise_test import synthetic_capture as aa_capture
 from zen5_build_control_test import synthetic_capture as build_capture
-from zen5_calibration_handoff import freeze, replay
+from zen5_calibration_handoff import PHASE_SCHEMA, freeze, replay, verify_service_phase
 
 
 def run() -> None:
@@ -73,6 +73,66 @@ def run() -> None:
     mutated = deepcopy(captures)
     mutated["cross-root"]["expected_output_sha256"] = "0" * 64
     assert replay(plan, digest, mutated, hashes, hashes)["status"] == "invalid"
+    # These independently sourced facts model the private service channel,
+    # never a request field or a receipt copied from the result bundle.
+    identity = {
+        "job_id": "fixture-job", "attempt": 1, "host_id": "fixture-host",
+        "boot_id": "fixture-boot", "lease_id": "fixture-lease",
+        "profile_sha256": "a" * 64,
+        "host_qualification_sha256": plan["host_qualification_sha256"],
+    }
+    presample = {
+        "schema": PHASE_SCHEMA, "version": 1, "phase": "pre-sample",
+        "status": "committed", **identity, "plan_sha256": digest,
+    }
+    completion = {
+        **presample, "phase": "aa-complete", "status": "complete",
+        "presample_sha256": sha256_bytes(canonical_bytes(presample)),
+        "capture_digests": {key: report["captures"][key]["capture_sha256"] for key in captures},
+        "report_sha256": sha256_bytes(canonical_bytes(report)),
+    }
+    trusted = {
+        **identity, "host_qualification_state": "pmu-qualified",
+        "lease_state": "exclusive-live", "presample_persisted_before_timing": True,
+        "presample_sha256": sha256_bytes(canonical_bytes(presample)),
+        "completion_sha256": sha256_bytes(canonical_bytes(completion)),
+    }
+    phase = verify_service_phase(plan, report, presample, completion, trusted)
+    assert phase["status"] == "verified-descriptive" and not phase["ab_authorized"], phase
+    # A complete authenticated descriptive receipt is still not the reviewed
+    # empirical A/A decision required for a service A/B transition.
+    def denied(pre: dict, post: dict, authority: dict, result: dict = report) -> None:
+        checked = verify_service_phase(plan, result, pre, post, authority)
+        assert checked["status"] == "denied" and not checked["ab_authorized"], checked
+    denied(presample, completion, {})
+    for key, value in (("host_id", "stale-host"), ("boot_id", "stale-boot"),
+                       ("lease_id", "stale-lease"), ("lease_state", "released"),
+                       ("host_qualification_state", "invalid"),
+                       ("presample_persisted_before_timing", False)):
+        altered = dict(trusted)
+        altered[key] = value
+        denied(presample, completion, altered)
+    altered = dict(completion)
+    altered["status"] = "denied"
+    denied(presample, altered, trusted)
+    altered = dict(completion)
+    altered["ab_authorized"] = True
+    denied(presample, altered, trusted)
+    altered = dict(completion)
+    altered["capture_digests"] = {**completion["capture_digests"], "immutable": "0" * 64}
+    denied(presample, altered, trusted)
+    altered = dict(report)
+    altered["status"] = "invalid"
+    denied(presample, completion, trusted, altered)
+    altered = dict(report)
+    altered["ab_authorized"] = True
+    denied(presample, completion, trusted, altered)
+    altered = dict(plan)
+    altered["immutable_binary_sha256"] = "0" * 64
+    assert verify_service_phase(altered, report, presample, completion, trusted)["status"] == "denied"
+    altered = deepcopy(plan)
+    altered["controls"]["cross-root"]["roots"] = altered["controls"]["same-root-rebuild"]["roots"]
+    assert replay(altered, sha256_bytes(canonical_bytes(altered)), captures, hashes, hashes)["status"] == "invalid"
     with tempfile.TemporaryDirectory(prefix="zen5-calibration-fixture-") as root:
         directory = Path(root)
         spec_file, plan_file, receipt_file, report_file = (

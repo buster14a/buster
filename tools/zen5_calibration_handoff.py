@@ -25,6 +25,7 @@ from zen5_build_control import (
 
 SCHEMA = "buster-zen5-calibration-family-v1"
 REPORT_SCHEMA = "buster-zen5-calibration-handoff-v1"
+PHASE_SCHEMA = "buster-zen5-calibration-phase-v1"
 KINDS = ("same-root-rebuild", "cross-root")
 COMMON = ("repository", "environment_fingerprint_sha256", "host_qualification_sha256",
           "source_identity_sha256", "expected_output_sha256")
@@ -160,6 +161,91 @@ def replay(plan: dict[str, Any], trusted_digest: str, captures: dict[str, dict[s
         "captures": analyses, "status": "invalid" if errors else "descriptive-complete",
         "errors": errors, "physical_admission": "not-evaluated",
         "candidate_decision": "not-evaluated", "ab_authorized": False,
+    }
+
+
+def verify_service_phase(plan: dict[str, Any], report: dict[str, Any],
+                         presample: Any, completion: Any, trusted: Any) -> dict[str, Any]:
+    """Check a service phase handoff; never turn descriptive replay into A/B authority.
+
+    ``trusted`` must be populated by the protected service's authenticated,
+    private control channel, independently of the capture/result bundle. In
+    particular its receipt digests and live lease facts cannot be read from the
+    two receipts under examination. The service must establish pre-sample
+    persistence before the first observation; timestamps in a bundle cannot.
+    """
+    errors: list[str] = plan_errors(plan)
+    plan_digest = sha256_bytes(canonical_bytes(plan))
+    identities = ("job_id", "attempt", "host_id", "boot_id", "lease_id",
+                  "profile_sha256", "host_qualification_sha256")
+    expected_trusted = {*identities, "host_qualification_state", "lease_state",
+                        "presample_persisted_before_timing", "presample_sha256",
+                        "completion_sha256"}
+    expected_pre = {"schema", "version", "phase", "status", *identities, "plan_sha256"}
+    expected_post = {*expected_pre, "presample_sha256", "capture_digests", "report_sha256"}
+    if not isinstance(trusted, dict) or set(trusted) != expected_trusted:
+        errors.append("independent service authority unavailable or malformed")
+        trusted = {}
+    for name, receipt, fields, phase, status in (
+        ("presample", presample, expected_pre, "pre-sample", "committed"),
+        ("completion", completion, expected_post, "aa-complete", "complete"),
+    ):
+        if not isinstance(receipt, dict) or set(receipt) != fields:
+            errors.append(f"{name} receipt fields differ")
+            continue
+        if (receipt["schema"], receipt["version"], receipt["phase"], receipt["status"]) != (
+            PHASE_SCHEMA, 1, phase, status
+        ):
+            errors.append(f"{name} receipt phase/status differs")
+        if any(receipt[field] != trusted.get(field) for field in identities):
+            errors.append(f"{name} receipt job/host/lease identity differs")
+        if receipt["plan_sha256"] != plan_digest:
+            errors.append(f"{name} receipt frozen plan differs")
+        if not SHA256_RE.fullmatch(str(trusted.get(f"{name}_sha256"))) or (
+            sha256_bytes(canonical_bytes(receipt)) != trusted.get(f"{name}_sha256")
+        ):
+            errors.append(f"{name} authenticated digest differs")
+    if not isinstance(trusted.get("job_id"), str) or not trusted["job_id"] or (
+        not isinstance(trusted.get("attempt"), int) or isinstance(trusted.get("attempt"), bool)
+        or trusted["attempt"] < 1
+    ):
+        errors.append("service job/attempt unavailable")
+    if any(not isinstance(trusted.get(key), str) or not trusted[key] for key in ("host_id", "boot_id", "lease_id")):
+        errors.append("service host/boot/lease unavailable")
+    for field in ("profile_sha256", "host_qualification_sha256"):
+        if not SHA256_RE.fullmatch(str(trusted.get(field))):
+            errors.append(f"service {field} unavailable")
+    if trusted.get("host_qualification_sha256") != plan.get("host_qualification_sha256"):
+        errors.append("host qualification differs from frozen plan")
+    if trusted.get("host_qualification_state") != "pmu-qualified":
+        errors.append("service host qualification unavailable or denied")
+    if trusted.get("lease_state") != "exclusive-live":
+        errors.append("service exclusive lease unavailable or stale")
+    if trusted.get("presample_persisted_before_timing") is not True:
+        errors.append("service did not attest pre-sample persistence")
+    if (report.get("status") != "descriptive-complete" or report.get("errors") != [] or
+        report.get("plan_sha256") != plan_digest or report.get("ab_authorized") is not False or
+        report.get("physical_admission") != "not-evaluated" or
+        report.get("candidate_decision") != "not-evaluated"):
+        errors.append("independent raw capture replay is incomplete or invalid")
+    if isinstance(completion, dict) and set(completion) == expected_post:
+        if completion["presample_sha256"] != trusted.get("presample_sha256"):
+            errors.append("completion does not follow authenticated pre-sample receipt")
+        if completion["report_sha256"] != sha256_bytes(canonical_bytes(report)):
+            errors.append("completion does not bind independent replay")
+        captures = report.get("captures")
+        if not isinstance(captures, dict) or set(captures) != {"immutable", *KINDS} or (
+            completion["capture_digests"] != {
+                key: captures[key].get("capture_sha256") if isinstance(captures[key], dict) else None
+                for key in ("immutable", *KINDS)
+            }
+        ):
+            errors.append("completion capture digests differ from independent replay")
+    return {
+        "schema": PHASE_SCHEMA, "version": 1,
+        "status": "verified-descriptive" if not errors else "denied",
+        "errors": errors, "ab_authorized": False,
+        "aa_decision": "not-evaluated", "candidate_decision": "not-evaluated",
     }
 
 
