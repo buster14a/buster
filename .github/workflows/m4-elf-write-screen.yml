@@ -1,0 +1,235 @@
+name: Mission 4 ELF write-set screen (temporary)
+on:
+  push:
+    branches: [research/m4-elf-write-screen-bb96b5d]
+    paths: [.github/workflows/m4-elf-write-screen.yml]
+permissions:
+  contents: read
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
+          persist-credentials: false
+      - name: Extract exact-source probe and retain prototype identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git rev-parse HEAD HEAD^{tree} > evidence/base-identity.txt
+          git hash-object src/buster/lib/compiler/object/object.c > evidence/base-object-blob.txt
+          test "$(cat evidence/base-object-blob.txt)" = 7290b4010a1b0d407a78206d6509110852fd499e
+          python3 - <<'PY'
+          from pathlib import Path
+          import difflib, hashlib, json, os, subprocess
+          src = Path('src/buster/lib/compiler/object/object.c').read_text()
+          hdr = Path('src/buster/lib/compiler/object/object.h').read_text()
+          def function(name):
+              marker = 'BUSTER_GLOBAL_LOCAL void ' + name + '('
+              start = src.index(marker)
+              end = src.index('\n}', start) + 2
+              return src[start:end]
+          old = '''            u64 offset = buffer.count;
+                      object_buffer_zero(&buffer, ELF_RELOCATION_SIZE);
+                      object_write_u64_at(&buffer, offset, relocation->offset);
+                      object_write_u64_at(&buffer, offset + 8, ((u64)symbol_indices[relocation->symbol] << 32) | type);
+                      object_write_s64_at(&buffer, offset + 16, relocation->addend);'''
+          # Strip the Python literal's indentation, then restore the source's 12 spaces.
+          old = '\n'.join('            ' + line.lstrip() for line in old.splitlines())
+          new = '''            u64 offset = buffer.count;
+                      if (buffer.error == OBJECT_ERROR_NONE)
+                      {
+                          if (ELF_RELOCATION_SIZE > buffer.capacity - buffer.count)
+                          {
+                              buffer.error = OBJECT_ERROR_CAPACITY;
+                          }
+                          else
+                          {
+                              buffer.count += ELF_RELOCATION_SIZE;
+                          }
+                      }
+                      object_write_u64_at(&buffer, offset, relocation->offset);
+                      object_write_u64_at(&buffer, offset + 8, ((u64)symbol_indices[relocation->symbol] << 32) | type);
+                      object_write_s64_at(&buffer, offset + 16, relocation->addend);'''
+          # Deliberately preserve the original capacity/error and patch order; remove only the clear.
+          new = '\n'.join(line[10:] if i else line for i, line in enumerate(new.splitlines()))
+          assert src.count(old) == 1, 'selected production sequence changed'
+          candidate = src.replace(old, new, 1)
+          Path('evidence/object.c').write_text(candidate)
+          Path('evidence/candidate.patch').write_text(''.join(difflib.unified_diff(src.splitlines(True), candidate.splitlines(True), fromfile='a/src/buster/lib/compiler/object/object.c', tofile='b/src/buster/lib/compiler/object/object.c')))
+          blob = subprocess.check_output(['git', 'hash-object', '-w', 'evidence/object.c'], text=True).strip()
+          env = dict(os.environ, GIT_INDEX_FILE=str(Path('evidence/candidate.index').resolve()))
+          subprocess.run(['git', 'read-tree', 'bb96b5d08e570aff3cbd473441d71ab0dc691d67'], env=env, check=True)
+          subprocess.run(['git', 'update-index', '--add', '--cacheinfo', '100644,' + blob + ',src/buster/lib/compiler/object/object.c'], env=env, check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], env=env, text=True).strip()
+          Path('evidence/candidate-identity.json').write_text(json.dumps({'base_commit':'bb96b5d08e570aff3cbd473441d71ab0dc691d67','candidate_object_blob':blob,'candidate_tree':tree,'prototype_revision':1,'scope':'uncommitted production diff; only extracted sequence compiled; NOT full Buster validation'}, indent=2)+'\n')
+          start = src.index('typedef struct ObjectBuffer ObjectBuffer;')
+          end = src.index('\n};', start) + 3
+          rstart = hdr.index('typedef struct ObjectRelocation ObjectRelocation;')
+          rend = hdr.index('\n};', rstart) + 3
+          preamble = '''#include <stdint.h>
+          #include <stddef.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <limits.h>
+          #include <assert.h>
+          typedef uint8_t u8;
+          typedef uint32_t u32;
+          typedef uint64_t u64;
+          typedef int64_t s64;
+          typedef enum { OBJECT_ERROR_NONE, OBJECT_ERROR_CAPACITY, OBJECT_ERROR_UNSUPPORTED_TARGET } ObjectError;
+          typedef uint32_t ObjectRelocationKind;
+          #define BUSTER_GLOBAL_LOCAL static
+          enum { ELF_RELOCATION_SIZE = 24 };
+          #if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+          #error This extracted current-writer screen is little-endian only
+          #endif
+          #ifdef DIAGNOSTIC_WRITES
+          static u64 diagnostic_zero_bytes;
+          static void* diagnostic_memset(void* p, int value, size_t n)
+          {
+              diagnostic_zero_bytes += n;
+              return memset(p, value, n);
+          }
+          #define memset diagnostic_memset
+          #endif
+          '''
+          helpers = src[start:end] + '\n' + hdr[rstart:rend] + '\n'
+          helpers += '\n\n'.join(function(n) for n in ['object_buffer_zero','object_write_u64_at','object_write_s64_at'])
+          helpers += '\n#ifdef DIAGNOSTIC_WRITES\n#undef memset\n#endif\n'
+          def emit(name, body):
+              body = body.replace('&buffer', 'buffer').replace('buffer.', 'buffer->')
+              return '__attribute__((noinline)) void '+name+'(ObjectBuffer* buffer, ObjectRelocation const* relocation, u32 const* symbol_indices, u32 type)\n{\n'+body+'\n}\n'
+          tests = r'''
+          static void expected_record(u8* out, ObjectRelocation const* r, u32 const* indices, u32 type)
+          {
+              u64 values[3] = {r->offset, ((u64)indices[r->symbol] << 32) | type, (u64)r->addend};
+              for (u32 field = 0; field < 3; field += 1)
+                  for (u32 byte = 0; byte < 8; byte += 1)
+                      out[field * 8 + byte] = (u8)(values[field] >> (byte * 8));
+          }
+          int main(void)
+          {
+              u8 const poisons[] = {0, 0xa5, 0x5a, 0xff, 1, 0x80, 0x7f, 0x3c};
+              u64 const values[] = {0, 1, UINT64_MAX, UINT64_C(0x8000000000000000), UINT64_C(0x1122334455667788), UINT64_C(0x7fffffffffffffff)};
+              u32 indices[] = {0, UINT32_MAX};
+              u64 cases = 0;
+              for (u32 p = 0; p < sizeof(poisons); p += 1)
+              for (u32 cap = 0; cap <= 64; cap += 1)
+              for (u32 count = 0; count <= cap; count += 1)
+              for (u32 error = 0; error < 3; error += 1)
+              for (u32 v = 0; v < sizeof(values) / sizeof(values[0]); v += 1)
+              {
+                  u8 a[96], b[96], expected[24];
+                  memset(a, poisons[p], sizeof(a));
+                  memset(b, poisons[p], sizeof(b));
+                  ObjectBuffer ba = {a + 16, count, cap, (ObjectError)error};
+                  ObjectBuffer bb = {b + 16, count, cap, (ObjectError)error};
+                  ObjectRelocation r = {.addend = (s64)values[v], .offset = values[(v + 1) % 6], .symbol = v & 1};
+                  u32 type = (u32)values[(v + 2) % 6];
+                  emit_baseline(&ba, &r, indices, type);
+                  emit_candidate(&bb, &r, indices, type);
+                  assert(ba.count == bb.count && ba.error == bb.error);
+                  assert(memcmp(a, b, sizeof(a)) == 0);
+                  for (u32 i = 0; i < 16; i += 1) assert(b[i] == poisons[p]);
+                  for (u32 i = 16 + cap; i < sizeof(b); i += 1) assert(b[i] == poisons[p]);
+                  if (!error && cap - count >= 24)
+                  {
+                      expected_record(expected, &r, indices, type);
+                      assert(bb.count == count + 24 && bb.error == OBJECT_ERROR_NONE);
+                      assert(memcmp(b + 16 + count, expected, sizeof(expected)) == 0);
+                  }
+                  cases += 1;
+              }
+              /* Reuse the exact same dirty storage, resetting the live cursor each time. */
+              u8 a[72], b[72];
+              memset(a, 0xa5, sizeof(a));
+              memset(b, 0xa5, sizeof(b));
+              for (u32 invocation = 0; invocation < 512; invocation += 1)
+              {
+                  ObjectBuffer ba = {a, 0, sizeof(a), OBJECT_ERROR_NONE};
+                  ObjectBuffer bb = {b, 0, sizeof(b), OBJECT_ERROR_NONE};
+                  for (u32 item = 0; item < (invocation % 3) + 1; item += 1)
+                  {
+                      ObjectRelocation r = {.addend = -(s64)invocation, .offset = item + invocation, .symbol = item & 1};
+                      emit_baseline(&ba, &r, indices, item + 1);
+                      emit_candidate(&bb, &r, indices, item + 1);
+                  }
+                  assert(ba.count == bb.count && ba.error == bb.error && !bb.error);
+                  assert(memcmp(a, b, sizeof(a)) == 0);
+              }
+              /* Unlike poison tests, MSan can diagnose a missing initialization here. */
+              u8 fresh_a[24], fresh_b[24], expected[24];
+              ObjectBuffer ba = {fresh_a, 0, 24, OBJECT_ERROR_NONE};
+              ObjectBuffer bb = {fresh_b, 0, 24, OBJECT_ERROR_NONE};
+              ObjectRelocation r = {.addend = INT64_MIN, .offset = UINT64_MAX, .symbol = 1};
+          #ifdef DIAGNOSTIC_WRITES
+              diagnostic_zero_bytes = 0;
+          #endif
+              emit_baseline(&ba, &r, indices, 2);
+          #ifdef DIAGNOSTIC_WRITES
+              u64 baseline_zero_bytes = diagnostic_zero_bytes;
+              diagnostic_zero_bytes = 0;
+          #endif
+              emit_candidate(&bb, &r, indices, 2);
+              expected_record(expected, &r, indices, 2);
+              assert(memcmp(fresh_a, expected, 24) == 0 && memcmp(fresh_b, expected, 24) == 0);
+          #ifdef DIAGNOSTIC_WRITES
+              printf("DIAGNOSTIC useful_record_bytes=24 baseline_explicit_zero_bytes=%llu candidate_explicit_zero_bytes=%llu final_field_bytes_each=24\n", (unsigned long long)baseline_zero_bytes, (unsigned long long)diagnostic_zero_bytes);
+              assert(baseline_zero_bytes == 24 && diagnostic_zero_bytes == 0);
+          #endif
+              printf("PASS capacity_poison_cases=%llu dirty_reuse_invocations=512 initialized_record_bytes=24\n", (unsigned long long)cases);
+              puts("SCOPE extracted exact source helpers/record sequence, stand-alone dependency typedefs; not full object writer, compiler, self-host, or performance acceptance");
+              return 0;
+          }
+          '''
+          Path('evidence/probe.c').write_text(preamble + helpers + '\n' + emit('emit_baseline',old) + emit('emit_candidate',new) + tests)
+          Path('evidence/source-hashes.json').write_text(json.dumps({name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in ['src/buster/lib/compiler/object/object.c','src/buster/lib/compiler/object/object.h','evidence/probe.c','evidence/candidate.patch']}, indent=2)+'\n')
+          print(Path('evidence/candidate-identity.json').read_text())
+          print(Path('evidence/candidate.patch').read_text())
+          PY
+      - name: Run independent compiler and sanitizer screens, retain every exit
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a > evidence/host.txt
+          lscpu >> evidence/host.txt
+          clang --version > evidence/clang-version.txt
+          gcc --version > evidence/gcc-version.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, subprocess
+          common = ['-std=c11','-Wall','-Wextra','-Werror','-fwrapv','-fno-strict-aliasing','-funsigned-char']
+          variants = [('clang-release','clang',['-O3','-march=x86-64-v3']),('gcc-release','gcc',['-O3','-march=x86-64-v3']),('diagnostic','clang',['-O0','-DDIAGNOSTIC_WRITES=1']),('asan-ubsan','clang',['-O1','-g','-fsanitize=address,undefined','-fno-sanitize-recover=all']),('msan','clang',['-O1','-g','-fsanitize=memory','-fno-omit-frame-pointer','-fPIE','-pie'])]
+          records = []
+          for name, cc, flags in variants:
+              command = [cc,*common,*flags,'evidence/probe.c','-o','evidence/'+name]
+              build = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              Path('evidence/'+name+'-build.log').write_text(build.stdout)
+              run_exit = None
+              if build.returncode == 0:
+                  run = subprocess.run(['evidence/'+name],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=60)
+                  run_exit = run.returncode
+                  Path('evidence/'+name+'-run.log').write_text(run.stdout)
+                  print(name, 'run_exit=', run_exit, run.stdout)
+              records.append({'variant':name,'compile_argv':command,'compile_exit':build.returncode,'run_exit':run_exit})
+              print(name, 'compile_exit=', build.returncode, build.stdout)
+              if name.endswith('release'):
+                  asm = subprocess.run([cc,*common,*flags,'-S','evidence/probe.c','-o','evidence/'+name+'.s'],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                  Path('evidence/'+name+'-assembly.log').write_text(asm.stdout)
+          Path('evidence/attempts.json').write_text(json.dumps(records,indent=2)+'\n')
+          print(json.dumps(records,indent=2))
+          if any(r['compile_exit'] or r['run_exit'] != 0 for r in records if r['variant'] != 'msan'):
+              raise SystemExit(1)
+          PY
+      - name: Retain all evidence, including failed attempts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: m4-elf-write-screen-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 90
+          if-no-files-found: error
