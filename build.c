@@ -39042,6 +39042,74 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_materialized_self_test(Ar
 BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
 {
     native_foundation_tool_add(arena, arguments, true);
+#if BUSTER_LINUX
+    bool sanitize = arguments.length == 2 && string_equal(arguments.pointer[0], S8("self-test")) &&
+                    string_equal(arguments.pointer[1], S8("--sanitize"));
+    bool self_test = sanitize || (arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test")));
+    if (self_test)
+    {
+        /* The retirement recipe remains blocked. Register its private
+         * preparation, correctness, store, and replay fixtures beside the
+         * ordinary service suite so every integration head runs them. */
+        String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
+        String8 sources[] = {S8("tools/bench_service/retirement_prepare_tests.c"),
+                             S8("tools/bench_service/retirement_correctness_tests.c"),
+                             S8("tools/bench_service/retirement_result_tests.c")};
+        String8 names[] = {S8("retirement-prepare-tests"), S8("retirement-correctness-tests"),
+                           S8("retirement-store-tests")};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        {
+            String8 executable = string_format(arena, S8("build/bench-service-tools/{S8}{S8}"),
+                names[index], sanitize ? S8("-sanitized") : S8(""));
+            ProcessRun* compile = run_add(arena, step_add(arena));
+            OsArgumentBuilder builder = os_argument_builder_start(arena);
+            os_argument_builder_append(&builder, compiler);
+            os_argument_builder_append(&builder, S8("-std=c11"));
+            os_argument_builder_append(&builder, S8("-O2"));
+            os_argument_builder_append(&builder, S8("-Wall"));
+            os_argument_builder_append(&builder, S8("-Wextra"));
+            os_argument_builder_append(&builder, S8("-Wpedantic"));
+            os_argument_builder_append(&builder, S8("-Werror"));
+            os_argument_builder_append(&builder, S8("-fwrapv"));
+            os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
+            os_argument_builder_append(&builder, S8("-funsigned-char"));
+            os_argument_builder_append(&builder, S8("-Isrc"));
+            os_argument_builder_append(&builder, S8("-DBUSTER_SINGLE_THREADED=1"));
+            if (index == 2) os_argument_builder_append(&builder, S8("-DBUSTER_RETIREMENT_STORE_TEST"));
+            os_argument_builder_append(&builder, sources[index]);
+            if (index == 0) os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
+            if (index == 2) os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
+            if (sanitize)
+            {
+                os_argument_builder_append(&builder, S8("-g"));
+                os_argument_builder_append(&builder, S8("-DBUSTER_SANITIZE=1"));
+                os_argument_builder_append(&builder, S8("-fsanitize=address,undefined"));
+                os_argument_builder_append(&builder, S8("-fno-sanitize-recover=all"));
+            }
+            os_argument_builder_append(&builder, S8("-lm"));
+            os_argument_builder_append(&builder, S8("-o"));
+            os_argument_builder_append(&builder, executable);
+            *compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                    .working_directory = S8("."),
+                                    .spawn_options = {.use_process_environment = 1}};
+            ProcessRun* run = run_add(arena, step_add(arena));
+            builder = os_argument_builder_start(arena);
+            os_argument_builder_append(&builder, executable);
+            *run = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                                .working_directory = S8("."),
+                                .spawn_options = {.use_process_environment = 1}};
+        }
+        ProcessRun* replay = run_add(arena, step_add(arena));
+        OsArgumentBuilder builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, S8("python3"));
+        os_argument_builder_append(&builder, S8("-W"));
+        os_argument_builder_append(&builder, S8("error"));
+        os_argument_builder_append(&builder, S8("tools/bench_service/retirement_export_replay_test.py"));
+        *replay = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
+                               .working_directory = S8("."),
+                               .spawn_options = {.use_process_environment = 1}};
+    }
+#endif
 }
 
 // A same-runner CI comparison. A separately checked-out baseline is required;

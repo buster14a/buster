@@ -233,6 +233,13 @@ throughput, sanitizer and workflow gates are retained. `shared.c` is the same
 foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
+On Linux, both service self-test commands also build and run the private
+retirement preparation, correctness and durable-store fixtures, plus the
+offline export/replay Python test. The throughput self-test registers the
+fixed-campaign child fixture. These tests check the combined adapters; they do
+not replace a complete service-owned producer, authenticated receipt handoff,
+physical A/A qualification or an admitted retirement recipe.
+
 Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
 commands use explicit `exec` so the test retains an owned direct child rather
 than depending on PID 1 to reap an orphaned shell descendant. The observed
