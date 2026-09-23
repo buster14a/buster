@@ -55,8 +55,10 @@ section remains zero; a zero baseline has no code ratio denominator.
 3. Call `row` once per canonical row, in increasing `row` order, with genuine
    observations or an explicit empty untimed fact. Failure poisons the gate.
 4. Call `finish` once. `ready` rehashes the preparation, declarations, receipt
-   digests and all row facts before lane D freezes its own command/host plan and
-   starts the first timed invocation. A later mutation removes readiness.
+   digests and all row facts. It is a structural check, not authorization to
+   launch: the service must authenticate all underlying producers, compare
+   the same identities across lane D's frozen commands and gate its first timed
+   invocation. A later mutation removes structural readiness.
 
 `sealed_sha256` is a private in-process integrity check, not publication,
 service authority, or a performance verdict. The integration owner must make

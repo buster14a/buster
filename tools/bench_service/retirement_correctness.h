@@ -1,7 +1,9 @@
 /* Private pre-timing gate for #1020. The service imports #1018's verified
  * preparation and #508/#509's authenticated census/check/oracle declarations.
- * begin/check/row/finish preserve the complete population; ready is the only
- * handoff to a measurement plan. This is not a published evidence schema.
+ * begin/check/row/finish preserve the complete population; ready verifies
+ * structural binding only. The service must independently authenticate each
+ * producer and gate the actual measurement launch. This is not a published
+ * evidence schema.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_H
