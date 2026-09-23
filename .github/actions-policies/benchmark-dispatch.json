@@ -1,5 +1,4 @@
 {
-  "name": "9700X benchmark dispatch administrators",
   "enforcement": "active",
   "conditions": {
     "workflow_path": {

@@ -112,14 +112,18 @@ def main() -> int:
             "selected_workflows",
             "repo-runners.json",
             "repos/$repo/actions/policies",
+            "policy_matches",
             '"reviewers": []',
         ):
             if marker not in installer:
                 errors.append(f"admission installer is missing control: {marker}")
-        policy_application = installer.find("gh api --method PUT", installer.find("policy_ids="))
+        policy_readback = installer.find('"repos/$repo/actions/policies/$policy_id"')
+        first_mutation = min(mutation_positions) if mutation_positions else -1
         reviewer_removal = installer.find('"reviewers": []')
-        if not (0 <= policy_application < reviewer_removal):
-            errors.append("admin actor policy must be applied before removing environment review")
+        if not (0 <= policy_readback < first_mutation < reviewer_removal):
+            errors.append("existing admin actor policy must be verified before changing admission")
+        if "--input \"$policy\"" in installer:
+            errors.append("admission installer must never replace the existing Actions policy")
         if MAIN_QUEUE_GATE.is_file():
             gate_id = re.search(
                 r"(?m)^RULESET_ID = ([1-9][0-9]*)$",
@@ -169,7 +173,6 @@ def main() -> int:
     else:
         actions = json.loads(ACTIONS_POLICY.read_text(encoding="utf-8"))
         if actions != {
-            "name": "9700X benchmark dispatch administrators",
             "enforcement": "active",
             "conditions": {"workflow_path": {
                 "include": [".github/workflows/9700x-service-dispatch.yml"],

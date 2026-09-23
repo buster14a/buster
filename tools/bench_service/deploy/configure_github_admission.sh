@@ -91,6 +91,34 @@ if [[ "$branch_policies" != present ]]; then
   exit 1
 fi
 
+# The administrator's existing Actions policy is a prerequisite. Never
+# create or modify it as a side effect of configuring benchmark admission.
+policy_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/actions/policies?has_parents=false&per_page=100" \
+  --jq '.policies[] | select(.source_type == "Repository") | .id')"
+policy_matches=0
+for policy_id in $policy_ids; do
+  gh api -H "X-GitHub-Api-Version: $api_version" \
+    "repos/$repo/actions/policies/$policy_id" >"$tmp/candidate-policy.json"
+  if python3 - "$policy" "$tmp/candidate-policy.json" <<'PY'
+import json
+import sys
+
+expected, live = (json.load(open(path)) for path in sys.argv[1:])
+if live.get("source_type") != "Repository" or live.get("target") != "actions":
+    sys.exit(1)
+if any(live.get(key) != expected[key] for key in ("enforcement", "conditions", "rules")):
+    sys.exit(1)
+PY
+  then
+    policy_matches=$((policy_matches + 1))
+  fi
+done
+if [[ "$policy_matches" -ne 1 ]]; then
+  printf 'expected one existing active, admin-only, dispatch-only Actions policy for the fixed workflow\n' >&2
+  exit 1
+fi
+
 ruleset_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/rulesets?includes_parents=false" \
   --jq '.[] | select(.name == "Benchmark dispatch main protection") | .id')"
@@ -106,37 +134,16 @@ else
     "repos/$repo/rulesets" --input "$ruleset" >"$tmp/benchmark.json"
 fi
 
-policy_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/actions/policies?has_parents=false&per_page=100" \
-  --jq '.policies[] | select(.name == "9700X benchmark dispatch administrators") | .id')"
-if [[ "$policy_ids" == *$'\n'* ]]; then
-  printf 'multiple benchmark Actions policies exist\n' >&2
-  exit 1
-fi
-if [[ -n "$policy_ids" ]]; then
-  gh api --method PUT -H "X-GitHub-Api-Version: $api_version" \
-    "repos/$repo/actions/policies/$policy_ids" --input "$policy" >/dev/null
-else
-  policy_ids="$(gh api --method POST -H "X-GitHub-Api-Version: $api_version" \
-    "repos/$repo/actions/policies" --input "$policy" --jq .id)"
-fi
-gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/actions/policies/$policy_ids" >"$tmp/policy.json"
-python3 - "$ruleset" "$tmp/benchmark.json" "$policy" "$tmp/policy.json" <<'PY'
+python3 - "$ruleset" "$tmp/benchmark.json" <<'PY'
 import json
 import sys
 
-expected_ruleset, live_ruleset, expected_policy, live_policy = map(
+expected_ruleset, live_ruleset = map(
     lambda path: json.load(open(path)), sys.argv[1:]
 )
 for key in ("name", "target", "enforcement", "bypass_actors", "conditions", "rules"):
     if live_ruleset.get(key) != expected_ruleset[key]:
         sys.exit(f"benchmark branch ruleset mismatch: {key}")
-for key in ("name", "enforcement", "conditions", "rules"):
-    if live_policy.get(key) != expected_policy[key]:
-        sys.exit(f"benchmark Actions policy mismatch: {key}")
-if live_policy.get("source_type") != "Repository":
-    sys.exit("benchmark Actions policy must belong to this repository")
 PY
 
 # Only after the actor restriction, branch protection, and runner restriction
@@ -173,4 +180,4 @@ if environment.get("deployment_branch_policy") != {
 }:
     sys.exit("environment deployment branch policy changed")
 PY
-printf 'Admin-only Actions policy and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED remains false\n'
+printf 'Existing admin-only Actions policy and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED remains false\n'
