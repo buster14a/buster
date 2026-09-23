@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -19,6 +20,9 @@ ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 DEPLOYMENT = SERVICE / "deploy" / "VALIDATE_BUSTER_V1.md"
 ADMISSION_INSTALLER = SERVICE / "deploy" / "configure_github_admission.sh"
+BENCHMARK_RULESET = ROOT / ".github" / "rulesets" / "benchmark-main.json"
+MAIN_QUEUE_RULESET = ROOT / ".github" / "main-merge-queue.ruleset.json"
+MAIN_QUEUE_GATE = ROOT / "tools" / "merge_queue_admission.py"
 
 SOURCE_REQUIREMENTS = {
     "exclusive_admission.c": (
@@ -100,6 +104,60 @@ def main() -> int:
             errors.append("admission installer is missing repository policy mutations")
         elif installer.find(disable_command) > min(mutation_positions):
             errors.append("admission installer must disable dispatch before its first policy mutation")
+        elif not 0 <= installer.find("verify_github_queue.py") < min(mutation_positions):
+            errors.append("admission installer must verify the main queue before policy mutation")
+        if MAIN_QUEUE_GATE.is_file():
+            gate_id = re.search(
+                r"(?m)^RULESET_ID = ([1-9][0-9]*)$",
+                MAIN_QUEUE_GATE.read_text(encoding="utf-8"),
+            )
+            installer_id = re.search(r"(?m)^main_ruleset_id=([1-9][0-9]*)$", installer)
+            if not gate_id or not installer_id or gate_id.group(1) != installer_id.group(1):
+                errors.append("admission installer and merge-queue gate must bind the same ruleset ID")
+        else:
+            errors.append("missing main merge-queue admission gate")
+
+    if not BENCHMARK_RULESET.is_file() or not MAIN_QUEUE_RULESET.is_file():
+        errors.append("missing benchmark or main queue ruleset")
+    else:
+        benchmark = json.loads(BENCHMARK_RULESET.read_text(encoding="utf-8"))
+        queue = json.loads(MAIN_QUEUE_RULESET.read_text(encoding="utf-8"))
+        benchmark_checks = [
+            rule for rule in benchmark["rules"] if rule["type"] == "required_status_checks"
+        ]
+        queue_checks = [
+            rule for rule in queue["rules"] if rule["type"] == "required_status_checks"
+        ]
+        if len(benchmark_checks) != 1 or len(queue_checks) != 1:
+            errors.append("benchmark and main queue must each define one status-check rule")
+        else:
+            benchmark_params = benchmark_checks[0]["parameters"]
+            queue_params = queue_checks[0]["parameters"]
+            if benchmark_params["strict_required_status_checks_policy"] is not False:
+                errors.append("benchmark checks must preserve non-strict merge-queue admission")
+            if queue_params["strict_required_status_checks_policy"] is not False:
+                errors.append("main queue checks must remain non-strict")
+            benchmark_contexts = {
+                check["context"] for check in benchmark_params["required_status_checks"]
+            }
+            queue_contexts = {check["context"] for check in queue_params["required_status_checks"]}
+            if not benchmark_contexts <= queue_contexts:
+                errors.append("benchmark checks must be covered by the main queue")
+        if benchmark["bypass_actors"] or queue["bypass_actors"]:
+            errors.append("benchmark and main queue rulesets must not allow bypass")
+        benchmark_reviews = [
+            rule for rule in benchmark["rules"] if rule["type"] == "pull_request"
+        ]
+        if len(benchmark_reviews) != 1:
+            errors.append("benchmark ruleset must require pull-request review")
+        else:
+            review_params = benchmark_reviews[0]["parameters"]
+            if (
+                review_params["required_approving_review_count"] < 1
+                or not review_params["dismiss_stale_reviews_on_push"]
+                or not review_params["require_last_push_approval"]
+            ):
+                errors.append("benchmark ruleset must require fresh independent review")
 
     if not POLICY.is_file():
         errors.append("missing bench-service-policy.yml")
