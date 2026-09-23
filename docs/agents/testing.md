@@ -78,6 +78,13 @@
   triggers to the broker; see
   `docs/ci-github-hosted-runners.md`.
 
+- The workflow-tools aggregate regression executes the actual `CI complete`
+  shell body for all 633 shard outcomes. Git Bash on Windows has a 120-second
+  subprocess budget; Unix retains 30 seconds. A completed run must still report
+  exactly 633 cases and fail for every missing, failed, skipped, or cancelled
+  shard. The test file is in the reviewed native-retirement support ledger;
+  change its exact byte/hash row through a policy transition.
+
 - Test implementations are not registered as modules; add new test pairs under
   `src/buster/tests/`, add
   the implementation to `BUSTER_TEST_SOURCES` and the header to

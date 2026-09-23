@@ -16,6 +16,17 @@ or byte-changed test input makes manifest generation fail. Updating the contract
 is therefore a reviewed support decision, not an automatic side effect of adding
 a fixture. Merging a contract change is the maintainer approval record.
 
+The #935 support decision updates only the byte/hash identity of
+`tests/ci_tools_test.py` after giving its 633-case real-shell aggregate check
+120 seconds on Windows (30 seconds elsewhere). Its role and compilation
+obligation remain `support-file` and `dependency-only`; the 559 inputs, 411
+subjects, and 78,912 row identities do not change. The previously approved
+declaration digest remains accepted for historical evidence. The new exact
+declaration digest is `932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82`.
+The trusted digest-reader bootstrap must already be installed before this
+support policy is integrated; the generated source snapshot and aggregate
+binding are published only by the trusted writer.
+
 The September 17, 2026 integration retains every subject admitted by the
 current support ledger. The integrated profile has 559 inputs,
 411 subjects, 19,728 groups and 78,912 rows: 405 supported-object
