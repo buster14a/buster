@@ -1921,6 +1921,7 @@ static void test_retirement_shards(char const* root)
     TpRetirementOutput output = {digest, digest, digest, digest, 32};
     TpProcess process = {.wall_seconds = 1.0, .peak_rss_bytes = 4096};
     TpProcessObservation observed = {.valid = 1, .start_token = 1234, .finished_ns = 1000};
+    TpRetirementShardFile shards[2] = {0};
     for (unsigned part = 0; part < 2; ++part)
     {
         char path[TP_PATH_CAP], leaf[64];
@@ -1938,6 +1939,7 @@ static void test_retirement_shards(char const* root)
         }
         TpRetirementShard shard;
         CHECK(tp_retirement_transcript_end_shard(&transcript, &shard) && shard.records == count);
+        shards[part] = (TpRetirementShardFile){part ? "retirement-shard-1.jsonl" : "retirement-shard-0.jsonl", shard};
         if (file) CHECK(fclose(file) == 0);
         char hash[65];
         uint64_t bytes = 0, lines = 0;
@@ -1946,6 +1948,40 @@ static void test_retirement_shards(char const* root)
     }
     CHECK(tp_retirement_transcript_finish(&transcript, observed.finished_ns + 1));
     CHECK(transcript.shards == 2 && transcript.total_records == 33184 && transcript.finished);
+    char receipt_path[TP_PATH_CAP];
+    CHECK(tp_path(receipt_path, root, "retirement-invocation-receipt.json"));
+    FILE* receipt_file = fopen(receipt_path, "wb+");
+    TpRetirementShard receipt;
+    char context[65];
+    memset(context, 'b', 64); context[64] = 0;
+    CHECK(receipt_file && tp_retirement_transcript_receipt(&transcript, digest, context,
+                                                           shards, 2, receipt_file, &receipt));
+    if (receipt_file) CHECK(fclose(receipt_file) == 0);
+    char receipt_digest[65];
+    uint64_t receipt_bytes = 0, receipt_lines = 0;
+    CHECK(tp_hash_file(receipt_path, receipt_digest, &receipt_bytes, &receipt_lines) &&
+          receipt_bytes == receipt.bytes && receipt_lines == 1 &&
+          !strcmp(receipt_digest, receipt.sha256));
+    CHECK(transcript.receipt_written);
+    for (unsigned failure = 0; failure < 7; ++failure)
+    {
+        TpRetirementTranscript bad = transcript;
+        TpRetirementExecution bad_execution = execution;
+        bad.execution = &bad_execution;
+        if (failure != 6) bad.receipt_written = 0;
+        TpRetirementShardFile cases[2] = {shards[0], shards[1]};
+        if (failure == 0) cases[1].path = cases[0].path;
+        if (failure == 1) cases[1].path = "../escape.jsonl";
+        if (failure == 2) --cases[1].contents.records;
+        if (failure == 3) cases[1].contents.sha256[0] = 'g';
+        FILE* rejected = tmpfile();
+        CHECK(rejected != NULL);
+        if (failure == 4) CHECK(rejected && fputs("old receipt", rejected) >= 0);
+        CHECK(!tp_retirement_transcript_receipt(&bad, failure == 5 ? "unbound" : digest,
+            context, cases, 2, rejected, &receipt));
+        CHECK(bad.failed && !bad.finished && bad_execution.failed && !receipt.bytes && !receipt.sha256[0]);
+        if (rejected) CHECK(fclose(rejected) == 0);
+    }
     CHECK(!tp_retirement_transcript_finish(&transcript, observed.finished_ns + 2));
 
 #ifdef __linux__

@@ -751,6 +751,11 @@ completion permanently invalidates the transcript. A descriptor is returned
 only after the shard's stream flush succeeds. The caller owns file creation,
 fsync, no-replace publication and final immutable revalidation; a returned
 SHA-256 descriptor establishes local byte integrity, not receipt authority.
+After complete collection, `tp_retirement_transcript_receipt` writes the
+canonical bounded invocation receipt once, joining the frozen plan and context
+digests to every published shard descriptor. A failed or repeated write poisons
+the attempt. Its returned digest needs separate, authenticated publication by
+the service; the result bundle cannot supply its own trust anchor.
 
 These primitives are not an admitted service recipe or an authenticated receipt.
 The service must still own the immutable plan, launch isolation, independent

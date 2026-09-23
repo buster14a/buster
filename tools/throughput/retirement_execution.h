@@ -379,6 +379,8 @@ static size_t tp_retirement_execution_record(char* bytes, size_t capacity,
 #define TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS 32768u
 #define TP_RETIREMENT_TRANSCRIPT_SHARDS 4096u
 #define TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES UINT64_C(67108864)
+#define TP_RETIREMENT_RECEIPT_BYTES UINT64_C(1048576)
+#define TP_RETIREMENT_RECEIPT_PATH_BYTES 192u
 
 typedef struct TpRetirementShard
 {
@@ -386,14 +388,20 @@ typedef struct TpRetirementShard
     char sha256[65];
 } TpRetirementShard;
 
+typedef struct TpRetirementShardFile
+{
+    char const* path;
+    TpRetirementShard contents;
+} TpRetirementShardFile;
+
 typedef struct TpRetirementTranscript
 {
     TpRetirementExecution* execution;
     FILE* stream;
     Sha256 hash;
-    uint64_t bytes, records, total_records, last_end, attempt;
+    uint64_t bytes, records, total_records, last_end, attempt, bound_at_ns, completed_at_ns;
     unsigned shards;
-    int cpu, failed, finished;
+    int cpu, failed, finished, receipt_written;
     char job[129], boot[129];
 } TpRetirementTranscript;
 
@@ -417,6 +425,7 @@ static int tp_retirement_transcript_init(TpRetirementTranscript* transcript,
             transcript->attempt = attempt;
             transcript->cpu = cpu;
             transcript->last_end = bound_at_ns;
+            transcript->bound_at_ns = bound_at_ns;
             strcpy(transcript->job, job);
             strcpy(transcript->boot, boot);
         }
@@ -511,7 +520,119 @@ static int tp_retirement_transcript_finish(TpRetirementTranscript* transcript, u
     if (transcript)
     {
         transcript->finished = ok;
+        if (ok) transcript->completed_at_ns = completed_at_ns;
         if (!ok) transcript->failed = 1;
+    }
+    return ok;
+}
+
+static int tp_retirement_receipt_path(char const* path)
+{
+    size_t size = 0;
+    if (path)
+        while (size <= TP_RETIREMENT_RECEIPT_PATH_BYTES && path[size]) ++size;
+    int ok = size && size <= TP_RETIREMENT_RECEIPT_PATH_BYTES && path[0] != '/' && path[size - 1] != '/';
+    size_t start = 0;
+    for (size_t i = 0; ok && i <= size; ++i)
+    {
+        if (i == size || path[i] == '/')
+        {
+            size_t count = i - start;
+            ok = count && !(count == 1 && path[start] == '.') &&
+                !(count == 2 && path[start] == '.' && path[start + 1] == '.');
+            start = i + 1;
+        }
+        else
+        {
+            unsigned char c = (unsigned char)path[i];
+            ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        }
+    }
+    return ok;
+}
+
+static int tp_retirement_receipt_write(FILE* stream, Sha256* hash, uint64_t* bytes,
+                                       char const* data, size_t count)
+{
+    int ok = stream && hash && bytes && data && count &&
+        *bytes <= TP_RETIREMENT_RECEIPT_BYTES && count <= TP_RETIREMENT_RECEIPT_BYTES - *bytes;
+    if (ok) ok = fwrite(data, 1, count, stream) == count && !ferror(stream);
+    if (ok)
+    {
+        sha256_add(hash, data, (u64)count);
+        *bytes += count;
+    }
+    return ok;
+}
+
+/* The service supplies the frozen plan/context digests and the separately
+ * published transcript-shard paths. This only encodes their bounded, canonical
+ * receipt bytes. The service must fsync, publish without replacement and
+ * authenticate the resulting receipt digest out of band for independent replay.
+ * A failed write poisons the complete attempt; partial receipt bytes remain. */
+static int tp_retirement_transcript_receipt(TpRetirementTranscript* transcript,
+    char const* plan_sha256, char const* context_sha256,
+    TpRetirementShardFile const* shards, unsigned count, FILE* stream, TpRetirementShard* receipt)
+{
+    int ok = transcript && transcript->finished && !transcript->failed && !transcript->receipt_written &&
+        transcript->execution && tp_retirement_execution_complete(transcript->execution) &&
+        tp_retirement_digest(plan_sha256) && tp_retirement_digest(context_sha256) &&
+        shards && count == transcript->shards && count && count <= TP_RETIREMENT_TRANSCRIPT_SHARDS &&
+        stream && stream != transcript->stream && receipt;
+    uint64_t records = 0;
+    for (unsigned i = 0; ok && i < count; ++i)
+    {
+        TpRetirementShardFile const* shard = shards + i;
+        ok = tp_retirement_receipt_path(shard->path) &&
+            (!i || strcmp(shards[i - 1].path, shard->path) < 0) &&
+            tp_retirement_digest(shard->contents.sha256) &&
+            shard->contents.records && shard->contents.records <= TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
+            (i + 1 == count || shard->contents.records == TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS) &&
+            shard->contents.bytes >= shard->contents.records &&
+            shard->contents.bytes <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES &&
+            records <= transcript->total_records &&
+            shard->contents.records <= transcript->total_records - records;
+        if (ok) records += shard->contents.records;
+    }
+    if (ok) ok = records == transcript->total_records && fseek(stream, 0, SEEK_END) == 0 && ftell(stream) == 0;
+    if (receipt) *receipt = (TpRetirementShard){0};
+    Sha256 hash;
+    sha256_init(&hash);
+    uint64_t written = 0;
+    char buffer[768];
+    int length = ok ? snprintf(buffer, sizeof(buffer),
+        "{\"attempt\":%" PRIu64 ",\"boot_id\":\"%s\",\"bound_at_ns\":%" PRIu64
+        ",\"completed_at_ns\":%" PRIu64 ",\"context_sha256\":\"%s\",\"execution_plan_sha256\":\"%s\""
+        ",\"invocations\":%" PRIu64 ",\"job_id\":\"%s\",\"schema\":\"buster-native-retirement-execution-receipt-v1\""
+        ",\"shards\":[", transcript->attempt, transcript->boot, transcript->bound_at_ns,
+        transcript->completed_at_ns, context_sha256, plan_sha256, transcript->total_records, transcript->job) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(buffer) &&
+        tp_retirement_receipt_write(stream, &hash, &written, buffer, (size_t)length);
+    for (unsigned i = 0; ok && i < count; ++i)
+    {
+        TpRetirementShardFile const* shard = shards + i;
+        length = snprintf(buffer, sizeof(buffer),
+            "%s{\"bytes\":%" PRIu64 ",\"path\":\"%s\",\"records\":%" PRIu64 ",\"sha256\":\"%s\"}",
+            i ? "," : "", shard->contents.bytes, shard->path,
+            shard->contents.records, shard->contents.sha256);
+        ok = length > 0 && (size_t)length < sizeof(buffer) &&
+            tp_retirement_receipt_write(stream, &hash, &written, buffer, (size_t)length);
+    }
+    if (ok) ok = tp_retirement_receipt_write(stream, &hash, &written, "],\"version\":1}\n", 15) &&
+                 fflush(stream) == 0 && !ferror(stream) && ftell(stream) == (long)written;
+    if (ok)
+    {
+        receipt->bytes = written;
+        receipt->records = 1;
+        sha256_finish_hex(&hash, receipt->sha256);
+        transcript->receipt_written = 1;
+    }
+    else if (transcript)
+    {
+        transcript->failed = 1;
+        transcript->finished = 0;
+        if (transcript->execution) transcript->execution->failed = 1;
     }
     return ok;
 }

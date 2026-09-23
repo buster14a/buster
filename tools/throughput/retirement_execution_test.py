@@ -132,6 +132,26 @@ class NativeExecutionTests(unittest.TestCase):
             self.assertEqual(event["process_instance_sha256"], binding._process_instance_digest(
                 "job-1", 2, "boot-123", event["pid"], event["process_start_token"]))
 
+    def test_native_receipt_binds_two_complete_transcript_shards(self):
+        data = (self.root / "retirement-invocation-receipt.json").read_bytes()
+        receipt = json.loads(data)
+        self.assertEqual(data, (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        self.assertEqual(receipt["schema"], binding.EXECUTION_RECEIPT_SCHEMA)
+        self.assertEqual(receipt["context_sha256"], "b" * 64)
+        self.assertEqual(receipt["execution_plan_sha256"], "a" * 64)
+        self.assertEqual((receipt["job_id"], receipt["attempt"], receipt["boot_id"]),
+                         ("job-1", 2, "boot-123"))
+        self.assertEqual(receipt["invocations"], 33184)
+        self.assertEqual([shard["records"] for shard in receipt["shards"]], [32768, 416])
+        records = binding._execution_trace_records(self.root, receipt["shards"], 33184)
+        try:
+            for index, record in enumerate(records):
+                self.assertEqual(record["sequence"], index)
+                self.assertGreater(record["started_ns"], receipt["bound_at_ns"])
+                self.assertLess(record["finished_ns"], receipt["completed_at_ns"])
+        finally:
+            records.close()
+
     def test_exact_nanosecond_serialization_is_canonical(self):
         lines = (self.root / "retirement-seconds.tsv").read_text().splitlines()
         self.assertEqual(len(lines), 110001)
