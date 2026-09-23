@@ -120,7 +120,7 @@ operation 13 (`EXPORT`). Existing request and ordinary reply limits stay fixed.
 | Depth | Fewer than 256 components; path bound also applies |
 | Receipt | 1,024 bytes |
 | Preparation / chunk operation / client transfer budget | 300 / 30 / 300 seconds for smoke; 86,400 / 30 / 86,400 seconds reserved for retirement |
-| Socket send/receive wait | 1 second; initial receipt wait bounded at 86,405 seconds because the request contains no recipe identity; smoke preparation still stops at 300 seconds |
+| Socket send/receive wait | 1 second; initial receipt wait bounded at 305 seconds for the admitted smoke recipe |
 
 The inventory is one fixed-capacity mapping; payload buffers are 64 KiB.
 The smoke chunk index has at most 8,334 fixed 64-byte hashes; the reserved
@@ -137,7 +137,9 @@ before transcripts, manifests, binaries or logs. An operator must provision
 space for the retained result, sealed export, downloaded archive and clean
 replay, each independently bounded by its own copy. The larger limits here
 only remove a transport ceiling; the recipe remains blocked until its complete
-producer, validators and service tests are reviewed.
+producer, validators and service tests are reviewed. Admission also needs a
+recipe-authenticated initial receipt wait: the current 305-second client wait
+cannot accommodate the reserved 86,400-second retirement preparation budget.
 
 Export request body:
 
