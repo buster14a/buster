@@ -1164,22 +1164,6 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metad
     };
 }
 
-BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand codegen_canonical_x64_metadata_vector(u32 register_index, u16 width)
-{
-    u8 physical_class = width <= 128 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_XMM
-                                     : width == 256 ? BUSTER_X86_METADATA_PHYSICAL_CLASS_YMM
-                                                    : BUSTER_X86_METADATA_PHYSICAL_CLASS_ZMM;
-    return (BusterX86MetadataPhysicalOperand){
-        .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
-        .width = width,
-        .reg = {
-            .index = (u16)register_index,
-            .width = width,
-            .physical_class = physical_class,
-        },
-    };
-}
-
 // One x87 stack slot, ST(index).  The metadata tables carry ST0..ST7 as
 // SPECIAL registers of architectural width 80, which is also how the
 // assembler's own crosswalk spells ASSEMBLY_REGISTER_X87.

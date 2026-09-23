@@ -1346,6 +1346,7 @@ class CheckedInDependencyTests(unittest.TestCase):
         self.assertIn("CODEGEN_REGISTER_ALLOCATOR_NONE", public)
         for retired in ("CCanonicalEmitter", "CCanonicalBranchPatch", "X64Builder",
                         "x64_emit_vector_native_memory", "x64_emit_vector_native_binary_operation",
+                        "codegen_canonical_x64_metadata_vector",
                         "x64_emit_vzeroupper", "a64_emit_initialize_aggregate_result",
                         "canonical_prep", "canonical_emit("):
             with self.subTest(retired=retired):
