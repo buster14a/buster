@@ -406,11 +406,10 @@ test_ios_boot_recovery() (
     export FAKE_IOS_STATE_DIR="$state"
     export FAKE_IOS_LOG="$log"
     export FAKE_IOS_RUNTIME_AVAILABLE=1
-    export FAKE_IOS_BOOTSTATUS_MODE=timeout-first-device
+    export FAKE_IOS_BOOTSTATUS_MODE=timeout-first
     export FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS=60
     export BUSTER_IOS_CONSOLE_LOG="$state/console.log"
     export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=1
-    export BUSTER_IOS_BOOT_CONTINUATION_SECONDS=1
     export BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=2
     export BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=2
     export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=2
@@ -427,7 +426,7 @@ test_ios_boot_recovery() (
     assert_count 2 'simctl create buster-ci' "$log"
     assert_count 1 "simctl boot $first_udid" "$log"
     assert_count 1 "simctl boot $replacement_udid" "$log"
-    assert_count 2 "simctl bootstatus $first_udid -b" "$log"
+    assert_count 1 "simctl bootstatus $first_udid -b" "$log"
     assert_count 1 "simctl bootstatus $replacement_udid -b" "$log"
     assert_count 1 "simctl shutdown $first_udid" "$log"
     assert_count 1 "simctl shutdown $replacement_udid" "$log"
@@ -436,106 +435,9 @@ test_ios_boot_recovery() (
         echo "old simulator identity was used after recovery" >&2
         exit 1
     fi
-    assert_file_contains 'readiness diagnostic' "$state/console.log.boot.attempt-1.bootstatus.log"
-    assert_file_contains "SIMULATOR_UDID=$first_udid" "$state/console.log.boot.attempt-1.bootstatus.lifecycle-context.log"
+    assert_file_contains 'first readiness diagnostic' "$state/console.log.boot.attempt-1.bootstatus.log"
     assert_file_contains 'BUSTER_IOS_BOOT_DISPOSITION=recovered-infrastructure-failure' "$state/run.log"
     echo "iOS boot recovery passed: one replacement, preserved diagnostics, new identity propagated"
-)
-
-test_ios_boot_continuation() (
-    set -euo pipefail
-    local state="$test_root/ios-boot-continuation"
-    local log="$state/xcrun.log"
-    local first_udid=00000000-0000-0000-0000-000000000001
-    mkdir -p "$state/Debug/ide.app" "$state/Release/ide.app"
-    : >"$log"
-    export PATH="$fake_bin:$PATH" FAKE_IOS_STATE_DIR="$state" FAKE_IOS_LOG="$log"
-    export FAKE_IOS_RUNTIME_AVAILABLE=1 FAKE_IOS_BOOTSTATUS_MODE=timeout-first
-    export FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS=60 BUSTER_IOS_CONSOLE_LOG="$state/console.log"
-    export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=1 BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=2
-    export BUSTER_IOS_BOOT_CONTINUATION_SECONDS=1
-    export BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=2 BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=2
-    export BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS=2 BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
-    export GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS RUNNER_ARCH=ARM64 BUSTER_IOS_ARCH=arm64
-    unset BUSTER_IOS_SIMULATOR_UDID
-    bash "$repo_root/ios/launch_simulator.sh" --batch Debug "$state/Debug/ide.app" \
-        Release "$state/Release/ide.app" >"$state/run.log" 2>&1
-    assert_count 1 'simctl create buster-ci' "$log"
-    assert_count 2 "simctl bootstatus $first_udid -b" "$log"
-    assert_count 1 "simctl shutdown $first_udid" "$log"
-    if grep -qF "simctl delete $first_udid" "$log"; then
-        echo 'same-device continuation unexpectedly replaced its simulator' >&2
-        exit 1
-    fi
-    assert_file_contains 'BUSTER_IOS_BOOT_CONTINUATION attempt=1' "$state/run.log"
-    assert_file_contains 'outcome=success-after-continuation' "$state/run.log"
-    assert_file_contains 'BUSTER_IOS_BOOT_DISPOSITION=continued-original-boot-success' "$state/run.log"
-    assert_file_contains "SIMULATOR_UDID=$first_udid" "$state/console.log.boot.attempt-1.bootstatus.lifecycle-context.log"
-    assert_file_contains 'SIMULATOR_RUNTIME=com.apple.CoreSimulator.SimRuntime.iOS-26-5' \
-        "$state/console.log.boot.attempt-1.bootstatus.lifecycle-context.log"
-    assert_file_contains 'BUSTER_IOS_RESULT: SUCCESS' "$state/console.Debug.log"
-    assert_file_contains 'BUSTER_IOS_RESULT: SUCCESS' "$state/console.Release.log"
-    echo 'iOS boot continuation passed: same device reaches both application configurations'
-)
-
-test_ios_incomplete_capture_receipt() (
-    set -euo pipefail
-    local state="$test_root/ios-incomplete-capture"
-    local mode row log status
-    mkdir -p "$state/bin"
-    cat >"$state/bin/python3" <<'PY_CAPTURE'
-#!/usr/bin/env bash
-if [[ ${1:-} == -c && ${2:-} == *'remaining = 65536'* ]]; then
-    for path in "$@"; do :; done
-    if [[ $path == *.bootstatus.log ]]; then
-        : >"$path"
-        if [[ ${BUSTER_CAPTURE_TEST_MODE:-} == empty ]]; then
-            : >"${path}.capture-status.log"
-            cat >/dev/null
-        else
-            sleep 60
-        fi
-        exit 0
-    fi
-fi
-exec "$BUSTER_REAL_PYTHON" "$@"
-PY_CAPTURE
-    chmod +x "$state/bin/python3"
-    export BUSTER_REAL_PYTHON="$(command -v python3)"
-    export PATH="$state/bin:$fake_bin:$PATH"
-    export FAKE_IOS_RUNTIME_AVAILABLE=1 FAKE_IOS_BOOTSTATUS_MODE=always-timeout
-    export FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS=60 BUSTER_IOS_SIMULATOR_UDID=FAKE-UDID
-    export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=1 BUSTER_IOS_BOOT_CONTINUATION_SECONDS=1
-    export BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=2 BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=2
-    export BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=2 BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS=2
-    export BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
-    for mode in empty timeout; do
-        row="$state/$mode"
-        mkdir -p "$row/Debug/ide.app"
-        log="$row/xcrun.log"
-        : >"$log"
-        export FAKE_IOS_STATE_DIR="$row" FAKE_IOS_LOG="$log"
-        export BUSTER_IOS_CONSOLE_LOG="$row/console.log" BUSTER_CAPTURE_TEST_MODE="$mode"
-        set +e
-        bash "$repo_root/ios/launch_simulator.sh" --batch Debug "$row/Debug/ide.app" >"$row/run.log" 2>&1
-        status=$?
-        set -e
-        [[ $status -eq 124 ]]
-        if [[ $mode == empty ]]; then
-            assert_file_contains 'capture_status=0' "$row/console.log.boot.attempt-1.bootstatus.status.log"
-        else
-            assert_file_contains 'capture_status=124' "$row/console.log.boot.attempt-1.bootstatus.status.log"
-        fi
-        assert_file_contains 'capture_receipt=incomplete' "$row/console.log.boot.attempt-1.bootstatus.status.log"
-        assert_file_contains 'BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt' \
-            "$row/console.log.boot.attempt-1.bootstatus.status.log"
-        assert_count 1 'simctl bootstatus' "$log"
-        if grep -qF 'simctl install' "$log"; then
-            echo 'incomplete readiness evidence reached application installation' >&2
-            exit 1
-        fi
-    done
-    echo 'iOS incomplete capture receipts passed: empty and helper timeout remain explicit'
 )
 
 test_ios_boot_recovery_controls() (
@@ -555,7 +457,6 @@ test_ios_boot_recovery_controls() (
         export FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS=60
         export BUSTER_IOS_CONSOLE_LOG="$state/console.log"
         export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=1 BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=2
-        export BUSTER_IOS_BOOT_CONTINUATION_SECONDS=1
         export BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=2 BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=2
         export BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS=2 BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
         export GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS RUNNER_ARCH=ARM64 BUSTER_IOS_ARCH=arm64
@@ -601,13 +502,11 @@ test_ios_boot_recovery_controls() (
                 assert_file_contains 'BUSTER_IOS_BOOT_DISPOSITION=first-attempt-success' "$state/run.log"
                 ;;
             both-timeout)
-                assert_count 3 'simctl bootstatus' "$log"
+                assert_count 2 'simctl bootstatus' "$log"
                 assert_count 2 'simctl create buster-ci' "$log"
                 assert_count 1 "simctl delete $first_udid" "$log"
                 assert_file_contains 'readiness diagnostic' "$state/console.log.boot.attempt-1.bootstatus.log"
                 assert_file_contains 'readiness diagnostic' "$state/console.log.boot.attempt-2.bootstatus.log"
-                assert_file_contains "SIMULATOR_UDID=$replacement_udid" "$state/console.log.boot.attempt-2.bootstatus.lifecycle-context.log"
-                assert_file_contains 'capture_receipt=complete' "$state/console.log.boot.attempt-2.bootstatus.status.log"
                 assert_file_contains 'BUSTER_IOS_BOOT_DISPOSITION=unrecovered-failure' "$state/run.log"
                 if grep -qF 'simctl install' "$log" || grep -qF 'simctl launch --console-pty' "$log"; then
                     echo "both-timeout case reached application phases" >&2
@@ -615,7 +514,7 @@ test_ios_boot_recovery_controls() (
                 fi
                 ;;
             shutdown-reject|shutdown-timeout|delete-reject|delete-timeout|create-reject|create-timeout)
-                assert_count 2 "simctl bootstatus $first_udid -b" "$log"
+                assert_count 1 "simctl bootstatus $first_udid -b" "$log"
                 if grep -qF "simctl bootstatus $replacement_udid -b" "$log"; then
                     echo "$case_name unexpectedly retried readiness" >&2
                     exit 1
@@ -623,7 +522,7 @@ test_ios_boot_recovery_controls() (
                 assert_file_contains 'BUSTER_IOS_BOOT_DISPOSITION=unrecovered-failure' "$state/run.log"
                 ;;
             create-invalid)
-                assert_count 2 "simctl bootstatus $first_udid -b" "$log"
+                assert_count 1 "simctl bootstatus $first_udid -b" "$log"
                 if grep -qF "simctl shutdown create rejected diagnostic" "$log" \
                     || grep -qF "simctl bootstatus $replacement_udid -b" "$log"; then
                     echo "invalid create output was treated as an owned replacement" >&2
@@ -641,13 +540,6 @@ test_ios_boot_recovery_controls() (
                 fi
                 assert_file_contains 'readiness_outcome=command-failure' "$state/run.log"
                 ;;
-            continue-native-124)
-                assert_count 2 "simctl bootstatus $first_udid -b" "$log"
-                assert_count 1 'simctl create buster-ci' "$log"
-                assert_file_contains 'phase=bootstatus-continue label=1 outcome=command-failure status=124 native_status=124' \
-                    "$state/console.log.boot.attempt-1.bootstatus-continue.status.log"
-                assert_file_contains 'BUSTER_IOS_BOOT_DISPOSITION=unrecovered-failure' "$state/run.log"
-                ;;
             first-test-failure|first-missing-marker)
                 assert_count 1 "simctl bootstatus $first_udid -b" "$log"
                 if grep -qF "simctl delete $first_udid" "$log" || grep -qF "simctl bootstatus $replacement_udid -b" "$log"; then
@@ -657,7 +549,7 @@ test_ios_boot_recovery_controls() (
                 assert_file_contains 'BUSTER_IOS_BOOT_DISPOSITION=first-attempt-boot-success-but-test-failure' "$state/run.log"
                 ;;
             test-failure|missing-marker)
-                assert_count 3 'simctl bootstatus' "$log"
+                assert_count 2 'simctl bootstatus' "$log"
                 assert_count 1 "simctl delete $first_udid" "$log"
                 assert_file_contains 'BUSTER_IOS_BOOT_DISPOSITION=recovered-boot-but-test-failure' "$state/run.log"
                 if ! grep -qF "simctl install $replacement_udid" "$log"; then
@@ -671,19 +563,18 @@ test_ios_boot_recovery_controls() (
 
     run_case first-boot-success success 0
     run_case both-timeout always-timeout 1
-    run_case shutdown-reject timeout-first-device 1
-    run_case shutdown-timeout timeout-first-device 1
-    run_case delete-reject timeout-first-device 1
-    run_case delete-timeout timeout-first-device 1
-    run_case create-reject timeout-first-device 1
-    run_case create-timeout timeout-first-device 1
-    run_case create-invalid timeout-first-device 1
+    run_case shutdown-reject timeout-first 1
+    run_case shutdown-timeout timeout-first 1
+    run_case delete-reject timeout-first 1
+    run_case delete-timeout timeout-first 1
+    run_case create-reject timeout-first 1
+    run_case create-timeout timeout-first 1
+    run_case create-invalid timeout-first 1
     run_case numeric-124 numeric-124 124
-    run_case continue-native-124 continue-native-124 124
     run_case first-test-failure success 1
     run_case first-missing-marker success 1
-    run_case test-failure timeout-first-device 1
-    run_case missing-marker timeout-first-device 1
+    run_case test-failure timeout-first 1
+    run_case missing-marker timeout-first 1
 )
 
 test_ios_boot_recovery_policy() (
@@ -701,7 +592,6 @@ test_ios_boot_recovery_policy() (
         export FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS=60
         export BUSTER_IOS_CONSOLE_LOG="$state/console.log"
         export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=1 BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=2
-        export BUSTER_IOS_BOOT_CONTINUATION_SECONDS=1
         export BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=2 BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=2
         export BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS=2 BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
         export GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS RUNNER_ARCH=ARM64 BUSTER_IOS_ARCH=arm64
@@ -770,11 +660,10 @@ test_ios_boot_recovery_cancellation() (
         : >"$log"
         export PATH="$fake_bin:$PATH"
         export FAKE_IOS_STATE_DIR="$state" FAKE_IOS_LOG="$log"
-        export FAKE_IOS_RUNTIME_AVAILABLE=1 FAKE_IOS_BOOTSTATUS_MODE=timeout-first-device
+        export FAKE_IOS_RUNTIME_AVAILABLE=1 FAKE_IOS_BOOTSTATUS_MODE=timeout-first
         export FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS=60
         export BUSTER_IOS_CONSOLE_LOG="$state/console.log"
         export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=1 BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=2
-        export BUSTER_IOS_BOOT_CONTINUATION_SECONDS=1
         export BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=2 BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=2
         export BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS=1 BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
         export GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS RUNNER_ARCH=ARM64 BUSTER_IOS_ARCH=arm64
@@ -830,7 +719,6 @@ test_ios_boot_recovery_cancellation() (
         export FAKE_IOS_BOOTSTATUS_SLEEP_SECONDS=60
         export BUSTER_IOS_CONSOLE_LOG="$state/console.log"
         export BUSTER_IOS_BOOT_TIMEOUT_SECONDS=1 BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS=2
-        export BUSTER_IOS_BOOT_CONTINUATION_SECONDS=1
         export BUSTER_IOS_INSTALL_TIMEOUT_SECONDS=2 BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS=2
         export BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS=1 BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS=1
         export GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS RUNNER_ARCH=ARM64 BUSTER_IOS_ARCH=arm64
@@ -891,7 +779,7 @@ test_ios_boot_recovery_cancellation() (
         echo "iOS boot recovery cancellation passed: $case_name (replacement cleanup identity preserved)"
     }
 
-    run_cancel_after_replacement_phase recovery-create timeout-first-device \
+    run_cancel_after_replacement_phase recovery-create timeout-first \
         'simctl create buster-ci com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro'
     run_cancel_after_replacement_phase replacement-readiness always-timeout \
         'simctl bootstatus 00000000-0000-0000-0000-000000000002 -b'
@@ -1019,8 +907,6 @@ test_ios_batch_and_cleanup
 test_ios_failure_and_cleanup_failure
 test_ios_true_timeout_after_early_launcher_exit
 test_ios_boot_recovery
-test_ios_boot_continuation
-test_ios_incomplete_capture_receipt
 test_ios_boot_recovery_controls
 test_ios_boot_recovery_policy
 test_ios_boot_recovery_cancellation

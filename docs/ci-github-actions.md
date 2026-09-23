@@ -380,7 +380,10 @@ deadlines in addition to that sum. This does not change local, borrowed,
 explicit or self-hosted devices, application-test retry policy, result-marker
 validation or mobile coverage requirements. The controlled override
 `BUSTER_IOS_BOOT_CONTINUATION_SECONDS` must be a positive integer and only
-affects the hosted owned continuation.
+affects the hosted owned continuation. A deliberately shortened first-readiness
+deadline keeps its original single-replacement path unless that override also
+opts into continuation. `ios/hosted_signing_budget_test.py` covers the real
+launcher with timeout, continuation, replacement and native failure fixtures.
 
 `bash tests/mobile_ci_scripts_test.sh` covers nonzero and hanging commands,
 bounded output, independent batch results and cleanup failure propagation.

@@ -920,7 +920,10 @@ run_boot_readiness_attempt() {
         readiness_status=$?
         readiness_outcome=$last_lifecycle_outcome
     fi
-    if [[ $attempt -eq 1 && $boot_recovery_eligible -eq 1 && $readiness_outcome == timeout ]]; then
+    # A caller that shortened the first readiness deadline keeps its chosen
+    # recovery budget unless it explicitly opts into a continuation as well.
+    if [[ $attempt -eq 1 && $boot_recovery_eligible -eq 1 && $readiness_outcome == timeout \
+        && ( $boot_timeout_seconds -ge 180 || -n ${BUSTER_IOS_BOOT_CONTINUATION_SECONDS:-} ) ]]; then
         first_readiness_status=$readiness_status
         first_readiness_outcome=$readiness_outcome
         continued=1

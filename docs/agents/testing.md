@@ -124,7 +124,10 @@
 - For an invocation-owned hosted ARM64 device, a true first `bootstatus -b`
   helper timeout gets one 120-second continuation on the same UDID before the
   existing single replacement. `BUSTER_IOS_BOOT_CONTINUATION_SECONDS` can
-  override that positive budget for a controlled diagnostic run. The replacement
+  override that positive budget for a controlled diagnostic run. A caller that
+  shortens the first 180-second readiness deadline opts into continuation by
+  setting this override; otherwise its original single-replacement budget is
+  preserved. The replacement
   still gets only one readiness check; native exit 124 and borrowed, explicit,
   local, and self-hosted devices do not enter continuation or replacement.
   Only a successful `bootstatus -b` permits app execution. Each failed boot
