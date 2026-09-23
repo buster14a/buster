@@ -602,9 +602,9 @@ intervals. An equal-mixture median lies between its component medians, so this
 inner union bound is distribution-free and costs no more than the declared
 pooled tail allocation. An unattainable finite endpoint is honestly reported as
 zero or infinity. The exact partition supports 300,000 metric cells per scope.
-The binding currently fixes 19,296 support groups, 77,184 required object
-rows, and at least 77,186 rows after the required link and self-host stages. The
-100,000-cell cap therefore leaves explicit room for admitted real-workload rows,
+The current full census replay retains 78,912 canonical rows, of which 72,672
+are compiler eligible and 6,240 are untimed. The 100,000-cell cap therefore
+leaves explicit room for admitted real-workload rows,
 and the 300,000-member cap is exactly three variable metrics for that maximum
 population in each scope. These caps do not reduce resamples or authorize excluding a
 required cell. The caller derives the bootstrap count from one scope's explicit
@@ -638,7 +638,12 @@ dedicated-host A/A admission and issues no #36 performance verdict.
 encoder for the existing performance binding's execution transcript. The cursor
 uses `tp_retirement_block_schedule` directly, includes two warmups per variant,
 and exhausts both rounds of compiler invocations before the native-runtime
-campaign. Its runtime row map is copied at initialization. A failed commit
+campaign. The service supplies the independently authenticated eligible-row
+projection in canonical census order. The cursor copies that sparse row-ID map
+and the runtime subset at initialization; it schedules only eligible compiler
+rows while retaining their original IDs in the invocation transcript and
+result-input records. A duplicate, unsorted, or out-of-range ID is rejected.
+A failed commit
 permanently invalidates the attempt; there is no skip or resume operation. The
 complete population's result-input capacity permits at most 254 pairs per round,
 so this collection boundary rejects 256 even though the statistics kernel can

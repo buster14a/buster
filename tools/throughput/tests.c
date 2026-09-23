@@ -1668,6 +1668,56 @@ static void test_retirement_execution(void)
         ++count;
     }
     CHECK(count == 3060 && tp_retirement_execution_complete(&state));
+    unsigned sparse_workspace[15], row_ids[] = {0, 6, 10};
+    CHECK(!tp_retirement_execution_init_rows(&state, 1, 3, row_ids, 11, runtime, 2, 60,
+                                              sparse_workspace, 14));
+    row_ids[1] = 0;
+    CHECK(!tp_retirement_execution_init_rows(&state, 1, 3, row_ids, 11, runtime, 2, 60,
+                                              sparse_workspace, 15));
+    row_ids[1] = 6;
+    row_ids[2] = 6;
+    CHECK(!tp_retirement_execution_init_rows(&state, 1, 3, row_ids, 11, runtime, 2, 60,
+                                              sparse_workspace, 15));
+    row_ids[2] = 11;
+    CHECK(!tp_retirement_execution_init_rows(&state, 1, 3, row_ids, 11, runtime, 2, 60,
+                                              sparse_workspace, 15));
+    row_ids[2] = 10;
+    CHECK(tp_retirement_execution_init_rows(&state, 1, 3, row_ids, 11, runtime, 2, 60,
+                                             sparse_workspace, 15));
+    row_ids[1] = 7;
+    count = 0;
+    unsigned sparse_counts[2][3] = {{0}};
+    while (tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY)
+    {
+        CHECK(invocation.dense < 3 && invocation.row == state.row_ids[invocation.dense] &&
+              invocation.row != 7);
+        if (invocation.dense < 3 && invocation.kind < 2)
+            ++sparse_counts[invocation.kind][invocation.dense];
+        CHECK(tp_retirement_execution_commit(&state, 1));
+        ++count;
+    }
+    CHECK(count == 1220 && tp_retirement_execution_complete(&state));
+    CHECK(sparse_counts[0][0] == 244 && sparse_counts[0][1] == 244 && sparse_counts[0][2] == 244);
+    CHECK(sparse_counts[1][0] == 244 && sparse_counts[1][1] == 0 && sparse_counts[1][2] == 244);
+    /* Exercise the real #929 population dimensions without running any
+     * benchmark processes. The skip layout is synthetic; the service must
+     * independently authenticate its actual applicability projection. */
+    unsigned const eligible = 72672, population = 78912;
+    unsigned* large_ids = malloc(sizeof(*large_ids) * eligible);
+    unsigned* large_workspace = malloc(sizeof(*large_workspace) * eligible * 5);
+    CHECK(large_ids && large_workspace);
+    if (large_ids && large_workspace)
+    {
+        for (unsigned index = 0; index < eligible; ++index) large_ids[index] = index + 6240;
+        CHECK(tp_retirement_execution_init_rows(&state, 1, eligible, large_ids, population,
+                                                 NULL, 0, 60, large_workspace, (size_t)eligible * 5));
+        CHECK(state.expected == UINT64_C(17731968));
+        CHECK(tp_retirement_samples_count(eligible, 60) == UINT64_C(8720640));
+        CHECK(tp_retirement_execution_peek(&state, &invocation) == TP_RETIREMENT_NEXT_READY &&
+              invocation.row == 6240 && invocation.dense == 0);
+    }
+    free(large_ids);
+    free(large_workspace);
     char digest[65];
     CHECK(tp_retirement_process_instance(digest, "job-1", 2, "boot-123", 4321, "987654"));
     CHECK(!strcmp(digest, "feff1be0001f01e4348977e86b09ee13df0d29f6c4a76418bcd2b85282b5dd03"));
@@ -1691,9 +1741,9 @@ static void test_retirement_records(char const* root)
     CHECK(tp_path(path, root, "retirement-execution.jsonl"));
     FILE* file = fopen(path, "wb");
     CHECK(file != NULL);
-    unsigned workspace[12], runtime_rows[] = {0, 2};
+    unsigned workspace[15], runtime_rows[] = {0, 2}, row_ids[] = {0, 6, 10};
     TpRetirementExecution state;
-    CHECK(tp_retirement_execution_init(&state, 1, 3, runtime_rows, 2, 60, workspace, 12));
+    CHECK(tp_retirement_execution_init_rows(&state, 1, 3, row_ids, 11, runtime_rows, 2, 60, workspace, 15));
     TpRetirementInvocation invocation;
     TpRetirementTranscript transcript;
     CHECK(tp_retirement_transcript_init(&transcript, &state, "job-1", 2, "boot-123", 2, 1000));

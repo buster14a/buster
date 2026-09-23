@@ -21,7 +21,7 @@
 typedef struct TpRetirementInvocation
 {
     uint64_t sequence;
-    unsigned row, kind, phase, variant;
+    unsigned row, dense, kind, phase, variant;
     int round, pair, warmup, position;
 } TpRetirementInvocation;
 
@@ -30,6 +30,7 @@ typedef struct TpRetirementExecution
     uint64_t seed, sequence, expected;
     unsigned rows, runtime_count, pairs;
     unsigned* runtime_rows;
+    unsigned* row_ids;
     unsigned* first_orders;
     unsigned* first_cells;
     unsigned* second_cells;
@@ -43,16 +44,25 @@ typedef enum TpRetirementNext
     TP_RETIREMENT_NEXT_INVALID, TP_RETIREMENT_NEXT_READY, TP_RETIREMENT_NEXT_DONE
 } TpRetirementNext;
 
-static int tp_retirement_execution_init(TpRetirementExecution* state, uint64_t seed,
-                                        unsigned rows, unsigned const* runtime_rows,
-                                        unsigned runtime_count, unsigned pairs,
-                                        unsigned* workspace, size_t workspace_count)
+/* row_ids is the authenticated projection of the complete census into the
+ * eligible compiler population. Runtime rows index that dense population.
+ * Both lists are copied: later mutation of producer input cannot change a
+ * frozen schedule. NULL row_ids preserves the old identity projection. */
+static int tp_retirement_execution_init_rows(TpRetirementExecution* state, uint64_t seed,
+                                             unsigned rows, unsigned const* row_ids,
+                                             unsigned population_rows, unsigned const* runtime_rows,
+                                             unsigned runtime_count, unsigned pairs,
+                                             unsigned* workspace, size_t workspace_count)
 {
     int ok = state && seed && rows && rows <= TP_RETIREMENT_MAX_CELLS &&
+             population_rows >= rows && population_rows <= TP_RETIREMENT_MAX_CELLS &&
              runtime_count <= rows && (!runtime_count || runtime_rows) &&
              pairs >= TP_RETIREMENT_MIN_PAIRS_PER_ROUND &&
              pairs <= TP_RETIREMENT_EXECUTION_MAX_PAIRS && !(pairs & 1) &&
-             workspace && workspace_count == (size_t)rows * 4;
+             workspace && workspace_count == (size_t)rows * (row_ids ? 5 : 4) &&
+             (row_ids || population_rows == rows);
+    for (unsigned i = 0; ok && row_ids && i < rows; ++i)
+        ok = row_ids[i] < population_rows && (!i || row_ids[i] > row_ids[i - 1]);
     for (unsigned i = 0; ok && i < runtime_count; ++i)
         ok = runtime_rows[i] < rows && (!i || runtime_rows[i] > runtime_rows[i - 1]);
     if (state)
@@ -64,6 +74,11 @@ static int tp_retirement_execution_init(TpRetirementExecution* state, uint64_t s
             state->rows = rows;
             state->runtime_rows = workspace + rows * 3;
             if (runtime_count) memmove(state->runtime_rows, runtime_rows, sizeof(*runtime_rows) * runtime_count);
+            if (row_ids)
+            {
+                state->row_ids = workspace + rows * 4;
+                memmove(state->row_ids, row_ids, sizeof(*row_ids) * rows);
+            }
             state->runtime_count = runtime_count;
             state->pairs = pairs;
             state->first_orders = workspace;
@@ -73,6 +88,17 @@ static int tp_retirement_execution_init(TpRetirementExecution* state, uint64_t s
                               (TP_RETIREMENT_WARMUPS + TP_RETIREMENT_ROUNDS * pairs);
         }
     }
+    return ok;
+}
+
+static int tp_retirement_execution_init(TpRetirementExecution* state, uint64_t seed,
+                                        unsigned rows, unsigned const* runtime_rows,
+                                        unsigned runtime_count, unsigned pairs,
+                                        unsigned* workspace, size_t workspace_count)
+{
+    int ok = tp_retirement_execution_init_rows(state, seed, rows, NULL, rows,
+                                                runtime_rows, runtime_count, pairs,
+                                                workspace, workspace_count);
     return ok;
 }
 
@@ -117,7 +143,8 @@ static TpRetirementNext tp_retirement_execution_peek(TpRetirementExecution* stat
             }
             if (ok)
             {
-                next.row = state->kind ? state->runtime_rows[dense] : dense;
+                next.dense = state->kind ? state->runtime_rows[dense] : dense;
+                next.row = state->row_ids ? state->row_ids[next.dense] : next.dense;
                 state->current = next;
                 state->pending = 1;
                 result = TP_RETIREMENT_NEXT_READY;

@@ -51,7 +51,8 @@ class NativeExecutionTests(unittest.TestCase):
         shard = {"path": "retirement-measured-execution.jsonl", "bytes": len(data),
                  "sha256": hashlib.sha256(data).hexdigest(), "records": 488}
         events = list(binding._execution_trace_records(self.root, [shard], 488))
-        schedule = binding._execution_schedule([{"row": 0, "metrics": {"generated_runtime": True}}],
+        schedule = binding._execution_schedule([{"row": 0, "metrics": {
+            "compiler_wall_time": True, "generated_runtime": True}}],
             {"seed": 1, "rounds": 2, "pairs_per_round": 60, "warmups_per_variant": 2})
         output_digest = hashlib.sha256(b"fixture-code\n").hexdigest()
         artifact = (self.root / "retirement-artifact-1-1.bin").read_bytes()
@@ -120,7 +121,9 @@ class NativeExecutionTests(unittest.TestCase):
 
     def test_exact_native_bytes_pass_canonical_reader(self):
         events = list(binding._execution_trace_records(self.root, [self.shard], 1220))
-        rows = [{"row": i, "metrics": {"generated_runtime": i != 1}} for i in range(3)]
+        row_ids = (0, 6, 10)
+        rows = [{"row": row, "metrics": {"compiler_wall_time": True,
+            "generated_runtime": row != 6}} for row in row_ids]
         sampling = {"seed": 1, "rounds": 2, "pairs_per_round": 60, "warmups_per_variant": 2}
         expected = list(binding._execution_schedule(rows, sampling))
         self.assertEqual(len(events), len(expected))
@@ -153,8 +156,8 @@ class NativeExecutionTests(unittest.TestCase):
             value = json.loads(line)
             self.assertEqual(line, (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
             self.assertEqual((value["row"], value["round"], value["pair"]),
-                             (ordinal // 120, ordinal // 60 % 2, ordinal % 60))
-            self.assertEqual("generated_runtime" in value["measurements"], value["row"] != 1)
+                             ((0, 6, 10)[ordinal // 120], ordinal // 60 % 2, ordinal % 60))
+            self.assertEqual("generated_runtime" in value["measurements"], value["row"] != 6)
         self.assertEqual(ordinal + 1, 360)
 
     @unittest.skipUnless(os.name == "posix", "production no-follow result reader requires POSIX")
@@ -218,14 +221,14 @@ class NativeExecutionTests(unittest.TestCase):
         template = binding_tests.BindingTests._series_join_fixture()[0][0]
         rows = []
         oracles = []
-        for i in range(3):
+        for i, row_id in enumerate((0, 6, 10)):
             row = copy.deepcopy(template)
-            row["row"] = i
+            row["row"] = row_id
             row["identity"]["fixture"] = f"tests/native-execution-{i}.c"
             row["identity"]["artifact_stage"] = "object" if i == 1 else "link"
             row["metrics"]["generated_runtime"] = i != 1
             rows.append(row)
-            oracles.append({"row": i, "code_section_status": "parsed-deterministic",
+            oracles.append({"row": row_id, "code_section_status": "parsed-deterministic",
                             "code_section_bytes": 32, "code_section_sha256": "d" * 64,
                             "runtime_oracle_status": "not-applicable" if i == 1 else "passed-native",
                             "runtime_exit_code": -1 if i == 1 else 0, "native_runtime": i != 1})

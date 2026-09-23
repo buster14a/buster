@@ -182,14 +182,14 @@ static int tp_retirement_samples_append(TpRetirementSamples* samples,
     if (ok) ok = tp_retirement_execution_record(checked, sizeof(checked), &invocation, observed,
         process, output, transcript->job, transcript->attempt, transcript->boot, transcript->cpu) > 0;
     if (ok && !invocation.kind)
-        ok = !!output->code_section_bytes == !!(samples->rows[invocation.row].metrics & TP_RETIREMENT_SAMPLE_CODE);
+        ok = !!output->code_section_bytes == !!(samples->rows[invocation.dense].metrics & TP_RETIREMENT_SAMPLE_CODE);
     uint64_t wall = ok ? observed->finished_ns - observed->started_ns : 0;
     uint64_t rss = ok && !invocation.kind ? (uint64_t)process->peak_rss_bytes : 0;
     uint64_t code = ok && !invocation.kind ? output->code_section_bytes : 0;
     if (ok && invocation.phase)
     {
         uint64_t values[9];
-        uint64_t ordinal = ((uint64_t)invocation.row * TP_RETIREMENT_ROUNDS +
+        uint64_t ordinal = ((uint64_t)invocation.dense * TP_RETIREMENT_ROUNDS +
                             (unsigned)invocation.round) * execution->pairs + (unsigned)invocation.pair;
         unsigned slot = invocation.kind ? 6 : 0;
         ok = tp_retirement_sample_read(samples, ordinal, values) && !values[slot + invocation.variant];
@@ -213,7 +213,7 @@ static int tp_retirement_samples_append(TpRetirementSamples* samples,
     if (ok)
     {
         if (invocation.phase)
-            tp_retirement_sample_hash(&samples->rows[invocation.row].observations[invocation.kind], invocation.row,
+            tp_retirement_sample_hash(&samples->rows[invocation.dense].observations[invocation.kind], invocation.row,
                 invocation.kind, (unsigned)invocation.round, (unsigned)invocation.pair,
                 invocation.variant, wall, rss, code);
         ++samples->collected;
@@ -255,12 +255,12 @@ static int tp_retirement_sample_values(uint64_t const values[9], unsigned metric
  * second spool pass and catch mutation even when a row crosses a shard boundary.
  * Earlier shards stay partial integrity artifacts until finish/manifest succeed.
  */
-static int tp_retirement_samples_verify_row(TpRetirementSamples* samples, unsigned row)
+static int tp_retirement_samples_verify_row(TpRetirementSamples* samples, unsigned dense)
 {
     int ok = 1;
     for (unsigned kind = 0; ok && kind < 2; ++kind)
     {
-        Sha256 expected = samples->rows[row].observations[kind];
+        Sha256 expected = samples->rows[dense].observations[kind];
         char actual_digest[65], expected_digest[65];
         sha256_finish_hex(&samples->exported_observations[kind], actual_digest);
         sha256_finish_hex(&expected, expected_digest);
@@ -331,23 +331,25 @@ static int tp_retirement_samples_write_shard(TpRetirementSamples* samples, FILE*
     while (ok && samples->exported < samples->expected && next.records < TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS)
     {
         unsigned pairs = samples->transcript->execution->pairs;
-        unsigned row = (unsigned)(samples->exported / (TP_RETIREMENT_ROUNDS * pairs));
+        unsigned dense = (unsigned)(samples->exported / (TP_RETIREMENT_ROUNDS * pairs));
+        unsigned row = samples->transcript->execution->row_ids ?
+            samples->transcript->execution->row_ids[dense] : dense;
         unsigned round = (unsigned)(samples->exported / pairs % TP_RETIREMENT_ROUNDS);
         unsigned pair = (unsigned)(samples->exported % pairs);
-        if (samples->verified_row != row)
+        if (samples->verified_row != dense)
         {
             sha256_init(&samples->exported_observations[0]);
             sha256_init(&samples->exported_observations[1]);
-            samples->verified_row = row;
+            samples->verified_row = dense;
         }
         uint64_t values[9];
         char bytes[TP_RETIREMENT_SAMPLE_LINE_CAP];
         ok = tp_retirement_sample_read(samples, samples->exported, values) &&
-            tp_retirement_sample_values(values, samples->rows[row].metrics);
+            tp_retirement_sample_values(values, samples->rows[dense].metrics);
         for (unsigned kind = 0; ok && kind < 2; ++kind)
             for (unsigned position = 0; position < 2; ++position)
             {
-                if (!kind || (samples->rows[row].metrics & TP_RETIREMENT_SAMPLE_RUNTIME))
+                if (!kind || (samples->rows[dense].metrics & TP_RETIREMENT_SAMPLE_RUNTIME))
                 {
                     unsigned variant = (unsigned)((values[8] >> kind) & 1) ^ position;
                     tp_retirement_sample_hash(&samples->exported_observations[kind], row, kind,
@@ -356,9 +358,9 @@ static int tp_retirement_samples_write_shard(TpRetirementSamples* samples, FILE*
                 }
             }
         if (ok && round + 1 == TP_RETIREMENT_ROUNDS && pair + 1 == pairs)
-            ok = tp_retirement_samples_verify_row(samples, row);
+            ok = tp_retirement_samples_verify_row(samples, dense);
         size_t count = ok ? tp_retirement_sample_record(bytes, sizeof(bytes), row, round, pair,
-            samples->rows[row].metrics, values) : 0;
+            samples->rows[dense].metrics, values) : 0;
         ok = ok && count && next.bytes <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES &&
             count <= TP_RETIREMENT_TRANSCRIPT_SHARD_BYTES - next.bytes;
         if (ok) ok = fwrite(bytes, 1, count, stream) == count && !ferror(stream);
