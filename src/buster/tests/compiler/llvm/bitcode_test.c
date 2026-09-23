@@ -196,6 +196,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    String8 source = S8(
+        "// The independent caller observes only live VLA elements. Every scope exit\n"
+        "// must preserve the outer VLA while discarding allocations made after it.\n"
+        "extern int observe_bytes(volatile unsigned char* bytes, int count, int first, int last);\n"
+        "\n"
+        "int scoped_vlas(int n, int repetitions)\n"
+        "{\n"
+        "    volatile unsigned char outer[n + 1];\n"
+        "    outer[0] = 71;\n"
+        "    outer[n] = 83;\n"
+        "    int result = 0;\n"
+        "    for (int i = 0; i < repetitions; i += 1)\n"
+        "    {\n"
+        "        volatile unsigned char bytes[n];\n"
+        "        bytes[0] = (unsigned char)i;\n"
+        "        bytes[n - 1] = (unsigned char)(n + i);\n"
+        "        result += observe_bytes(bytes, n, (unsigned char)i, (unsigned char)(n + i));\n"
+        "        if (i % 3 == 0)\n"
+        "        {\n"
+        "            volatile unsigned char nested[n + 3];\n"
+        "            nested[0] = (unsigned char)(i + 3);\n"
+        "            nested[n + 2] = 47;\n"
+        "            result += observe_bytes(nested, n + 3, (unsigned char)(i + 3), 47);\n"
+        "        }\n"
+        "    }\n"
+        "    return result + outer[0] + outer[n];\n"
+        "}\n"
+        "\n"
+        "int scoped_exits(int n, int mode)\n"
+        "{\n"
+        "    volatile unsigned char outer[n + 3];\n"
+        "    outer[0] = 19;\n"
+        "    outer[n + 2] = 23;\n"
+        "    int result = 0;\n"
+        "    for (int i = 0; i < 4; i += 1)\n"
+        "    {\n"
+        "        volatile unsigned char inner[n];\n"
+        "        inner[0] = (unsigned char)i;\n"
+        "        inner[n - 1] = 29;\n"
+        "        if (mode == 1 && i == 0)\n"
+        "        {\n"
+        "            continue;\n"
+        "        }\n"
+        "        if (mode == 2 && i == 1)\n"
+        "        {\n"
+        "            break;\n"
+        "        }\n"
+        "        if (mode == 3 && i == 2)\n"
+        "        {\n"
+        "            goto outer_exit;\n"
+        "        }\n"
+        "        if (mode == 4 && i == 0)\n"
+        "        {\n"
+        "            return outer[0] + outer[n + 2];\n"
+        "        }\n"
+        "        result += observe_bytes(inner, n, (unsigned char)i, 29);\n"
+        "    }\n"
+        "outer_exit:\n"
+        "    return result + outer[0] + outer[n + 2];\n"
+        "}\n");
+    String8 caller = S8(
+        "// Compiled by Clang, independently of the Buster-produced bitcode.\n"
+        "int scoped_vlas(int n, int repetitions);\n"
+        "int scoped_exits(int n, int mode);\n"
+        "\n"
+        "int observe_bytes(volatile unsigned char* bytes, int count, int first, int last)\n"
+        "{\n"
+        "    return bytes[0] == first && bytes[count - 1] == last ? 1 : -10000;\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int failures = 0;\n"
+        "    failures += scoped_vlas(3, 5) != 71 + 83 + 5 + 2;\n"
+        "    // 1024 x 16 KiB exceeds an ordinary thread stack if no loop restore runs.\n"
+        "    failures += scoped_vlas(16384, 1024) != 71 + 83 + 1024 + 342;\n"
+        "    failures += scoped_exits(23, 0) != 42 + 4;\n"
+        "    failures += scoped_exits(23, 1) != 42 + 3;\n"
+        "    failures += scoped_exits(23, 2) != 42 + 1;\n"
+        "    failures += scoped_exits(23, 3) != 42 + 2;\n"
+        "    failures += scoped_exits(23, 4) != 42;\n"
+        "    return failures;\n"
+        "}\n");
     String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
     String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     String8 optimizations[] = {S8("-O0"), S8("-O2")};
@@ -203,9 +286,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-stack"), S8(".c"));
+        String8 caller_input = buster_test_temporary_path(arena, S8("buster-llvm-stack-caller"), S8(".c"));
         String8 output = buster_test_temporary_path(arena, S8("buster-llvm-stack"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(caller_input, BUSTER_SLICE_TO_BYTE_SLICE(caller)));
         String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output,
-                             S8("src/buster/tests/compiler/llvm/fixtures/stack_scopes.c")};
+                             input};
         CompilerDriverResult emitted = compiler_driver_execute_invocation(
             arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
         if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
@@ -223,8 +310,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
 #else
                                                                S8(""));
 #endif
-                String8 compile[] = {compiler, optimizations[optimization], output,
-                                     S8("src/buster/tests/compiler/llvm/fixtures/stack_scopes_main.c"), S8("-o"), executable};
+                String8 compile[] = {compiler, optimizations[optimization], output, caller_input, S8("-o"), executable};
                 ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
                     (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
                         .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
