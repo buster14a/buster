@@ -3550,18 +3550,6 @@ BUSTER_C_INTERNAL bool c_parse_expression_place_shape(CParseResult* result, CPre
         }
     }
     if (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_AMPERSAND)) place = false;
-    if (place && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
-    {
-        u32 use = c_parse_identifier_use_index(result, start);
-        if (use != C_ID_UNDERLYING_INVALID)
-        {
-            CEntityId entity = result->identifier_uses[use].entity;
-            place = entity.value < result->entity_count &&
-                    (result->entities[entity.value].kind == C_ENTITY_OBJECT || result->entities[entity.value].kind == C_ENTITY_LOCAL ||
-                     result->entities[entity.value].kind == C_ENTITY_PARAMETER);
-            if (place) place = !result->entities[entity.value].is_constexpr;
-        }
-    }
     for (u32 cursor = start; place && cursor < end; cursor += 1)
     {
         CToken token = preprocess.tokens[cursor];
@@ -3597,6 +3585,20 @@ BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, C
     {
         CType value = result->types[type.value];
         valid = !value.is_const && (c_parse_expression_real_kind(value.kind) || value.kind == C_TYPE_POINTER);
+    }
+    while (valid && start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
+    {
+        start += 1;
+        end -= 1;
+    }
+    if (valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    {
+        u32 use = c_parse_identifier_use_index(result, start);
+        CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity : C_ENTITY_ID_INVALID;
+        valid = entity.value < result->entity_count &&
+                (result->entities[entity.value].kind == C_ENTITY_OBJECT || result->entities[entity.value].kind == C_ENTITY_LOCAL ||
+                 result->entities[entity.value].kind == C_ENTITY_PARAMETER) && !result->entities[entity.value].is_constexpr;
     }
     return valid;
 }

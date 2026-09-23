@@ -11100,6 +11100,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_update_operand_constraints(Unit
         {S8("sizeof (++((int [2]){0, 1})[0])"), true},
         {S8("sizeof (++pair.member)"), true},
         {S8("sizeof (pointer++)"), true},
+        {S8("sizeof ((void)&no_link, ++*pointer)"), true},
         {S8("sizeof ((void)no_link(1), ++*pointer)"), true},
         {S8("sizeof (++*pointer + 1)"), true},
     };
