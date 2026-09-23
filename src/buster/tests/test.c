@@ -3,7 +3,9 @@
 // row here in registration order, its sources to CMakeLists.txt, and its
 // includes below (AGENTS.md). library_tests runs the table, prints the
 // TEST_MODULE_TIMING lines the test_timing_summary diagnostic consumes,
-// and honors BUSTER_TEST_JOBS. Arena scopes publish TEST_ARENA_V1 and
+// and honors BUSTER_TEST_JOBS. Private child payloads dispatch before prewarm;
+// test_os_with_fatal_child_isolation checks that fatal probes run no modules.
+// Arena scopes publish TEST_ARENA_V1 and
 // TEST_ARENA_TOP_V1 counters with diagnostics copied before rewind. Opt-in
 // TEST_FIXTURE_TIMING_V1 rows observe the same scopes; see docs/driver-test-timing.md.
 // A descriptor marked table_audit runs only
@@ -397,6 +399,78 @@ BUSTER_GLOBAL_LOCAL void test_timing_report(UnitTestArguments* arguments, TestTi
                     record.result.test_count, status);
 }
 
+// Keep the original OS tests, including every closed/full-stream control. These
+// additional live probes make late child dispatch observable even on fast hosts:
+// verbose nested modules write stdout, whereas the fatal payload writes only stderr.
+BUSTER_GLOBAL_LOCAL UnitTestResult test_os_with_fatal_child_isolation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = os_tests(arguments);
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    enum { TEST_FATAL_CHILD_REPETITIONS = 3, TEST_FATAL_CHILD_TIMEOUT_US = 30000000 };
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 modes[] = {S8("raw-live"), S8("formatted-live")};
+    String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test"), S8("--verbose=1"), S8("--ci=1")};
+    SliceString8 inherited_keys = program_state->input.environment_keys;
+    SliceString8 inherited_values = program_state->input.environment_values;
+    String8* keys = arena_allocate(arena, String8, inherited_keys.length + 2);
+    String8* values = arena_allocate(arena, String8, inherited_keys.length + 2);
+    keys[0] = S8("BUSTER_OS_FATAL_OUTPUT_MODE");
+    keys[1] = S8("BUSTER_TEST_JOBS");
+    values[1] = S8("1");
+    u64 count = 2;
+    for (u64 inherited = 0; inherited < inherited_keys.length; inherited += 1)
+    {
+        if (!string_equal(inherited_keys.pointer[inherited], keys[0]) && !string_equal(inherited_keys.pointer[inherited], keys[1]))
+        {
+            keys[count] = inherited_keys.pointer[inherited];
+            values[count] = inherited_values.pointer[inherited];
+            count += 1;
+        }
+    }
+    u64 capture_position = arena->position;
+    for (u32 repetition = 0; repetition < TEST_FATAL_CHILD_REPETITIONS; repetition += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            values[0] = modes[mode];
+            TimeDataType start = timestamp_take();
+            ProcessSpawnResult spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments),
+                (SliceString8){keys, count}, (SliceString8){values, count},
+                (ProcessSpawnOptions){.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            if (BUSTER_REQUIRE(arguments, spawn.handle != 0))
+            {
+                ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, TEST_FATAL_CHILD_TIMEOUT_US);
+                TimeDataType end = timestamp_take();
+                BUSTER_TEST(arguments, !wait.timed_out);
+                BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
+#if BUSTER_WINDOWS
+                BUSTER_TEST(arguments, wait.platform_status == 1);
+#else
+                // Darwin's wait macros require an addressable native int.
+                int native_status = (int)wait.platform_status;
+                BUSTER_TEST(arguments, WIFEXITED(native_status) && WEXITSTATUS(native_status) == 1);
+#endif
+                String8 error = {(char8*)wait.streams[STANDARD_STREAM_ERROR].pointer, wait.streams[STANDARD_STREAM_ERROR].length};
+                BUSTER_STRING_TEST(arguments, error, S8("fatal-output-37 at os-fail-regression.c:19 in child\n"));
+                BUSTER_TEST(arguments, wait.streams[STANDARD_STREAM_OUTPUT].length == 0);
+                arguments->show(arguments,
+                    S8("OS_FATAL_OUTPUT_CHILD_V1 mode={S8} repetition={u32} duration_ns={u64} timed_out={u32} platform_status={u64} stdout_bytes={u64} stderr_bytes={u64}\n"),
+                    modes[mode], repetition, timestamp_ns_between(start, end), (u32)wait.timed_out, (u64)wait.platform_status,
+                    wait.streams[STANDARD_STREAM_OUTPUT].length, wait.streams[STANDARD_STREAM_ERROR].length);
+            }
+            else
+            {
+                arguments->show(arguments, S8("OS_FATAL_OUTPUT_CHILD_V1 mode={S8} repetition={u32} status=spawn-failed\n"), modes[mode], repetition);
+            }
+            arena_set_position(arena, capture_position);
+        }
+    }
+    arena_set_position(arena, position);
+#endif
+    return result;
+}
+
 typedef enum TestId
 {
     TEST_ID_BYTE_WRITER,
@@ -467,7 +541,7 @@ BUSTER_GLOBAL_LOCAL TestDescriptor test_descriptors[TEST_ID_COUNT] = {
     [TEST_ID_HASH] = {S8_INITIALIZER("hash_tests"), &hash_tests},
     [TEST_ID_SIMD] = {S8_INITIALIZER("simd_tests"), &simd_tests},
     [TEST_ID_STRING] = {S8_INITIALIZER("string_tests"), &string_tests},
-    [TEST_ID_OS] = {S8_INITIALIZER("os_tests"), &os_tests, true},
+    [TEST_ID_OS] = {S8_INITIALIZER("os_tests"), &test_os_with_fatal_child_isolation, true},
     [TEST_ID_FILE] = {S8_INITIALIZER("file_tests"), &file_tests, !BUSTER_ANDROID && !BUSTER_IOS},
     [TEST_ID_TARGET] = {S8_INITIALIZER("target_tests"), &target_tests},
     [TEST_ID_TRUETYPE] = {S8_INITIALIZER("truetype_tests"), &truetype_tests},
@@ -1278,6 +1352,18 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     }
 
     os_test_process_child_run(arguments);
+#if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
+    if (os_get_environment_variable(S8("BUSTER_OS_FATAL_OUTPUT_MODE")).length)
+    {
+        // The selected payload is the first block of os_tests and must exit.
+        // Do not reach it through the descriptor table: that runs compiler
+        // prewarm and seven unrelated modules (including sanitizer children).
+        // Keep the payload and all its stream semantics in their existing owner.
+        os_tests(arguments);
+        enum { TEST_FATAL_CHILD_UNEXPECTED_RETURN = 125 };
+        os_exit(TEST_FATAL_CHILD_UNEXPECTED_RETURN);
+    }
+#endif
     compiler_driver_test_wasm_node_child_run();
 
     // Some test modules intentionally leave a resident lane gang available
