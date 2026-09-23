@@ -444,6 +444,43 @@ class CompletionGateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 github_ci_time.require_jobs(args)
 
+    def test_api_gate_waits_for_unfinished_job_but_rejects_missing_final_steps(self):
+        completed = self.sample()
+        pending = copy.deepcopy(completed)
+        windows = next(job for job in pending if job["name"] == "Windows x86-64 checks")
+        windows.update(status="in_progress", conclusion=None, steps=[])
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
+
+        def api_get(_repository, path, _token):
+            if path == "actions/runs/123":
+                return run
+            api_get.probes += 1
+            return {"total_count": len(completed), "jobs": pending if not api_get.settles or api_get.probes == 1 else completed}
+
+        api_get.probes = 0
+        api_get.settles = True
+        with mock.patch.object(github_ci_time, "api_get", side_effect=api_get), \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            self.assertTrue(github_ci_time.require_jobs(args)["success"])
+            sleep.assert_called_once_with(github_ci_time.REQUIRED_JOB_SETTLE_SECONDS)
+
+        api_get.probes = 0
+        api_get.settles = False
+        with mock.patch.object(github_ci_time, "api_get", side_effect=api_get), \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            self.assertFalse(github_ci_time.require_jobs(args)["success"])
+            self.assertEqual(api_get.probes, github_ci_time.REQUIRED_JOB_SETTLE_PROBES)
+            self.assertEqual(sleep.call_count, github_ci_time.REQUIRED_JOB_SETTLE_PROBES - 1)
+
+        # A finished job without its required steps is not an unfinished API
+        # observation. No previous green attempt may supply those steps.
+        windows.update(status="completed", conclusion="success")
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, {"total_count": len(pending), "jobs": pending}]), \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            self.assertFalse(github_ci_time.require_jobs(args)["success"])
+            sleep.assert_not_called()
+
     def test_workflow_expands_exact_cross_product_and_keeps_gate_wiring(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
