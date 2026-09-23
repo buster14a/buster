@@ -63,7 +63,7 @@ enum
     LLVM_BC_CST_AGGREGATE = 7,
     LLVM_BC_CST_STRING = 8,
     LLVM_BC_CST_CE_CAST = 11,
-    LLVM_BC_CST_CE_GEP = 32,
+    LLVM_BC_CST_CE_GEP_OLD = 12,
 
     LLVM_BC_FUNC_DECLAREBLOCKS = 1,
     LLVM_BC_FUNC_BINOP = 2,
@@ -1840,9 +1840,11 @@ static u32 llvm_bc_address_constant(LlvmBcContext* context, IrSymbolId symbol_id
             u32 offset = llvm_bc_integer_constant_for_type_id(context, index_type, (u32)(pointer_size * 8), (u64)addend);
             // GEP over i8 expresses a signed byte displacement without claiming
             // inbounds: a canonical addend may point before its named symbol.
-            u64 operands[6] = {context->i8_type_id, 0, context->pointer_type_id,
+            // The unflagged GEP record is understood by LLVM 18 and newer;
+            // the newer flags-bearing record is not understood by LLVM 18.
+            u64 operands[5] = {context->i8_type_id, context->pointer_type_id,
                                context->symbol_value_ids[symbol_id.value], index_type, offset};
-            result = llvm_bc_add_constant(context, context->pointer_type_id, LLVM_BC_CST_CE_GEP, operands, 6);
+            result = llvm_bc_add_constant(context, context->pointer_type_id, LLVM_BC_CST_CE_GEP_OLD, operands, 5);
         }
     }
     return result;
