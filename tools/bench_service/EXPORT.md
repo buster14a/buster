@@ -4,6 +4,11 @@
 result, including the original manifest, `BQ-BUNDLE-V1` index, outcome record
 when present, every indexed file and empty directories. `FULL_SHA` is the
 `full-result-sha256` from `gateway result JOB`; `ATTEMPT` is its token.
+The optional fourth argument `EXPECTED_RECIPE` must exactly match the job's
+fixed service recipe. It selects the client's preparation wait; a mismatch is
+rejected before the daemon prepares an archive. The admitted smoke recipe
+continues to use the three-argument command. A future retirement export must
+specify `native-retirement-performance-v1`.
 No filename, root, glob, command, environment, URL or branch crosses this
 protocol. The daemon derives the root from `BQ_RESULT_BIND` in its durable
 queue. A raw local `protocol` call cannot invoke export.
@@ -120,7 +125,7 @@ operation 13 (`EXPORT`). Existing request and ordinary reply limits stay fixed.
 | Depth | Fewer than 256 components; path bound also applies |
 | Receipt | 1,024 bytes |
 | Preparation / chunk operation / client transfer budget | 300 / 30 / 300 seconds for smoke; 86,400 / 30 / 86,400 seconds reserved for retirement |
-| Socket send/receive wait | 1 second; initial receipt wait bounded at 305 seconds for the admitted smoke recipe |
+| Socket send/receive wait | 1 second; initial receipt wait 305 seconds for smoke, 86,405 seconds for an explicit matched retirement recipe |
 
 The inventory is one fixed-capacity mapping; payload buffers are 64 KiB.
 The smoke chunk index has at most 8,334 fixed 64-byte hashes; the reserved
@@ -137,9 +142,7 @@ before transcripts, manifests, binaries or logs. An operator must provision
 space for the retained result, sealed export, downloaded archive and clean
 replay, each independently bounded by its own copy. The larger limits here
 only remove a transport ceiling; the recipe remains blocked until its complete
-producer, validators and service tests are reviewed. Admission also needs a
-recipe-authenticated initial receipt wait: the current 305-second client wait
-cannot accommodate the reserved 86,400-second retirement preparation budget.
+producer, validators and service tests are reviewed.
 
 Export request body:
 
@@ -148,7 +151,7 @@ Export request body:
 | 0 / 8 | Job ID / attempt token, u64 |
 | 16 | Expected full-result digest, 64 lowercase hex bytes |
 | 80 | Cursor, u64; `UINT64_MAX` requests the initial receipt |
-| 88 | Expected export-receipt digest, 64 hex bytes; all zero for initial receipt |
+| 88 | Chunk: expected export-receipt digest, 64 hex bytes. Initial receipt: optional expected recipe ID (u32; 0 unspecified, 3 smoke, 4 retirement), then 60 zero bytes |
 
 Successful reply body:
 

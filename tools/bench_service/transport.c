@@ -206,7 +206,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_public_request(u8 const* input, u32 siz
                      bq_result_digest_valid(arguments + 16);
         if (valid && bq_u64(arguments + 80) == UINT64_MAX)
         {
-            for (u32 i = 88; valid && i < BQ_EXPORT_REQUEST_CAP; i += 1) valid = arguments[i] == 0;
+            u32 recipe = bq_u32(arguments + 88);
+            valid = recipe == BQ_RECIPE_UNKNOWN || recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+                    recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED;
+            for (u32 i = 92; valid && i < BQ_EXPORT_REQUEST_CAP; i += 1) valid = arguments[i] == 0;
         }
         else if (valid) valid = bq_result_digest_valid(arguments + 88);
         if (!valid) error = BQ_BAD_REQUEST;
@@ -326,6 +329,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_worker_once(BqQueue* queue, BqWorkerCon
     return error;
 }
 
+BUSTER_GLOBAL_LOCAL int bq_transport_response_wait(u8 const* request, u32 request_size)
+{
+    int result = BQ_TRANSPORT_CLIENT_MILLISECONDS;
+    if (request_size == BQ_CONTROL_HEADER + BQ_EXPORT_REQUEST_CAP &&
+        bq_u32(request + 8) == BQ_OP_EXPORT && bq_u64(request + BQ_CONTROL_HEADER + 80) == UINT64_MAX)
+    {
+        BqRecipe recipe = (BqRecipe)bq_u32(request + BQ_CONTROL_HEADER + 88);
+        result = (int)bq_export_prepare_milliseconds(recipe) + 5000;
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 const* request, u32 request_size,
                                                      BqPacket* response)
 {
@@ -350,9 +365,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_round_trip(char const* socket_path, u8 
             {
                 u32 received = 0;
                 BqError receive_error = bq_transport_receive_timeout(client, response->bytes, &received,
-                                                                      bq_u32(request + 8) == BQ_OP_EXPORT && request_size == BQ_CONTROL_HEADER + BQ_EXPORT_REQUEST_CAP &&
-                                                                      bq_u64(request + BQ_CONTROL_HEADER + 80) == UINT64_MAX ?
-                                                                      BQ_EXPORT_PREPARE_MILLISECONDS + 5000 : BQ_TRANSPORT_CLIENT_MILLISECONDS,
+                                                                      bq_transport_response_wait(request, request_size),
                                                                       BQ_PACKET_CAP);
                 bool response_valid = receive_error == BQ_OK && received >= BQ_CONTROL_HEADER + 4 &&
                                       !memcmp(response->bytes, "BQP1", 4) &&
@@ -491,6 +504,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_transport_dispatch(BqQueue* queue, u8 const* requ
         error = queue->poisoned || queue->journal_fd < 0 ? BQ_IO :
                 bq_export_authorize(queue, body, S8(BQ_EXPORT_PRINCIPAL), &job);
         u64 cursor = bq_u64(body + 80);
+        if (error == BQ_OK && cursor == UINT64_MAX)
+        {
+            BqRecipe expected = (BqRecipe)bq_u32(body + 88);
+            BqRecipe actual = bq_request_recipe(&job->request);
+            if ((expected != BQ_RECIPE_UNKNOWN && expected != actual) ||
+                (actual == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && expected != actual)) error = BQ_CONFLICT;
+        }
         if (error == BQ_OK && cursor == UINT64_MAX) error = bq_export_prepare(queue, job);
         if (error == BQ_OK)
         {

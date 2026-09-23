@@ -120,7 +120,9 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
                             !memcmp(arguments + 16, data + BQ_EXPORT_REPLY_HEADER + 240, 64) &&
                             bq_u64(data + BQ_EXPORT_REPLY_HEADER + 8) == bq_u64(arguments) &&
                             bq_u64(data + BQ_EXPORT_REPLY_HEADER + 16) == bq_u64(arguments + 8) &&
-                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 24) == total;
+                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 24) == total &&
+                            (bq_u32(arguments + 88) == BQ_RECIPE_UNKNOWN ||
+                             bq_u32(arguments + 88) == bq_export_receipt_recipe(data + BQ_EXPORT_REPLY_HEADER));
 #endif
                 }
                 else if (valid)
