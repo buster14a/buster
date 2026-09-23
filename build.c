@@ -1471,7 +1471,12 @@ BUSTER_GLOBAL_LOCAL String8 build_running_driver(Arena* arena)
 BUSTER_GLOBAL_LOCAL bool path_exists(Arena* arena, String8 path)
 {
     String8 path_z = string_duplicate_arena(arena, path, true);
-    OsFileDescriptor* fd = os_file_open(path_z, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* fd = os_file_open(
+        path_z,
+        (OpenFlags){0},
+        (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1});
     bool result = fd != 0;
     if (fd)
     {
@@ -3012,7 +3017,12 @@ BUSTER_GLOBAL_LOCAL bool build_artifact_fanout_snapshot(Arena* arena, String8 so
 
     bool result = file_copy((CopyFileArguments){.original_path = source, .new_path = destination});
 #if BUSTER_LINUX || BUSTER_MACOS
-    OsFileDescriptor* destination_file = os_file_open(destination, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* destination_file = os_file_open(
+        destination,
+        (OpenFlags){0},
+        (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1});
     bool mode_result = false;
     if (destination_file)
     {
@@ -7863,7 +7873,12 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_large(String8 path, 
         return false;
     }
 
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){.create = 1, .truncate = 1},
+        (OsFileAccess){.write = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (!file)
     {
         return false;
@@ -7908,7 +7923,12 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_unique_rows(Arena* a
 {
     String8 prefix = S8("{\"traceEvents\":[");
     String8 suffix = S8("]}");
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){.create = 1, .truncate = 1},
+        (OsFileAccess){.write = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (!file)
     {
         return false;
@@ -7941,7 +7961,12 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_name_cap(String8 pat
     String8 prefix = S8("{\"traceEvents\":[{\"ph\":\"X\",\"name\":\"Total ");
     String8 suffix = S8("\",\"dur\":1}]}");
     u64 repeated_count = BUSTER_KB(512) - 6 + 1;
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){.create = 1, .truncate = 1},
+        (OsFileAccess){.write = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (!file)
     {
         return false;
@@ -7966,7 +7991,12 @@ BUSTER_GLOBAL_LOCAL bool time_trace_summary_self_test_write_depth_cap(String8 pa
     String8 scalar = S8("0");
     String8 suffix = S8("}");
     u64 nested_count = 257;
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){.create = 1, .truncate = 1},
+        (OsFileAccess){.write = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
     if (!file)
     {
         return false;
@@ -8217,8 +8247,18 @@ BUSTER_GLOBAL_LOCAL bool self_host_audit_compare_file(Arena* arena, String8 left
 {
     // Query both sizes before comparing mappings, including legitimately
     // empty diagnostics. Missing files and failed stat queries fail the audit.
-    OsFileDescriptor* left_fd = os_file_open(left, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
-    OsFileDescriptor* right_fd = os_file_open(right, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* left_fd = os_file_open(
+        left,
+        (OpenFlags){0},
+        (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1});
+    OsFileDescriptor* right_fd = os_file_open(
+        right,
+        (OpenFlags){0},
+        (OsFileAccess){.read = 1},
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){.read = 1});
     bool valid = left_fd && right_fd;
     u64 left_size = left_fd ? os_file_get_size(left_fd) : 0;
     u64 right_size = right_fd ? os_file_get_size(right_fd) : 0;
@@ -14837,7 +14877,12 @@ BUSTER_GLOBAL_LOCAL bool sbase_copy_program(Arena* arena, String8 from, String8 
     if (ok)
     {
         OsFileDescriptor* fd =
-            os_file_open(to, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+            os_file_open(
+                to,
+                (OpenFlags){.create = 1, .truncate = 1},
+                (OsFileAccess){.write = 1},
+                (OsFileCreateMode){.kind = OS_FILE_CREATE_MODE_EXECUTABLE},
+                (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
         ok = fd != 0;
         if (ok)
         {
@@ -22774,7 +22819,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_artifact_fanout_tests(Arena* arena, bool
     if (include_large_snapshot)
     {
         OsFileDescriptor* large_snapshot_file =
-            os_file_open(large_snapshot_source, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, (OpenPermissions){.read = 1, .write = 1});
+            os_file_open(
+                large_snapshot_source,
+                (OpenFlags){.create = 1, .truncate = 1},
+                (OsFileAccess){.write = 1},
+                (OsFileCreateMode){0},
+                (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
         bool large_snapshot_written = large_snapshot_file != 0;
         u8 large_snapshot_buffer[BUSTER_KB(64)] = {0};
         u64 large_snapshot_size = BUSTER_MB(65) + BUSTER_KB(1);
