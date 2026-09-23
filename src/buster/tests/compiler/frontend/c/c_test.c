@@ -2777,6 +2777,53 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_identity(UnitTestArgu
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_tag_scope_typedef_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int main(void) { struct Tag; typedef struct Tag Saved; "
+           "struct Tag { unsigned char bytes[7]; }; Saved *p=0; "
+           "_Static_assert(sizeof(p->bytes)==7, \"A\"); return 0; }"),
+        S8("struct Tag { unsigned char bytes[1]; }; "
+           "int main(void) { struct Tag; typedef struct Tag Saved; "
+           "struct Tag { unsigned char bytes[7]; }; Saved *p=0; "
+           "_Static_assert(sizeof(p->bytes)==7, \"B\"); return 0; }"),
+        S8("struct Tag { unsigned char bytes[1]; }; "
+           "int main(void) { struct LocalTag; typedef struct LocalTag Saved; "
+           "struct LocalTag { unsigned char bytes[7]; }; Saved *p=0; "
+           "_Static_assert(sizeof(p->bytes)==7, \"C\"); return 0; }"),
+        S8("struct Tag { unsigned char bytes[1]; }; "
+           "int main(void) { typedef struct Tag Saved; "
+           "struct Tag { unsigned char bytes[7]; }; Saved *p=0; "
+           "_Static_assert(sizeof(p->bytes)==1, \"D\"); return 0; }"),
+        S8("int main(void) { { struct Tag { unsigned char bytes[1]; }; } "
+           "{ typedef struct Tag Saved; struct Tag { unsigned char bytes[7]; }; "
+           "Saved *p=0; _Static_assert(sizeof(p->bytes)==7, \"E\"); return 0; } }"),
+        S8("struct Tag { unsigned char bytes[1]; }; "
+           "int main(void) { struct Tag { unsigned char bytes[7]; }; "
+           "typedef struct Tag Saved; Saved *p=0; "
+           "_Static_assert(sizeof(p->bytes)==7, \"F\"); return 0; }"),
+        S8("struct Tag; typedef struct Tag Outer; "
+           "int main(void) { struct Tag { unsigned char bytes[7]; }; "
+           "typedef struct Tag Saved; Saved *p=0; "
+           "_Static_assert(sizeof(p->bytes)==7, \"G inner\"); return 0; } "
+           "struct Tag { unsigned char bytes[1]; }; "
+           "_Static_assert(sizeof(Outer)==1, \"G outer\");"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens;
+        CParseResult parse;
+        CIRLowerResult lowered = c_test_lower_source(temporary.arena, sources[index], S8("tag-scope-typedef.c"), target_native, &tokens, &parse);
+        BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        BUSTER_TEST(arguments, lowered.program != 0 && lowered.diagnostic_count == 0);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_aggregate_lookup_frontend(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -20803,6 +20850,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_fresh_binding_publication);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_growth);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_identity);
+    BUSTER_TEST_FIXTURE(arguments, c_test_tag_scope_typedef_identity);
     BUSTER_TEST_FIXTURE(arguments, c_test_aggregate_lookup_frontend);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_parse_rollback_growth);
 

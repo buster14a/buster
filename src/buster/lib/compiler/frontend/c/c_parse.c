@@ -7219,7 +7219,10 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
                 u32 type_index = slot->type_index;
                 bool live = type_index < result->type_count && result->types[type_index].kind == kind &&
                     !result->types[type_index].has_unqualified_type && string_equal(result->types[type_index].tag, tag);
-                if (live && !slot->multiple)
+                bool visible = live && (scope.value == C_ID_UNDERLYING_INVALID ||
+                    result->types[type_index].tag_scope.value == scope.value ||
+                    c_parse_scope_distance(result, result->types[type_index].tag_scope, scope) != UINT32_MAX);
+                if (visible && !slot->multiple)
                 {
                     found = (CTypeId){.value = type_index};
                     scan = false;
@@ -7227,7 +7230,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_aggregate_lookup(CParseResult* result, CTypeKi
                 else
                 {
                     scan = true;
-                    scan_by_scope = scan_by_scope || slot->multiple;
+                    scan_by_scope = scan_by_scope || slot->multiple || !visible;
                 }
             }
         }
@@ -8934,6 +8937,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_range_step(CTypeParseMachine* mach
             if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                       .result = frame->result,
                                                       .preprocess = frame->preprocess,
+                                                      .scope = frame->scope,
                                                       .start = frame->segment_start,
                                                       .end = frame->index,
                                                       .kind = C_TYPE_PARSE_FRAME_AGGREGATE_SEGMENT,
@@ -9022,6 +9026,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
                                                   .preprocess = preprocess,
+                                                  .scope = frame->scope,
                                                   .start = frame->start,
                                                   .end = frame->end,
                                                   .kind = C_TYPE_PARSE_FRAME_ALIGNMENT,
@@ -9053,7 +9058,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
                                                   .preprocess = preprocess,
-                                                  .scope = result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                  .scope = frame->scope,
                                                   .start = type_start,
                                                   .end = frame->end,
                                                   .mutation_mark = machine->mutation_count,
@@ -9409,6 +9414,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
                                                       .scope = frame->scope,
                                                       .start = start,
                                                       .end = frame->end,
+                                                      .tag_only_declaration = frame->tag_only_declaration,
                                                       .mutation_mark = machine->mutation_count,
                                                       .kind = C_TYPE_PARSE_FRAME_CORE,
                                                   }))
@@ -9681,6 +9687,7 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
                                                   .preprocess = frame->preprocess,
+                                                  .scope = root->tag_scope,
                                                   .start = root->definition_start,
                                                   .end = root->definition_start + root->definition_token_count,
                                                   .kind = C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
@@ -9734,6 +9741,7 @@ BUSTER_C_INTERNAL void c_type_parse_core_step(CTypeParseMachine* machine, CTypeP
         if (!c_type_parse_frame_push(machine, (CTypeParseFrame){
                                                   .result = result,
                                                   .preprocess = frame->preprocess,
+                                                  .scope = pending->tag_scope,
                                                   .start = pending->definition_start,
                                                   .end = pending->definition_start + pending->definition_token_count,
                                                   .kind = C_TYPE_PARSE_FRAME_AGGREGATE_RANGE,
@@ -10365,9 +10373,9 @@ BUSTER_C_INTERNAL void c_type_parse_machine_run(CTypeParseMachine* machine, u32 
     }
 }
 
-BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
-                                                         u32 start, u32 end,
-                                                         u32* declarator_start)
+BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope_context(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                                 CScopeId scope, u32 start, u32 end, bool tag_only_declaration,
+                                                                 u32* declarator_start)
 {
     u32 frame_start = machine->frame_count;
     CParseResult checkpoint = *result;
@@ -10380,6 +10388,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* machin
                                               .scope = scope,
                                               .start = start,
                                               .end = end,
+                                              .tag_only_declaration = tag_only_declaration,
                                               .mutation_mark = mutation_mark,
                                               .kind = C_TYPE_PARSE_FRAME_SCALAR,
                                           });
@@ -10391,6 +10400,12 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* machin
                                           machine->failed && start < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[start]) : (CSourceLocation){0});
     *declarator_start = machine->result_index;
     return valid ? machine->result_type : C_TYPE_ID_INVALID;
+}
+
+BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_in_scope(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                         u32 start, u32 end, u32* declarator_start)
+{
+    return c_parse_scalar_type_in_scope_context(machine, result, preprocess, scope, start, end, false, declarator_start);
 }
 
 BUSTER_C_INTERNAL CTypeId c_parse_scalar_type(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end,
@@ -11172,6 +11187,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     }
     CTypeId type = c_parse_aggregate_lookup(result, kind, tag, frame->scope);
     bool definition = index < end && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_LEFT_BRACE);
+    // A standalone block-scope tag declaration introduces an identity here;
+    // a typedef, cast, member or sizeof type name still sees an outer tag.
+    if (!definition && frame->tag_only_declaration && tag.length && c_parse_skip_attributes(preprocess, index, end) == end &&
+        type.value != C_ID_UNDERLYING_INVALID && result->types[type.value].tag_scope.value != frame->scope.value)
+    {
+        type = C_TYPE_ID_INVALID;
+    }
     if (!definition)
     {
         if (!tag.length)
@@ -11221,18 +11243,17 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
     // -- clang's xmmintrin.h defines `struct __mm_storeh_pi_struct` inside
     // two intrinsics, and the second body must not be read against the
     // first's completed record, which both mis-sized the second struct and
-    // sent the whole statement back through the expression parser.  An
-    // incomplete found tag keeps its existing completion path whatever the
-    // scope, which is the `struct S; struct S { ... };` forward idiom.
+    // sent the whole statement back through the expression parser. An inner
+    // definition must not complete an incomplete tag in an outer scope.
+    if (type.value != C_ID_UNDERLYING_INVALID && result->types[type.value].tag_scope.value != frame->scope.value)
+    {
+        type = C_TYPE_ID_INVALID;
+    }
     if (type.value != C_ID_UNDERLYING_INVALID && result->types[type.value].is_complete)
     {
-        if (result->types[type.value].tag_scope.value == frame->scope.value)
-        {
-            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[tag_index]), C_DIAGNOSTIC_REDEFINITION,
-                               string_format(result->arena, S8("redefinition of tag '{S8}'"), tag));
-            return C_TYPE_ID_INVALID;
-        }
-        type = C_TYPE_ID_INVALID;
+        c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[tag_index]), C_DIAGNOSTIC_REDEFINITION,
+                           string_format(result->arena, S8("redefinition of tag '{S8}'"), tag));
+        return C_TYPE_ID_INVALID;
     }
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
@@ -14501,7 +14522,8 @@ BUSTER_C_INTERNAL bool c_parse_local_declarations(CTypeParseMachine* machine, Ar
     }
     u32 enum_member_start = result->enum_member_count;
     u32 declarator_start = start;
-    CTypeId base = is_auto_type ? C_TYPE_ID_INVALID : c_parse_scalar_type_in_scope(machine, result, preprocess, scope, start, end, &declarator_start);
+    CTypeId base = is_auto_type ? C_TYPE_ID_INVALID :
+        c_parse_scalar_type_in_scope_context(machine, result, preprocess, scope, start, end, true, &declarator_start);
     if (is_auto_type)
     {
         declarator_start = auto_info.name_index;
