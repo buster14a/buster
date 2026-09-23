@@ -5475,6 +5475,8 @@ enum
 {
     OBJECT_COFF_SECTION_LINK_COMDAT = 0x00001000,
     OBJECT_COFF_SECTION_LINK_NRELOC_OVFL = 0x01000000,
+    // COFF counts the overflow marker itself; 65,536 real entries need 65,537.
+    OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT = UINT16_MAX + 2,
     OBJECT_COFF_STORAGE_EXTERNAL = 2,
     OBJECT_COFF_STORAGE_STATIC = 3,
     OBJECT_COFF_STORAGE_WEAK_EXTERNAL = 105,
@@ -5657,13 +5659,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 if (!object_read_u32(bytes, relocation_offset, &overflow_count) ||
                     !object_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
                     !object_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
-                    overflow_count <= UINT16_MAX || overflow_symbol || overflow_type)
+                    overflow_count < OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT || overflow_symbol || overflow_type)
                 {
                     read_ok = false;
                 }
                 else
                 {
-                    actual_relocation_count = overflow_count;
+                    actual_relocation_count = overflow_count - 1;
                 }
             }
             u64 relocation_bytes = (u64)actual_relocation_count * COFF_RELOCATION_SIZE +
@@ -6169,13 +6171,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 if (!object_read_u32(bytes, relocation_offset, &overflow_count) ||
                     !object_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
                     !object_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
-                    overflow_count <= UINT16_MAX || overflow_symbol || overflow_type)
+                    overflow_count < OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT || overflow_symbol || overflow_type)
                 {
                     read_ok = false;
                 }
                 else
                 {
-                    actual_relocation_count = overflow_count;
+                    actual_relocation_count = overflow_count - 1;
                     relocation_data_offset += COFF_RELOCATION_SIZE;
                 }
             }
@@ -11510,7 +11512,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
     {
         ObjectRelocation* source = object->relocations + relocation;
-        if (source->section >= section_count || relocation_counts[source->section] == UINT32_MAX)
+        // Leave room for the COFF marker's N+1 count in its 32-bit field.
+        if (source->section >= section_count || relocation_counts[source->section] >= UINT32_MAX - 1)
         {
             buffer.error = OBJECT_ERROR_INVALID_INPUT;
             break;
@@ -11602,7 +11605,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         {
             u64 overflow_offset = buffer.count;
             object_buffer_zero(&buffer, COFF_RELOCATION_SIZE);
-            object_write_u32_at(&buffer, overflow_offset, relocation_counts[section]);
+            // The 32-bit field counts the marker as well as all real relocations.
+            object_write_u32_at(&buffer, overflow_offset, relocation_counts[section] + 1);
         }
         for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
         {
