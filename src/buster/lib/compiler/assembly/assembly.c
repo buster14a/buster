@@ -12,8 +12,9 @@
 // selection and encoding go through the generated metadata
 // (assembly_x86_metadata_select_source_form, x86_64_metadata.h), with the
 // assembly_x86_instruction_size/encode paths retaining preliminary size and
-// legality checks for many families, including EVEX/APX. LEA bypasses those
-// size checks and derives its length from metadata selection. AArch64 uses the generated
+// legality checks for many families, including EVEX/APX. LEA and the scalar
+// MOVZX/MOVSX/MOVSXD family derive their lengths from metadata selection.
+// AArch64 uses the generated
 // syntax/semantic tables and compact architectural front doors such as the
 // scalar GPR memory family, all encoded through aarch64_encoding.h.
 //
@@ -10866,9 +10867,12 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         }
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
-            // LEA's layout is selected with its checked metadata form below;
-            // the source parser only supplies the operands and syntax alias.
-            bool metadata_layout = instruction.opcode == ASSEMBLY_OPCODE_X86_LEA;
+            // These source layouts are selected with checked metadata forms
+            // below; the parser only supplies operands and syntax aliases.
+            bool metadata_layout = instruction.opcode == ASSEMBLY_OPCODE_X86_LEA ||
+                                   instruction.opcode == ASSEMBLY_OPCODE_X86_MOVZX ||
+                                   instruction.opcode == ASSEMBLY_OPCODE_X86_MOVSX ||
+                                   instruction.opcode == ASSEMBLY_OPCODE_X86_MOVSXD;
             if ((!metadata_layout && !assembly_x86_instruction_size(&instruction)) ||
                 (info.suffix_width && instruction.width && info.suffix_width != instruction.width))
             {
