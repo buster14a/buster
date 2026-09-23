@@ -64,6 +64,13 @@ static int atomic_pointer_builtins(void)
            previous == values && subtracted == values + 2 && __c11_atomic_load(&cursor, __ATOMIC_RELAXED) == values + 1;
 }
 
+static int atomic_or_preserves_overlapping_bits(void)
+{
+    _Atomic(unsigned int) value = 1;
+    unsigned int previous = __c11_atomic_fetch_or(&value, 1, __ATOMIC_RELAXED);
+    return previous == 1 && __c11_atomic_load(&value, __ATOMIC_RELAXED) == 1;
+}
+
 int main(void)
 {
     atomic_byte = atomic_byte + 2;
@@ -71,5 +78,5 @@ int main(void)
     atomic_word = atomic_word + 2;
     atomic_double = atomic_double + 2;
     return !(atomic_byte == 5 && atomic_half == 7 && atomic_word == 9 && atomic_double == 13 && local_atomic_round_trip() && atomic_read_modify_write() &&
-             atomic_builtins() && atomic_pointer_builtins());
+             atomic_builtins() && atomic_pointer_builtins() && atomic_or_preserves_overlapping_bits());
 }
