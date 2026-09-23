@@ -155,7 +155,18 @@ static int test_child(int argc, char** argv)
         else
         {
             for (size_t i = 0; i < bytes; i += 4096) memory[i] = (unsigned char)(i >> 12);
+#ifdef __APPLE__
+            /* Keep the private working set active so Darwin's wait4 RSS
+             * high-water captures the full allocation reliably on hosted CI. */
+            for (unsigned pass = 0; pass < 8; ++pass)
+            {
+                for (size_t i = 0; i < bytes; i += 4096)
+                    memory[i] ^= (unsigned char)(pass + 1);
+            }
+            test_delay(100);
+#else
             test_delay(10);
+#endif
             free((void*)memory);
         }
     }
@@ -372,8 +383,9 @@ static void test_processes(char const* executable, char const* root)
 #endif
     TpProcess rejected = tp_process(fail, NULL, root, 2, -1, 0);
     CHECK(rejected.launch_error && rejected.diagnostics_available == 0);
-    CHECK(large.exit_code == 0 && large.peak_rss_bytes >= 80.0 * 1048576.0);
     TpProcess small = tp_process(fail, NULL, log, 2, -1, 0);
+    printf("PROCESS_RSS large_bytes=%.0f small_bytes=%.0f\\n", large.peak_rss_bytes, small.peak_rss_bytes);
+    CHECK(large.exit_code == 0 && large.peak_rss_bytes >= 80.0 * 1048576.0);
     CHECK(small.exit_code == 7 && small.peak_rss_bytes < large.peak_rss_bytes * 0.8);
     CHECK(large.user_seconds >= 0 && large.system_seconds >= 0 && large.wall_seconds > 0);
     char* echo[] = {(char*)executable, "child", "echo", "space in argument", "quote\"inside", "tail\\", "", NULL};
