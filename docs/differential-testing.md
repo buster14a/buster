@@ -16,8 +16,10 @@ From the repository root, build `ide` normally and use a **new** output director
 The defaults use thirteen permanent cases and four generated cases, seed 1, a
 10-second deadline per child, and at most 64 reduction trials for the first
 runtime mismatch in each case. A reference compiler must be available; its
-absence is a failure, not a skip. `--cc` accepts a Clang/GCC-style executable,
-not a shell command containing flags. On Windows specify the `.exe` path.
+absence is a failure, not a skip. `--cc` accepts one executable, not a shell
+command containing flags. The default `--reference-dialect gnu` uses Clang/GCC
+syntax; on Windows specify the `.exe` path. The explicit `msvc` dialect is
+described below.
 
 Desktop SysV x86-64 hosts additionally run `sysv-sseup`: an independently
 compiled observer checks sixteen-byte vector wrappers, nested wrappers, union
@@ -137,14 +139,58 @@ QUALITY exercises its scheduling policy; there is no invented scheduler flag.
 This runner executes the **native target**. It does not pretend a successfully
 written cross-target object was executed. Continue running `test_mode_matrix`
 for the separate target/object/disassembly matrix, and run this command on each
-native host to test its ABI. The host compiler interface is Clang/GCC-style;
-MSVC's `cl` command-line syntax is not implemented.
+native host to test its ABI. The default reference dialect uses Clang/GCC-style
+arguments. The MSVC subset below is opt-in.
+
+## Native MSVC reference subset
+
+From an x64 or ARM64 Visual Studio developer shell on **native Windows**, with
+a Release `ide.exe` built for that target, run:
+
+```powershell
+./build.ps1 test_differential --ide build/Release/ide.exe --cc cl.exe `
+  --reference-dialect msvc --source tools/fixtures/msvc_reference_subject.c `
+  --host tools/fixtures/msvc_reference_caller.c --minimize 0 --strict-mir `
+  --out build/differential-msvc
+```
+
+The runner checks the resolved compiler with the existing `/Bv /EP /TC`
+identity and native-target probe. `VSCMD_ARG_TGT_ARCH` and a working Visual
+Studio toolchain environment (`INCLUDE`, `LIB`, `PATH`) are required. The
+preflight rejects a missing compiler, a non-MSVC executable, a wrong target,
+built-in or generated suites, `--sanitize-oracle`, and any nonzero reduction
+budget **before** creating the output directory. The default reduction budget
+is 64, so pass `--minimize 0` explicitly. MSVC offers no ASan+UBSan equivalent
+to the runner's sanitized reduction contract. Required Clang/GCC corpus and
+sanitizer runs remain separate, unchanged obligations.
+
+Supply a reviewed, standard-C11 source using the native Windows ABI. GNU
+extensions, compiler builtins, signed-overflow-dependent behavior and
+incompatible aliasing semantics are outside this subset. `/J` gives plain
+`char` the unsigned behavior required by Buster; `/Od` and `/O2` are separate
+reference controls. The optional fixed `--host` translation unit is compiled
+independently for each reference and once for all Buster configurations. A
+successful custom reference must exit zero in both optimization variants.
+The included fixture checks scalar and aggregate values and calls in both
+compiler directions, including an aggregate returned through the Windows ABI.
+
+Compilation uses `/nologo /std:c11 /TC /J /Od` (or `/O2`), `/I`, `/c`, and
+`/Fo`; linking uses the selected `cl.exe` with object files, `/Fe`, `/link`,
+`/LIBPATH:` and `legacy_stdio_definitions.lib`. Arguments are passed directly,
+including paths with spaces. The runner preserves the developer shell
+environment and adds only its existing per-child sanitizer report policy.
+The manifest records the resolved executable and its hash, MSVC version and
+target, dialect, capabilities and environment policy; phase `.argv` files
+record exact NUL-delimited arguments. Child stdout/stderr/status and stable
+artifact hashes use the same evidence checks as the default dialect.
 
 ## Observations and independent controls
 
 The two reference executions compile the same subject with the host compiler
-at O0 and O2. All subject and host-caller compilations preserve `-fwrapv`,
-`-fno-strict-aliasing`, and `-funsigned-char`. The references must agree and terminate normally before they can be an
+at O0 and O2. The default dialect preserves `-fwrapv`,
+`-fno-strict-aliasing`, and `-funsigned-char` for subjects and callers. The
+MSVC subset uses `/J` and sources that do not require the first two flags.
+The references must agree and terminate normally before they can be an
 oracle. Nonzero program exits are valid observations, not automatically errors:
 the observables fixture deliberately exits 37 and writes a NUL byte to stdout.
 The built-in ABI fixtures additionally require the independent reference to
@@ -262,7 +308,7 @@ and placement-builder validity checks, not a new proof of register-allocation
 semantics; the executable/ABI comparisons provide the independent behavioral
 check.
 
-`--sanitize-oracle` instruments the host reference programs and fixed caller
+In the default dialect, `--sanitize-oracle` instruments the host reference programs and fixed caller
 translation units with ASan and UBSan and disables sanitizer recovery. Passing a sanitized Buster binary instruments
 the **compiler itself**. This does not claim that Buster-generated machine code
 has acquired sanitizer instrumentation. Sanitizer checks and O0/O2 agreement
@@ -271,7 +317,7 @@ Do not suppress a sanitizer report merely to get a green matrix.
 
 ## Reduction and evidence
 
-The iterative line reducer has a finite trial budget. It preserves the exact
+For the default dialect, the iterative line reducer has a finite trial budget. It preserves the exact
 runtime difference mask and failing Buster configuration against agreeing
 host O0/O2 references. Each reduction candidate must compile/link and terminate
 normally; reference programs are ASan/UBSan-instrumented during reduction even
