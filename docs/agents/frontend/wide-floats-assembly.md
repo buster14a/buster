@@ -37,9 +37,9 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   **Native code generation implements the binary16 runtime vocabulary.**
   Scalar arguments and results use the ABI's real floating position: the low
   sixteen bits of an XMM register on System V and Win64 x86-64, and the H/V
-  register position on AArch64. The direct emitter and the MIR value-shape
-  tables agree on that classification, so `none`, `mir-stack`, `fast` and
-  `quality` compile the same signatures without machine fallback. Baseline
+  register position on AArch64. The shared ABI classification feeds the MIR
+  value-shape tables, so `none`, `mir-stack`, `fast` and `quality` compile the
+  same signatures through MIR. Baseline
   targets need no F16C or AVX512-FP16 feature. On x86-64, lowering widens each half through
   `__extendhfsf2`, performs arithmetic in binary32, and rounds immediately back
   through `__truncsfhf2`; a binary64 source uses `__truncdfhf2`. Darwin x86-64's

@@ -1332,6 +1332,32 @@ class ContractTests(unittest.TestCase):
 
 
 class CheckedInDependencyTests(unittest.TestCase):
+    def test_native_dispatch_cannot_register_retired_direct_emitter(self):
+        root = Path(__file__).resolve().parents[1]
+        codegen = (root / "src/buster/lib/compiler/codegen/codegen.c").read_text(encoding="utf-8")
+        private = (root / "src/buster/lib/compiler/codegen/codegen_internal.h").read_text(encoding="utf-8")
+        public = (root / "src/buster/lib/compiler/codegen/codegen.h").read_text(encoding="utf-8")
+        cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
+        unity = (root / "src/buster/apps/ide/ide.c").read_text(encoding="utf-8")
+
+        self.assertIn("machine_select_validated_canonical_function(", codegen)
+        self.assertIn("options.register_allocator = CODEGEN_REGISTER_ALLOCATOR_MIR_STACK;", codegen)
+        self.assertIn("machine_stack_placement_build(", codegen)
+        self.assertIn("CODEGEN_REGISTER_ALLOCATOR_NONE", public)
+        for retired in ("CCanonicalEmitter", "CCanonicalBranchPatch", "X64Builder",
+                        "x64_emit_vector_native_memory", "x64_emit_vector_native_binary_operation",
+                        "x64_emit_vzeroupper", "a64_emit_initialize_aggregate_result",
+                        "canonical_prep", "canonical_emit("):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, codegen + private)
+
+        # Both source graphs register the shared codegen module. Neither may
+        # grow a second native emitter or link the archived reference compiler.
+        self.assertIn('buster_register_module(compiler_codegen "${BUSTER_SOURCE_DIR}/compiler/codegen/codegen${COMMON_EXTENSION}")', cmake)
+        self.assertIn('#include <buster/lib/compiler/codegen/codegen.c>', unity)
+        for registry in (cmake, unity):
+            self.assertNotRegex(registry, r'(?m)^(?:.*register_module|\s*#include)\b[^\n]*(?:direct_native|native_direct|retirement_reference)')
+
     def test_historical_gap_ledger_maps_to_current_row_numbers(self):
         root = Path(__file__).resolve().parents[1]
         _fields, inputs = read_table(root / "docs/native-retirement-support-v1.tsv")

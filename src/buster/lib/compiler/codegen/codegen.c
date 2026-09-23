@@ -11,7 +11,8 @@
 // codegen_generate_canonical_module_attempt lays out global data (read-only
 // / writable / thread-local / zero-fill images plus initializer
 // relocations), then per function runs the machine path. The direct-emitter
-// body is removed at cutover; #514 owns unused helper and API cleanup.
+// body is removed at cutover. The remaining ABI and metadata helpers have
+// machine, assembly, or focused regression consumers.
 // codegen_generate_canonical_module wraps the attempt in a retry loop
 // that grows the code-buffer capacity scale when an attempt runs out.
 //
@@ -35,7 +36,8 @@
 //   codegen_emit_global_assembly                 here, instructions through
 //                                                assembly_encode, relocations
 //                                                into the module
-//   a64_emit_*, codegen_canonical_a64_*          AArch64 emission helpers
+//   a64_emit_*, codegen_canonical_a64_*          AArch64 stack probes and
+//                                                checked address helpers
 //   codegen_slot_costs_build,                    the attempt's per-type frame
 //   codegen_record_machine_line_marks            slot table and the line rows
 //                                                of a machine-emitted function
@@ -138,10 +140,6 @@ bool codegen_module_relocation_valid(CodegenModuleRelocation* relocation)
 #include <buster/lib/integer.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
-
-#define X64_VALUE_SLOT_SIZE 32
-#define X64_VALUE_SLOT_COMPONENT_COUNT 4
-#define A64_VALUE_SLOT_SIZE 32
 
 BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_names64[] = {
     S8_INITIALIZER("rax"), S8_INITIALIZER("rcx"), S8_INITIALIZER("rdx"), S8_INITIALIZER("rbx"), S8_INITIALIZER("rsp"), S8_INITIALIZER("rbp"), S8_INITIALIZER("rsi"), S8_INITIALIZER("rdi"),
@@ -2375,206 +2373,6 @@ bool codegen_x64_emit_windows_stack_allocate(CodegenBuffer* buffer, u32 size, Co
     return true;
 }
 
-// popcnt eax/rax, eax/rax. The C frontend only produces this operation when
-// the target has POPCNT and expands the SWAR form itself otherwise, so there
-// is no second sequence to keep in step here.
-
-void x64_emit_vector_native_memory(X64Builder* builder, bool store, u32 size, X64Register base)
-{
-    if (size != 32 && size != 64)
-    {
-        builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-        return;
-    }
-    u16 vector_width = (u16)(size * 8);
-    // The legacy native load/store opcode is VMOVUPS for both YMM and ZMM
-    // widths.  Keep the aggregate memory atom at the 256-bit lane shape used
-    // by the metadata schema; EVEX selects the 512-bit register width from
-    // the ZMM physical class while AVX512F gates the wide form.
-    String8 mnemonic = S8("VMOVUPS");
-    u16 memory_width = 32;
-    BusterX86MetadataPhysicalOperand memory = codegen_canonical_x64_metadata_memory_relaxed(base, memory_width, 0);
-    BusterX86MetadataPhysicalOperand vector = codegen_canonical_x64_metadata_vector(0, vector_width);
-    BusterX86MetadataPhysicalOperand operands[2] = {store ? memory : vector, store ? vector : memory};
-    String8 feature_names[2] = {0};
-    u32 feature_count = 0;
-    if (size == 64)
-    {
-        feature_names[feature_count++] = S8("avx512f");
-    }
-    else
-    {
-        feature_names[feature_count++] = S8("avx");
-    }
-    (void)codegen_canonical_x64_metadata_emit_features(
-        &builder->buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
-        (BusterX86MetadataFeatureInput){.names = feature_names, .count = feature_count});
-}
-
-// Emit a native packed operation from an explicit IR element kind/width.
-// The legacy opcode prefix is not sufficient to classify this operation:
-// 0x66 is used by both packed integer and packed-double forms.  Keep the
-// classification at the call site and use the physical metadata encoder for
-// every form.
-BUSTER_GLOBAL_LOCAL void x64_emit_vector_native_binary_operation_kind(X64Builder* builder, bool integer_operation, u16 element_width,
-                                                                       u8 prefix, u8 opcode, u32 size, X64Register base)
-{
-    (void)prefix;
-    if (size != 32 && size != 64)
-    {
-        builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-        return;
-    }
-    String8 mnemonic = {0};
-    u16 memory_width = 0;
-    if (integer_operation)
-    {
-        switch (opcode)
-        {
-        case 0xfc: mnemonic = S8("VPADDB"); memory_width = 8; break;
-        case 0xfd: mnemonic = S8("VPADDW"); memory_width = 16; break;
-        case 0xfe: mnemonic = S8("VPADDD"); memory_width = 32; break;
-        case 0xd4: mnemonic = S8("VPADDQ"); memory_width = 64; break;
-        case 0xf8: mnemonic = S8("VPSUBB"); memory_width = 8; break;
-        case 0xf9: mnemonic = S8("VPSUBW"); memory_width = 16; break;
-        case 0xfa: mnemonic = S8("VPSUBD"); memory_width = 32; break;
-        case 0xfb: mnemonic = S8("VPSUBQ"); memory_width = 64; break;
-        case 0xdb:
-            mnemonic = size == 64 ? (element_width <= 32 ? S8("VPANDD") : S8("VPANDQ")) : S8("VPAND");
-            // The AVX-512 D/Q logical forms use their tuple element width
-            // (dword/qword) for memory matching even when the IR vector is
-            // byte/word-granular: the operation is bitwise and does not
-            // change its result based on the logical lane size.
-            memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
-            break;
-        case 0xeb:
-            mnemonic = size == 64 ? (element_width <= 32 ? S8("VPORD") : S8("VPORQ")) : S8("VPOR");
-            memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
-            break;
-        case 0xef:
-            mnemonic = size == 64 ? (element_width <= 32 ? S8("VPXORD") : S8("VPXORQ")) : S8("VPXOR");
-            memory_width = size == 64 ? (element_width <= 32 ? 32 : 64) : 256;
-            break;
-        default: break;
-        }
-    }
-    else
-    {
-        bool double_precision = element_width == 64;
-        switch (opcode)
-        {
-        case 0x58: mnemonic = double_precision ? S8("VADDPD") : S8("VADDPS"); memory_width = double_precision ? 64 : 32; break;
-        case 0x5c: mnemonic = double_precision ? S8("VSUBPD") : S8("VSUBPS"); memory_width = double_precision ? 64 : 32; break;
-        case 0x59: mnemonic = double_precision ? S8("VMULPD") : S8("VMULPS"); memory_width = double_precision ? 64 : 32; break;
-        case 0x5e: mnemonic = double_precision ? S8("VDIVPD") : S8("VDIVPS"); memory_width = double_precision ? 64 : 32; break;
-        default: break;
-        }
-    }
-    if (!mnemonic.length)
-    {
-        builder->buffer.error = CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION;
-        return;
-    }
-    u16 vector_width = (u16)(size * 8);
-    BusterX86MetadataPhysicalOperand memory_operand = codegen_canonical_x64_metadata_memory_relaxed(base, memory_width, 0);
-    // Vector memory operands carry the scalar element width used by the
-    // tuple encoding together with their aggregate source width.  The
-    // latter is what lets metadata distinguish (for example) a dword
-    // tuple in a zmmword operand from an ordinary scalar dword load.
-    memory_operand.memory.source_width = vector_width;
-    BusterX86MetadataPhysicalOperand operands[3] = {
-        codegen_canonical_x64_metadata_vector(0, vector_width),
-        codegen_canonical_x64_metadata_vector(0, vector_width),
-        memory_operand,
-    };
-    String8 feature_names[2] = {0};
-    u32 feature_count = 0;
-    if (size == 64)
-    {
-        feature_names[feature_count++] = S8("avx512f");
-        if (integer_operation && (memory_width == 8 || memory_width == 16)) feature_names[feature_count++] = S8("avx512bw");
-    }
-    else
-    {
-        feature_names[feature_count++] = integer_operation ? S8("avx2") : S8("avx");
-    }
-    (void)codegen_canonical_x64_metadata_emit_features(
-        &builder->buffer, mnemonic, operands, BUSTER_ARRAY_LENGTH(operands),
-        (BusterX86MetadataFeatureInput){.names = feature_names, .count = feature_count});
-}
-
-// Keep the internal declaration's historical signature for out-of-line
-// callers, while routing the canonical vector path through the explicit
-// element-kind helper above.  This wrapper only serves legacy tests/tools;
-// production call sites pass element kind and width directly below.
-void x64_emit_vector_native_binary_operation(X64Builder* builder, u8 prefix, u8 opcode, u32 size, X64Register base)
-{
-    bool integer_operation = opcode != 0x58 && opcode != 0x5c && opcode != 0x59 && opcode != 0x5e;
-    u16 element_width = 32;
-    if (integer_operation)
-    {
-        element_width = opcode == 0xfc || opcode == 0xf8 ? 8 : opcode == 0xfd || opcode == 0xf9 ? 16 : opcode == 0xfe || opcode == 0xfa ? 32 : 64;
-    }
-    else if (prefix == 0x66)
-    {
-        element_width = 64;
-    }
-    x64_emit_vector_native_binary_operation_kind(builder, integer_operation, element_width, prefix, opcode, size, base);
-}
-
-// A vector element the canonical emitters have lane instructions for: any of
-// the four integer widths they address, and a float lane only at the two IEEE
-// widths their arithmetic implements. The scalarized lane loops already asked
-// this of a float before operating; the shape guards at the top of both
-// emitters did not, so a binary16 lane was admitted and then selected the
-// binary32 or binary64 encoding. The MIR selectors spell the same rule.
-
-bool x64_target_supports_native_vector(Target target, u64 size, u32 element_width, bool integer_operation)
-{
-    if (size <= 16 || size > target_vector_register_size(target))
-    {
-        return false;
-    }
-    // The packed float arithmetic here is ADDPS/ADDPD and their siblings, so
-    // a float lane narrower than binary32 has no encoding at all: binary16
-    // needs AVX512-FP16's ADDPH, which this backend does not select. Without
-    // this the binary32/binary64 pair was chosen for a `_Float16` lane and the
-    // vector was added as if its lanes were twice as wide.
-    if (!integer_operation && element_width < 32)
-    {
-        return false;
-    }
-    if (integer_operation)
-    {
-        if (size == 32)
-        {
-            return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX2);
-        }
-        if (size == 64 && element_width < 32)
-        {
-            return target_cpu_feature_has(target, TARGET_CPU_FEATURE_X86_AVX512BW);
-        }
-    }
-
-    return true;
-}
-
-void x64_emit_vzeroupper(X64Builder* builder)
-{
-    if (!builder->upper_vector_dirty)
-    {
-        return;
-    }
-    String8 feature_names[] = {S8("avx")};
-    (void)codegen_canonical_x64_metadata_emit_features(
-        &builder->buffer, S8("VZEROUPPER"), 0, 0,
-        (BusterX86MetadataFeatureInput){.names = feature_names, .count = BUSTER_ARRAY_LENGTH(feature_names)});
-    builder->upper_vector_dirty = false;
-    builder->last_wide_vector_result = IR_VALUE_ID_INVALID;
-    builder->last_wide_vector_size = 0;
-    builder->vzeroupper_count += 1;
-}
-
 // `source_limit` is the first source id the record cannot name: at most
 // UINT16_MAX + 1, and the program's source count when the caller knows it, so
 // a stored source is always an index into the source table and the object
@@ -2714,58 +2512,9 @@ struct A64Relocation
     u8 reserved[3];
 };
 
-#define A64_VALUE_SLOT_COMPONENT_COUNT 4
-
 BUSTER_GLOBAL_LOCAL void a64_emit_instruction_word(CodegenBuffer* buffer, u32 instruction)
 {
     codegen_emit_u32(buffer, instruction);
-}
-
-BUSTER_GLOBAL_LOCAL u32 a64_value_offset(IrValueId value)
-{
-    return value.value * A64_VALUE_SLOT_SIZE;
-}
-
-BUSTER_GLOBAL_LOCAL u32 a64_value_component_offset(IrValueId value, u32 component)
-{
-    return a64_value_offset(value) + component * 8;
-}
-
-BUSTER_GLOBAL_LOCAL void a64_emit_store_offset(CodegenBuffer* buffer, u32 source, u32 offset)
-{
-    if (offset > 32760)
-    {
-        buffer->error = CODEGEN_ERROR_CAPACITY;
-        return;
-    }
-    a64_emit_instruction_word(buffer, 0xf90003e0 | ((offset / 8) << 10) | source);
-}
-
-void a64_emit_float_load_offset(CodegenBuffer* buffer, u32 target, u32 offset, u32 size)
-{
-    u32 scale = size <= 4 ? 4 : size <= 8 ? 8 : 16;
-    if (offset % scale || offset / scale > A64_IMM12_MAX)
-    {
-        buffer->error = CODEGEN_ERROR_CAPACITY;
-        return;
-    }
-    a64_emit_instruction_word(buffer, (size <= 4 ? 0xbd4003e0 : size <= 8 ? 0xfd4003e0 : 0x3dc003e0) | ((offset / scale) << 10) | target);
-}
-
-void a64_emit_float_store_offset(CodegenBuffer* buffer, u32 source, u32 offset, u32 size)
-{
-    u32 scale = size <= 4 ? 4 : size <= 8 ? 8 : 16;
-    if (offset % scale || offset / scale > A64_IMM12_MAX)
-    {
-        buffer->error = CODEGEN_ERROR_CAPACITY;
-        return;
-    }
-    a64_emit_instruction_word(buffer, (size <= 4 ? 0xbd0003e0 : size <= 8 ? 0xfd0003e0 : 0x3d8003e0) | ((offset / scale) << 10) | source);
-}
-
-BUSTER_GLOBAL_LOCAL void a64_emit_store_value_component(CodegenBuffer* buffer, u32 source, IrValueId value, u32 component)
-{
-    a64_emit_store_offset(buffer, source, a64_value_component_offset(value, component));
 }
 
 BUSTER_GLOBAL_LOCAL void a64_emit_constant(CodegenBuffer* buffer, u32 target, u64 value)
@@ -2869,29 +2618,6 @@ bool codegen_a64_windows_large_stack_adjust(CodegenBuffer* buffer, u32 size, boo
     return handled;
 }
 
-BUSTER_GLOBAL_LOCAL void a64_emit_stack_address(CodegenBuffer* buffer, u32 target, u32 offset)
-{
-    a64_emit_instruction_word(buffer, 0x910003e0 | target);
-    while (offset)
-    {
-        u32 chunk = BUSTER_MIN(offset, A64_IMM12_MAX);
-        a64_emit_instruction_word(buffer, 0x91000000 | target | (target << 5) | (chunk << 10));
-        offset -= chunk;
-    }
-}
-
-// Keep the low `bytes` bytes of a register and zero the rest, through a
-// constant in `scratch`. The x86 twin, codegen_canonical_x64_keep_low_bytes,
-// says why an atomic aggregate needs it; a full or empty span is a no-op.
-
-// LDXP/LDAXP and STXP/STLXP, the exclusive pair forms behind every 16-byte
-// atomic: below LSE2 no plain 16-byte access is single-copy atomic, so a
-// sixteen-byte atomic load, store, RMW, and CAS are all bounded loops over
-// these words, exactly the shape clang emits for baseline AArch64.
-
-// The bounded backward branch every exclusive loop ends with: CBNZ on the
-// W13 status register to the loop's exclusive load.
-
 void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset);
 
 void a64_emit_load_pointer_offset(CodegenBuffer* buffer, u32 target, u32 address, u32 offset, u32 size)
@@ -2937,40 +2663,6 @@ void a64_emit_store_pointer_offset(CodegenBuffer* buffer, u32 source, u32 addres
         offset = 0;
     }
     a64_emit_instruction_word(buffer, encoded | ((offset / scale) << 10) | (address << 5) | source);
-}
-
-void a64_emit_copy_memory_registers(CodegenBuffer* buffer, u32 destination, u32 source, u32 scratch, u32 size)
-{
-    u32 offset = 0;
-    while (size - offset >= 8)
-    {
-        a64_emit_instruction_word(buffer, 0xf9400000 | ((offset / 8) << 10) | (source << 5) | scratch);
-        a64_emit_instruction_word(buffer, 0xf9000000 | ((offset / 8) << 10) | (destination << 5) | scratch);
-        offset += 8;
-    }
-    if (size - offset >= 4)
-    {
-        a64_emit_instruction_word(buffer, 0xb9400000 | ((offset / 4) << 10) | (source << 5) | scratch);
-        a64_emit_instruction_word(buffer, 0xb9000000 | ((offset / 4) << 10) | (destination << 5) | scratch);
-        offset += 4;
-    }
-    if (size - offset >= 2)
-    {
-        a64_emit_instruction_word(buffer, 0x79400000 | ((offset / 2) << 10) | (source << 5) | scratch);
-        a64_emit_instruction_word(buffer, 0x79000000 | ((offset / 2) << 10) | (destination << 5) | scratch);
-        offset += 2;
-    }
-    if (size != offset)
-    {
-        a64_emit_instruction_word(buffer, 0x39400000 | (offset << 10) | (source << 5) | scratch);
-        a64_emit_instruction_word(buffer, 0x39000000 | (offset << 10) | (destination << 5) | scratch);
-    }
-}
-
-void a64_emit_initialize_aggregate_result(CodegenBuffer* buffer, u32* value_storage_offsets, IrValueId value)
-{
-    a64_emit_stack_address(buffer, 16, value_storage_offsets[value.value]);
-    a64_emit_store_value_component(buffer, 16, value, 0);
 }
 
 BUSTER_GLOBAL_LOCAL IrAbiConvention codegen_canonical_ir_abi_convention(CodegenAbi abi)
@@ -4107,89 +3799,6 @@ CodegenError codegen_canonical_x64_call_layout(Arena* arena, IrProgram* program,
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL void codegen_canonical_a64_adjust_stack_described(CodegenBuffer* buffer, u32 byte_count, bool subtract,
-                                                                      CodegenFunctionDescriptor* descriptor, u32 action_capacity, bool windows)
-{
-    if (!windows || !codegen_a64_windows_large_stack_adjust(buffer, byte_count, subtract, descriptor, action_capacity))
-    {
-        while (byte_count)
-        {
-            u32 chunk = BUSTER_MIN(byte_count, A64_SP_ADJUST_CHUNK);
-            codegen_emit_u32(buffer, (subtract ? 0xd10003ff : 0x910003ff) | (chunk << 10));
-            if (subtract && descriptor &&
-                !codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset,
-                                              CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, chunk))
-            {
-                buffer->error = CODEGEN_ERROR_CAPACITY;
-                return;
-            }
-            if (subtract)
-            {
-                codegen_emit_u32(buffer, 0xf90003ff);
-                if (windows && descriptor &&
-                    !codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset, CODEGEN_UNWIND_ACTION_NOP, 0, 0))
-                {
-                    buffer->error = CODEGEN_ERROR_CAPACITY;
-                    return;
-                }
-            }
-            byte_count -= chunk;
-        }
-    }
-}
-
-void codegen_canonical_a64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
-{
-    codegen_canonical_a64_adjust_stack_described(buffer, byte_count, subtract, 0, 0, false);
-}
-
-BUSTER_GLOBAL_LOCAL void codegen_canonical_x64_adjust_stack_described(CodegenBuffer* buffer, u32 byte_count, bool subtract,
-                                                                      CodegenFunctionDescriptor* descriptor, u32 action_capacity, bool windows)
-{
-    if (!subtract)
-    {
-        if (!byte_count)
-        {
-            return;
-        }
-        BusterX86MetadataPhysicalOperand operands[2] = {
-            codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
-            codegen_canonical_x64_metadata_immediate(byte_count, byte_count <= INT8_MAX ? 8 : 32),
-        };
-        (void)codegen_canonical_x64_metadata_emit(buffer, S8("ADD"), operands, BUSTER_ARRAY_LENGTH(operands));
-        return;
-    }
-    if (!windows || !codegen_x64_emit_windows_stack_allocate(buffer, byte_count, descriptor, action_capacity, descriptor ? descriptor->code_offset : 0))
-    {
-        while (byte_count)
-        {
-            u32 chunk = BUSTER_MIN(byte_count, CODEGEN_X64_STACK_PROBE_PAGE);
-            BusterX86MetadataPhysicalOperand subtract_operands[2] = {
-                codegen_canonical_x64_metadata_gpr(X64_REGISTER_RSP, 64),
-                codegen_canonical_x64_metadata_immediate(chunk, chunk <= INT8_MAX ? 8 : 32),
-            };
-            (void)codegen_canonical_x64_metadata_emit(buffer, S8("SUB"), subtract_operands, BUSTER_ARRAY_LENGTH(subtract_operands));
-            if (descriptor && !codegen_unwind_action_append(descriptor, action_capacity, (u32)buffer->count - descriptor->code_offset,
-                                                            CODEGEN_UNWIND_ACTION_ALLOCATE_STACK, 0, chunk))
-            {
-                buffer->error = CODEGEN_ERROR_CAPACITY;
-                return;
-            }
-            BusterX86MetadataPhysicalOperand probe_operands[2] = {
-                codegen_canonical_x64_metadata_memory_relaxed(X64_REGISTER_RSP, 8, 0),
-                codegen_canonical_x64_metadata_immediate(0, 8),
-            };
-            (void)codegen_canonical_x64_metadata_emit(buffer, S8("TEST"), probe_operands, BUSTER_ARRAY_LENGTH(probe_operands));
-            byte_count -= chunk;
-        }
-    }
-}
-
-void codegen_canonical_x64_adjust_stack(CodegenBuffer* buffer, u32 byte_count, bool subtract)
-{
-    codegen_canonical_x64_adjust_stack_described(buffer, byte_count, subtract, 0, 0, false);
-}
-
 void codegen_canonical_a64_base_address(CodegenBuffer* buffer, u32 register_number, u32 base_register, u32 byte_offset)
 {
     if (byte_offset <= A64_IMM12_MAX)
@@ -5247,106 +4856,6 @@ u32 codegen_canonical_a64_remainder_divide_instruction(bool signed_remainder, bo
 // A branch whose target block was not placed when the branch was emitted. The
 // generator records the field to overwrite and fills every one of them once
 // the block offsets are known.
-typedef struct CCanonicalBranchPatch CCanonicalBranchPatch;
-struct CCanonicalBranchPatch
-{
-    IrBlockId target;
-    IrBlockId predecessor;
-    u32 offset;
-    u32 secondary_offset;
-    bool aarch64;
-    bool conditional;
-    bool label_address;
-    u8 reserved[3];
-};
-
-// The per-function emission state the canonical generator's inner loop works
-// against: the code buffer, the frame each canonical value owns a slot in, and
-// the two records that survive between instructions -- the forwarded rax store
-// and the pending branch patches. Gathering it here is what lets the load,
-// store and address helpers below be ordinary functions instead of macros
-// reaching into the generator's locals.
-typedef struct CCanonicalEmitter CCanonicalEmitter;
-struct CCanonicalEmitter
-{
-    CodegenBuffer* buffer;
-    u32 const* value_offsets;
-    u32 frame_base_offset;
-    bool save_rbx;
-    u32 rbx_save_offset;
-    // Win64 owns RSI as a callee-saved register while the 128-bit integer
-    // vocabulary names it as a scratch, so a Windows function containing one
-    // parks RSI in a frame slot beside the RBX save.
-    bool save_rsi;
-    u32 rsi_save_offset;
-    // Buffer position immediately after the last full-width rax store and the
-    // frame displacement it wrote. While nothing else has been emitted, rax
-    // still holds that slot, so reloading it is a no-op. Any other emission
-    // moves the position and invalidates the record.
-    u64 forwarded_store_end;
-    s32 forwarded_store_displacement;
-    IrBlockId current_block;
-    CCanonicalBranchPatch* branch_patches;
-    u32 branch_patch_count;
-    u32 branch_patch_capacity;
-};
-
-// False only when the patch list is full, which the caller reports as a
-// capacity error and retries with a larger reservation.
-
-// Branches to parameterized blocks pass through an out-of-line edge thunk.
-// First capture every source into the frame tile, then publish destinations;
-// no edge can overwrite a source needed by another assignment. Label-address
-// relocations bypass thunks so address-taken block identity never changes.
-
-// `register_opcode` is the ModRM byte the caller would have emitted; its
-// register field names the destination. 0x85 is the plain rax reload, the only
-// one the forwarded store can answer.
-
-// Leaves the addressed location in r10, either by loading the pointer value or
-// by taking the address of the place's own frame slot.
-
-// The second eightbyte of a 128-bit integer's sixteen-byte slot, the AArch64
-// spelling of c_x64_load_high/c_x64_store_high_rdx. Only call these for
-// values whose canonical type is 128 bits wide; a narrower value's slot does
-// not extend past its first eightbyte.
-
-// The AAPCS64 result image widens two compact integer-vector elements into
-// 32-bit lanes and four elements into 16-bit lanes in D0. The canonical frame
-// image remains compact. This predicate deliberately excludes single-lane
-// short vectors, which retain their sized V-register transfer.
-
-// Convert X9 between the compact frame image and the widened D0 ABI image.
-// X10 is the accumulating result and X11 is one extracted lane.
-
-// Patches one local AArch64 branch after its target has been emitted. The
-// canonical emitter uses this for the fixed-shape loops inside one IR row;
-// ordinary IR block branches continue through CCanonicalBranchPatch below.
-
-// Emits the canonical 128-bit divide/remainder loop. Inputs arrive in
-// x9:x10 (dividend) and x11:x12 (divisor), low eightbyte first. The loop
-// shifts one dividend bit into x13:x14, subtracts the divisor when the
-// partial remainder is large enough, and accumulates the quotient in x0:x1.
-// Signed operations normalize both operands before the loop and restore the
-// quotient/remainder sign afterwards; unsigned operations use the same loop
-// without that normalization. On success the selected result is x9:x10.
-
-// Converts an i128 pair in a frame slot to an AArch64 scalar FP value. The
-// halves are converted as an unsigned magnitude, with an integer sticky-bit
-// combine before the final double conversion. Converting the halves
-// independently and adding them can double-round a halfway value (the low
-// half's sticky bit would have been lost by ucvtf), so the common path first
-// rounds a target-precision significand (53 bits for binary64, 24 for binary32)
-// and scales it by the discarded-bit count.
-// Signed inputs are made positive first and negated in FP after the magnitude
-// has been formed. The final narrowing is done only once when the requested
-// destination is float.
-
-// Converts a scalar float/double in a frame slot to an i128 pair. Values are
-// split at 2^64 so each FCVTZU consumes a representable unsigned 64-bit
-// range; signed inputs use the absolute magnitude and restore the sign in the
-// integer pair. Float inputs are widened to double before the split.
-
 // Which data section a global's bytes belong in. `const` is the frontend's
 // answer and the read-only section is its usual home, but an object that
 // carries a relocation cannot stay there: those bytes are written when the

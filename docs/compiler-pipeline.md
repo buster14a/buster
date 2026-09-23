@@ -168,8 +168,8 @@ the machine verifier does not establish.
 
 Encoding consumes legal allocated machine IR plus sorted edits and relocation
 facts. It does not perform semantic legalization or repair malformed machine
-IR. A failed exact-form lookup, placement or encoding is reported at that
-stage and is observable while whole-function fallback still exists.
+IR. A failed exact-form lookup, placement or encoding reports a structured
+error without publishing an output artifact.
 
 The object writer owns format layout and relocation serialization. It does not
 rederive language, SSA or target-selection semantics from instruction bytes.
@@ -194,32 +194,22 @@ A consumer that cannot support a new semantic class must fail deliberately. A
 successful build with silently changed semantics is never an acceptable
 fallback.
 
-## Direct-native fallback contract
+## Native production contract
 
-The direct canonical native emitter is a migration oracle, not a second target
-architecture. Until it is retired, every attempt to use a non-`NONE` allocator
-that falls back for a function remains measurable through
-`CodegenStatistics`:
+Every native allocator spelling, including the compatibility `none` and
+`-fno-register-allocator` spellings, selects MIR. `none` uses MIR_STACK
+placement. An unsupported function or a failed verification, placement or
+encoding returns an attributable error; no direct canonical emission is
+attempted and no partially generated module is published. Legacy fallback
+telemetry fields and command-line flags are accepted during schema migration,
+but production records no fallback functions. The archived direct compiler is
+an external differential reference; ordinary builds do not link it.
 
-- `fallback_function_count` counts affected functions;
-- `fallback_opcode_counts` records selection refusals by canonical opcode;
-- `fallback_verify_count`, `fallback_placement_count` and
-  `fallback_encode_count` identify later-stage failures;
-- verbose compiler output publishes `CODEGEN_FALLBACK` and
-  `CODEGEN_FALLBACK_STAGES` records beside target and allocator information.
-
-A test intended to prove machine-path coverage asserts the fallback count and,
-where relevant, its stage/reason. Merely running the generated program is not
-coverage evidence because the direct emitter can produce the same answer.
-Unexpected fallback is a regression even when output bytes still execute
-correctly.
-
-The direct path remains frozen except for correctness fixes needed to keep it a
-trustworthy differential oracle. It can be removed from production only after
-[issue #35](https://github.com/buster14a/buster/issues/35) establishes stable
-reason codes and a curated zero-unapproved-fallback corpus, and
-[issue #36](https://github.com/buster14a/buster/issues/36) records clean
-differential results and removes fallback in reviewable stages.
+The registered allocator matrix and unsupported-input controls exercise this
+behavior. `tools/native_retirement_contract_test.py` also rejects known
+retired emitter symbols and product registrations. Final retirement evidence
+requires the exact integrated tree and the performance rerun in
+[#883](https://github.com/buster14a/buster/issues/883).
 
 ## Current migration exceptions
 

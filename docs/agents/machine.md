@@ -443,8 +443,8 @@
   calls cross the host/MIR boundary in both directions without a PE loader;
   they cover register and stack arguments, indirect calls, copied lists,
   high limbs, private parameter writes, and forty-byte variadic aggregates.
-  The direct backend still lacks wide variadic reads, so this fixture's
-  complete module is a MIR gate rather than a NONE differential gate.
+  The archived direct backend lacked wide variadic reads; `none` is now a
+  MIR_STACK compatibility spelling rather than an independent direct baseline.
 - Windows/UEFI x86-64 sixty-four-byte vector signatures use the existing ZMM
   vocabulary on AVX-512 targets. Arguments occupy one pointer slot with an
   aligned private copy; callers stage register values through a frame slot,
@@ -456,9 +456,9 @@
   hosts, checks every result lane, caller preservation, raw variadic pointer
   alignment, and live dynamic allocations. The fixed subset also executes
   through NONE. Smaller vectors and model-dependent register splitting retain
-  the direct fallback; this change does not replace their representation.
+  the MIR shape rules; unsupported shapes fail with a diagnostic.
 - Windows/UEFI x86-64 MIR frames larger than one page reuse
-  `codegen_x64_emit_windows_stack_allocate`, the direct emitter's bounded
+  `codegen_x64_emit_windows_stack_allocate`, the shared bounded
   R10/R11 probe loop. RSP stays unchanged until the final allocation, so a
   large frame requires one allocation unwind action and a bounded prologue.
   `MachineEncodeResult.frame_allocation_offset` supplies its actual byte offset
@@ -691,15 +691,15 @@
   in parallel. Each row snapshots zero-extended results to a private frame
   object before ordinary stores publish output places. XGETBV requires XSAVE
   on the compile target. Partial-width, read/write, partial-output and other
-  assembly shapes retain their existing fallback; these rows do not implement
+  assembly shapes fail diagnostically; these rows do not implement
   unrestricted inline assembly.
 - The x86 exact-emission bridge represents a full-width 32-bit immediate as
   its signed low-32-bit pattern. Normalize only when both register and
   immediate widths are 32; narrower immediates and 64-bit destinations retain
   their sign-extension constraints. High-bit unsigned switch constants must
-  encode without canonical fallback.
+  encode through MIR without fallback.
 - The f32/f64-to-u64 biased conversions compare against **2^63 in the source
-  format**. Both x86 emitters use `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
+  format**. Native x86 MIR emission uses `CODEGEN_F32_SIGNED64_LIMIT_BITS` and
   `CODEGEN_F64_SIGNED64_LIMIT_BITS`; the source width does not change which
   integer bit the final bias restores.
 - AArch64 symbol addresses on macOS/iOS use ADRP/ADD with Mach-O PAGE21 and
@@ -720,8 +720,7 @@
   procedure linkage entry. Internal and hidden symbols keep the rip-relative
   form, and a thread-local address is the thread-local model's to pick --
   `codegen_thread_local_model` reads the same flag and answers general-dynamic
-  under it. The canonical emitter and the machine path make
-  the same decision from the same predicate: the selector writes a
+  under it. The machine selector makes the decision from that predicate and writes a
   `MachineSymbolReference` beside each call-target row and the module
   relocation is derived from it, so the four allocators cannot disagree. One
   object-writer decision follows from the model rather than from a relocation:
@@ -788,12 +787,14 @@ The same memory effects and source/destination ownership apply in every allocato
 
 ## MIR-only cutover boundary
 
-Native module generation removes the direct canonical emitter body and its
-unreferenced private helper chain atomically with dispatch. Failed generation
+Native module generation uses MIR for every retained allocator spelling. The
+direct emitter body and its unreferenced private helper chain are removed.
+Failed generation
 publishes no code/data images, entries, relocations, unwind descriptors or debug
 rows; diagnostics and attempted-work counters remain available. The external
-archived reference remains the differential oracle. Issue #514 retains cleanup
-of legacy result fields, public helper interfaces and documentation.
+archived reference remains the differential oracle. Legacy fallback telemetry
+is retained only while the census/result schema migrates; it cannot enable
+direct production emission.
 
 Native selectors accept any valid canonical entry block. They emit that block
 first, remap expanded MIR block ranges and CFG edges, and capture arguments in
