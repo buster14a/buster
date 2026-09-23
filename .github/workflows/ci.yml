@@ -250,6 +250,7 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/native_producer_profile_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-producer-profile.log"
           "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
           "$BUSTER_CI_PYTHON" tools/ci_matrix_phases_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-phases-test.log"
+          "$BUSTER_CI_PYTHON" tools/ci_matrix_phases_bridge_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-phases-bridge-test.log"
           "$BUSTER_CI_PYTHON" tools/ci_native_observation_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-observation-test.log"
 
       # Wrapper integration starts many real shells. It must not consume the
