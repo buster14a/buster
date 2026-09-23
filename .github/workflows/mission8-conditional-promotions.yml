@@ -1,0 +1,36 @@
+name: Mission 8 conditional promotions
+
+on:
+  push:
+    branches: [diagnostics/mission8-conditional-promotions-bb96b5d0]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
+          persist-credentials: false
+      - name: Retain exact inspected source and newest audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mission8-source"
+          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/mission8-source/identity.txt"
+          test "$(git rev-parse HEAD)" = bb96b5d08e570aff3cbd473441d71ab0dc691d67
+          git ls-tree -r HEAD > "$RUNNER_TEMP/mission8-source/tree.txt"
+          python3 tools/new_audit.py --newest | tee "$RUNNER_TEMP/mission8-source/newest-audit.txt"
+          git archive HEAD AGENTS.md CMakeLists.txt build.c src/buster/lib/compiler/frontend/c src/buster/tests docs/agents docs/performance-audits docs/canonical-fast-pipeline.md tests tools/new_audit.py .github/workflows/ci.yml | gzip > "$RUNNER_TEMP/mission8-source/source.tar.gz"
+          sha256sum "$RUNNER_TEMP/mission8-source/source.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mission8-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mission8-source
+          if-no-files-found: error
+          retention-days: 14
