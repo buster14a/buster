@@ -121,6 +121,18 @@
   status propagation are covered by `python3 ios/hosted_signing_budget_test.py`
   in the mobile lifecycle workflow; actual Apple signing and simulator tests
   remain a distinct native CI gate.
+- For an invocation-owned hosted ARM64 device, a true first `bootstatus -b`
+  helper timeout gets one 120-second continuation on the same UDID before the
+  existing single replacement. `BUSTER_IOS_BOOT_CONTINUATION_SECONDS` can
+  override that positive budget for a controlled diagnostic run. A caller that
+  shortens the first 180-second readiness deadline opts into continuation by
+  setting this override; otherwise its original single-replacement budget is
+  preserved. The replacement
+  still gets only one readiness check; native exit 124 and borrowed, explicit,
+  local, and self-hosted devices do not enter continuation or replacement.
+  Only a successful `bootstatus -b` permits app execution. Each failed boot
+  phase retains its own UDID/runtime/source context and bounded host probes;
+  command and capture timings and missing capture receipts remain distinct.
 - For an invocation-owned GitHub-hosted macOS arm64 simulator, a true
   shutdown-helper timeout is first reconciled against one bounded exact-UDID
   state probe. If a successful payload still leaves that device non-Shutdown,
