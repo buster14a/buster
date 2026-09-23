@@ -551,13 +551,15 @@ class NativeObservationTest(unittest.TestCase):
             self.skipTest("repository workflow is not present in the standalone test fixture")
         workflow = workflow_path.read_text(encoding="utf-8")
         self.assertIn(
-            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows' || 'modes differential' }}",
+            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || 'modes differential' }}",
             workflow,
         )
         self.assertIn(
-            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows pack' || 'modes differential pack' }}",
+            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || 'modes differential pack' }}",
             workflow,
         )
+        self.assertIn("steps.msvc_reference.outcome == 'success' && '1'", workflow)
+        self.assertIn("id: msvc_reference", workflow)
         self.assertIn("tools/ci_native_observation.py init", workflow)
         self.assertIn("tools/ci_native_observation.py finalize", workflow)
         self.assertIn(
