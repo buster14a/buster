@@ -5,32 +5,116 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  mutations:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
           persist-credentials: false
-          fetch-depth: 4
-      - name: Record exact source and narrow atomic implementation
+      - name: Original, two disposable mutants, independent oracle
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD HEAD^{tree} bb96b5d08e570aff3cbd473441d71ab0dc691d67^{tree}
-          git hash-object src/buster/lib/compiler/frontend/c/c_gen.c
-          python3 - <<'PY'
-          from pathlib import Path
-          for name in ['src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/c_test.c']:
-              lines = Path(name).read_text().splitlines()
-              hits = [i for i, line in enumerate(lines) if 'atomic_fetch_xor' in line or 'C_ATOMIC_OP' in line]
-              selected = set()
-              for i in hits[:24]:
-                  selected.update(range(max(0, i - 20), min(len(lines), i + 35)))
-              print('\nFILE', name, 'hits', len(hits))
-              for i in sorted(selected):
-                  print(f'{i + 1}: {lines[i]}')
-          print('\nBUILD GUIDE\n' + Path('docs/agents/build.md').read_text())
-          print('\nBUILD ENTRY\n' + Path('build.sh').read_text())
-          print('\nCMAKE ENTRY\n' + '\n'.join(Path('CMakeLists.txt').read_text().splitlines()[:200]))
+          export EVIDENCE="$RUNNER_TEMP/mission7-evidence"
+          mkdir -p "$EVIDENCE"
+          python3 -u - <<'PY' 2>&1 | tee "$EVIDENCE/transcript.log"
+          import hashlib, json, os, pathlib, shlex, subprocess
+          root = pathlib.Path.cwd()
+          evidence = pathlib.Path(os.environ['EVIDENCE'])
+          results = []
+          def run(label, command, cwd=root):
+              print('COMMAND', label, shlex.join(map(str, command)), 'cwd=' + str(cwd), flush=True)
+              with (evidence / (label + '.log')).open('wb') as log:
+                  result = subprocess.run(list(map(str, command)), cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
+              results.append({'label': label, 'command': list(map(str, command)), 'cwd': str(cwd), 'exit': result.returncode})
+              (evidence / 'results.json').write_text(json.dumps(results, indent=2))
+              print('RESULT', label, result.returncode, flush=True)
+              print((evidence / (label + '.log')).read_text(errors='replace')[-6000:], flush=True)
+              return result.returncode
+          def require(label, command, cwd=root):
+              if run(label, command, cwd):
+                  raise SystemExit('Prerequisite failed: ' + label)
+          require('revision', ['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'])
+          require('producer', ['clang', '--version'])
+          source_path = 'src/buster/lib/compiler/frontend/c/c_gen.c'
+          require('source-blob', ['git', 'hash-object', source_path])
+          original_source = (root / source_path).read_text()
+          original_fixture = (root / 'tests/basic_c_atomic.c').read_text()
+          regression = '''static int atomic_or_preserves_overlapping_bits(void)
+          {
+              _Atomic(unsigned int) value = 1;
+              unsigned int previous = __c11_atomic_fetch_or(&value, 1, __ATOMIC_RELAXED);
+              return previous == 1 && __c11_atomic_load(&value, __ATOMIC_RELAXED) == 1;
+          }
+
+          '''
+          anchor = 'int main(void)\n'
+          tail = 'atomic_builtins() && atomic_pointer_builtins());'
+          assert original_fixture.count(anchor) == 1 and original_fixture.count(tail) == 1
+          candidate = original_fixture.replace(anchor, regression + anchor).replace(tail, 'atomic_builtins() && atomic_pointer_builtins() && atomic_or_preserves_overlapping_bits());')
+          (evidence / 'regression.c').write_text(candidate)
+          witness = '''int main(void)
+          {
+              _Atomic(unsigned int) value = 1;
+              unsigned int previous = __c11_atomic_fetch_or(&value, 1, __ATOMIC_RELAXED);
+              unsigned int after = __c11_atomic_load(&value, __ATOMIC_RELAXED);
+              return (previous != 1) | ((after != 1) << 1);
+          }
+          '''
+          (evidence / 'witness.c').write_text(witness)
+          assert (1 | 1) == 1 and (1 ^ 1) == 0
+          (evidence / 'semantic-model.txt').write_text('OR: old=1, operand=1, new=1|1=1. XOR mutant: old=1, operand=1, new=1^1=0. Witness exit 2 identifies the wrong stored value, not wrong previous value.\n')
+          for opt in ['0', '2']:
+              out = evidence / ('clang-witness-O' + opt)
+              require('clang-witness-compile-O' + opt, ['clang', '-std=c11', '-O' + opt, evidence / 'witness.c', '-o', out])
+              require('clang-witness-run-O' + opt, [out])
+          require('clang-witness-ir', ['clang', '-std=c11', '-O0', '-S', '-emit-llvm', evidence / 'witness.c', '-o', evidence / 'clang-witness.ll'])
+          require('clang-regression-compile', ['clang', '-std=c11', '-O0', evidence / 'regression.c', '-o', evidence / 'clang-regression'])
+          require('clang-regression-run', [evidence / 'clang-regression'])
+          variants = [('original', None, None), ('or-as-xor', 'or', 'XOR'), ('xor-as-or', 'xor', 'OR')]
+          for label, spelling, replacement in variants:
+              directory = pathlib.Path(os.environ['RUNNER_TEMP']) / ('mission7-' + label)
+              require(label + '-worktree', ['git', 'worktree', 'add', '--detach', directory, 'HEAD'])
+              if spelling:
+                  before = 'S8("__c11_atomic_fetch_' + spelling + '"),\n            C_IR_ATOMIC_BUILTIN_FETCH_' + spelling.upper() + ','
+                  after = 'S8("__c11_atomic_fetch_' + spelling + '"),\n            C_IR_ATOMIC_BUILTIN_FETCH_' + replacement + ','
+                  assert original_source.count(before) == 1, (label, 'mutation must match exactly once')
+                  (directory / source_path).write_text(original_source.replace(before, after))
+                  require(label + '-patch', ['git', 'diff', '--', source_path], directory)
+                  require(label + '-index', ['git', 'add', source_path], directory)
+              require(label + '-tree', ['git', 'write-tree'], directory)
+              require(label + '-diff-check', ['git', 'diff', '--cached', '--check'], directory)
+              driver = pathlib.Path(os.environ['RUNNER_TEMP']) / ('mission7-driver-' + label)
+              require(label + '-bootstrap', ['clang', '-Isrc', '-Wall', '-Werror', '-Wno-unused-function', '-Wno-unused-variable', '-g', 'build.c', '-o', driver], directory)
+              require(label + '-configure', [driver, 'generate', '--cc', 'clang'], directory)
+              require(label + '-build', [driver, 'build', '--config', 'Release', '-t', 'ide'], directory)
+              compiler = directory / 'build/Release/ide'
+              print('COMPILER_SHA256', label, hashlib.sha256(compiler.read_bytes()).hexdigest(), flush=True)
+              fixtures = [('atomic', directory / 'tests/basic_c_atomic.c'), ('advertised', directory / 'tests/basic_c_has_builtin.c'), ('witness', evidence / 'witness.c'), ('regression', evidence / 'regression.c')]
+              for name, fixture in fixtures:
+                  output = evidence / (label + '-' + name)
+                  status = run(label + '-' + name + '-compile', [compiler, 'cc', '-O0', fixture, '-o', output], directory)
+                  if status == 0:
+                      run(label + '-' + name + '-run', [output], directory)
+              if label == 'original':
+                  expected = [x for x in results if x['label'].startswith('original-') and (x['label'].endswith('-compile') or x['label'].endswith('-run'))]
+                  if len(expected) != 8 or any(x['exit'] for x in expected):
+                      raise SystemExit('Original focused prerequisite failed; do not interpret mutants')
+          expected_exits = {'or-as-xor-atomic-run': 0, 'or-as-xor-advertised-run': 0, 'or-as-xor-witness-run': 2, 'or-as-xor-regression-run': 1, 'xor-as-or-atomic-run': 1, 'xor-as-or-advertised-run': 8, 'xor-as-or-witness-run': 0, 'xor-as-or-regression-run': 1}
+          actual = {x['label']: x['exit'] for x in results}
+          discrepancies = {key: {'expected': value, 'actual': actual.get(key)} for key, value in expected_exits.items() if actual.get(key) != value}
+          (evidence / 'discrepancies.json').write_text(json.dumps(discrepancies, indent=2))
+          print('DIAGNOSTIC_DISCREPANCIES', discrepancies, flush=True)
+          if discrepancies:
+              raise SystemExit(1)
           PY
+      - name: Retain every diagnostic attempt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mission7-atomic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mission7-evidence
+          retention-days: 30
+          if-no-files-found: error
