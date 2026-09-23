@@ -59,7 +59,7 @@ typedef struct BqRetirementTrustedRow
 typedef struct BqRetirementRequiredCheck
 {
     uint32_t kind, target, rows;
-    char command_sha256[65], configuration_sha256[65];
+    char command_sha256[65], configuration_sha256[65], receipt_sha256[65];
 } BqRetirementRequiredCheck;
 
 typedef struct BqRetirementCheckResult

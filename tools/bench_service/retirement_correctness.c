@@ -99,6 +99,7 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_seal(BqRetirementCorrectness 
         bq_retirement_correctness_number(&hash, required->rows);
         bq_retirement_correctness_text(&hash, required->command_sha256);
         bq_retirement_correctness_text(&hash, required->configuration_sha256);
+        bq_retirement_correctness_text(&hash, required->receipt_sha256);
         bq_retirement_correctness_number(&hash, checked->kind);
         bq_retirement_correctness_number(&hash, checked->target);
         bq_retirement_correctness_number(&hash, checked->rows);
@@ -180,7 +181,8 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
              check->kind < BQ_RETIREMENT_CHECK_COUNT && check->rows > 0 &&
              check->rows <= prepared->rows && check->target <= 12 &&
              bq_retirement_correctness_digest(check->command_sha256) &&
-             bq_retirement_correctness_digest(check->configuration_sha256);
+             bq_retirement_correctness_digest(check->configuration_sha256) &&
+             bq_retirement_correctness_digest(check->receipt_sha256);
         if (ok)
         {
             for (uint32_t previous = 0; ok && previous < i; previous += 1)
@@ -283,7 +285,7 @@ bool bq_retirement_correctness_check(BqRetirementCorrectness* gate, BqRetirement
              bq_retirement_correctness_equal(observed->command_sha256, required->command_sha256) &&
              bq_retirement_correctness_equal(observed->configuration_sha256, required->configuration_sha256) &&
              bq_retirement_correctness_equal(observed->preparation_sha256, gate->prepared.preparation_sha256) &&
-             bq_retirement_correctness_digest(observed->receipt_sha256);
+             bq_retirement_correctness_equal(observed->receipt_sha256, required->receipt_sha256);
         for (uint32_t side = 0; ok && side < 2; side += 1)
             ok = bq_retirement_correctness_equal(observed->source_sha256[side], gate->prepared.source_sha256[side]) &&
                  bq_retirement_correctness_equal(observed->binary_sha256[side], gate->prepared.binary_sha256[side]);

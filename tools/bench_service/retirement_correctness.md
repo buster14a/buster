@@ -30,7 +30,9 @@ The required-check array must enumerate every applicable #509 native semantic
 lane, supported configuration matrix, no-fallback/census validation, self-host
 and fixed-point gate. The service executes or independently validates each
 exact-source and exact-binary check, then verifies the receipt bytes against a
-separate trusted digest before passing its status to `check`. A digest obtained
+separate trusted digest before passing its status to `check`. Each required
+check carries that independently established digest; `check` requires equality
+and the readiness seal covers both the expected and observed values. A digest obtained
 from the candidate or downloaded result is not a trusted receipt. Any required
 host unavailable at qualification leaves the campaign blocked.
 
