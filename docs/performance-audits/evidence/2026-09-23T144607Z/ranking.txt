@@ -1,0 +1,63 @@
+USER cycles:u main_thread: 2958 samples, 7808066308 sampled period units
+PHASE (exclusive root categories, sampled user cycles)
+semantic analysis                                     29.49%   848 samples   2302780857 period
+C-to-IR lowering                                      25.20%   774 samples   1967377209 period
+canonical code generation                             25.13%   718 samples   1962344600 period
+IR preparation/validation                             11.45%   326 samples    894338950 period
+preprocessing                                          4.26%   157 samples    332557736 period
+object/DWARF construction                              2.04%    62 samples    159128723 period
+AST parsing                                            1.73%    50 samples    135336057 period
+other compiler/driver                                  0.69%    23 samples     54202176 period
+SELF (uninlined leaf symbols; [unknown] is unattributed)
+ir_validate_canonical_module                           4.64%   131 samples    362106304 period
+c_type_parse_machine_run                               4.25%   122 samples    331621326 period
+c_parse_validate_lowering_constraints                  4.17%   119 samples    325599060 period
+[unknown]                                              3.92%   116 samples    305878022 period
+c_ir_ssa_finish                                        3.60%   111 samples    281304797 period
+machine_fast_close_live_ranges                         3.23%    92 samples    251841185 period
+machine_fast_placement_build_prepassed                 2.92%    83 samples    227770908 period
+machine_select_canonical_function_x86_64               1.94%    55 samples    151093740 period
+c_parse_lookup_entity_symbol                           1.93%    55 samples    150527085 period
+ir_cfg_publish_instruction_rows                        1.91%    55 samples    149277626 period
+ir_fast_function                                       1.87%    53 samples    145902664 period
+codegen_machine_debug_index_build                      1.75%    50 samples    136910141 period
+c_parse_expression_type_query                          1.72%    49 samples    134636634 period
+c_parse_scope_for_token                                1.54%    44 samples    120395441 period
+machine_fast_prepass_build                             1.48%    42 samples    115463183 period
+c_lower_to_ir_with_options                             1.42%    43 samples    111016838 period
+c_ir_lower_expression_core_step                        1.31%    40 samples    102016762 period
+codegen_machine_debug_timeline_for                     1.29%    37 samples    100914335 period
+c_ir_lower_expression_step                             1.25%    38 samples     97447528 period
+c_ir_lower_body_advance                                1.24%    38 samples     96459734 period
+c_conditional_number                                   1.21%    36 samples     94501949 period
+c_parse_type_layout_core                               1.13%    33 samples     88055911 period
+c_lex_dispatch                                         1.09%    40 samples     85141094 period
+ir_rewrite_compact                                     1.06%    30 samples     82585885 period
+ir_promote_function                                    1.04%    30 samples     80992516 period
+machine_debug_values_build                             1.01%    29 samples     78852452 period
+machine_encode_x86_64                                  0.99%    28 samples     77057932 period
+machine_schedule_frame_access                          0.95%    27 samples     73976619 period
+c_parse_initializer_designator                         0.94%    27 samples     73777102 period
+machine_x64_emit_exact_recipe                          0.91%    26 samples     71437105 period
+SELECTED INCLUSIVE (nested; do not add percentages)
+c_parse_validate_lowering_constraints                 24.10%   688 samples   1881555459 period
+c_ir_ssa_finish                                        5.30%   163 samples    413514192 period
+machine_fast_prepass_build                             1.51%    43 samples    118156186 period
+machine_fast_sort_edits                                0.00%     0 samples            0 period
+c_ir_decode_quoted                                     0.16%     5 samples     12855185 period
+machine_select_canonical_function_x86_64               6.85%   195 samples    535112849 period
+codegen_machine_debug_index_build                      2.03%    58 samples    158788600 period
+KERNEL cycles:k main_thread: 714 samples, 518877772 sampled period units
+KERNEL SELF (separate process-tree replay)
+clear_page_erms                                       79.26%   615 samples    411248927 period
+folios_put_refs                                        1.56%     4 samples      8107828 period
+_raw_spin_lock                                         1.45%     5 samples      7542978 period
+copy_folio_from_iter_atomic                            1.20%     3 samples      6220428 period
+free_unref_folios                                      0.94%     2 samples      4898516 period
+free_tail_page_prepare                                 0.94%     2 samples      4857068 period
+__filemap_add_folio                                    0.89%     2 samples      4634154 period
+_raw_spin_lock_irq                                     0.89%     3 samples      4624642 period
+prep_new_page                                          0.82%     7 samples      4235966 period
+__rmqueue_pcplist                                      0.69%     6 samples      3583631 period
+tlb_finish_mmu                                         0.66%     5 samples      3429934 period
+flush_tlb_mm_range                                     0.61%     1 samples      3153925 period
