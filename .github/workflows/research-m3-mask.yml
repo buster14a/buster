@@ -1,0 +1,115 @@
+name: M3 mask screening (diagnostic only)
+on:
+  push:
+    branches: [research/m3-asm-label-mask-20260923]
+    paths:
+      - tools/research/m3_mask_probe.py
+      - .github/workflows/research-m3-mask.yml
+permissions:
+  contents: read
+# Every attempt retains separate evidence. No benchmark-host labels or secrets.
+concurrency:
+  group: m3-mask-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+jobs:
+  screen:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      M3_EVIDENCE: ${{ runner.temp }}/m3-evidence
+      BUSTER_TEST_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Freeze identity and run cheapest discriminating probe
+        id: kernels
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$M3_EVIDENCE"
+          git rev-parse HEAD HEAD^{tree} > "$M3_EVIDENCE/revisions.txt"
+          git diff --exit-code bb96b5d08e570aff3cbd473441d71ab0dc691d67 -- src build.c CMakeLists.txt
+          python3 tools/new_audit.py --newest | tee "$M3_EVIDENCE/newest-audit.txt"
+          python3 tools/research/m3_mask_probe.py kernels
+      - name: Build exact baseline through the native driver
+        id: baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$M3_EVIDENCE/baseline-build.log") 2>&1
+          set -x
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/m3-build"
+          "$RUNNER_TEMP/m3-build" generate --ci --linker DEFAULT
+          "$RUNNER_TEMP/m3-build" build --config Release -t ide
+          sha256sum build/Release/ide > "$M3_EVIDENCE/baseline-binary.sha256"
+          cp build/compile_commands.json "$M3_EVIDENCE/compile_commands.json"
+          objdump -d -Mintel --disassemble=ir_inline_assembly_label_operand_base build/Release/ide > "$M3_EVIDENCE/production-helper.asm"
+      - name: Reproduce the baseline fixed point before instrumentation
+        id: fixed_point
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$M3_EVIDENCE/baseline-self-host.log") 2>&1
+          set -x
+          "$RUNNER_TEMP/m3-build" test_self_host --config Release
+      - name: Freeze diagnostic compiler and restore identical workload source
+        id: diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$M3_EVIDENCE/diagnostic-build.log") 2>&1
+          set -x
+          python3 tools/research/m3_mask_probe.py instrument
+          "$RUNNER_TEMP/m3-build" build --config Release -t ide
+          sha256sum build/Release/ide > "$M3_EVIDENCE/diagnostic-binary.sha256"
+          python3 tools/research/m3_mask_probe.py restore
+      - name: Census real artifact-producing compilations (not timing)
+        id: census
+        shell: bash
+        run: |
+          set -uo pipefail
+          record() {
+            local name="$1"
+            shift
+            printf '%q ' "$@" >> "$M3_EVIDENCE/workload-$name.argv"
+            printf '\n' >> "$M3_EVIDENCE/workload-$name.argv"
+            "$@" > "$M3_EVIDENCE/workload-$name.log" 2>&1
+            local result=$?
+            printf '%s\n' "$result" > "$M3_EVIDENCE/workload-$name.status"
+            cat "$M3_EVIDENCE/workload-$name.log"
+            return 0
+          }
+          record selfhost build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -target x86_64-unknown-linux -fregister-allocator=fast -fno-machine-fallback src/buster/apps/ide/ide.c -lm -o "$M3_EVIDENCE/selfhost-program"
+          record labels-fast build/Release/ide cc -v -target x86_64-unknown-linux -fregister-allocator=fast -fno-machine-fallback -fverify-codegen -c tests/basic_c_labels.c -o "$M3_EVIDENCE/labels-fast.o"
+          record labels-none build/Release/ide cc -v -target x86_64-unknown-linux -fregister-allocator=none -c tests/basic_c_labels.c -o "$M3_EVIDENCE/labels-none.o"
+          record asm-fast build/Release/ide cc -v -target x86_64-unknown-linux -fregister-allocator=fast -fno-machine-fallback -fverify-codegen -c tests/basic_c_asm.c -o "$M3_EVIDENCE/asm-fast.o"
+          record cleanup-fast build/Release/ide cc -v -target x86_64-unknown-linux -fregister-allocator=fast -fno-machine-fallback -fverify-codegen -c tests/basic_c_cleanup.c -o "$M3_EVIDENCE/cleanup-fast.o"
+          python3 tools/research/m3_mask_probe.py summarize
+          sha256sum "$M3_EVIDENCE"/*.o "$M3_EVIDENCE/selfhost-program" > "$M3_EVIDENCE/workload-artifacts.sha256"
+          grep -L '^0$' "$M3_EVIDENCE"/workload-*.status > "$M3_EVIDENCE/failed-workloads.txt"
+          test ! -s "$M3_EVIDENCE/failed-workloads.txt"
+      - name: Preserve final status and source identity
+        if: ${{ always() }}
+        shell: bash
+        env:
+          KERNEL_RESULT: ${{ steps.kernels.outcome }}
+          BASELINE_RESULT: ${{ steps.baseline.outcome }}
+          FIXED_POINT_RESULT: ${{ steps.fixed_point.outcome }}
+          DIAGNOSTIC_RESULT: ${{ steps.diagnostic.outcome }}
+          CENSUS_RESULT: ${{ steps.census.outcome }}
+        run: |
+          mkdir -p "$M3_EVIDENCE"
+          printf 'kernels=%s\nbaseline=%s\nfixed_point=%s\ndiagnostic=%s\ncensus=%s\nperformance=NOT_RUN\n' "$KERNEL_RESULT" "$BASELINE_RESULT" "$FIXED_POINT_RESULT" "$DIAGNOSTIC_RESULT" "$CENSUS_RESULT" > "$M3_EVIDENCE/status.txt"
+          git diff -- src/buster/lib/compiler/ir/ir.c > "$M3_EVIDENCE/final-source-diff.patch"
+          cat "$M3_EVIDENCE/status.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain all raw attempts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: m3-mask-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m3-evidence
+          if-no-files-found: error
+          retention-days: 90
