@@ -93,7 +93,7 @@ class ActionPinsTest(unittest.TestCase):
     def test_buster_ci_uses_native_node24_artifact_action(self):
         github = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn(UPLOAD_ARTIFACT_V4_PIN, github)
-        self.assertEqual(github.count(UPLOAD_ARTIFACT_V7_PIN), 9)
+        self.assertEqual(github.count(UPLOAD_ARTIFACT_V7_PIN), 8)
         self.assertEqual(PINS.APPROVED["actions/upload-artifact"],
                          {UPLOAD_ARTIFACT_V4_SHA, UPLOAD_ARTIFACT_V7_SHA})
 

@@ -590,37 +590,17 @@ class EvidencePackTests(unittest.TestCase):
 
     def test_workflow_packs_after_the_summary_and_never_loses_evidence(self):
         steps = self.native_steps()
-        self.assertEqual(list(steps)[-9:], [
-            "Native result and reproduction", "Pack native logs", "Retain native logs",
-            "Back off before retrying native log upload", "Retain native logs (retry)",
-            "Record recovered native log upload", "Record failed native log upload",
-            "Record native packaging failure", "Retain unpacked native logs",
-        ])
-        pack, packed, backoff, retry, recovered, failed_upload, failed_pack, unpacked = (
-            steps[name] for name in (
-                "Pack native logs", "Retain native logs", "Back off before retrying native log upload",
-                "Retain native logs (retry)", "Record recovered native log upload",
-                "Record failed native log upload", "Record native packaging failure",
-                "Retain unpacked native logs"))
+        self.assertEqual(list(steps)[-5:], ["Native result and reproduction", "Pack native logs",
+                                            "Retain native logs", "Record native packaging failure", "Retain unpacked native logs"])
+        pack, packed, unpacked = (steps[name] for name in (
+            "Pack native logs", "Retain native logs", "Retain unpacked native logs"))
         self.assertIn("id: pack\n", pack)
         self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", pack)
         self.assertIn("if: ${{ !cancelled() && steps.pack.outcome == 'success' }}", packed)
-        self.assertIn("id: native_upload\n", packed)
-        self.assertIn("continue-on-error: true\n", packed)
-        self.assertNotIn("overwrite: true", packed)
-        self.assertIn("steps.native_upload.outcome == 'failure'", backoff)
-        self.assertIn("sleep 15", backoff)
-        self.assertIn("if: ${{ !cancelled() && steps.pack.outcome == 'success' && steps.native_upload.outcome == 'failure' }}", retry)
-        self.assertIn("id: native_upload_retry\n", retry)
-        self.assertNotIn("continue-on-error", retry)
-        self.assertIn("overwrite: true\n", retry)
-        self.assertIn("steps.native_upload_retry.outcome == 'success'", recovered)
-        self.assertIn("steps.native_upload_retry.outcome == 'failure'", failed_upload)
-        self.assertIn("evidence was not retained", failed_upload)
-        # A failed pack still uploads the original tree; it never reaches the packed retry path.
+        # Exactly one upload runs: the archive, or the original tree after a failed pack.
         self.assertIn("if: ${{ !cancelled() && steps.pack.outcome != 'success' }}", unpacked)
         artifact = "name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}\n"
-        for block in (packed, retry, unpacked):
+        for block in (packed, unpacked):
             self.assertIn(artifact, block)
             self.assertIn("retention-days: 7\n", block)
         self.assertIn("path: ${{ runner.temp }}/native-ci-upload/\n", packed)
@@ -629,9 +609,10 @@ class EvidencePackTests(unittest.TestCase):
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program\n", unpacked)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o\n", unpacked)
         self.assertEqual(ci_pack_evidence.GENERATED, frozenset(("program", "subject.o")))
-        self.assertIn("steps.pack.outcome != 'success'", failed_pack)
-        self.assertIn("BUSTER_CI_REQUIRED: modes differential pack", failed_pack)
-        self.assertIn("run: python3 tools/ci_summary.py", failed_pack)
+        failed_summary = steps["Record native packaging failure"]
+        self.assertIn("steps.pack.outcome != 'success'", failed_summary)
+        self.assertIn("BUSTER_CI_REQUIRED: modes differential pack", failed_summary)
+        self.assertIn("run: python3 tools/ci_summary.py", failed_summary)
         outcomes = {"modes": {"outcome": "success"}, "differential": {"outcome": "success"},
                     "pack": {"outcome": "failure"}}
         self.assertEqual(ci_summary.assess(outcomes, ["modes", "differential", "pack"]), ["pack"])
@@ -881,14 +862,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("test_mode_matrix --config Release", text)
         self.assertIn("./android/test_ci.sh --all", text)
         self.assertIn("./ios/test_ci.sh --all", text)
-        steps = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", text)
-        tolerated = [
-            (name, line.strip())
-            for name, block in steps
-            for line in block.splitlines()
-            if re.match(r"^ {8}continue-on-error\s*:", line)
-        ]
-        self.assertEqual(tolerated, [("Retain native logs", "continue-on-error: true")])
+        self.assertNotRegex(text, r"(?m)^\s*continue-on-error:")
         self.assertNotIn("BUSTER_INCLUDE_TESTS=OFF", text.split("\n  uefi:", 1)[0])
 
     def test_integrity_and_security_policy(self):
@@ -959,20 +933,6 @@ class WorkflowPolicyTests(unittest.TestCase):
                       '--out "$RUNNER_TEMP/buster-ci/differential" --sanitize-oracle', native)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/program", native)
         self.assertIn("!${{ runner.temp }}/buster-ci/differential/**/subject.o", native)
-        primary_upload = native.split("      - name: Retain native logs\n", 1)[1].split(
-            "      - name:", 1)[0]
-        retry_upload = native.split("      - name: Retain native logs (retry)\n", 1)[1].split(
-            "      - name:", 1)[0]
-        self.assertIn("id: native_upload", primary_upload)
-        self.assertIn("continue-on-error: true", primary_upload)
-        self.assertNotIn("overwrite: true", primary_upload)
-        self.assertIn("id: native_upload_retry", retry_upload)
-        self.assertNotIn("continue-on-error", retry_upload)
-        self.assertIn("steps.native_upload.outcome == 'failure'", retry_upload)
-        self.assertIn("overwrite: true", retry_upload)
-        self.assertIn("sleep 15", native)
-        self.assertIn("steps.native_upload_retry.outcome == 'success'", native)
-        self.assertIn("steps.native_upload_retry.outcome == 'failure'", native)
 
     def test_platform_and_bootstrap_events_cover_the_same_revisions(self):
         common = ("  pull_request:", "  push:", "    branches: [main]",

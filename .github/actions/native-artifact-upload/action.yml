@@ -1,0 +1,67 @@
+name: Upload native logs with one bounded retry
+description: Upload packed native CI evidence and retry one transient failure.
+inputs:
+  name:
+    description: Artifact name used for both attempts.
+    required: true
+  path:
+    description: Files to retain.
+    required: true
+  compression-level:
+    description: Upload compression level.
+    required: false
+    default: "0"
+  if-no-files-found:
+    description: Behavior when the path is empty.
+    required: false
+    default: error
+  retention-days:
+    description: Artifact retention period.
+    required: false
+    default: "7"
+runs:
+  using: composite
+  steps:
+    - name: Retain native logs
+      id: native_upload
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        compression-level: ${{ inputs.compression-level }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+
+    - name: Back off before retrying native log upload
+      if: ${{ !cancelled() && steps.native_upload.outcome == 'failure' }}
+      shell: bash
+      run: |
+        printf '::warning::Native artifact upload failed; retrying once after 15 seconds.\n'
+        printf '## Native artifact upload\n\nInitial upload failed; retrying once after a 15-second backoff.\n' >> "$GITHUB_STEP_SUMMARY"
+        sleep 15
+
+    - name: Retain native logs (retry)
+      id: native_upload_retry
+      if: ${{ !cancelled() && steps.native_upload.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        compression-level: ${{ inputs.compression-level }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        retention-days: ${{ inputs.retention-days }}
+        # A timed-out CreateArtifact request may have committed remotely.
+        overwrite: true
+
+    - name: Record recovered native log upload
+      if: ${{ !cancelled() && steps.native_upload.outcome == 'failure' && steps.native_upload_retry.outcome == 'success' }}
+      shell: bash
+      run: printf '\nRetry succeeded; native evidence was retained.\n' >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Record failed native log upload
+      if: ${{ always() && !cancelled() && steps.native_upload.outcome == 'failure' && steps.native_upload_retry.outcome == 'failure' }}
+      shell: bash
+      run: |
+        printf '::error::Native artifact upload retry failed; evidence was not retained.\n'
+        printf '\nNative artifact upload retry failed; evidence was not retained.\n' >> "$GITHUB_STEP_SUMMARY"
