@@ -5054,6 +5054,35 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, null_archive.error != OBJECT_ERROR_NONE);
         arena_set_position(arguments->arena, archive_scope.position);
     }
+    String8 clang_coff_fixture_path = os_get_environment_variable(S8("BUSTER_TEST_COFF_RELOCATION_FIXTURE"));
+    if (clang_coff_fixture_path.length)
+    {
+        TemporalArena clang_coff_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice clang_coff_bytes = file_read(arguments->arena, clang_coff_fixture_path, (FileReadOptions){0});
+        Target clang_coff_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .os = OPERATING_SYSTEM_WINDOWS,
+        };
+        ObjectFile clang_coff = object_read(arguments->arena, clang_coff_bytes, clang_coff_target);
+        bool clang_coff_valid = clang_coff.error == OBJECT_ERROR_NONE && clang_coff.relocation_count == UINT16_MAX + 1 &&
+                                clang_coff.relocations && clang_coff.symbols && clang_coff.symbol_count;
+        if (BUSTER_REQUIRE(arguments, clang_coff_valid))
+        {
+            ObjectRelocation* first = clang_coff.relocations;
+            ObjectRelocation* last = clang_coff.relocations + clang_coff.relocation_count - 1;
+            bool symbols_valid = first->symbol < clang_coff.symbol_count && last->symbol < clang_coff.symbol_count;
+            BUSTER_TEST(arguments, first->section == last->section && first->offset == 0 && first->addend == 0 &&
+                                       first->kind == OBJECT_RELOCATION_ABSOLUTE64);
+            BUSTER_TEST(arguments, last->offset == (u64)UINT16_MAX * sizeof(u64) && last->addend == 0 &&
+                                       last->kind == OBJECT_RELOCATION_ABSOLUTE64);
+            if (BUSTER_REQUIRE(arguments, symbols_valid))
+            {
+                BUSTER_STRING_TEST(arguments, clang_coff.symbols[first->symbol].name, S8("relocation_marker"));
+                BUSTER_STRING_TEST(arguments, clang_coff.symbols[last->symbol].name, S8("relocation_marker"));
+            }
+        }
+        arena_set_position(arguments->arena, clang_coff_scope.position);
+    }
 #if BUSTER_FUZZ_AVAILABLE
     {
         TemporalArena fuzz_scope = arena_begin_temporal(arguments->arena);
