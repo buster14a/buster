@@ -9848,6 +9848,50 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                                    x86_64_metadata_test_bytes_equal(lea_selected_bytes, lea_selected.byte_count, lea_base_bytes,
                                                                      BUSTER_ARRAY_LENGTH(lea_base_bytes)));
 
+        // Layout, checked encoding and exact-form emission agree even when
+        // the placeholder value is zero but the displacement is unresolved.
+        BusterX86MetadataPhysicalOperand lea_symbol_memory = x86_64_metadata_test_physical_mem_base(12, 64, 0);
+        lea_symbol_memory.memory.has_index = true;
+        lea_symbol_memory.memory.index = (BusterX86MetadataPhysicalRegister){
+            .index = 9, .width = 64, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR};
+        lea_symbol_memory.memory.scale = 4;
+        lea_symbol_memory.memory.has_symbol = true;
+        lea_symbol_memory.memory.symbol = S8("external_disp");
+        BusterX86MetadataPhysicalOperand lea_symbol_operands[2] = {lea_rax, lea_symbol_memory};
+        BusterX86MetadataPhysicalQuery lea_symbol_query = x86_64_metadata_test_physical_query(
+            S8("LEA"), lea_symbol_operands, 2, (BusterX86MetadataPhysicalAttributes){0}, wildcard, BUSTER_ARRAY_LENGTH(wildcard));
+        lea_symbol_query.source_semantics = true;
+        BusterX86MetadataSelectResult lea_symbol_selection = buster_x86_metadata_select_form(lea_symbol_query);
+        u8 lea_checked_bytes[16] = {0};
+        u8 lea_exact_bytes[16] = {0};
+        BusterX86MetadataRelocation lea_checked_relocations[1] = {0};
+        BusterX86MetadataRelocation lea_exact_relocations[1] = {0};
+        BusterX86MetadataEmitResult lea_checked = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = lea_symbol_query, .output = lea_checked_bytes, .output_capacity = sizeof(lea_checked_bytes),
+            .relocations = lea_checked_relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(lea_checked_relocations)});
+        BusterX86MetadataEmitResult lea_exact = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = lea_symbol_query, .form_id = lea_symbol_selection.form_id,
+            .output = lea_exact_bytes, .output_capacity = sizeof(lea_exact_bytes),
+            .relocations = lea_exact_relocations, .relocation_capacity = BUSTER_ARRAY_LENGTH(lea_exact_relocations)});
+        u8 const lea_symbol_bytes[] = {0x4b, 0x8d, 0x84, 0x8c, 0, 0, 0, 0};
+        BUSTER_TEST(arguments, lea_symbol_selection.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   lea_symbol_selection.selected_byte_count == sizeof(lea_symbol_bytes) &&
+                                   lea_checked.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   lea_exact.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   lea_checked.form_id == lea_symbol_selection.form_id &&
+                                   lea_exact.form_id == lea_symbol_selection.form_id &&
+                                   lea_checked.byte_count == sizeof(lea_symbol_bytes) &&
+                                   lea_exact.byte_count == sizeof(lea_symbol_bytes) &&
+                                   memcmp(lea_checked_bytes, lea_exact_bytes, sizeof(lea_symbol_bytes)) == 0 &&
+                                   memcmp(lea_checked_bytes, lea_symbol_bytes, sizeof(lea_symbol_bytes)) == 0 &&
+                                   lea_checked.relocation_count == 1 && lea_exact.relocation_count == 1 &&
+                                   lea_checked_relocations[0].offset == 4 && lea_exact_relocations[0].offset == 4 &&
+                                   lea_checked_relocations[0].width == 4 && lea_exact_relocations[0].width == 4 &&
+                                   lea_checked_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED &&
+                                   lea_exact_relocations[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED &&
+                                   string_equal(lea_checked_relocations[0].symbol, S8("external_disp")) &&
+                                   string_equal(lea_exact_relocations[0].symbol, S8("external_disp")));
+
         u8 nop_bytes[] = {0x90};
         u8 pause_bytes[] = {0xf3, 0x90};
         BUSTER_TEST(arguments, x86_64_metadata_test_emit_exact(S8("NOP"), 9852, 0, 0,

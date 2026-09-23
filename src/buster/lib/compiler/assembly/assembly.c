@@ -11,8 +11,9 @@
 // Instruction knowledge is table-driven, not hand-coded per mnemonic: x86
 // selection and encoding go through the generated metadata
 // (assembly_x86_metadata_select_source_form, x86_64_metadata.h), with the
-// assembly_x86_instruction_size/encode paths covering the legacy subset
-// and every prefix family up to EVEX/APX; AArch64 parsing uses the generated
+// assembly_x86_instruction_size/encode paths retaining preliminary size and
+// legality checks for many families, including EVEX/APX. LEA bypasses those
+// size checks and derives its length from metadata selection. AArch64 uses the generated
 // syntax/semantic tables and compact architectural front doors such as the
 // scalar GPR memory family, all encoded through aarch64_encoding.h.
 //
@@ -10865,7 +10866,11 @@ BUSTER_GLOBAL_LOCAL void assembly_instruction_parse_handwritten(AssemblyBuilder*
         }
         if (target.cpu_arch == CPU_ARCH_X86_64)
         {
-            if (!assembly_x86_instruction_size(&instruction) || (info.suffix_width && instruction.width && info.suffix_width != instruction.width))
+            // LEA's layout is selected with its checked metadata form below;
+            // the source parser only supplies the operands and syntax alias.
+            bool metadata_layout = instruction.opcode == ASSEMBLY_OPCODE_X86_LEA;
+            if ((!metadata_layout && !assembly_x86_instruction_size(&instruction)) ||
+                (info.suffix_width && instruction.width && info.suffix_width != instruction.width))
             {
                 assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_OPERANDS, line, column + (u32)mnemonic_end,
                                     (u32)operands.length, S8("unsupported x86 operand form"));
