@@ -1,0 +1,121 @@
+name: Mission 9 error transaction audit
+
+on:
+  push:
+    branches: [audit/mission9-first-error-bb96b5d0]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '2'
+      BUSTER_MATRIX_THREADS: '2'
+      M9_BASE: bb96b5d08e570aff3cbd473441d71ab0dc691d67
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 4
+      - name: Record immutable source and probe identities
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/m9-evidence"
+          {
+            git rev-parse HEAD HEAD^{tree}
+            git rev-parse "$M9_BASE" "$M9_BASE^{tree}"
+            git diff --stat "$M9_BASE" HEAD
+            git diff --check "$M9_BASE" HEAD
+            git diff --exit-code "$M9_BASE" HEAD -- src build.c CMakeLists.txt
+            clang --version
+            uname -a
+            printf 'run=%s attempt=%s runner=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME"
+          } 2>&1 | tee "$RUNNER_TEMP/m9-evidence/identity.log"
+          git archive "$M9_BASE" src/buster/apps/ide src/buster/lib/compiler/driver src/buster/lib/compiler/frontend/c src/buster/lib/compiler/diagnostic.c src/buster/lib/compiler/diagnostic.h src/buster/tests docs/agents docs/diagnostics.md AGENTS.md | gzip > "$RUNNER_TEMP/m9-evidence/inspected-source.tar.gz"
+          python3 tools/new_audit.py --newest | tee "$RUNNER_TEMP/m9-evidence/newest-audit-path.txt"
+          newest=$(cat "$RUNNER_TEMP/m9-evidence/newest-audit-path.txt")
+          cp "$newest" "$RUNNER_TEMP/m9-evidence/newest-audit.md"
+          cp tools/mission9_error_audit.py "$RUNNER_TEMP/m9-evidence/mission9_error_audit.py"
+      - name: Independent source validity controls
+        id: reference
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/mission9_error_audit.py references --evidence "$RUNNER_TEMP/m9-evidence/references" 2>&1 | tee "$RUNNER_TEMP/m9-evidence/references.log"
+      - name: Build unmodified pinned compiler through native build driver
+        id: build
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/m9-build"
+            "$RUNNER_TEMP/m9-build" generate --cc clang --ci --linker DEFAULT
+            "$RUNNER_TEMP/m9-build" build --config Release -t ide -- -j1
+            cp build/Release/ide "$RUNNER_TEMP/m9-base-ide"
+            sha256sum "$RUNNER_TEMP/m9-base-ide"
+          } 2>&1 | tee "$RUNNER_TEMP/m9-evidence/build-base.log"
+      - name: Cheapest real CLI screen
+        id: screen
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/mission9_error_audit.py run --screen --binary "$RUNNER_TEMP/m9-base-ide" --evidence "$RUNNER_TEMP/m9-evidence/base-screen" 2>&1 | tee "$RUNNER_TEMP/m9-evidence/base-screen.log"
+      - name: Unmodified CLI error and artifact matrix
+        id: matrix
+        if: ${{ !cancelled() && steps.screen.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/mission9_error_audit.py run --binary "$RUNNER_TEMP/m9-base-ide" --evidence "$RUNNER_TEMP/m9-evidence/base-matrix" 2>&1 | tee "$RUNNER_TEMP/m9-evidence/base-matrix.log"
+      - name: Existing complete registered Release suite
+        id: registered
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/m9-build" build --config Release -t test_all -- -j1 2>&1 | tee "$RUNNER_TEMP/m9-evidence/registered-release.log"
+      - name: Build separate diagnostic observation revision
+        id: diagnostic_build
+        if: ${{ !cancelled() && steps.screen.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            python3 tools/mission9_error_audit.py instrument --evidence "$RUNNER_TEMP/m9-evidence/instrumentation"
+            git diff --check
+            "$RUNNER_TEMP/m9-build" build --config Release -t ide -- -j1
+            cp build/Release/ide "$RUNNER_TEMP/m9-diagnostic-ide"
+            sha256sum "$RUNNER_TEMP/m9-diagnostic-ide"
+          } 2>&1 | tee "$RUNNER_TEMP/m9-evidence/build-diagnostic.log"
+      - name: Diagnostic screen with second in-process invocation
+        id: diagnostic_screen
+        if: ${{ !cancelled() && steps.diagnostic_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/mission9_error_audit.py run --screen --diagnostic --binary "$RUNNER_TEMP/m9-diagnostic-ide" --evidence "$RUNNER_TEMP/m9-evidence/diagnostic-screen" 2>&1 | tee "$RUNNER_TEMP/m9-evidence/diagnostic-screen.log"
+      - name: Structured ownership and repeated invocation matrix
+        id: diagnostic_matrix
+        if: ${{ !cancelled() && steps.diagnostic_screen.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/mission9_error_audit.py run --diagnostic --binary "$RUNNER_TEMP/m9-diagnostic-ide" --evidence "$RUNNER_TEMP/m9-evidence/diagnostic-matrix" 2>&1 | tee "$RUNNER_TEMP/m9-evidence/diagnostic-matrix.log"
+      - name: Preserve every attempt and raw result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mission9-error-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/m9-evidence
+          if-no-files-found: error
+          retention-days: 30
