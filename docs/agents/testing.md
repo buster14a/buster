@@ -50,6 +50,12 @@
   see [analyzer sharding](../clang-analyze-shards.md). The separate
   `Linux x86-64 bootstrap evidence` check is required as well when the stronger
   repeated self-host audit is mandatory; `CI complete` does not aggregate it.
+  The aggregate's independent desktop inventory waits up to 24 seconds if the
+  Actions API still reports a required job unfinished after the matrix need
+  completes. It checks every job and required step again on each probe and
+  fails closed after the deadline. A completed job with missing steps, including
+  a partial-rerun carry-forward, is rejected immediately; run a fresh full CI
+  attempt rather than treating a copied success label as execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Both matrices
   disable fail-fast, and a combination failure does not hide Unix mode tests.
