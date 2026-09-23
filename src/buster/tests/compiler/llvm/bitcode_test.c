@@ -116,6 +116,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
     LlvmBitcodeConsumerFixture fixtures[] = {
         {.source = S8("tests/basic_c_llvm_scalars.c")},
         {.source = S8("tests/basic_c_llvm_layout.c")},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_addend.c"),
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_addend_caller.c")},
+        {.source = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_table.c"),
+         .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_pointer_table_caller.c")},
 #if BUSTER_CPU_ARCH_X86_64
         {.source = S8("tests/basic_c_llvm_aggregate_abi_callee.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_caller.c")},
         {.source = S8("tests/basic_c_llvm_aggregate_abi_caller.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_callee.c")},
@@ -520,6 +524,77 @@ BUSTER_GLOBAL_LOCAL bool llvm_bitcode_test_integer(ByteSlice bytes, u64 expected
     return !reader.failed && functions == 1 && returns == 1 && matched;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    IrType types[5] = {0};
+    types[0] = (IrType){.kind = IR_TYPE_VOID, .layout = {.resolved = true}};
+    types[1] = (IrType){.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .bit_width = 8,
+                        .layout = {.size = 1, .alignment = 1, .resolved = true}};
+    types[2] = (IrType){.id = {.value = 2}, .kind = IR_TYPE_INTEGER, .bit_width = 32,
+                        .layout = {.size = 4, .alignment = 4, .resolved = true}};
+    types[3] = (IrType){.id = {.value = 3}, .kind = IR_TYPE_POINTER, .element_type = {.value = 2},
+                        .layout = {.size = 8, .alignment = 8, .resolved = true}};
+    types[4] = (IrType){.id = {.value = 4}, .kind = IR_TYPE_ARRAY, .element_type = {.value = 1}, .element_count = 26,
+                        .layout = {.size = 26, .alignment = 1, .resolved = true}};
+    IrSymbol symbols[4] = {
+        {.id = {.value = 0}, .name = S8("payload"), .type = {.value = 4}, .kind = IR_SYMBOL_DATA,
+         .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true},
+        {.id = {.value = 1}, .name = S8("word"), .type = {.value = 2}, .kind = IR_SYMBOL_DATA,
+         .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true},
+        {.id = {.value = 2}, .name = S8("before_word"), .type = {.value = 3}, .kind = IR_SYMBOL_DATA,
+         .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true},
+        {.id = {.value = 3}, .name = S8("imported"), .type = {.value = 2}, .kind = IR_SYMBOL_DATA,
+         .linkage = IR_LINKAGE_IMPORT},
+    };
+    u8 bytes[26] = {3, 0, 0, 0, 0, 0, 0, 0, 0, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0, 0, 0, 0, 0, 17, 18};
+    // Reversed canonical order must still produce the physical order 1, 16.
+    IrGlobalRelocation relocations[2] = {
+        {.symbol = {.value = 3}, .offset = 16},
+        {.symbol = {.value = 1}, .addend = -4, .offset = 1},
+    };
+    IrGlobal globals[3] = {
+        {.symbol = {.value = 0}, .type = {.value = 4}, .bytes = {.pointer = bytes, .length = sizeof(bytes)},
+         .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES, .relocations = relocations, .relocation_count = 2, .alignment = 1},
+        {.symbol = {.value = 1}, .type = {.value = 2}, .initializer_kind = IR_GLOBAL_INITIALIZER_INTEGER,
+         .initializer_bits = 31, .alignment = 4},
+        {.symbol = {.value = 2}, .type = {.value = 3}, .initializer_kind = IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS,
+         .initializer_symbol = {.value = 1}, .initializer_addend = -4, .alignment = 8},
+    };
+    IrModule modules[1] = {{.name = S8("relocated_global_test"), .globals = globals, .global_count = 3}};
+    IrProgram program = {.arena = arena, .modules = modules, .module_count = 1,
+                         .types = {.types = types, .count = 5}, .symbols = {.symbols = symbols, .count = 4}};
+    program.data_layout.pointer.size = 8;
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.data_layout = S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    options.validate_ir = false;
+    LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
+    BUSTER_TEST(arguments, first.bytes.pointer && second.bytes.pointer && first.bytes.length == second.bytes.length &&
+                           !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+
+    relocations[0].offset = 23;
+    LlvmBitcodeArtifact range = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, range.error.code == LLVM_BITCODE_ERROR_IR_VALIDATION && !range.bytes.length);
+    relocations[0].offset = 4;
+    LlvmBitcodeArtifact overlap = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, overlap.error.code == LLVM_BITCODE_ERROR_IR_VALIDATION && !overlap.bytes.length);
+    relocations[0].offset = 16;
+    relocations[0].is_label_address = true;
+    LlvmBitcodeArtifact label = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, label.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER && !label.bytes.length);
+    relocations[0].is_label_address = false;
+    symbols[3].is_thread_local = true;
+    LlvmBitcodeArtifact tls = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, tls.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER && !tls.bytes.length);
+
+    return result;
+}
+
 UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -699,6 +774,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult diagnostics = llvm_bitcode_test_abi_diagnostics(arguments);
     result.test_count += diagnostics.test_count;
     result.succeeded_test_count += diagnostics.succeeded_test_count;
+    UnitTestResult relocations = llvm_bitcode_test_relocated_globals(arguments);
+    result.test_count += relocations.test_count;
+    result.succeeded_test_count += relocations.succeeded_test_count;
     return result;
 }
 #endif

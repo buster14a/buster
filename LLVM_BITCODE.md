@@ -84,6 +84,15 @@ intrinsics, inline assembly, SIMD, label addresses, indirect branches, and
 debug traps, are deliberate diagnostics.
 
 Aggregate storage preserves canonical field offsets, packing, and tail padding.
+Global pointer initializers may reference data or function symbols with a
+signed byte addend. Relocation-bearing byte initializers use packed LLVM
+constant storage with pointer slots and exact byte runs, so pointer tables,
+packed records, array elements, and forward/external references retain their
+canonical size and offsets. The writer does not claim an addend is in bounds;
+the source and canonical IR must supply a valid address for its use. TLS symbol
+references, label addresses, unsupported pointer index widths and malformed
+or overlapping relocation ranges remain explicit errors. This is LLVM
+constant emission, not native object relocation processing.
 Aggregate function parameters and results follow the x86-64 System V or Win64
 C calling convention, including indirect calls, register exhaustion, by-value
 stack arguments, and hidden result pointers. LLVM parameter attributes describe
