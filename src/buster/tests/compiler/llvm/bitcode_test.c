@@ -734,6 +734,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
         wide_values[index].canonical_type.value = 3;
     }
     IrSymbol mixed_symbols[2] = {symbol, symbol};
+    mixed_symbols[1].id.value = 1;
     mixed_symbols[1].name = S8("canonical_counts64");
     mixed_symbols[1].link_name = S8("canonical_counts64");
     mixed_symbols[1].type.value = 4;
