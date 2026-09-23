@@ -126,8 +126,8 @@
     },
     {
       "source": "src/buster/lib/integer.h",
-      "bytes": 1479,
-      "sha256": "6e23390bec10298d876e1992c1c16aeead1d53768520965f08870ad70ad6c92e"
+      "bytes": 1547,
+      "sha256": "47b824ed5b2840c8ed12e010fc25fdf6d47e1778f5f9fafd7731f69beadba593"
     },
     {
       "source": "src/buster/lib/os.c",
