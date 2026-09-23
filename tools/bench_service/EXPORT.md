@@ -57,6 +57,53 @@ The currently admitted `validate-buster-v1` receipt still means smoke validation
 not a #512 performance verdict. Failed/cancelled/interrupted terminal bundles
 remain downloadable evidence; their recorded outcomes do not become success.
 
+### Retirement test publication and independent replay
+
+The blocked retirement recipe has a separate offline handoff, exercised only
+after its service-owned producer supplies a complete finalized bundle and the
+authenticated control service supplies **two independent values**: the export
+receipt digest printed after a successful gateway download, and the execution
+receipt digest for the exact job and attempt. Neither digest is read from the
+download as its own authority. The binding path is relative to the reconstructed
+service result; obtain its fixed location from the reviewed producer contract.
+Use a reviewed local service executable and an immutable checkout containing
+the referenced Git objects:
+
+```sh
+bench_service gateway export JOB ATTEMPT FULL_SHA native-retirement-performance-v1 > /private/download.bqexport
+python3 tools/bench_service/retirement_export_replay.py \
+    /private/download.bqexport /private/new-result \
+    --test-publication /private/test-publication \
+    --bench-service /usr/local/libexec/buster-bench-service \
+    --repository-root /private/pinned-checkout \
+    --binding PATH_WITHIN_RESULT --job JOB --attempt ATTEMPT \
+    --full-result-sha256 FULL_SHA \
+    --export-receipt-sha256 AUTHENTICATED_EXPORT_SHA \
+    --trusted-execution-receipt-sha256 AUTHENTICATED_EXECUTION_SHA
+```
+
+Check the gateway exit status and capture its stderr receipt before running the
+second command. The test publication directory must exist, be private and owned
+by the caller. The command exclusively creates
+`retirement-JOB-ATTEMPT.bqexport`, syncs it and its parent, reads back all
+bytes, and replays from that copy in a new private destination. An interrupted
+copy leaves `.pending` evidence; an existing pending or published name is a
+collision and is never overwritten. The original archive and result remain
+untouched. Real durable #510 publication is a separate operator action with
+its own approved destination and receipt. This local test copy is not a #512
+acceptance artifact.
+
+The native unpacker checks every archived byte, canonical inventory and worker
+result binding. The production Python validator then reconstructs the entire
+population, eligibility/census and transcript-to-sample joins, statistics and
+the publication/replay closure using the external execution receipt digest and
+immutable Git identities. The handoff additionally joins the export's numeric
+job and attempt to the validated execution receipt. A failed, interrupted or
+invalid exported attempt can be unpacked and retained but exits before the
+performance replay. A verified replay reports
+`verified-without-admission`; it cannot admit the recipe or invent a performance
+pass.
+
 ## Immutability, persistence and retention
 
 The initial request requires a terminal job with a durably bound result and
@@ -143,6 +190,36 @@ space for the retained result, sealed export, downloaded archive and clean
 replay, each independently bounded by its own copy. The larger limits here
 only remove a transport ceiling; the recipe remains blocked until its complete
 producer, validators and service tests are reviewed.
+
+Arithmetic capacity for the declared 78,912-row census and 72,672
+compiler-eligible rows, **not a transferred or executed retirement run**:
+
+| Component | Declared maximum at 60 pairs | Relevant ceiling |
+|---|---:|---:|
+| Compiler invocations, including warmups | 17,731,968 | Transcript: 32,768 records and 64 MiB per shard |
+| Additional runtime invocations if every compiler row is runtime eligible | 17,731,968 | Same transcript ceilings |
+| Transcript shards for both campaigns at that upper bound | 1,083 | 4,096 transcript shards; 4,096 bundle entries shared with all files/directories |
+| Paired numeric records | 8,720,640 | 16,777,216 records per partition; 16 GiB total #615 input per manifest |
+| Numeric shards at 32,768 records each | 267 | 64 MiB per published file; remaining entry budget for all controls, binaries, logs and directories: 2,746 |
+| Combined shard bytes if every shard reached 64 MiB | 86,400 MiB | 128 GiB indexed payload including every other retained file |
+
+The combined shard bound leaves approximately 43.6 GiB for other indexed files
+before the 128 GiB total limit, but an actual producer must inventory **every**
+retained file and directory and respect the 64 MiB per-file, 192-byte path,
+8 MiB index and 1 MiB execution-receipt bounds. A fixed transcript shard also
+fails before its 32,768th record if its JSONL lines exceed 64 MiB in total.
+These arithmetic figures cannot establish that real lines, logs and binaries
+fit. The existing service tests transfer small smoke archives; no full
+retirement export or clean replay has been completed at this point.
+
+At maximum capacity, reserve roughly five independent copies: retained
+service result, service sealed spool (including its chunk index), gateway
+download, immutable test publication and extracted clean replay. The
+128 GiB payload ceiling therefore implies **over 640 GiB** plus index,
+filesystem and #510 publication headroom. Export preparation, native unpack
+and independent binding replay have separate 24-hour budgets; bound the full
+end-to-end operator window as the sum of their observed times, not the
+per-operation receipt wait alone.
 
 Export request body:
 
