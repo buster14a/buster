@@ -2062,7 +2062,9 @@ static void test_process_observations(char const* executable, char const* root)
 #include "retirement_samples_test.h"
 #include "retirement_artifact_test.h"
 #include "retirement_measurement_test.h"
+#ifdef __linux__
 #include "retirement_campaign_test.h"
+#endif
 
 int main(int argc, char** argv)
 {

@@ -39078,7 +39078,11 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
             if (index == 2) os_argument_builder_append(&builder, S8("-DBUSTER_RETIREMENT_STORE_TEST"));
             os_argument_builder_append(&builder, sources[index]);
             if (index == 0) os_argument_builder_append(&builder, S8("tools/throughput/shared.c"));
-            if (index == 2) os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
+            if (index == 2)
+            {
+                os_argument_builder_append(&builder, S8("tools/bench_service/retirement_result.c"));
+                os_argument_builder_append(&builder, S8("src/buster/lib/hash.c"));
+            }
             if (sanitize)
             {
                 os_argument_builder_append(&builder, S8("-g"));
