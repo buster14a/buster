@@ -592,14 +592,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
     options.target_triple = S8("x86_64-unknown-linux-gnu");
     options.validate_ir = false;
     String8 compiler = executable_resolve_in_path(arena, S8("clang"));
-    u32 widths[] = {1, 8, 16, 32, 64, 128};
-    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(widths); index += 1)
+    for (u32 width = 1; width <= 128; width = width == 64 ? 128 : width + 1)
     {
-        u32 width = widths[index];
         types[1].bit_width = width;
         types[1].layout.size = (width + 7) / 8;
-        types[1].layout.alignment = (u32)types[1].layout.size;
-        constant_immediate = index & 1 ? 0 : 1;
+        types[1].layout.alignment = width == 64 ? 8 : width == 32 ? 4 : width == 16 ? 2 : 1;
+        constant_immediate = width & 1 ? 0 : 1;
         LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
         LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
         if (width > 64)
@@ -615,7 +613,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
                                   !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
             BUSTER_TEST(arguments, first.stats.function_count == 4 && first.stats.defined_function_count == 1);
             BUSTER_TEST(arguments, first.stats.instruction_count == 6);
-            if (compiler.length && first.success)
+            if (compiler.length && first.success && (width == 1 || width == 8 || width == 16 || width == 32 || width == 64))
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 Arena* scratch = temporary.arena;
