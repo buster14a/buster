@@ -10,9 +10,6 @@
 
 #define BQ_RETIREMENT_CORRECTNESS_ROWS_CAP 100000u
 #define BQ_RETIREMENT_CORRECTNESS_CHECKS_CAP 256u
-/* The reviewed #508/#929 v1 projection; changing it needs a new binding. */
-#define BQ_RETIREMENT_CORRECTNESS_V1_ROWS 78912u
-#define BQ_RETIREMENT_CORRECTNESS_V1_ELIGIBLE 72672u
 
 typedef enum BqRetirementCheckKind
 {
@@ -49,6 +46,9 @@ typedef struct BqRetirementTrustedRow
     uint32_t compiler_eligible, code_obligation, execution_obligation;
     char identity_sha256[65], source_sha256[65], configuration_sha256[65];
     char skip_proof_sha256[65], independent_oracle_sha256[65];
+    /* Independently derived exact argv/cwd/environment, by trusted binary.
+     * Untimed sides and inapplicable native runtime have empty commands. */
+    char compiler_command_sha256[2][65], runtime_command_sha256[2][65];
 } BqRetirementTrustedRow;
 
 /* Every required check is an independently authenticated, exact-source and

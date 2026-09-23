@@ -19,11 +19,12 @@ each skip proof, source, configuration,
 target, stage and execution obligation from those authenticated inputs. No
 candidate output, manifest or request may select these values.
 
-The production gate requires exactly 78,912 canonical rows and 72,672
-compiler-eligible rows from the reviewed version-1 support projection. A
-different count cannot start timing under the current binding. The standalone
-miniature and synthetic-capacity fixtures explicitly opt out of that fixed
-population check; they do not establish a production census.
+The production gate takes population counts from the independently replayed
+current support/census authority. It checks the complete object join, the
+eligible count in the required matrix and no-fallback checks, and the bounded
+row array; historical dimensions do not authorize a population. The importer
+must prove that the prepared counts equal its independently replayed inventory.
+The miniature and synthetic-capacity fixtures do not establish that proof.
 
 The required-check array must enumerate every applicable #509 native semantic
 lane, supported configuration matrix, no-fallback/census validation, self-host
@@ -33,7 +34,10 @@ separate trusted digest before passing its status to `check`. A digest obtained
 from the candidate or downloaded result is not a trusted receipt. Any required
 host unavailable at qualification leaves the campaign blocked.
 
-Before `row`, the service compiles each eligible cell with both matched trusted
+Before `row`, the service derives exact compiler and applicable runtime command
+hashes (argv, cwd and environment) independently from the admitted oracle
+path. The gate binds those hashes for both binary sides to observed commands;
+a changed command fails before timing. The service compiles each eligible cell with both matched trusted
 Clang-built binaries from #1018, checks semantic and generated-output evidence,
 parses actual artifact code sections, and runs native link/self-host outputs
 through an independent oracle. It obtains the expected output digest from the

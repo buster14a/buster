@@ -29,13 +29,6 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_equal(char const left[65], ch
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_population(uint32_t rows, uint32_t eligible)
-{
-    bool ok = rows == BQ_RETIREMENT_CORRECTNESS_V1_ROWS &&
-              eligible == BQ_RETIREMENT_CORRECTNESS_V1_ELIGIBLE;
-    return ok;
-}
-
 BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_number(Sha256* hash, uint64_t value)
 {
     uint8_t bytes[8];
@@ -140,6 +133,11 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_seal(BqRetirementCorrectness 
         bq_retirement_correctness_text(&hash, row->configuration_sha256);
         bq_retirement_correctness_text(&hash, row->skip_proof_sha256);
         bq_retirement_correctness_text(&hash, row->independent_oracle_sha256);
+        for (uint32_t side = 0; side < 2; side += 1)
+        {
+            bq_retirement_correctness_text(&hash, row->compiler_command_sha256[side]);
+            bq_retirement_correctness_text(&hash, row->runtime_command_sha256[side]);
+        }
         bq_retirement_correctness_number(&hash, fact->row);
         bq_retirement_correctness_number(&hash, fact->census_row);
         bq_retirement_correctness_number(&hash, fact->compiler_eligible);
@@ -214,6 +212,13 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
             row->stage != BQ_RETIREMENT_STAGE_OBJECT && row->target == prepared->native_target;
         if (ok) ok = native_runtime ? bq_retirement_correctness_digest(row->independent_oracle_sha256) :
             bq_retirement_correctness_empty(row->independent_oracle_sha256);
+        for (uint32_t side = 0; ok && side < 2; side += 1)
+            ok = (row->compiler_eligible ?
+                  bq_retirement_correctness_digest(row->compiler_command_sha256[side]) :
+                  bq_retirement_correctness_empty(row->compiler_command_sha256[side])) &&
+                 (native_runtime ?
+                  bq_retirement_correctness_digest(row->runtime_command_sha256[side]) :
+                  bq_retirement_correctness_empty(row->runtime_command_sha256[side]));
         if (ok)
         {
             uint32_t slot = 2166136261u;
@@ -239,9 +244,6 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
         if (ok) eligible += row->compiler_eligible;
     }
     if (ok) ok = eligible > 0 && object_rows == prepared->object_rows;
-#ifndef BUSTER_RETIREMENT_CORRECTNESS_FIXTURE
-    if (ok) ok = bq_retirement_correctness_population(prepared->rows, eligible);
-#endif
     for (uint32_t i = 0; ok && i < check_count; i += 1)
     {
         BqRetirementRequiredCheck const* check = &checks[i];
@@ -320,7 +322,8 @@ bool bq_retirement_correctness_row(BqRetirementCorrectness* gate, BqRetirementRo
             if (!compiler) ok = bq_retirement_correctness_side_empty(facts);
             else
             {
-                ok = bq_retirement_correctness_digest(facts->compiler_command_sha256) &&
+                ok = bq_retirement_correctness_equal(facts->compiler_command_sha256,
+                         expected->compiler_command_sha256[side]) &&
                      bq_retirement_correctness_digest(facts->artifact_sha256) &&
                      facts->semantic_pass == 1 && facts->fallback_count == 0 &&
                      facts->compiler_exit == 0 && facts->timed_out == 0 && facts->out_of_memory == 0;
@@ -330,7 +333,8 @@ bool bq_retirement_correctness_row(BqRetirementCorrectness* gate, BqRetirementRo
                         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")) :
                     bq_retirement_correctness_empty(facts->code_sha256) && facts->code_bytes == 0;
                 if (ok) ok = runtime ?
-                    bq_retirement_correctness_digest(facts->runtime_command_sha256) &&
+                    bq_retirement_correctness_equal(facts->runtime_command_sha256,
+                        expected->runtime_command_sha256[side]) &&
                     bq_retirement_correctness_equal(facts->runtime_output_sha256, expected->independent_oracle_sha256) &&
                     facts->runtime_exit == 0 :
                     bq_retirement_correctness_empty(facts->runtime_command_sha256) &&
