@@ -134,7 +134,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         String8 command[5];
         u32 command_count = 0;
         command[command_count++] = S8("-emit-llvm");
-        if (bit_counts)
+        if (bit_counts && BUSTER_CPU_ARCH_X86_64)
         {
             command[command_count++] = S8("-mattr=+popcnt");
         }
