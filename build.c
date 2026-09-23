@@ -39111,7 +39111,7 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
         os_argument_builder_append(&builder, S8("tools/bench_service/retirement_export_replay_test.py"));
         *replay = (ProcessRun){.arguments = os_argument_builder_flush(&builder),
                                .working_directory = S8("."),
-                               .spawn_options = {.use_process_environment = 1}};
+                               .spawn_options = {.use_process_environment = 1, .search_path = 1}};
     }
 #endif
 }
