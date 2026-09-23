@@ -108,6 +108,21 @@ BUSTER_GLOBAL_LOCAL bool gpu_tools_rejected(DObservation observation)
     return d_normal(observation) && observation.status != 0 && (observation.output.length || observation.error.length);
 }
 
+BUSTER_GLOBAL_LOCAL bool gpu_tools_files_identical(GpuTools* settings, String8 role, String8 expected_path, String8 actual_path)
+{
+    Arena* arena = settings->evidence.arena;
+    ByteSlice expected = file_read(arena, expected_path, (FileReadOptions){0});
+    ByteSlice actual = file_read(arena, actual_path, (FileReadOptions){0});
+    bool identical = expected.pointer && actual.pointer && expected.length == actual.length;
+    if (identical) { identical = memcmp(expected.pointer, actual.pointer, expected.length) == 0; }
+    String8 record = string_format(arena,
+        S8("source={S8}\noutput={S8}\nsource_bytes={u64}\noutput_bytes={u64}\nbyte_identical={u32}\n"),
+        expected_path, actual_path, expected.length, actual.length, (u32)identical);
+    d_write(&settings->evidence, path_join(arena, settings->directory, string_format(arena, S8("passthrough-{S8}.txt"), role)), record);
+    if (!identical) { string_print(S8("GPU_PASSTHROUGH_FAIL role={S8} source={S8} output={S8}\n"), role, expected_path, actual_path); }
+    return identical && !settings->evidence.io_failed;
+}
+
 BUSTER_GLOBAL_LOCAL bool gpu_tools_profile(GpuTools* settings, u32 profile)
 {
     DSettings* evidence = &settings->evidence;
@@ -142,6 +157,33 @@ BUSTER_GLOBAL_LOCAL bool gpu_tools_profile(GpuTools* settings, u32 profile)
                 consumed = GPU_TOOLS_RUN(settings, S8("validate"), settings->spirv_val, S8("--target-env"), S8("vulkan1.2"), artifact);
                 d_write(evidence, invalid, malformed);
                 rejected = GPU_TOOLS_RUN(settings, S8("reject"), settings->spirv_val, S8("--target-env"), S8("vulkan1.2"), invalid);
+                if (d_success(compiled) && d_success(consumed))
+                {
+                    String8 object = path_join(arena, settings->directory, S8("passthrough-object.spv"));
+                    String8 linked = path_join(arena, settings->directory, S8("passthrough-link.spv"));
+                    DObservation object_copy = GPU_TOOLS_RUN(settings, S8("passthrough-object"), evidence->ide, S8("cc"),
+                        S8("--target=spirv"), S8("-c"), artifact, S8("-o"), object);
+                    ok &= d_success(object_copy);
+                    if (d_success(object_copy))
+                    {
+                        ok &= gpu_tools_files_identical(settings, S8("object"), artifact, object);
+                        ok &= gpu_tools_hash(settings, object, (String8){0});
+                        DObservation object_validation = GPU_TOOLS_RUN(settings, S8("validate-object"), settings->spirv_val,
+                            S8("--target-env"), S8("vulkan1.2"), object);
+                        ok &= d_success(object_validation);
+                    }
+                    DObservation link_copy = GPU_TOOLS_RUN(settings, S8("passthrough-link"), evidence->ide, S8("cc"),
+                        S8("--target=spirv"), artifact, S8("-o"), linked);
+                    ok &= d_success(link_copy);
+                    if (d_success(link_copy))
+                    {
+                        ok &= gpu_tools_files_identical(settings, S8("link"), artifact, linked);
+                        ok &= gpu_tools_hash(settings, linked, (String8){0});
+                        DObservation link_validation = GPU_TOOLS_RUN(settings, S8("validate-link"), settings->spirv_val,
+                            S8("--target-env"), S8("vulkan1.2"), linked);
+                        ok &= d_success(link_validation);
+                    }
+                }
             }
             else
             {
