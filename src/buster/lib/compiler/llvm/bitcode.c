@@ -1815,9 +1815,9 @@ static u32 llvm_bc_address_constant(LlvmBcContext* context, IrSymbolId symbol_id
     u32 result = LLVM_BC_INVALID_ID;
     IrSymbol* symbol = llvm_bc_ir_symbol(context, symbol_id);
     u32 target = symbol ? context->symbol_value_ids[symbol_id.value] : LLVM_BC_INVALID_ID;
-    bool thread_local = symbol && (symbol->is_thread_local ||
-                                   (target < context->global_count && context->globals[target].is_thread_local));
-    if (!symbol || thread_local || target == LLVM_BC_INVALID_ID ||
+    bool tls_target = symbol && (symbol->is_thread_local ||
+                                 (target < context->global_count && context->globals[target].is_thread_local));
+    if (!symbol || tls_target || target == LLVM_BC_INVALID_ID ||
         (symbol->kind != IR_SYMBOL_DATA && symbol->kind != IR_SYMBOL_FUNCTION))
     {
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
