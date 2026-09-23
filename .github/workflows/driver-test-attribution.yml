@@ -25,7 +25,8 @@ jobs:
       ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
           (github.event_name == 'workflow_dispatch' ||
            github.head_ref == 'diagnostics/708-driver-fixture-timing' ||
-           github.head_ref == 'diagnostics/949-driver-operations') }}
+           github.head_ref == 'diagnostics/949-driver-operations' ||
+           github.head_ref == 'diagnostics/949-isolated-replay') }}
     name: Windows x86-64 fixture attribution
     runs-on: windows-2025
     timeout-minutes: 300
@@ -49,6 +50,7 @@ jobs:
         shell: powershell
         env:
           BUSTER_TEST_FIXTURE_TIMING: compiler_driver_tests
+          BUSTER_ATTRIBUTION_ISOLATED_REPLAY: ${{ github.head_ref == 'diagnostics/949-isolated-replay' && '1' || '0' }}
           VS_COMPONENT: Microsoft.VisualStudio.Component.VC.Tools.x86.x64
         run: |
           $ErrorActionPreference = 'Stop'
@@ -177,6 +179,27 @@ jobs:
             Remove-Job -Job $Watcher -Force -ErrorAction SilentlyContinue
           }
           if ($MatrixExit -ne 0) { exit $MatrixExit }
+
+          # Temporary #949 diagnostic only: run the generated Debug executable
+          # again after all matrix trees have completed. Keep the same toolchain
+          # environment in this PowerShell step, but remove the four-tree load.
+          if ($env:BUSTER_ATTRIBUTION_ISOLATED_REPLAY -eq '1') {
+            $DebugExecutable = Join-Path (Get-Location) 'build\build-ci_on-cc_clang-sanitize_on-fuzz_available_on-configs_Debug\Debug\ide.exe'
+            if (-not (Test-Path -LiteralPath $DebugExecutable)) { throw "missing generated Debug executable: $DebugExecutable" }
+            $env:BUSTER_TEST_JOBS = '1'
+            $env:BUSTER_TEST_TABLE_AUDITS = '1'
+            # CMakeLists.txt's BUSTER_TEST_ENV on WIN32 in the generated
+            # sanitized tree; the executable and its test arguments are exact.
+            $env:BUSTER_SANITIZER_POLICY_MODE = 'unsupported'
+            "source=$(git rev-parse HEAD) image=$env:ImageVersion executable=$DebugExecutable sha256=$((Get-FileHash -LiteralPath $DebugExecutable -Algorithm SHA256).Hash) jobs=$env:BUSTER_TEST_JOBS audits=$env:BUSTER_TEST_TABLE_AUDITS sanitizer_policy=$env:BUSTER_SANITIZER_POLICY_MODE fixture_timing=$env:BUSTER_TEST_FIXTURE_TIMING" |
+              Set-Content -LiteralPath (Join-Path $Logs 'isolated-debug-identity.txt')
+            & $DebugExecutable test --verbose=1 --ci=1 2>&1 |
+              ForEach-Object { "{0}`t{1}" -f [DateTime]::UtcNow.ToString('o'), [string]$_ } |
+              Tee-Object -FilePath (Join-Path $Logs 'isolated-debug-timestamped.log')
+            $ReplayExit = $LASTEXITCODE
+            "exit=$ReplayExit" | Add-Content -LiteralPath (Join-Path $Logs 'isolated-debug-identity.txt')
+            if ($ReplayExit -ne 0) { exit $ReplayExit }
+          }
 
       - name: Matrix coverage and result
         if: ${{ always() && steps.checkout.outcome == 'success' }}
