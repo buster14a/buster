@@ -299,6 +299,8 @@ struct LlvmBcContext
     LlvmBcFunction* functions;
     u32 function_count;
     u32 function_capacity;
+    u32 stack_save_function_index;
+    u32 stack_restore_function_index;
     LlvmBcString* strings;
     u32 string_count;
     u32 string_capacity;
@@ -1536,6 +1538,33 @@ static bool llvm_bc_add_function_entity(LlvmBcContext* context, IrFunction* func
     return true;
 }
 
+static bool llvm_bc_add_stack_intrinsic(LlvmBcContext* context, bool save)
+{
+    String8 name = llvm_bc_s8(save ? "llvm.stacksave" : "llvm.stackrestore");
+    if (!llvm_bc_name_available(context, name, 0))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM stack intrinsic collides with a module symbol"),
+                     0, 0, 0, IR_SYMBOL_ID_INVALID);
+        return false;
+    }
+    u64 signature[3] = {0, save ? context->pointer_type_id : context->void_type_id, context->pointer_type_id};
+    u32 type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, signature, save ? 2 : 3);
+    llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
+                        sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
+    u32 index = context->function_count++;
+    context->functions[index] = (LlvmBcFunction){.name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
+                                                 .type_id = type_id, .declaration = true, .synthetic = true};
+    if (save)
+    {
+        context->stack_save_function_index = index;
+    }
+    else
+    {
+        context->stack_restore_function_index = index;
+    }
+    return true;
+}
+
 static bool llvm_bc_collect_entities(LlvmBcContext* context)
 {
     u32 symbol_count = context->program->symbols.count;
@@ -1657,6 +1686,28 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
                 context->string_count += 1;
             }
         }
+    }
+
+    bool needs_stack_save = false;
+    bool needs_stack_restore = false;
+    for (u32 index = 0; index < context->function_count; index += 1)
+    {
+        IrFunction* function = context->functions[index].function;
+        if (context->functions[index].declaration || !function)
+        {
+            continue;
+        }
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            IrOpcode opcode = function->instructions[instruction_index].opcode;
+            needs_stack_save |= opcode == IR_OPCODE_STACK_SAVE;
+            needs_stack_restore |= opcode == IR_OPCODE_STACK_RESTORE;
+        }
+    }
+    if ((needs_stack_save && !llvm_bc_add_stack_intrinsic(context, true)) ||
+        (needs_stack_restore && !llvm_bc_add_stack_intrinsic(context, false)))
+    {
+        return false;
     }
 
     u32 value_id = 0;
@@ -2270,6 +2321,7 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
         return 0;
     case IR_OPCODE_LOCAL:
     case IR_OPCODE_STACK_ALLOCATE:
+    case IR_OPCODE_STACK_SAVE:
     case IR_OPCODE_LOAD:
     case IR_OPCODE_ATOMIC_LOAD:
     case IR_OPCODE_ATOMIC_READ_MODIFY_WRITE:
@@ -2368,6 +2420,7 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
         return result.aggregate && !result.indirect ? 2 : 0;
     }
     case IR_OPCODE_STORE:
+    case IR_OPCODE_STACK_RESTORE:
     case IR_OPCODE_ATOMIC_STORE:
     case IR_OPCODE_ATOMIC_FENCE:
     case IR_OPCODE_BRANCH:
@@ -2375,14 +2428,6 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
     case IR_OPCODE_SWITCH:
     case IR_OPCODE_UNREACHABLE:
         return 0;
-    case IR_OPCODE_STACK_SAVE:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode stack_save is not implemented"), function, block,
-                     instruction, instruction->symbol);
-        return LLVM_BC_INVALID_ID;
-    case IR_OPCODE_STACK_RESTORE:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode stack_restore is not implemented"), function, block,
-                     instruction, instruction->symbol);
-        return LLVM_BC_INVALID_ID;
     case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode clear_instruction_cache is not implemented"),
                      function, block, instruction, instruction->symbol);
@@ -3316,6 +3361,31 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         *current_value_id += 1;
         break;
     }
+    case IR_OPCODE_STACK_SAVE:
+    case IR_OPCODE_STACK_RESTORE:
+    {
+        bool save = instruction->opcode == IR_OPCODE_STACK_SAVE;
+        u32 index = save ? context->stack_save_function_index : context->stack_restore_function_index;
+        if (index == LLVM_BC_INVALID_ID)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("missing LLVM stack intrinsic declaration"), function, block,
+                         instruction, instruction->symbol);
+            return false;
+        }
+        LlvmBcFunction* intrinsic = context->functions + index;
+        operands[count++] = 0; // no parameter attributes
+        operands[count++] = LLVM_BC_CALL_EXPLICIT_TYPE;
+        operands[count++] = intrinsic->type_id;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, intrinsic->value_id, context->pointer_type_id);
+        if (!save)
+        {
+            u32 checkpoint = llvm_bc_function_value_id(context, record, instruction->operands[0]);
+            llvm_bc_push_relative(operands, &count, *current_value_id, checkpoint);
+        }
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
+        *current_value_id += save;
+        break;
+    }
     case IR_OPCODE_LOAD:
     case IR_OPCODE_ATOMIC_LOAD:
     {
@@ -3616,8 +3686,6 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
     case IR_OPCODE_UNREACHABLE:
         llvm_bc_record(&context->stream, LLVM_BC_FUNC_UNREACHABLE, 0, 0);
         break;
-    case IR_OPCODE_STACK_SAVE:
-    case IR_OPCODE_STACK_RESTORE:
     case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
     case IR_OPCODE_SLICE:
     case IR_OPCODE_REVERSE:
@@ -3814,7 +3882,7 @@ static bool llvm_bc_emit_module_entities(LlvmBcContext* context)
             function->calling_convention,
             function->declaration,
             llvm_bc_linkage(function->symbol),
-            context->abi_signatures[function->canonical_type.value]->attribute_list_id, // parameter attribute list id
+            function->synthetic ? 0 : context->abi_signatures[function->canonical_type.value]->attribute_list_id,
             0, // alignment
             0, // section id
             0, // visibility
@@ -3964,6 +4032,8 @@ LlvmBitcodeArtifact llvm_bitcode_emit_with_options(Arena* arena, IrProgram* prog
         .modules = modules,
         .module_count = module_count,
         .options = options,
+        .stack_save_function_index = LLVM_BC_INVALID_ID,
+        .stack_restore_function_index = LLVM_BC_INVALID_ID,
         .error = {
             .function = IR_FUNCTION_ID_INVALID,
             .block = IR_BLOCK_ID_INVALID,

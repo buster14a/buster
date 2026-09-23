@@ -77,9 +77,12 @@ as a successful artifact.
 
 The implemented lowering covers the canonical scalar, pointer, aggregate,
 memory, atomic, call, cast, arithmetic, comparison, branch, switch, return,
-and unreachable forms used by the current C frontend. Canonical
-operations that do not yet have an LLVM record mapping, including stack
-save/restore, instruction-cache clearing, slice/reverse helpers, variadic
+and unreachable forms used by the current C frontend. Scoped dynamic stack
+allocation maps canonical stack saves and restores to LLVM's `llvm.stacksave`
+and `llvm.stackrestore` intrinsics, preserving the block position of each
+operation and the lifetime of outer allocations. Canonical operations that do
+not yet have an LLVM record mapping, including instruction-cache clearing,
+slice/reverse helpers, variadic
 intrinsics, inline assembly, SIMD, label addresses, indirect branches, and
 debug traps, are deliberate diagnostics.
 
@@ -99,3 +102,16 @@ signature for an unimplemented target ABI.
 Source-level debug metadata and LLVM optimization pipelines are outside the
 current emitter. Add new mappings only with deterministic byte-level tests and
 validation through an LLVM consumer that can parse the generated module.
+
+## Stack scope validation
+
+`llvm_bitcode_tests` checks two saves, dynamic allocations and void restores
+in one canonical function, including a saved token passed through a block
+parameter. It compares repeated output byte for byte and rejects a malformed
+restore without publishing bytes. The C fixture runs nested and repeated VLAs,
+continue, break, outward goto, early return, and a live outer allocation;
+the independently compiled observer reads only live elements. The 1024-iteration
+16 KiB case exposes an omitted loop restore by exhausting a typical stack.
+The test module also checks that a later unsupported operation cannot replace
+an existing output. When Clang is available, the fixture is consumed and run
+at both `-O0` and `-O2` for both frontend modes.

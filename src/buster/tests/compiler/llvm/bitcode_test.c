@@ -191,6 +191,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
     return result;
 }
 
+// Run the bitcode with a separately compiled observer. The long repeated
+// scope also exhausts an ordinary thread stack if restores are omitted.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 compiler = executable_resolve_in_path(arguments->arena, S8("clang"));
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-stack"), S8(".bc"));
+        String8 command[] = {S8("-emit-llvm"), frontends[frontend], S8("-o"), output,
+                             S8("src/buster/tests/compiler/llvm/fixtures/stack_scopes.c")};
+        CompilerDriverResult emitted = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
+        {
+            arguments->show(arguments, S8("LLVM stack fixture {S8}: {S8}\n"), frontends[frontend], emitted.diagnostic);
+        }
+        BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
+        if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-stack"),
+#if BUSTER_WINDOWS
+                                                               S8(".exe"));
+#else
+                                                               S8(""));
+#endif
+                String8 compile[] = {compiler, optimizations[optimization], output,
+                                     S8("src/buster/tests/compiler/llvm/fixtures/stack_scopes_main.c"), S8("-o"), executable};
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile), (SliceString8){0},
+                    (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
+                {
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
+                    {
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM stack consumer {S8} {S8}: {S8}\n"), frontends[frontend],
+                                        optimizations[optimization], (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0},
+                            (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            bool success = os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS;
+                            if (!success)
+                            {
+                                arguments->show(arguments, S8("LLVM stack answers differ: {S8} {S8}\n"), frontends[frontend],
+                                                optimizations[optimization]);
+                            }
+                            BUSTER_TEST(arguments, success);
+                        }
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    if (!compiler.length)
+    {
+        arguments->show(arguments, S8("LLVM stack consumer execution skipped: clang is unavailable on PATH\n"));
+    }
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 source = S8("int invalid_stack(int n) { volatile unsigned char bytes[n]; bytes[0] = 1;"
+                            " __builtin_debugtrap(); return bytes[0]; }\n");
+        String8 sentinel = S8("existing bitcode must survive a failed emission");
+        String8 input = buster_test_temporary_path(arena, S8("buster-llvm-stack-invalid"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-llvm-stack-invalid"), S8(".bc"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+        BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, input};
+        CompilerDriverResult rejected = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+        BUSTER_TEST(arguments, rejected.error == COMPILER_DRIVER_ERROR_LLVM_BITCODE && !rejected.has_llvm_bitcode &&
+                               !rejected.llvm_bitcode.bytes.length && rejected.llvm_bitcode.error.opcode == IR_OPCODE_DEBUG_TRAP);
+        FileMapRead preserved = file_map_read(arena, output, (FileReadOptions){0});
+        BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
+                               !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
+        file_map_unmap(preserved);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Keep the expected answers in a separately compiled consumer: valid bitcode
 // can still branch to the wrong case, including in the program's own checker.
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_switches(UnitTestArguments* arguments)
@@ -371,6 +469,104 @@ BUSTER_GLOBAL_LOCAL LlvmBitcodeArtifact llvm_bitcode_test_atomic_record(Arena* a
     options.validate_ir = false;
 
     return llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_records(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    IrTypeId parameter_types[] = {{.value = 1}};
+    IrType types[] = {
+        {.kind = IR_TYPE_VOID, .layout = {.resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .bit_width = 64, .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_POINTER, .element_type = {.value = 0},
+         .layout = {.size = 8, .alignment = 8, .resolved = true}},
+        {.id = {.value = 3}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 1},
+         .parameter_types = parameter_types, .parameter_count = 1, .layout = {.resolved = true}},
+    };
+    IrSymbol symbols[] = {{.name = S8("stack_records"), .link_name = S8("stack_records"), .type = {.value = 3},
+                           .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true}};
+    IrValueId size_operand[] = {{.value = 0}};
+    IrValueId first_checkpoint[] = {{.value = 3}};
+    IrValueId second_checkpoint[] = {{.value = 4}};
+    IrBlockId continuation[] = {{.value = 1}};
+    u64 argument_index[] = {0};
+    u64 alignment[] = {16};
+    IrInstruction instructions[] = {
+        {.opcode = IR_OPCODE_ARGUMENT, .canonical_type = {.value = 1}, .result = {.value = 0},
+         .immediates = argument_index, .immediate_count = 1},
+        {.opcode = IR_OPCODE_STACK_SAVE, .canonical_type = {.value = 2}, .result = {.value = 1}},
+        {.opcode = IR_OPCODE_STACK_ALLOCATE, .canonical_type = {.value = 2}, .result = {.value = 2},
+         .operands = size_operand, .operand_count = 1, .immediates = alignment, .immediate_count = 1},
+        {.opcode = IR_OPCODE_BRANCH, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .targets = continuation, .target_count = 1},
+        {.opcode = IR_OPCODE_STACK_RESTORE, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .operands = first_checkpoint, .operand_count = 1},
+        {.opcode = IR_OPCODE_STACK_SAVE, .canonical_type = {.value = 2}, .result = {.value = 4}},
+        {.opcode = IR_OPCODE_STACK_ALLOCATE, .canonical_type = {.value = 2}, .result = {.value = 5},
+         .operands = size_operand, .operand_count = 1, .immediates = alignment, .immediate_count = 1},
+        {.opcode = IR_OPCODE_STACK_RESTORE, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .operands = second_checkpoint, .operand_count = 1},
+        {.opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+         .operands = size_operand, .operand_count = 1},
+    };
+    IrValue values[6] = {0};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(values); index += 1)
+    {
+        values[index] = (IrValue){.canonical_type = {.value = index == 0 ? 1 : 2}, .definition = IR_INSTRUCTION_ID_INVALID,
+                                  .category = IR_VALUE_VALUE};
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(instructions); index += 1)
+    {
+        if (instructions[index].result.value < BUSTER_ARRAY_LENGTH(values))
+        {
+            values[instructions[index].result.value].definition = (IrInstructionId){.value = index};
+        }
+    }
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(instructions); index += 1)
+    {
+        instructions[index].next = index != 3 && index + 1 < BUSTER_ARRAY_LENGTH(instructions) ?
+                                   (IrInstructionId){.value = index + 1} : IR_INSTRUCTION_ID_INVALID;
+    }
+    IrIncoming incoming = {.predecessor = {.value = 0}, .value = {.value = 1}};
+    IrBlockParameter parameter = {.first_incoming = &incoming, .last_incoming = &incoming, .canonical_type = {.value = 2},
+                                  .value = {.value = 3}, .incoming_count = 1};
+    IrPredecessor predecessor = {.block = {.value = 0}};
+    IrBlock blocks[] = {
+        {.first_instruction = {.value = 0}, .last_instruction = {.value = 3}, .terminated = true, .sealed = true},
+        {.id = {.value = 1}, .first_instruction = {.value = 4}, .last_instruction = {.value = 8}, .terminated = true, .sealed = true,
+         .first_predecessor = &predecessor, .last_predecessor = &predecessor, .predecessor_count = 1,
+         .first_parameter = &parameter, .last_parameter = &parameter, .parameter_count = 1},
+    };
+    IrFunction functions[] = {{.name = S8("stack_records"), .symbol = {.value = 0}, .canonical_type = {.value = 3},
+                               .entry = {.value = 0}, .blocks = blocks, .instructions = instructions, .values = values,
+                               .block_count = BUSTER_ARRAY_LENGTH(blocks), .instruction_count = BUSTER_ARRAY_LENGTH(instructions),
+                               .value_count = BUSTER_ARRAY_LENGTH(values), .state = IR_FUNCTION_LOWERED}};
+    IrModule modules[] = {{.name = S8("stack_records"), .functions = functions, .function_count = 1, .lowered_function_count = 1}};
+    IrProgram program = {.arena = arena, .modules = modules, .types = {.types = types, .count = BUSTER_ARRAY_LENGTH(types)},
+                         .symbols = {.symbols = symbols, .count = 1}, .module_count = 1, .lowered_function_count = 1};
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.data_layout = S8("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+    LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    if (!llvm_bitcode_artifact_is_valid(first))
+    {
+        arguments->show(arguments, S8("LLVM stack records rejected: {S8} block={u32} instruction={u32}: {S8}\n"),
+                        llvm_bitcode_error_code_name(first.error.code), first.error.block.value, first.error.instruction.value,
+                        first.error.message);
+    }
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first));
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(second));
+    BUSTER_TEST(arguments, first.stats.function_count == 3 && first.stats.defined_function_count == 1);
+    BUSTER_TEST(arguments, first.bytes.length == second.bytes.length && first.bytes.length &&
+                           !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+
+    instructions[7].operand_count = 0;
+    LlvmBitcodeArtifact malformed = llvm_bitcode_emit_with_options(arena, &program, modules, 1, options);
+    BUSTER_TEST(arguments, !llvm_bitcode_artifact_is_valid(malformed) && !malformed.bytes.length);
+    BUSTER_TEST(arguments, malformed.error.code == LLVM_BITCODE_ERROR_IR_VALIDATION && malformed.error.instruction.value == 7);
+    return result;
 }
 
 // Independent, bounded reader for the unabbreviated records this writer emits.
@@ -693,6 +889,12 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult consumers = llvm_bitcode_test_consumers(arguments);
     result.test_count += consumers.test_count;
     result.succeeded_test_count += consumers.succeeded_test_count;
+    UnitTestResult stack_records = llvm_bitcode_test_stack_records(arguments);
+    result.test_count += stack_records.test_count;
+    result.succeeded_test_count += stack_records.succeeded_test_count;
+    UnitTestResult stack_scopes = llvm_bitcode_test_stack_scopes(arguments);
+    result.test_count += stack_scopes.test_count;
+    result.succeeded_test_count += stack_scopes.succeeded_test_count;
     UnitTestResult switches = llvm_bitcode_test_switches(arguments);
     result.test_count += switches.test_count;
     result.succeeded_test_count += switches.succeeded_test_count;
