@@ -1,0 +1,37 @@
+name: Mission 10 capability diagnostic
+
+on:
+  push:
+    branches: ['diagnostics/mission10-capability-bb96b5d']
+    paths: ['.github/workflows/mission10-capability-diagnostic.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
+          persist-credentials: false
+      - name: Record source identity and capability implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mission10-source"
+          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/mission10-source/identity.txt"
+          git grep -n -E 'c_conditional_builtin_supported|c_symbol_builtin_from_spelling|BUILTIN_NAN|BUILTIN_NANS|__builtin_nans|__builtin_nan' -- src tests docs/agents docs/performance-audits > "$RUNNER_TEMP/mission10-source/matches.txt" || status=$?
+          if [ "${status:-0}" -gt 1 ]; then exit "$status"; fi
+          cat "$RUNNER_TEMP/mission10-source/matches.txt"
+          git archive HEAD src/buster/lib/compiler/frontend/c src/buster/tests/compiler tests docs/agents docs/performance-audits .github/workflows/ci.yml build.sh | gzip > "$RUNNER_TEMP/mission10-source/pinned-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mission10-pinned-source-${{ github.sha }}
+          path: ${{ runner.temp }}/mission10-source
+          if-no-files-found: error
+          retention-days: 14
