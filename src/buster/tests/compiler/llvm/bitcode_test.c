@@ -564,7 +564,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
     {
         instructions[index + 1] = (IrInstruction){
             .opcode = IR_OPCODE_UNARY, .canonical_type = {.value = 1}, .result = {.value = index + 1},
-            .operands = operands + index, .operand_count = 1, .unary_operation = operations[index],
+            .operands = operands + index, .operand_count = 1, .unary_operation = (u8)operations[index],
             .next = {.value = index + 2},
             .conversion_operation = IR_CONVERSION_COUNT, .binary_operation = IR_BINARY_COUNT,
         };
@@ -598,7 +598,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
         u32 width = widths[index];
         types[1].bit_width = width;
         types[1].layout.size = (width + 7) / 8;
-        types[1].layout.alignment = types[1].layout.size;
+        types[1].layout.alignment = (u32)types[1].layout.size;
         constant_immediate = index & 1 ? 0 : 1;
         LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
         LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
