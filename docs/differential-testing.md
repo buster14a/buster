@@ -166,8 +166,12 @@ sanitizer runs remain separate, unchanged obligations.
 
 Supply a reviewed, standard-C11 source using the native Windows ABI. GNU
 extensions, compiler builtins, signed-overflow-dependent behavior and
-incompatible aliasing semantics are outside this subset. `/J` gives plain
-`char` the unsigned behavior required by Buster; `/Od` and `/O2` are separate
+incompatible aliasing semantics are outside this subset. Use explicit
+`unsigned char` for high-bit byte values: Buster currently accepts
+`-funsigned-char` without promoting plain `char` as unsigned on Windows
+([#1000](https://github.com/buster14a/buster/issues/1000)). `/J` sets the
+reference's intended plain-`char` policy, but such dependent sources are not
+admitted until that compiler defect is repaired. `/Od` and `/O2` are separate
 reference controls. The optional fixed `--host` translation unit is compiled
 independently for each reference and once for all Buster configurations. A
 successful custom reference must exit zero in both optimization variants.

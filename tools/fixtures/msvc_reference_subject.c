@@ -22,7 +22,7 @@ int msvc_subject_calls_host(void)
     struct MsvcSmall p = {2u, 4u};
     struct MsvcLarge q = {5u, 8u, 10u};
     struct MsvcLarge answer = msvc_host_make(19u, 23u, 29u);
-    char byte = (char)255;
+    unsigned char byte = (unsigned char)255;
     return msvc_host_mix(p, 9u, q, 3.0) != 160u ||
         answer.a != 19u || answer.b != 23u || answer.c != 29u || (unsigned)byte != 255u;
 }
