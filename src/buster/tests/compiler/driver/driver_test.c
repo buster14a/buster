@@ -2868,9 +2868,42 @@ struct CompilerDriverTestNativeFrameLinkCacheEntry
     u32 fixture;
 };
 
+// Diagnostic-only, non-overlapping operation intervals within the two large
+// driver fixtures. The existing fixture and module records remain authoritative.
+typedef struct CompilerDriverTestOperationTiming CompilerDriverTestOperationTiming;
+struct CompilerDriverTestOperationTiming
+{
+    u64 calls;
+    u64 duration_ns;
+};
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_operation_end(CompilerDriverTestOperationTiming* timing, TimeDataType start)
+{
+    timing->calls += 1;
+    timing->duration_ns += timestamp_ns_between(start, timestamp_take());
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_driver_test_operation_row(UnitTestArguments* arguments, String8 fixture, String8 operation,
+                                                             CompilerDriverTestOperationTiming timing)
+{
+    arguments->show(arguments,
+        S8("DRIVER_OPERATION_TIMING_V1 fixture={S8} operation={S8} calls={u64} duration_ns={u64} measurement=inclusive-wall status=completed\n"),
+        fixture, operation, timing.calls, timing.duration_ns);
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    bool timing = arguments->fixture_timing_report;
+    TimeDataType body_start = timing ? timestamp_take() : (TimeDataType){0};
+    CompilerDriverTestOperationTiming compile_time = {0};
+    CompilerDriverTestOperationTiming positive_time = {0};
+    CompilerDriverTestOperationTiming identity_time = {0};
+    CompilerDriverTestOperationTiming host_compile_time = {0};
+    CompilerDriverTestOperationTiming host_link_launch_time = {0};
+    CompilerDriverTestOperationTiming host_link_wait_time = {0};
+    CompilerDriverTestOperationTiming run_launch_time = {0};
+    CompilerDriverTestOperationTiming run_wait_time = {0};
     String8 targets[] = {S8("x86_64-linux"), S8("x86_64-macos"), S8("x86_64-windows"),
                          S8("x86_64-android"), S8("x86_64-ios"), S8("x86_64-uefi"),
                          S8("aarch64-linux"), S8("aarch64-macos"), S8("aarch64-windows"),
@@ -2924,16 +2957,19 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         host_command[host_count++] = host_sources[observer];
         host_command[host_count++] = S8("-o");
         host_command[host_count++] = host_objects[observer];
+        TimeDataType host_start = timing ? timestamp_take() : (TimeDataType){0};
         ProcessSpawnResult host_spawn = os_process_spawn((SliceString8){.pointer = host_command, .length = host_count},
             (SliceString8){0}, (SliceString8){0},
             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
         if (!host_spawn.handle)
         {
+            if (timing) { compiler_driver_test_operation_end(&host_compile_time, host_start); }
             host_observer_available = false;
             arguments->show(arguments, S8("NATIVE_FRAME_VECTOR_OBSERVER status=skipped reason=missing-clang\n"));
             continue;
         }
         host_compiled[observer] = os_process_wait_sync(arguments->arena, host_spawn).result == PROCESS_RESULT_SUCCESS;
+        if (timing) { compiler_driver_test_operation_end(&host_compile_time, host_start); }
         BUSTER_TEST(arguments, host_compiled[observer]);
     }
 #endif
@@ -2956,7 +2992,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                 S8("-DBUSTER_SIGNBIT_BINARY128_REJECTION=1")};
                             CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                             invocation.reject_machine_fallback = mode != 0;
+                            TimeDataType compile_start = timing ? timestamp_take() : (TimeDataType){0};
                             CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                            if (timing) { compiler_driver_test_operation_end(&compile_time, compile_start); }
                             String8 description = string_format(temporary.arena, S8("frame vector {S8} {S8} {S8} {S8} {S8} PIC={u32}: {S8}"),
                                 sources[fixture], targets[target], modes[mode], frontends[frontend], cpus[cpu], pic, compiled.diagnostic);
                             TargetDataLayout layout = target_data_layout(invocation.target);
@@ -2996,7 +3034,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                 CompilerDriverInvocation positive = compiler_driver_parse_arguments(temporary.arena,
                                     (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
                                 positive.reject_machine_fallback = mode != 0;
+                                TimeDataType positive_start = timing ? timestamp_take() : (TimeDataType){0};
                                 CompilerDriverResult supported = compiler_driver_execute_invocation(temporary.arena, positive);
+                                if (timing) { compiler_driver_test_operation_end(&positive_time, positive_start); }
                                 BUSTER_TEST_RAW(arguments, supported.error == COMPILER_DRIVER_ERROR_NONE && supported.has_object &&
                                     supported.codegen_statistics.function_count == 2 &&
                                     supported.codegen_statistics.fallback_function_count == 0, description);
@@ -3018,6 +3058,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                 compiled.error == COMPILER_DRIVER_ERROR_NONE && (observer == UINT32_MAX || host_compiled[observer]))
                             {
                                 native_frame_run_count += 1;
+                                TimeDataType identity_start = timing ? timestamp_take() : (TimeDataType){0};
                                 ByteSlice object_bytes = file_read(temporary.arena, object, (FileReadOptions){0});
                                 u64 object_hash = object_bytes.pointer ? buster_hash_64(object_bytes.pointer, object_bytes.length) : 0;
                                 CompilerDriverTestNativeFrameLinkCacheEntry* cached = 0;
@@ -3039,6 +3080,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                         }
                                     }
                                 }
+                                if (timing) { compiler_driver_test_operation_end(&identity_time, identity_start); }
 
                                 String8 executable = {0};
                                 bool link_ok = false;
@@ -3088,9 +3130,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                     link_command[link_count++] = S8("-o");
                                     link_command[link_count++] = executable;
                                     native_frame_link_count += 1;
+                                    TimeDataType link_launch_start = timing ? timestamp_take() : (TimeDataType){0};
                                     ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = link_command, .length = link_count},
                                         (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
-                                    link_ok = linked.handle && os_process_wait_sync(temporary.arena, linked).result == PROCESS_RESULT_SUCCESS;
+                                    if (timing) { compiler_driver_test_operation_end(&host_link_launch_time, link_launch_start); }
+                                    if (linked.handle)
+                                    {
+                                        TimeDataType link_wait_start = timing ? timestamp_take() : (TimeDataType){0};
+                                        link_ok = os_process_wait_sync(temporary.arena, linked).result == PROCESS_RESULT_SUCCESS;
+                                        if (timing) { compiler_driver_test_operation_end(&host_link_wait_time, link_wait_start); }
+                                    }
                                     if (link_ok && retain_object)
                                     {
                                         CompilerDriverTestNativeFrameLinkCacheEntry* entry = native_frame_link_cache + native_frame_link_cache_count++;
@@ -3107,7 +3156,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
                                     }
                                 }
                                 BUSTER_TEST(arguments, link_ok);
-                                if (link_ok) { BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, executable)); }
+                                if (link_ok)
+                                {
+                                    String8 run_arguments[] = {executable};
+                                    TimeDataType run_launch_start = timing ? timestamp_take() : (TimeDataType){0};
+                                    ProcessSpawnResult run_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run_arguments),
+                                        (SliceString8){0}, (SliceString8){0},
+                                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                                    if (timing) { compiler_driver_test_operation_end(&run_launch_time, run_launch_start); }
+                                    bool run_ok = false;
+                                    if (run_spawn.handle)
+                                    {
+                                        TimeDataType run_wait_start = timing ? timestamp_take() : (TimeDataType){0};
+                                        run_ok = os_process_wait_deadline(temporary.arena, run_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                                        if (timing) { compiler_driver_test_operation_end(&run_wait_time, run_wait_start); }
+                                    }
+                                    BUSTER_TEST(arguments, run_ok);
+                                }
                             }
 #endif
                             scratch_end(temporary);
@@ -3130,6 +3195,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_frame_vectors(Uni
         (void)os_file_delete(native_frame_link_cache[cache_index].executable_path);
     }
 #endif
+    if (timing)
+    {
+        CompilerDriverTestOperationTiming body_time = {.calls = 1, .duration_ns = timestamp_ns_between(body_start, timestamp_take())};
+        String8 fixture_name = S8("native_frame_vectors");
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("body"), body_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("buster_compile"), compile_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("positive_compile"), positive_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("object_identity"), identity_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("host_compile_launch_wait"), host_compile_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("link_launch"), host_link_launch_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("link_wait"), host_link_wait_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("run_launch"), run_launch_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("run_wait"), run_wait_time);
+    }
     return result;
 }
 
@@ -4460,6 +4539,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_platform_variadi
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    bool timing = arguments->fixture_timing_report;
+    TimeDataType primary_start = timing ? timestamp_take() : (TimeDataType){0};
+    CompilerDriverTestOperationTiming strict_time = {0};
+    CompilerDriverTestOperationTiming reference_time = {0};
+    CompilerDriverTestOperationTiming sentinel_write_time = {0};
+    CompilerDriverTestOperationTiming sentinel_read_time = {0};
     String8 targets[] = {S8("x86_64-unknown-linux"), S8("aarch64-unknown-linux"), S8("x86_64-apple-macos"),
                          S8("aarch64-apple-macos"), S8("x86_64-unknown-windows"), S8("aarch64-unknown-windows")};
     String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
@@ -4516,12 +4601,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                     ByteSlice sentinel = {.pointer = (u8*)"existing-output", .length = 15};
                     if (fallbacks)
                     {
+                        TimeDataType sentinel_start = timing ? timestamp_take() : (TimeDataType){0};
                         BUSTER_TEST(arguments, file_write(output, sentinel));
+                        if (timing) { compiler_driver_test_operation_end(&sentinel_write_time, sentinel_start); }
                     }
                     String8 command[] = {S8("-c"), S8("-g0"), S8("-target"), targets[target], modes[mode], frontends[frontend],
                                          S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, corpus[fixture].path};
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    TimeDataType strict_start = timing ? timestamp_take() : (TimeDataType){0};
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    if (timing) { compiler_driver_test_operation_end(&strict_time, strict_start); }
                     String8 description = string_format(arguments->arena, S8("strict {S8} {S8} {S8} {S8}: {S8}"),
                         targets[target], modes[mode], frontends[frontend], corpus[fixture].path, compiled.diagnostic);
                     BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.function_count != 0, description);
@@ -4534,14 +4623,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                         BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_opcode_counts[IR_OPCODE_COUNT] == signatures, description);
                         BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_opcode_counts[IR_OPCODE_CALL] == calls, description);
                         BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_opcode_counts[IR_OPCODE_STACK_ALLOCATE] == dynamic_stacks, description);
+                        TimeDataType read_start = timing ? timestamp_take() : (TimeDataType){0};
                         ByteSlice retained = file_read(temporary.arena, output, (FileReadOptions){0});
+                        if (timing) { compiler_driver_test_operation_end(&sentinel_read_time, read_start); }
                         BUSTER_TEST_RAW(arguments, retained.length == sentinel.length &&
                             memcmp(retained.pointer, sentinel.pointer, sentinel.length) == 0, description);
                         // The direct oracle still supports each refused MIR row.
                         // A frontend or object-writer failure is not an accepted
                         // fallback and must not manufacture a green coverage row.
                         invocation.reject_machine_fallback = false;
+                        TimeDataType reference_start = timing ? timestamp_take() : (TimeDataType){0};
                         CompilerDriverResult reference = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        if (timing) { compiler_driver_test_operation_end(&reference_time, reference_start); }
                         BUSTER_TEST_RAW(arguments, reference.error == COMPILER_DRIVER_ERROR_NONE && reference.has_object, reference.diagnostic);
                         BUSTER_TEST_RAW(arguments, reference.codegen_statistics.function_count == compiled.codegen_statistics.function_count &&
                             reference.codegen_statistics.fallback_function_count == fallbacks, description);
@@ -4566,6 +4659,16 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_machine_fallback(UnitTes
                     result.test_count - result.succeeded_test_count - failures_before);
             }
         }
+    }
+    if (timing)
+    {
+        CompilerDriverTestOperationTiming primary_time = {.calls = 1, .duration_ns = timestamp_ns_between(primary_start, timestamp_take())};
+        String8 fixture_name = S8("machine_fallback_primary_corpus");
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("body"), primary_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("strict_compile"), strict_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("reference_compile"), reference_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("sentinel_write"), sentinel_write_time);
+        compiler_driver_test_operation_row(arguments, fixture_name, S8("sentinel_read"), sentinel_read_time);
     }
     // Keep complete AArch64 vector and integer-pair fixtures strict so a
     // later operation cannot silently restore per-function fallback.

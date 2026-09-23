@@ -2,6 +2,8 @@
 
 This is the first diagnostic stage of [#708](https://github.com/buster14a/buster/issues/708),
 not a driver optimization or a claim that the Windows tail has been reduced.
+The current-source operation split for [#949](https://github.com/buster14a/buster/issues/949)
+uses the same opt-in environment variable and Windows diagnostic workflow.
 
 ## What the archived run establishes
 
@@ -98,6 +100,20 @@ stacks. Replay the saved sanitized Debug test command in isolation with
 `BUSTER_TEST_JOBS=1`, preserving its exact generated sanitizer environment, and
 compare it with the full-matrix diagnostic. Do not regenerate a tree while its
 matrix is running or confuse an isolated test with full CI coverage.
+
+With this opt-in setting, `native_frame_vectors` also emits aggregate
+`DRIVER_OPERATION_TIMING_V1` rows for Buster compilation, positive-control
+compilation, object-byte identity checks, host-object compilation, host-link
+launch/wait, and executable launch/wait. The `machine_fallback_primary_corpus`
+rows cover only that fixture's first target/mode/frontend corpus, including
+strict and reference compilations and sentinel I/O; later subcorpora remain in
+the enclosing fixture interval. A `body` row gives the measured scope boundary.
+Each row has `calls` and `duration_ns`; zero calls means that the platform or
+test outcome did not enter that operation. The difference between `body` and
+listed operations includes unsampled setup, checks, cleanup, and the observer
+itself, so do not label it all as removable setup. Intervals are wall times
+under matrix contention, never CPU usage. Compare identical configurations and
+correlate with the retained Windows process events before choosing a repair.
 
 For a subsequent optimization, retain at least three successful comparable full
 uninstrumented runs per arm, matched runner/image and configuration identities,
