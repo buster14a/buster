@@ -9,29 +9,152 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  baseline:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
           ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
           persist-credentials: false
-      - name: Record source identity and capability implementation
+      - name: Prepare independent source and record hosted provenance
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/mission10-source"
-          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/mission10-source/identity.txt"
-          git grep -n -E 'c_conditional_builtin_supported|c_symbol_builtin_from_spelling|BUILTIN_NAN|BUILTIN_NANS|__builtin_nans|__builtin_nan' -- src tests docs/agents docs/performance-audits > "$RUNNER_TEMP/mission10-source/matches.txt" || status=$?
-          if [ "${status:-0}" -gt 1 ]; then exit "$status"; fi
-          cat "$RUNNER_TEMP/mission10-source/matches.txt"
-          git archive HEAD src/buster/lib/compiler/frontend/c src/buster/tests/compiler tests docs/agents docs/performance-audits .github/workflows/ci.yml build.sh | gzip > "$RUNNER_TEMP/mission10-source/pinned-source.tar.gz"
+          evidence="$RUNNER_TEMP/mission10-baseline"
+          mkdir -p "$evidence"
+          git rev-parse HEAD HEAD^{tree} | tee "$evidence/source-identity.txt"
+          { uname -a; clang --version; gcc --version; cmake --version; ninja --version; } > "$evidence/tools.txt"
+          cat > "$evidence/record.sh" <<'EOF'
+          record() {
+              name="$1"; shift
+              printf '%q ' "$@" > "$evidence/$name.command"
+              printf '\n' >> "$evidence/$name.command"
+              set +e
+              "$@" > "$evidence/$name.log" 2>&1
+              LAST=$?
+              set -e
+              printf '%s\t%s\n' "$name" "$LAST" | tee -a "$evidence/status.tsv"
+              cat "$evidence/$name.log"
+              return 0
+          }
+          EOF
+          cat > "$evidence/packet.c" <<'EOF'
+          #if !__has_builtin(__builtin_assume_aligned)
+          #error assume_aligned is not advertised
+          #endif
+          _Alignas(32) static unsigned char storage[64];
+          static volatile unsigned int prefix = 5;
+          static int pointer_calls;
+          static int offset_calls;
+          static unsigned char *payload(void)
+          {
+              pointer_calls += 1;
+              return storage + prefix;
+          }
+          static unsigned int payload_offset(void)
+          {
+              offset_calls += 1;
+              return prefix;
+          }
+          int main(void)
+          {
+              for (unsigned int i = 0; i < 64; i += 1) storage[i] = (unsigned char)i;
+          #if RUNTIME
+              unsigned char *p = __builtin_assume_aligned(payload(), 32, payload_offset());
+          #else
+              unsigned char *p = __builtin_assume_aligned(payload(), 32, 5);
+          #endif
+              unsigned int checksum = 0;
+              for (unsigned int i = 0; i < 8; i += 1) checksum += p[i];
+              int valid = p == storage + 5 && checksum == 68 && pointer_calls == 1;
+          #if RUNTIME
+              valid = valid && offset_calls == 1;
+          #else
+              valid = valid && offset_calls == 0;
+          #endif
+              return valid ? 0 : 1;
+          }
+          EOF
+          cat > "$evidence/result-type.c" <<'EOF'
+          _Alignas(32) static unsigned char storage[64];
+          int main(void)
+          {
+              return _Generic(__builtin_assume_aligned(storage, 32), void *: 0, default: 1);
+          }
+          EOF
+          cat > "$evidence/invalid-offset.c" <<'EOF'
+          void *f(void *p, void *offset) { return __builtin_assume_aligned(p, 32, offset); }
+          EOF
+          cat > "$evidence/invalid-alignment.c" <<'EOF'
+          void *f(void *p, int alignment) { return __builtin_assume_aligned(p, alignment); }
+          EOF
+          sha256sum "$evidence"/*.c > "$evidence/inputs.sha256"
+          source "$evidence/record.sh"
+          for cc in clang gcc; do
+            for opt in 0 2; do
+              for runtime in 0 1; do
+                name="$cc-O$opt-runtime$runtime"
+                record "$name-compile" "$cc" -std=gnu11 -O"$opt" -DRUNTIME="$runtime" "$evidence/packet.c" -o "$evidence/$name"
+                if [ "$LAST" -eq 0 ]; then record "$name-execute" "$evidence/$name"; fi
+              done
+              name="$cc-O$opt-result-type"
+              record "$name-compile" "$cc" -std=gnu11 -O"$opt" "$evidence/result-type.c" -o "$evidence/$name"
+              if [ "$LAST" -eq 0 ]; then record "$name-execute" "$evidence/$name"; fi
+            done
+            for case in invalid-offset invalid-alignment; do
+              record "$cc-$case" "$cc" -std=gnu11 -Wall -Werror -c "$evidence/$case.c" -o "$evidence/$cc-$case.o"
+            done
+          done
+      - name: Build pinned Buster through the hosted bootstrap exception
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/mission10-baseline"
+          source "$evidence/record.sh"
+          record build-driver clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/mission10-driver"
+          test "$LAST" -eq 0
+          record configure "$RUNNER_TEMP/mission10-driver" generate --cc clang --config Release --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF -DBUSTER_UNITY_BUILD=OFF
+          test "$LAST" -eq 0
+          record build "$RUNNER_TEMP/mission10-driver" build --config Release -t ide
+          test "$LAST" -eq 0
+          sha256sum build/Release/ide > "$evidence/compiler.sha256"
+      - name: Run unchanged baseline through all native allocator and frontend modes
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/mission10-baseline"
+          source "$evidence/record.sh"
+          for mode in none mir-stack fast quality; do
+            for frontend in -fc-direct-ssa -fno-c-direct-ssa; do
+              for runtime in 0 1; do
+                name="buster-$mode-$frontend-runtime$runtime"
+                record "$name-compile" build/Release/ide cc -std=gnu11 -fregister-allocator="$mode" -fno-machine-fallback -fverify-codegen "$frontend" -DRUNTIME="$runtime" "$evidence/packet.c" -o "$evidence/$name"
+                if [ "$LAST" -eq 0 ]; then record "$name-execute" "$evidence/$name"; fi
+              done
+              name="buster-$mode-$frontend-result-type"
+              record "$name-compile" build/Release/ide cc -std=gnu11 -fregister-allocator="$mode" -fno-machine-fallback -fverify-codegen "$frontend" "$evidence/result-type.c" -o "$evidence/$name"
+              if [ "$LAST" -eq 0 ]; then record "$name-execute" "$evidence/$name"; fi
+            done
+          done
+          for case in invalid-offset invalid-alignment; do
+            record "buster-$case-object" build/Release/ide cc -c "$evidence/$case.c" -o "$evidence/buster-$case.o"
+            record "buster-$case-syntax" build/Release/ide cc -fsyntax-only "$evidence/$case.c"
+          done
+      - name: Preserve baseline self-host fixed-point evidence
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/mission10-baseline"
+          source "$evidence/record.sh"
+          record self-host "$RUNNER_TEMP/mission10-driver" test_self_host --config Release
+          test "$LAST" -eq 0
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mission10-pinned-source-${{ github.sha }}
-          path: ${{ runner.temp }}/mission10-source
+          name: mission10-baseline-${{ github.sha }}
+          path: ${{ runner.temp }}/mission10-baseline
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
