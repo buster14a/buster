@@ -161,8 +161,12 @@ static void test_publication_and_authority(void)
     CHECK(tp_retirement_store_authority_matches(&fixture.store, fixture.private_root,
                                                 TP_RETIREMENT_EXECUTION_RECEIPT_PATH, "job-1", 2,
                                                 digest_a, digest_b, &authority));
+    CHECK(tp_retirement_store_authority_reopen(fixture.root, fixture.private_root,
+                                               "job-1", 2, digest_a, digest_b, &authority));
     TpRetirementReceiptAuthority substituted = authority;
     substituted.receipt_sha256[0] = substituted.receipt_sha256[0] == '0' ? '1' : '0';
+    CHECK(!tp_retirement_store_authority_reopen(fixture.root, fixture.private_root,
+                                                "job-1", 2, digest_a, digest_b, &substituted));
     CHECK(!tp_retirement_store_authority_matches(&fixture.store, fixture.private_root,
                                                  TP_RETIREMENT_EXECUTION_RECEIPT_PATH, "job-1", 2,
                                                  digest_a, digest_b, &substituted));
@@ -462,6 +466,9 @@ static void test_actual_encoder_fixture(char const* source_root)
         TP_RETIREMENT_EXECUTION_RECEIPT_PATH, "job-1", 2, digest_a, digest_b, &authority));
     CHECK(tp_retirement_store_authority_matches(&fixture.store, fixture.private_root,
         TP_RETIREMENT_EXECUTION_RECEIPT_PATH, "job-1", 2, digest_a, digest_b, &authority));
+    tp_retirement_store_close(&fixture.store);
+    CHECK(tp_retirement_store_authority_reopen(fixture.root, fixture.private_root,
+        "job-1", 2, digest_a, digest_b, &authority));
     fixture_stop(&fixture);
 }
 

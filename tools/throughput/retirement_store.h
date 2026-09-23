@@ -77,6 +77,12 @@ int tp_retirement_store_receipt_authority(TpRetirementStore* store, int authorit
 int tp_retirement_store_authority_matches(TpRetirementStore* store, int authority_root, char const* path,
     char const* job, uint64_t attempt, char const* plan_sha256, char const* context_sha256,
     TpRetirementReceiptAuthority const* trusted);
+/* Fresh export/replay consumer: trusted must arrive on the authenticated
+ * control channel; the result bundle cannot supply it. This checks the two
+ * sealed files without relying on the producer's in-memory store state. */
+int tp_retirement_store_authority_reopen(int result_root, int authority_root,
+    char const* job, uint64_t attempt, char const* plan_sha256, char const* context_sha256,
+    TpRetirementReceiptAuthority const* trusted);
 void tp_retirement_store_close(TpRetirementStore* store);
 #endif
 #endif

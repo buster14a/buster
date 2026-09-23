@@ -634,12 +634,35 @@ int tp_retirement_store_receipt_authority(TpRetirementStore* store, int authorit
     return valid;
 }
 
-int tp_retirement_store_authority_matches(TpRetirementStore* store, int authority_root, char const* path,
+BUSTER_GLOBAL_LOCAL int tp_retirement_store_reopen_file(TpRetirementStore* store, char const* path,
+                                                        char const* digest, uint64_t maximum)
+{
+    struct stat info = {0};
+    int valid = store && tp_retirement_store_root(store) && tp_retirement_store_path(path) &&
+                tp_retirement_store_digest(digest) &&
+                fstatat(store->root, path, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+                S_ISREG(info.st_mode) && info.st_size > 0 && (uint64_t)info.st_size <= maximum;
+    if (valid)
+    {
+        TpRetirementStoredFile file = {0};
+        strcpy(file.path, path);
+        strcpy(file.sha256, digest);
+        file.bytes = (uint64_t)info.st_size;
+        file.device = info.st_dev;
+        file.inode = info.st_ino;
+        file.owner = info.st_uid;
+        file.parent_device = store->root_identity.st_dev;
+        file.parent_inode = store->root_identity.st_ino;
+        valid = tp_retirement_store_file(store, &file, NULL);
+    }
+    return valid;
+}
+
+int tp_retirement_store_authority_reopen(int result_root, int authority_root,
     char const* job, uint64_t attempt, char const* plan_sha256, char const* context_sha256,
     TpRetirementReceiptAuthority const* trusted)
 {
-    int valid = trusted && path && !strcmp(path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH) &&
-                tp_retirement_store_token(job) && attempt &&
+    int valid = trusted && tp_retirement_store_token(job) && attempt &&
                 tp_retirement_store_digest(plan_sha256) && tp_retirement_store_digest(context_sha256) &&
                 tp_retirement_store_token(trusted->job) &&
                 tp_retirement_store_digest(trusted->plan_sha256) &&
@@ -648,46 +671,45 @@ int tp_retirement_store_authority_matches(TpRetirementStore* store, int authorit
                 tp_retirement_store_digest(trusted->authority_sha256) &&
                 !strcmp(trusted->job, job) && trusted->attempt == attempt &&
                 !strcmp(trusted->plan_sha256, plan_sha256) &&
-                !strcmp(trusted->context_sha256, context_sha256) && tp_retirement_store_validate(store);
-    int found = 0;
+                !strcmp(trusted->context_sha256, context_sha256);
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[512], expected[65];
+    size_t length = 0;
+    if (valid) valid = tp_retirement_store_authority_bytes(trusted, name, body, &length);
+    if (valid)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, body, length);
+        sha256_finish_hex(&hash, (char8*)expected);
+        valid = !strcmp(expected, trusted->authority_sha256);
+    }
+    TpRetirementStore result_store, private_store;
+    TpRetirementStoredFile result_file, private_file;
+    int result_open = valid && tp_retirement_store_open(&result_store, result_root, &result_file, 1);
+    int private_open = result_open && tp_retirement_store_open(&private_store, authority_root, &private_file, 1);
+    valid = private_open && tp_retirement_store_private_root(&result_store, &private_store);
+    if (valid) valid = tp_retirement_store_reopen_file(&private_store, name, expected, length) &&
+                       tp_retirement_store_reopen_file(&result_store, TP_RETIREMENT_EXECUTION_RECEIPT_PATH,
+                                                       trusted->receipt_sha256, UINT64_C(1048576));
+    if (private_open) tp_retirement_store_close(&private_store);
+    if (result_open) tp_retirement_store_close(&result_store);
+    return valid;
+}
+
+int tp_retirement_store_authority_matches(TpRetirementStore* store, int authority_root, char const* path,
+    char const* job, uint64_t attempt, char const* plan_sha256, char const* context_sha256,
+    TpRetirementReceiptAuthority const* trusted)
+{
+    int valid = store && trusted && path && !strcmp(path, TP_RETIREMENT_EXECUTION_RECEIPT_PATH) &&
+                tp_retirement_store_validate(store);
+    unsigned found = 0;
     for (unsigned i = 0; valid && i < store->count; ++i)
         if (!strcmp(store->files[i].path, path) &&
             !strcmp(store->files[i].sha256, trusted->receipt_sha256)) ++found;
     valid = valid && found == 1 &&
-            tp_retirement_store_receipt_validate(store, job, attempt, plan_sha256, context_sha256);
-    if (valid)
-    {
-        char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[512], expected_digest[65];
-        size_t length = 0;
-        valid = tp_retirement_store_authority_bytes(trusted, name, body, &length);
-        if (valid)
-        {
-            Sha256 hash;
-            sha256_init(&hash);
-            sha256_add(&hash, body, length);
-            sha256_finish_hex(&hash, (char8*)expected_digest);
-            valid = !strcmp(expected_digest, trusted->authority_sha256);
-        }
-        TpRetirementStore private_store;
-        TpRetirementStoredFile private_file = {0};
-        int opened = valid && tp_retirement_store_open(&private_store, authority_root, &private_file, 1);
-        if (opened) valid = tp_retirement_store_private_root(store, &private_store);
-        struct stat info;
-        if (valid) valid = fstatat(private_store.root, name, &info, AT_SYMLINK_NOFOLLOW) == 0;
-        if (valid)
-        {
-            strcpy(private_file.path, name);
-            strcpy(private_file.sha256, expected_digest);
-            private_file.bytes = length;
-            private_file.device = info.st_dev;
-            private_file.inode = info.st_ino;
-            private_file.owner = info.st_uid;
-            private_file.parent_device = private_store.root_identity.st_dev;
-            private_file.parent_inode = private_store.root_identity.st_ino;
-            valid = tp_retirement_store_file(&private_store, &private_file, NULL);
-        }
-        if (opened) tp_retirement_store_close(&private_store);
-    }
+            tp_retirement_store_receipt_validate(store, job, attempt, plan_sha256, context_sha256) &&
+            tp_retirement_store_authority_reopen(store->root, authority_root,
+                job, attempt, plan_sha256, context_sha256, trusted);
     if (store && !valid) store->failed = 1;
     return valid;
 }
