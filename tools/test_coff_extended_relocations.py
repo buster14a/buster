@@ -75,8 +75,7 @@ def main():
         cwd=repo,
     )
     clang_readobj = output / "clang-extended-relocations.readobj.txt"
-    with clang_readobj.open("wb") as log:
-        run(["llvm-readobj", "--file-headers", "--sections", "--relocations", clang_input],
+    run(["llvm-readobj", "--file-headers", "--sections", "--relocations", clang_input],
             cwd=repo, log_path=clang_readobj)
     check_extended_coff(clang_readobj)
 
@@ -98,8 +97,7 @@ def main():
         cwd=repo,
     )
     buster_readobj = output / "buster-extended-relocations.readobj.txt"
-    with buster_readobj.open("wb") as log:
-        run(["llvm-readobj", "--file-headers", "--sections", "--relocations", buster_object],
+    run(["llvm-readobj", "--file-headers", "--sections", "--relocations", buster_object],
             cwd=repo, log_path=buster_readobj)
     check_extended_coff(buster_readobj)
 
