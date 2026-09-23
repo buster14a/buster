@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define TP_RETIREMENT_STORE_FILES 4096u
 #define TP_RETIREMENT_STORE_PATH_BYTES 192u
@@ -28,6 +29,7 @@ typedef struct TpRetirementStoredFile
     dev_t parent_device;
     ino_t parent_inode;
     uid_t owner;
+    struct timespec changed;
 } TpRetirementStoredFile;
 
 typedef struct TpRetirementStore
@@ -54,7 +56,8 @@ typedef struct TpRetirementReceiptAuthority
 {
     /* The service must persist and send this on its authenticated private
      * channel. Copying these fields into a bundle does not authenticate it. */
-    char job[129], plan_sha256[65], context_sha256[65], receipt_sha256[65], authority_sha256[65];
+    char job[129], plan_sha256[65], context_sha256[65], receipt_sha256[65];
+    char identity_sha256[65], authority_sha256[65];
     uint64_t attempt;
 } TpRetirementReceiptAuthority;
 
@@ -80,6 +83,8 @@ int tp_retirement_store_authority_matches(TpRetirementStore* store, int authorit
 /* Fresh export/replay consumer: trusted must arrive on the authenticated
  * control channel; the result bundle cannot supply it. This reopens the
  * private reference, receipt and every receipt shard without producer memory.
+ * The private reference binds the original receipt and shard inode identities,
+ * so byte-identical replacement at the service root also fails readback.
  * The complete result bundle still needs the service's separate manifest and
  * full-tree validation before an experiment can be acknowledged. */
 int tp_retirement_store_authority_reopen(int result_root, int authority_root,

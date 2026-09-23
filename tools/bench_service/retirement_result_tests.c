@@ -210,6 +210,40 @@ static void test_reopened_shard_inventory(void)
     CHECK(!tp_retirement_store_authority_reopen(fixture.root, fixture.private_root,
         "job-1", 2, digest_a, digest_b, &authority));
     fixture_stop(&fixture);
+
+    CHECK(fixture_start(&fixture, 4));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(mkdirat(fixture.root, "evidence", 0700) == 0);
+    CHECK(fixture_publish(&fixture, "evidence/shard.jsonl", "{}\n", 3, 3));
+    CHECK(fixture_receipt(&fixture, "evidence/shard.jsonl", "{}\n", 3));
+    CHECK(tp_retirement_store_receipt_authority(&fixture.store, fixture.private_root,
+        TP_RETIREMENT_EXECUTION_RECEIPT_PATH, "job-1", 2, digest_a, digest_b, &authority));
+    tp_retirement_store_close(&fixture.store);
+    directory = openat(fixture.root, "evidence", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    CHECK(directory >= 0 && unlinkat(directory, "shard.jsonl", 0) == 0);
+    int replacement = directory >= 0 ? openat(directory, "shard.jsonl",
+        O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600) : -1;
+    CHECK(replacement >= 0 && write(replacement, "{}\n", 3) == 3 &&
+        fchmod(replacement, 0400) == 0 && close(replacement) == 0);
+    if (directory >= 0) CHECK(close(directory) == 0);
+    CHECK(!tp_retirement_store_authority_reopen(fixture.root, fixture.private_root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    fixture_stop(&fixture);
+
+    CHECK(fixture_start(&fixture, 4));
+    CHECK(tp_retirement_store_plan(&fixture.store, 2, 3, 1024));
+    CHECK(fixture_publish(&fixture, "shard.jsonl", "{}\n", 3, 3));
+    CHECK(fixture_receipt(&fixture, "shard.jsonl", "{}\n", 3));
+    CHECK(tp_retirement_store_receipt_authority(&fixture.store, fixture.private_root,
+        TP_RETIREMENT_EXECUTION_RECEIPT_PATH, "job-1", 2, digest_a, digest_b, &authority));
+    tp_retirement_store_close(&fixture.store);
+    CHECK(fchmodat(fixture.root, "shard.jsonl", 0600, 0) == 0);
+    replacement = openat(fixture.root, "shard.jsonl", O_WRONLY | O_NOFOLLOW);
+    CHECK(replacement >= 0 && ftruncate(replacement, 2) == 0 &&
+        fchmod(replacement, 0400) == 0 && close(replacement) == 0);
+    CHECK(!tp_retirement_store_authority_reopen(fixture.root, fixture.private_root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    fixture_stop(&fixture);
 }
 
 static void test_malformed_receipt_and_shard_inventory(void)
