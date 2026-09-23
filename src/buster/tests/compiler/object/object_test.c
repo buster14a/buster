@@ -1047,92 +1047,99 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_dwarf5_sections(UnitTestArguments
 BUSTER_GLOBAL_LOCAL UnitTestResult object_test_elf_thread_local_symbol_identity(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
-    u8 text[] = {0xc3};
-    u8 data[] = {1, 2, 3, 4};
-    ObjectSection sections[OBJECT_SECTION_COUNT] = {0};
-    for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
+    CpuArch architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    for (u32 architecture = 0; architecture < BUSTER_ARRAY_LENGTH(architectures); architecture += 1)
     {
-        sections[kind] = (ObjectSection){
-            .name = object_section_name_for_kind((ObjectSectionKind)kind),
-            .kind = (ObjectSectionKind)kind,
-            .alignment = object_section_default_alignment((ObjectSectionKind)kind),
-        };
-    }
-    sections[OBJECT_SECTION_TEXT].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(text);
-    sections[OBJECT_SECTION_TEXT].virtual_size = sizeof(text);
-    sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
-    sections[OBJECT_SECTION_DATA].virtual_size = sizeof(data);
-    sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
-    sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(data);
-    sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size = sizeof(data);
-    ObjectSymbol symbols[] = {
-        {.name = S8("undefined_tls"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
-         .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
-        {.name = S8("undefined_data"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
-         .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO},
-        {.name = S8("undefined_function"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true,
-         .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO},
-        {.name = S8("defined_data"), .size = sizeof(data), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
-        {.name = S8("defined_function"), .size = sizeof(text), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
-        {.name = S8("defined_tls_data"), .size = sizeof(data), .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
-        {.name = S8("defined_tls_zero"), .size = sizeof(data), .section = OBJECT_SECTION_THREAD_LOCAL_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true},
-    };
-    ObjectFile object = {
-        .target = target,
-        .sections = sections,
-        .symbols = symbols,
-        .section_count = OBJECT_SECTION_COUNT,
-        .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
-    };
-    ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64);
-    BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
-    String8 names[] = {
-        S8("undefined_tls"), S8("undefined_data"), S8("undefined_function"), S8("defined_data"),
-        S8("defined_function"), S8("defined_tls_data"), S8("defined_tls_zero"),
-    };
-    u8 expected_types[] = {6, 1, 2, 1, 2, 6, 6};
-    if (artifact.error == OBJECT_ERROR_NONE)
-    {
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+        Target target = {.cpu_arch = architectures[architecture], .os = OPERATING_SYSTEM_LINUX};
+        u8 x86_text[] = {0xc3};
+        u8 aarch64_text[] = {0xc0, 0x03, 0x5f, 0xd6};
+        ByteSlice text = architectures[architecture] == CPU_ARCH_AARCH64 ? (ByteSlice)BUSTER_ARRAY_TO_SLICE(aarch64_text)
+                                                                         : (ByteSlice)BUSTER_ARRAY_TO_SLICE(x86_text);
+        u8 data[] = {1, 2, 3, 4};
+        ObjectSection sections[OBJECT_SECTION_COUNT] = {0};
+        for (u32 kind = 0; kind < OBJECT_SECTION_COUNT; kind += 1)
         {
-            u8 type = UINT8_MAX;
-            bool found = object_test_elf_symbol_type(artifact.bytes, names[index], &type);
-            BUSTER_TEST(arguments, found && type == expected_types[index]);
-        }
-        ObjectFile restored = object_read(arguments->arena, artifact.bytes, target);
-        BUSTER_TEST(arguments, restored.error == OBJECT_ERROR_NONE && restored.symbol_count == BUSTER_ARRAY_LENGTH(symbols));
-        if (restored.error == OBJECT_ERROR_NONE && restored.symbol_count == BUSTER_ARRAY_LENGTH(symbols))
-        {
-            u8 expected_states[] = {
-                OBJECT_SYMBOL_THREAD_LOCAL_YES, OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_NO,
-                OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_YES,
-                OBJECT_SYMBOL_THREAD_LOCAL_YES,
+            sections[kind] = (ObjectSection){
+                .name = object_section_name_for_kind((ObjectSectionKind)kind),
+                .kind = (ObjectSectionKind)kind,
+                .alignment = object_section_default_alignment((ObjectSectionKind)kind),
             };
+        }
+        sections[OBJECT_SECTION_TEXT].data = text;
+        sections[OBJECT_SECTION_TEXT].virtual_size = text.length;
+        sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+        sections[OBJECT_SECTION_DATA].virtual_size = sizeof(data);
+        sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
+        sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(data);
+        sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size = sizeof(data);
+        ObjectSymbol symbols[] = {
+            {.name = S8("undefined_tls"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+             .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES},
+            {.name = S8("undefined_data"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true,
+             .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO},
+            {.name = S8("undefined_function"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true,
+             .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO},
+            {.name = S8("defined_data"), .size = sizeof(data), .section = OBJECT_SECTION_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("defined_function"), .size = text.length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("defined_tls_data"), .size = sizeof(data), .section = OBJECT_SECTION_THREAD_LOCAL_DATA, .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("defined_tls_zero"), .size = sizeof(data), .section = OBJECT_SECTION_THREAD_LOCAL_ZERO, .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectFile object = {
+            .target = target,
+            .sections = sections,
+            .symbols = symbols,
+            .section_count = OBJECT_SECTION_COUNT,
+            .symbol_count = BUSTER_ARRAY_LENGTH(symbols),
+        };
+        ObjectArtifact artifact = object_write(arguments->arena, &object, OBJECT_FORMAT_ELF64);
+        BUSTER_TEST(arguments, artifact.error == OBJECT_ERROR_NONE);
+        String8 names[] = {
+            S8("undefined_tls"), S8("undefined_data"), S8("undefined_function"), S8("defined_data"),
+            S8("defined_function"), S8("defined_tls_data"), S8("defined_tls_zero"),
+        };
+        u8 expected_types[] = {6, 1, 2, 1, 2, 6, 6};
+        if (artifact.error == OBJECT_ERROR_NONE)
+        {
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
             {
-                bool found = false;
-                for (u32 symbol_index = 0; symbol_index < restored.symbol_count; symbol_index += 1)
-                {
-                    ObjectSymbol* symbol = restored.symbols + symbol_index;
-                    if (string_equal(symbol->name, names[index]))
-                    {
-                        found = true;
-                        BUSTER_TEST(arguments, symbol->thread_local_state == expected_states[index]);
-                        break;
-                    }
-                }
-                BUSTER_TEST(arguments, found);
+                u8 type = UINT8_MAX;
+                bool found = object_test_elf_symbol_type(artifact.bytes, names[index], &type);
+                BUSTER_TEST(arguments, found && type == expected_types[index]);
             }
-            ObjectArtifact rewritten = object_write(arguments->arena, &restored, OBJECT_FORMAT_ELF64);
-            BUSTER_TEST(arguments, rewritten.error == OBJECT_ERROR_NONE);
-            if (rewritten.error == OBJECT_ERROR_NONE)
+            ObjectFile restored = object_read(arguments->arena, artifact.bytes, target);
+            BUSTER_TEST(arguments, restored.error == OBJECT_ERROR_NONE && restored.symbol_count == BUSTER_ARRAY_LENGTH(symbols));
+            if (restored.error == OBJECT_ERROR_NONE && restored.symbol_count == BUSTER_ARRAY_LENGTH(symbols))
             {
+                u8 expected_states[] = {
+                    OBJECT_SYMBOL_THREAD_LOCAL_YES, OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_NO,
+                    OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_NO, OBJECT_SYMBOL_THREAD_LOCAL_YES,
+                    OBJECT_SYMBOL_THREAD_LOCAL_YES,
+                };
                 for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
                 {
-                    u8 type = UINT8_MAX;
-                    bool found = object_test_elf_symbol_type(rewritten.bytes, names[index], &type);
-                    BUSTER_TEST(arguments, found && type == expected_types[index]);
+                    bool found = false;
+                    for (u32 symbol_index = 0; symbol_index < restored.symbol_count; symbol_index += 1)
+                    {
+                        ObjectSymbol* symbol = restored.symbols + symbol_index;
+                        if (string_equal(symbol->name, names[index]))
+                        {
+                            found = true;
+                            BUSTER_TEST(arguments, symbol->thread_local_state == expected_states[index]);
+                            break;
+                        }
+                    }
+                    BUSTER_TEST(arguments, found);
+                }
+                ObjectArtifact rewritten = object_write(arguments->arena, &restored, OBJECT_FORMAT_ELF64);
+                BUSTER_TEST(arguments, rewritten.error == OBJECT_ERROR_NONE);
+                if (rewritten.error == OBJECT_ERROR_NONE)
+                {
+                    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(names); index += 1)
+                    {
+                        u8 type = UINT8_MAX;
+                        bool found = object_test_elf_symbol_type(rewritten.bytes, names[index], &type);
+                        BUSTER_TEST(arguments, found && type == expected_types[index]);
+                    }
                 }
             }
         }
