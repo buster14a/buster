@@ -3,6 +3,8 @@
 
 Run only on an authorized correctness runner. `instrument` changes an idle
 checkout for a separate diagnostic build, never an acceptance/timing build.
+Revision 2 corrects a probe expectation: the CLI prints the first error;
+complete multi-error reporting belongs to CompilerDriverResult.diagnostics.
 """
 import argparse
 import hashlib
@@ -22,6 +24,7 @@ FIXTURES = {
     "bad_nested.c": 'struct Pair { int x; int y; };\nstruct Wrap { struct Pair pair; int tail; };\nint completed_declaration(void) { return 17; }\nint broken(void) {\n    struct Wrap w = { .pair = { .missing = 3 }, .tail = 7 };\n    return w.tail;\n}\n',
     "bad_multi.c": '#error M9_FIRST_ERROR\n#error M9_SECOND_ERROR\nint helper_b(void) { return 17; }\n',
 }
+FIXTURES["good_nested.c"] = FIXTURES["bad_nested.c"].replace(".missing", ".x")
 CASES = [
     ("syntax_first_object", ["bad_parse.c"], False, True),
     ("nested_object", ["bad_nested.c"], False, True),
@@ -30,6 +33,7 @@ CASES = [
     ("multi_errors", ["good_a.c", "bad_multi.c", "good_c.c"], False, False),
     ("failure_then_success", ["bad_nested.c", "good_c.c"], False, False),
     ("valid_object", ["good_b.c"], True, True),
+    ("valid_nested_neighbor", ["good_nested.c"], True, True),
     ("valid_link", ["good_a.c", "good_b.c", "good_c.c"], True, False),
 ]
 SENTINEL = b"M9 pre-existing user output\nnot a compiler artifact\x00\xff"
@@ -64,9 +68,9 @@ def instrument(evidence):
     after = before + r'''
     if (os_get_environment_variable(S8("M9_REPORT")).length)
     {
-        CompilerDriverResult m9_observed = compile;
         for (u32 m9_phase = 0; m9_phase < 3; m9_phase += 1)
         {
+            CompilerDriverResult m9_observed;
             if (m9_phase == 1)
             {
                 string_print(S8("M9_REPLAY_BEGIN\n"));
@@ -122,6 +126,8 @@ def execute(command, destination, env=None, timeout=90):
         record.update(returncode=None, timeout=True,
                       stdout=(error.stdout or b"").decode(errors="replace") if isinstance(error.stdout, bytes) else (error.stdout or ""),
                       stderr=(error.stderr or b"").decode(errors="replace") if isinstance(error.stderr, bytes) else (error.stderr or ""))
+    except OSError as error:
+        record.update(returncode=None, launch_error=str(error), stdout="", stderr="")
     destination.write_text(json.dumps(record, indent=2))
     return record
 
@@ -175,18 +181,19 @@ def run_probe(binary, evidence, diagnostic, screen):
             else:
                 if status is None or status <= 0 or status >= 128:
                     errors.append("invalid input did not terminate with ordinary unsuccessful status")
-                if "error" not in text.lower():
-                    errors.append("missing diagnostic")
+                if "cc: error:" not in text:
+                    errors.append("missing CLI diagnostic")
                 if state == "sentinel" and (not output.exists() or output.read_bytes() != SENTINEL):
                     errors.append("failed transaction changed pre-existing output")
                 if state == "absent" and output.exists():
                     errors.append("failed transaction published new output")
-                if "M9_LATE_WARNING" in text:
+                if not diagnostic and "M9_LATE_WARNING" in text:
                     errors.append("diagnostic from unobservable later unit was published")
                 if inputs[0] == "good_a.c" and "M9_EARLY_WARNING" not in text:
                     errors.append("earlier useful warning was lost")
-                if name == "multi_errors" and not all(marker in text for marker in ("M9_FIRST_ERROR", "M9_SECOND_ERROR")):
-                    errors.append("legitimate multi-error reporting was lost")
+                # docs/diagnostics.md and run_c_compiler select first-error text.
+                if name == "multi_errors" and "M9_FIRST_ERROR" not in text:
+                    errors.append("first-error compatibility text was lost")
             extra = sorted(path.name for path in case_dir.iterdir()
                            if path.name not in ("output", "output.o", "compile.json", "program.json", "replay-output", "replay-program.json"))
             if extra:
@@ -203,10 +210,13 @@ def run_probe(binary, evidence, diagnostic, screen):
                     if line.startswith("M9_DIAG\t"):
                         fields = line.split("\t")
                         records[int(fields[1])].append(fields[2:])
-                # Replay warnings are intentionally unrelated to the first transaction.
-                # Only the original prefix and the normal terminal renderer describe it.
+                for index, line in enumerate(original_trace.splitlines()):
+                    if line.startswith("M9_BACKEND\t"):
+                        source = line.split("\t")[1]
+                        previous = original_trace.splitlines()[:index]
+                        if f"M9_VALIDATION\t{source}\t0" not in previous:
+                            errors.append("backend was not preceded by successful canonical validation")
                 if not valid:
-                    errors = [error for error in errors if error != "diagnostic from unobservable later unit was published"]
                     if "M9_LATE_WARNING" in original_trace + result["stderr"]:
                         errors.append("diagnostic from unobservable later unit was published")
                     if "M9_LINK" in original_trace:
@@ -223,6 +233,11 @@ def run_probe(binary, evidence, diagnostic, screen):
                         errors.append("driver result lost its failure")
                     if name.startswith("after_work_") and f"M9_BACKEND\t{root / 'good_a.c'}" not in original_trace:
                         errors.append("earlier TU did not demonstrate backend work")
+                    if name == "multi_errors":
+                        messages = [row[-1] for row in records[0] if row[2] == "0"]
+                        if not all(any(marker in message for message in messages)
+                                   for marker in ("M9_FIRST_ERROR", "M9_SECOND_ERROR")):
+                            errors.append("complete structured multi-error reporting was lost")
                 if records[0] != records[2] or snapshots.get(0) != snapshots.get(2):
                     errors.append("retained first result changed after second invocation")
                 if snapshots.get(1, [-1])[0] != 0 or not replay_output.is_file():
@@ -239,7 +254,8 @@ def run_probe(binary, evidence, diagnostic, screen):
             if errors:
                 failures.append(row)
             print("M9_CASE " + json.dumps(row), flush=True)
-    summary = {"base": BASE, "binary": binary, "binary_sha256": hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
+    summary = {"base": BASE, "probe_revision": 2, "binary": binary,
+               "binary_sha256": hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
                "diagnostic": diagnostic, "screen": screen, "cases": len(outcomes),
                "failures": len(failures), "outcomes": outcomes}
     (evidence / "summary.json").write_text(json.dumps(summary, indent=2))
