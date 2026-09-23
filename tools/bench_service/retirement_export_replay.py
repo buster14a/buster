@@ -24,6 +24,8 @@ CHUNK = 64 * 1024
 RECEIPT_BYTES = 1024
 # export.c's separate blocked-retirement ceiling, including archive headers.
 ARCHIVE_CAP = 137448259584
+# export.c reserves a full 64-byte digest index up to the recipe's archive cap.
+SPOOL_INDEX_BYTES = ((ARCHIVE_CAP + CHUNK - 1) // CHUNK) * 64
 RECIPE = b"native-retirement-performance-v1"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -161,6 +163,24 @@ def publish_test_copy(source, before, receipt, directory, job, attempt):
         os.close(parent)
 
 
+def retrieve_test_copy(source, before, receipt, directory, job, attempt, publication):
+    # This is a byte transfer into a separate private workspace, not a hard
+    # link or a second view of the publisher's directory.
+    published_parent = os.open(publication.parent, os.O_RDONLY | os.O_DIRECTORY |
+                               os.O_NOFOLLOW | os.O_CLOEXEC)
+    retrieval_parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY |
+                               os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        first = os.fstat(published_parent)
+        second = os.fstat(retrieval_parent)
+        if (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino):
+            fail("retrieval must use a separate private directory")
+    finally:
+        os.close(published_parent)
+        os.close(retrieval_parent)
+    return publish_test_copy(source, before, receipt, directory, job, attempt)
+
+
 def relative_binding_path(text):
     relative = PurePosixPath(text)
     if (not text or relative.is_absolute() or
@@ -180,12 +200,25 @@ def replay(args):
     source, original, receipt = archive_source(
         args.download, receipt_sha256, args.job, args.attempt, full_sha256)
     try:
-        published = publish_test_copy(source, original, receipt, args.test_publication,
-                                      args.job, args.attempt)
+        if args.consume_published:
+            published = retrieve_test_copy(source, original, receipt, args.retrieval,
+                                           args.job, args.attempt, args.download)
+            stage = "retrieved_export"
+        else:
+            published = publish_test_copy(source, original, receipt, args.test_publication,
+                                          args.job, args.attempt)
+            stage = "test_publication"
     finally:
         os.close(source)
-    print(json.dumps({"test_publication": published, "bytes": original.st_size,
-                      "export_receipt_sha256": receipt_sha256}), flush=True)
+    print(json.dumps({stage: published, "transferred_bytes": original.st_size,
+                      "archive_bytes": u64(receipt, 24),
+                      "indexed_file_bytes": u64(receipt, 32),
+                      "files": u32(receipt, 40), "entries": u32(receipt, 44),
+                      "archive_chunks": (u64(receipt, 24) + CHUNK - 1) // CHUNK,
+                      "reserved_service_spool_bytes": RECEIPT_BYTES + SPOOL_INDEX_BYTES + u64(receipt, 24),
+                      "export_receipt_sha256": receipt_sha256}, sort_keys=True), flush=True)
+    if args.publish_only:
+        return
     command = [str(args.bench_service), "unpack-export", published,
                str(args.destination), receipt_sha256]
     subprocess.run(command, check=True, timeout=86405)
@@ -228,9 +261,16 @@ def replay(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("download", type=Path, help="completed gateway export from stdout")
-    parser.add_argument("destination", type=Path, help="new private clean replay directory")
-    parser.add_argument("--test-publication", required=True, type=Path,
+    parser.add_argument("destination", nargs="?", type=Path,
+                        help="new private clean replay directory (required for replay)")
+    parser.add_argument("--test-publication", type=Path,
                         help="existing private directory for an immutable test copy")
+    parser.add_argument("--retrieval", type=Path,
+                        help="new private directory for a fresh copy of the published export")
+    parser.add_argument("--consume-published", action="store_true",
+                        help="read an immutable test publication in a separate consumer invocation")
+    parser.add_argument("--publish-only", action="store_true",
+                        help="publish test bytes without claiming a completed replay")
     parser.add_argument("--bench-service", required=True, type=Path,
                         help="reviewed local service utility, never taken from the bundle")
     parser.add_argument("--repository-root", required=True, type=Path,
@@ -245,6 +285,14 @@ def main():
                         help="from the service control authority, never the bundle")
     args = parser.parse_args()
     try:
+        if args.publish_only and args.consume_published:
+            fail("publication and independent consumption are separate invocations")
+        if args.consume_published and (args.retrieval is None or args.test_publication is not None):
+            fail("consumer requires --retrieval and cannot publish")
+        if not args.consume_published and (args.test_publication is None or args.retrieval is not None):
+            fail("publisher requires --test-publication and cannot retrieve")
+        if not args.publish_only and args.destination is None:
+            fail("replay requires a new private destination")
         replay(args)
     except (ValueError, OSError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired, KeyError, TypeError) as error:
