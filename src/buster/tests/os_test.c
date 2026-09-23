@@ -952,10 +952,19 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         String8 root = buster_test_temporary_path(arena, S8("shared-io space"), S8(""));
         BUSTER_TEST(arguments, os_make_directory_attempt(root));
         BUSTER_TEST(arguments, os_make_directory_attempt(root));
+        String8 status_directory = string_format_z(arena, S8("{S8}/directory-status"), root);
+        OsDirectoryCreateResult created_directory = os_make_directory(status_directory);
+        BUSTER_TEST(arguments, !created_directory.error.v && created_directory.created && !created_directory.already_exists &&
+                                   !created_directory.existing_directory);
+        OsDirectoryCreateResult existing_directory = os_make_directory(status_directory);
+        BUSTER_TEST(arguments, !existing_directory.error.v && !existing_directory.created && existing_directory.already_exists &&
+                                   existing_directory.existing_directory);
         String8 path = string_format_z(arena, S8("{S8}/bytes"), root);
         String8 absent = string_format_z(arena, S8("{S8}/absent/child"), root);
         BUSTER_TEST(arguments, !os_make_directory_attempt(absent));
         BUSTER_TEST(arguments, !os_make_directory_attempt((String8){0}));
+        OsDirectoryCreateResult missing_parent = os_make_directory(absent);
+        BUSTER_TEST(arguments, missing_parent.error.v != 0 && !missing_parent.created && !missing_parent.existing_directory);
         u8 original[257];
         u8 copy[300];
         for (u32 i = 0; i < sizeof(original); i += 1) original[i] = (u8)i;
@@ -972,6 +981,9 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, !os_file_read_attempt(file, (ByteSlice){copy, 1}, &count) && count == 0);
             BUSTER_TEST(arguments, os_file_close(file));
         }
+        OsDirectoryCreateResult file_collision = os_make_directory(path);
+        BUSTER_TEST(arguments, file_collision.error.v != 0 && file_collision.already_exists && !file_collision.existing_directory &&
+                                   !file_collision.created);
         file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
         BUSTER_TEST(arguments, file != 0);
         if (file)
@@ -983,6 +995,16 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, memcmp(copy, original + 13, sizeof(original) - 13) == 0);
             BUSTER_TEST(arguments, os_file_read_attempt(file, (ByteSlice){copy, sizeof(copy)}, &count) && count == 0);
             BUSTER_TEST(arguments, os_file_close(file));
+        }
+        {
+            String8 short_path = string_format_z(arena, S8("{S8}/foo"), root);
+            String8 long_path = string_format_z(arena, S8("{S8}/foobar"), root);
+            BUSTER_TEST(arguments, file_write(short_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("short-path"))));
+            BUSTER_TEST(arguments, file_write(long_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("long-path"))));
+            FileReadResult sliced_read = file_read_checked(arena, (String8){.pointer = long_path.pointer, .length = short_path.length}, (FileReadOptions){0});
+            String8 sliced_contents = {.pointer = (char8*)sliced_read.bytes.pointer, .length = sliced_read.bytes.length};
+            BUSTER_TEST(arguments, sliced_read.status == OS_FILE_READ_OK && string_equal(sliced_contents, S8("short-path")));
+            BUSTER_TEST(arguments, os_file_delete(long_path) && os_file_delete(short_path));
         }
 #if BUSTER_LINUX
         file = os_file_open(S8("/dev/full"), (OpenFlags){.write = 1}, (OpenPermissions){.read = 1, .write = 1});
@@ -1012,6 +1034,13 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         char8 invalid[] = {'a', 0, 'b'};
         BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){invalid, sizeof(invalid)}, true).length);
         BUSTER_TEST(arguments, !os_path_absolute_lexical(arena, (String8){0, 1}, true).length);
+        OsFileOpenResult invalid_open = os_file_open_checked((String8){invalid, sizeof(invalid)}, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        BUSTER_TEST(arguments, !invalid_open.file && invalid_open.error.v != 0);
+        BUSTER_TEST(arguments, os_file_delete_checked((String8){invalid, sizeof(invalid)}).v != 0);
+        BUSTER_TEST(arguments, !os_dynamic_library_load((String8){invalid, sizeof(invalid)}));
+        BUSTER_TEST(arguments, !os_dynamic_library_function_load(0, (String8){invalid, sizeof(invalid)}));
+        FileMapRead invalid_map = file_map_read(arena, (String8){invalid, sizeof(invalid)}, (FileReadOptions){.map_required = 1});
+        BUSTER_TEST(arguments, !invalid_map.bytes.pointer);
         BUSTER_TEST(arguments, os_directory_delete(root));
     }
 #endif
@@ -1730,9 +1759,10 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         char8 invalid[] = {'a', 0, 'b'};
         BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){invalid, sizeof(invalid)}, true).length);
         BUSTER_TEST(arguments, !os_path_absolute(arena, (String8){0}, true).length);
-        os_make_directory((String8){invalid, sizeof(invalid)});
-        os_make_directory((String8){0});
-        BUSTER_TEST(arguments, true);
+        OsDirectoryCreateResult invalid_create = os_make_directory((String8){invalid, sizeof(invalid)});
+        OsDirectoryCreateResult empty_create = os_make_directory((String8){0});
+        BUSTER_TEST(arguments, invalid_create.error.v != 0 && !invalid_create.created && !invalid_create.already_exists);
+        BUSTER_TEST(arguments, empty_create.error.v != 0 && !empty_create.created && !empty_create.already_exists);
     }
 
     // Regression: draining captured stdout/stderr sequentially deadlocked when

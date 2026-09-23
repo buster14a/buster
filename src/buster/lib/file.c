@@ -274,32 +274,30 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     }
 #elif BUSTER_LINUX || BUSTER_MACOS
     {
-        u64 path_buffer_size;
-        BUSTER_VALIDATE(u64_add_checked(path.length, 1, &path_buffer_size));
-        char* path_buffer = (char*)arena_allocate_bytes(arena, path_buffer_size, 1);
-        memcpy(path_buffer, path.pointer, path.length);
-        path_buffer[path.length] = 0;
-
-        int file_descriptor = open(path_buffer, O_RDONLY, 0);
-        if (file_descriptor >= 0)
+        String8Z path_z = {0};
+        if (string8z_copy_arena(arena, path, &path_z))
         {
-            struct stat file_stats = {0};
-            if (fstat(file_descriptor, &file_stats) == 0 && file_stats.st_size > 0)
+            int file_descriptor = open(path_z.pointer, O_RDONLY, 0);
+            if (file_descriptor >= 0)
             {
-                void* mapped = mmap(0, (u64)file_stats.st_size, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
-                if (mapped != MAP_FAILED)
+                struct stat file_stats = {0};
+                if (fstat(file_descriptor, &file_stats) == 0 && file_stats.st_size > 0)
                 {
-                    result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
-                    result.mapped_pointer = mapped;
-                    result.mapped_size = (u64)file_stats.st_size;
-                    result.identity = (FileIdentity){
-                        .device = (u64)file_stats.st_dev,
-                        .index = (u64)file_stats.st_ino,
-                        .valid = true,
-                    };
+                    void* mapped = mmap(0, (u64)file_stats.st_size, PROT_READ, MAP_PRIVATE, file_descriptor, 0);
+                    if (mapped != MAP_FAILED)
+                    {
+                        result.bytes = (ByteSlice){(u8*)mapped, (u64)file_stats.st_size};
+                        result.mapped_pointer = mapped;
+                        result.mapped_size = (u64)file_stats.st_size;
+                        result.identity = (FileIdentity){
+                            .device = (u64)file_stats.st_dev,
+                            .index = (u64)file_stats.st_ino,
+                            .valid = true,
+                        };
+                    }
                 }
+                close(file_descriptor);
             }
-            close(file_descriptor);
         }
     }
 #endif
@@ -355,10 +353,12 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
     // skipped rather than returned around.
     bool asset_resolved = false;
     // The app has no test files on disk; relative paths resolve to APK assets.
-    if (buster_android_asset_manager && path.length && path.pointer[0] != '/')
+    if (buster_android_asset_manager && path.pointer && path.length && path.pointer[0] != '/')
     {
         String8 asset_path = file_android_asset_path(arena, path);
-        AAsset* asset = asset_path.length ? AAssetManager_open(buster_android_asset_manager, (char*)asset_path.pointer, AASSET_MODE_BUFFER) : 0;
+        String8Z asset_path_z = {0};
+        bool asset_path_valid = asset_path.length && string8z_copy_arena(arena, asset_path, &asset_path_z);
+        AAsset* asset = asset_path_valid ? AAssetManager_open(buster_android_asset_manager, (char*)asset_path_z.pointer, AASSET_MODE_BUFFER) : 0;
         if (asset)
         {
             u64 file_size = (u64)AAsset_getLength64(asset);
@@ -386,7 +386,7 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
 
 #if BUSTER_IOS
     // Resolve relative paths against the app bundle's Resources directory.
-    if (path.length && path.pointer[0] != '/')
+    if (path.pointer && path.length && path.pointer[0] != '/')
     {
         const char* resource_path = buster_ios_bundle_resource_path();
         if (resource_path)

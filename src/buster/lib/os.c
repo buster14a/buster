@@ -74,6 +74,8 @@ BUSTER_GLOBAL_LOCAL void thread_context_tls_key_ensure_initialized(void)
 BUSTER_THREAD_LOCAL_DECL ThreadContext* thread_context_thread_local;
 #endif
 
+BUSTER_GLOBAL_LOCAL OsError os_file_invalid_error(void);
+
 #if !BUSTER_SINGLE_THREADED
 BUSTER_GLOBAL_LOCAL void lane_gang_release(ThreadContext* thread_context);
 #endif
@@ -1079,33 +1081,35 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
 {
     String8 result = {0};
 #if defined(__linux__) || defined(__APPLE__)
-    bool valid = relative_file_path.pointer || !relative_file_path.length;
-    for (u64 i = 0; i < relative_file_path.length && valid; i += 1)
-    {
-        valid = relative_file_path.pointer[i] != 0;
-    }
-    if (valid && relative_file_path.length)
+    if (relative_file_path.length)
     {
         TemporalArena temp = scratch_begin(&arena, 1);
-        String8 terminated = string_duplicate_arena(temp.arena, relative_file_path, true);
-        u64 position = arena->position;
-        u64 length = PATH_MAX;
-        char8* buffer = arena_allocate(arena, char8, length + null_terminate);
-        char* syscall_result = realpath((char*)terminated.pointer, buffer);
-
-        if (syscall_result)
+        String8Z terminated = {0};
+        if (string8z_copy_arena(temp.arena, relative_file_path, &terminated))
         {
-            result = string_from_pointer(syscall_result);
-            BUSTER_VALIDATE(result.length <= length);
-        }
+            u64 position = arena->position;
+            u64 length = PATH_MAX;
+            char8* buffer = arena_allocate(arena, char8, length + null_terminate);
+            char* syscall_result = realpath((char*)terminated.pointer, buffer);
 
-        arena_set_position(arena, position + result.length + null_terminate);
+            if (syscall_result)
+            {
+                result = string_from_pointer(syscall_result);
+                BUSTER_VALIDATE(result.length <= length);
+            }
+
+            arena_set_position(arena, position + result.length + null_terminate);
+        }
         scratch_end(temp);
     }
 #elif defined(_WIN32)
     TemporalArena temp = scratch_begin(&arena, 1);
-    String16 relative_file_path_w = string16_from_string8(temp.arena, relative_file_path, true);
-    DWORD length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, 0, 0, 0);
+    String16Z relative_file_path_w = {0};
+    DWORD length_plus_null_termination = 0;
+    if (string16z_from_string8_arena(temp.arena, relative_file_path, &relative_file_path_w))
+    {
+        length_plus_null_termination = GetFullPathNameW(relative_file_path_w.pointer, 0, 0, 0);
+    }
 
     if (length_plus_null_termination != 0)
     {
@@ -1167,97 +1171,201 @@ String8 os_path_absolute_lexical(Arena* arena, String8 path, bool null_terminate
 bool os_make_directory_attempt(String8 path)
 {
     bool result = path.pointer != 0 && path.length != 0;
-    for (u64 i = 0; i < path.length && result; i += 1)
-    {
-        result = path.pointer[i] != 0;
-    }
     if (result)
     {
         TemporalArena temp = scratch_begin(0, 0);
 #if defined(_WIN32)
-        String16 wide = string16_from_string8(temp.arena, path, true);
-        result = CreateDirectoryW(wide.pointer, 0) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+        String16Z wide = {0};
+        bool valid = string16z_from_string8_arena(temp.arena, path, &wide);
+        if (valid)
+        {
+            result = CreateDirectoryW(wide.pointer, 0) != 0;
+            DWORD error = result ? ERROR_SUCCESS : GetLastError();
+            if (!result && (error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS))
+            {
+                DWORD attributes = GetFileAttributesW(wide.pointer);
+                result = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            }
+        }
 #else
-        String8 terminated = string_duplicate_arena(temp.arena, path, true);
-        result = mkdir(terminated.pointer, 0700) == 0 || errno == EEXIST;
+        String8Z terminated = {0};
+        if (string8z_copy_arena(temp.arena, path, &terminated))
+        {
+            result = mkdir(terminated.pointer, 0700) == 0;
+            if (!result && errno == EEXIST)
+            {
+                struct stat attributes;
+                result = stat(terminated.pointer, &attributes) == 0 && S_ISDIR(attributes.st_mode);
+            }
+        }
+        else
+        {
+            result = false;
+        }
 #endif
         scratch_end(temp);
     }
     return result;
 }
 
-void os_make_directory(String8 path)
+OsDirectoryCreateResult os_make_directory(String8 path)
 {
-#if defined(__linux__) || defined(__APPLE__)
-    bool valid = path.pointer != 0 && path.length != 0;
-    for (u64 i = 0; i < path.length && valid; i += 1)
+    OsDirectoryCreateResult result = {0};
+    if (!path.pointer || !path.length)
     {
-        valid = path.pointer[i] != 0;
+        result.error = os_file_invalid_error();
     }
-    if (valid)
+    else
     {
         TemporalArena temp = scratch_begin(0, 0);
-        String8 terminated = string_duplicate_arena(temp.arena, path, true);
-        mkdir((const char*)terminated.pointer, 0755);
+#if defined(_WIN32)
+        String16Z wide = {0};
+        if (!string16z_from_string8_arena(temp.arena, path, &wide))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else if (CreateDirectoryW(wide.pointer, 0))
+        {
+            result.created = true;
+        }
+        else
+        {
+            OsError create_error = os_get_last_error();
+            if (create_error.v == (u32)ERROR_ALREADY_EXISTS || create_error.v == (u32)ERROR_FILE_EXISTS)
+            {
+                result.already_exists = true;
+                DWORD attributes = GetFileAttributesW(wide.pointer);
+                if (attributes == INVALID_FILE_ATTRIBUTES)
+                {
+                    result.error = os_get_last_error();
+                }
+                else
+                {
+                    result.existing_directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    if (!result.existing_directory)
+                    {
+                        result.error = create_error;
+                    }
+                }
+            }
+            else
+            {
+                result.error = create_error;
+            }
+        }
+#elif defined(__linux__) || defined(__APPLE__)
+        String8Z terminated = {0};
+        if (!string8z_copy_arena(temp.arena, path, &terminated))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else
+        {
+            int status;
+            do
+            {
+                status = mkdir(terminated.pointer, 0755);
+            } while (status < 0 && errno == EINTR);
+            if (status == 0)
+            {
+                result.created = true;
+            }
+            else
+            {
+                OsError create_error = os_get_last_error();
+                if (create_error.v == (u32)EEXIST)
+                {
+                    result.already_exists = true;
+                    struct stat attributes;
+                    if (stat(terminated.pointer, &attributes) != 0)
+                    {
+                        result.error = os_get_last_error();
+                    }
+                    else
+                    {
+                        result.existing_directory = S_ISDIR(attributes.st_mode);
+                        if (!result.existing_directory)
+                        {
+                            result.error = create_error;
+                        }
+                    }
+                }
+                else
+                {
+                    result.error = create_error;
+                }
+            }
+        }
+#else
+        result.error = os_file_invalid_error();
+#endif
         scratch_end(temp);
     }
-#elif defined(_WIN32)
-    TemporalArena temp = scratch_begin(0, 0);
-    String16 path_w = string16_from_string8(temp.arena, path, true);
-    CreateDirectoryW(path_w.pointer, 0);
-    scratch_end(temp);
-#endif
+    return result;
 }
 
 OsDirectoryCreateResult os_make_directory_exclusive(String8 path)
 {
     OsDirectoryCreateResult result = {0};
-    bool valid = path.pointer != 0 && path.length != 0;
-    for (u64 index = 0; index < path.length && valid; index += 1)
+    if (!path.pointer || !path.length)
     {
-        valid = path.pointer[index] != 0;
-    }
-
-    if (!valid)
-    {
-#if defined(_WIN32)
-        result.error.v = (u32)ERROR_INVALID_PARAMETER;
-#else
-        result.error.v = (u32)EINVAL;
-#endif
+        result.error = os_file_invalid_error();
     }
     else
     {
         TemporalArena scratch = scratch_begin(0, 0);
 #if defined(_WIN32)
-        String16 wide = string16_from_string8(scratch.arena, path, true);
-        if (!CreateDirectoryW(wide.pointer, 0))
+        String16Z wide = {0};
+        if (!string16z_from_string8_arena(scratch.arena, path, &wide))
+        {
+            result.error = os_file_invalid_error();
+        }
+        else if (!CreateDirectoryW(wide.pointer, 0))
         {
             result.error = os_get_last_error();
             result.already_exists = result.error.v == (u32)ERROR_ALREADY_EXISTS || result.error.v == (u32)ERROR_FILE_EXISTS;
             if (result.already_exists)
             {
                 result.error = (OsError){0};
+                DWORD attributes = GetFileAttributesW(wide.pointer);
+                result.existing_directory = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
             }
         }
+        else
+        {
+            result.created = true;
+        }
 #elif defined(__linux__) || defined(__APPLE__)
-        String8 terminated = string_duplicate_arena(scratch.arena, path, true);
-        int status;
-        do
+        String8Z terminated = {0};
+        if (!string8z_copy_arena(scratch.arena, path, &terminated))
         {
-            status = mkdir((const char*)terminated.pointer, 0700);
-        } while (status < 0 && errno == EINTR);
-        if (status < 0)
+            result.error = os_file_invalid_error();
+        }
+        else
         {
-            result.error = os_get_last_error();
-            result.already_exists = result.error.v == (u32)EEXIST;
-            if (result.already_exists)
+            int status;
+            do
             {
-                result.error = (OsError){0};
+                status = mkdir(terminated.pointer, 0700);
+            } while (status < 0 && errno == EINTR);
+            if (status < 0)
+            {
+                result.error = os_get_last_error();
+                result.already_exists = result.error.v == (u32)EEXIST;
+                if (result.already_exists)
+                {
+                    result.error = (OsError){0};
+                    struct stat attributes;
+                    result.existing_directory = stat(terminated.pointer, &attributes) == 0 && S_ISDIR(attributes.st_mode);
+                }
+            }
+            else
+            {
+                result.created = true;
             }
         }
 #else
-        result.error.v = 1;
+        result.error = os_file_invalid_error();
 #endif
         scratch_end(scratch);
     }
@@ -1283,22 +1391,22 @@ BUSTER_GLOBAL_LOCAL String16 os_string16_from_wide(char16* pointer)
 
 BUSTER_GLOBAL_LOCAL bool os_windows_entry_delete(Arena* arena, String8 path, DWORD attributes)
 {
-    // Keep conversion storage in the walker's arena. A nested scratch scope
-    // can select that same arena and rewind away the pending worklist tasks.
-    String16 path_w = string16_from_string8(arena, path, true);
-    // Read-only files refuse DeleteFileW until the attribute is cleared.
-    if (attributes & FILE_ATTRIBUTE_READONLY)
+    TemporalArena scratch = scratch_begin(&arena, 1);
+    String16Z path_w = {0};
+    bool valid = string16z_from_string8_arena(scratch.arena, path, &path_w);
+    if (valid && (attributes & FILE_ATTRIBUTE_READONLY))
     {
         SetFileAttributesW(path_w.pointer, attributes & ~(DWORD)FILE_ATTRIBUTE_READONLY);
     }
     // A directory reparse point is unlinked with RemoveDirectoryW, which
     // removes the link itself rather than its target.
-    bool result = attributes & FILE_ATTRIBUTE_DIRECTORY ? RemoveDirectoryW(path_w.pointer) != 0 : DeleteFileW(path_w.pointer) != 0;
-    if (!result)
+    bool result = valid && (attributes & FILE_ATTRIBUTE_DIRECTORY ? RemoveDirectoryW(path_w.pointer) != 0 : DeleteFileW(path_w.pointer) != 0);
+    if (valid && !result)
     {
         DWORD error = GetLastError();
         result = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
     }
+    scratch_end(scratch);
     return result;
 }
 #endif
@@ -1309,12 +1417,12 @@ struct OsDirectoryDeleteFrame
 {
     OsDirectoryDeleteFrame* parent;
     DIR* directory;
-    String8 name;
+    String8Z name;
     dev_t device;
     ino_t inode;
 };
 
-BUSTER_GLOBAL_LOCAL int os_directory_delete_open_path(String8 path)
+BUSTER_GLOBAL_LOCAL int os_directory_delete_open_path(String8Z path)
 {
     int result;
     do
@@ -1324,7 +1432,7 @@ BUSTER_GLOBAL_LOCAL int os_directory_delete_open_path(String8 path)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL int os_directory_delete_open_at(int parent, String8 name)
+BUSTER_GLOBAL_LOCAL int os_directory_delete_open_at(int parent, String8Z name)
 {
     int result;
     do
@@ -1344,7 +1452,7 @@ BUSTER_GLOBAL_LOCAL int os_directory_delete_stat(int descriptor, struct stat* st
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL int os_directory_delete_stat_at(int parent, String8 name, struct stat* stats)
+BUSTER_GLOBAL_LOCAL int os_directory_delete_stat_at(int parent, String8Z name, struct stat* stats)
 {
     int result;
     do
@@ -1354,7 +1462,7 @@ BUSTER_GLOBAL_LOCAL int os_directory_delete_stat_at(int parent, String8 name, st
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL int os_directory_delete_unlink_at(int parent, String8 name, int flags)
+BUSTER_GLOBAL_LOCAL int os_directory_delete_unlink_at(int parent, String8Z name, int flags)
 {
     int result;
     do
@@ -1383,31 +1491,33 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
         separator -= 1;
     }
 
-    String8 parent_path;
-    String8 root_name;
+    String8 parent_path_slice;
+    String8 root_name_slice;
     if (separator)
     {
         u64 parent_length = separator == 1 ? 1 : separator - 1;
-        parent_path = (String8){.pointer = root.pointer, .length = parent_length};
-        root_name = (String8){.pointer = root.pointer + separator, .length = root_end - separator};
+        parent_path_slice = (String8){.pointer = root.pointer, .length = parent_length};
+        root_name_slice = (String8){.pointer = root.pointer + separator, .length = root_end - separator};
     }
     else
     {
-        parent_path = S8(".");
-        root_name = (String8){.pointer = root.pointer, .length = root_end};
+        parent_path_slice = S8(".");
+        root_name_slice = (String8){.pointer = root.pointer, .length = root_end};
     }
-    if (!root_name.length)
+    if (!root_name_slice.length)
     {
-        root_name = S8(".");
+        root_name_slice = S8(".");
     }
-    parent_path = string_duplicate_arena(arena, parent_path, true);
-    root_name = string_duplicate_arena(arena, root_name, true);
+    String8Z parent_path = {0};
+    String8Z root_name = {0};
+    bool paths_valid = string8z_copy_arena(arena, parent_path_slice, &parent_path) &&
+                       string8z_copy_arena(arena, root_name_slice, &root_name);
 
-    int root_parent = os_directory_delete_open_path(parent_path);
+    int root_parent = paths_valid ? os_directory_delete_open_path(parent_path) : -1;
     OsDirectoryDeleteFrame* frame = 0;
-    if (root_parent < 0)
+    if (!paths_valid || root_parent < 0)
     {
-        result = errno == ENOENT;
+        result = paths_valid && errno == ENOENT;
     }
     else
     {
@@ -1458,8 +1568,9 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
             struct dirent* entry = readdir(frame->directory);
             if (entry)
             {
-                String8 name = string_from_pointer((const char8*)entry->d_name);
-                if (!string_equal(name, S8(".")) && !string_equal(name, S8("..")))
+                String8 name_slice = string_from_pointer((const char8*)entry->d_name);
+                String8Z name = {.pointer = name_slice.pointer, .length = name_slice.length};
+                if (!string_equal(name_slice, S8(".")) && !string_equal(name_slice, S8("..")))
                 {
                     int directory = dirfd(frame->directory);
                     struct stat entry_stats;
@@ -1492,13 +1603,19 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                         else
                         {
                             OsDirectoryDeleteFrame* child_frame = arena_allocate(arena, OsDirectoryDeleteFrame, 1);
+                            String8Z child_name = {0};
+                            bool child_name_valid = string8z_copy_arena(arena, name_slice, &child_name);
                             *child_frame = (OsDirectoryDeleteFrame){
                                 .parent = frame,
                                 .directory = child_directory,
-                                .name = string_duplicate_arena(arena, name, true),
+                                .name = child_name,
                                 .device = opened.st_dev,
                                 .inode = opened.st_ino,
                             };
+                            if (!child_name_valid)
+                            {
+                                result = false;
+                            }
                             if (closedir(frame->directory) != 0)
                             {
                                 result = false;
@@ -1521,7 +1638,8 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
                 int parent_descriptor = root_parent;
                 if (parent)
                 {
-                    parent_descriptor = os_directory_delete_open_at(dirfd(finished->directory), S8(".."));
+                    String8Z parent_name = {.pointer = (char8*)"..", .length = 2};
+                    parent_descriptor = os_directory_delete_open_at(dirfd(finished->directory), parent_name);
                     struct stat reopened;
                     bool same_parent = parent_descriptor >= 0 && os_directory_delete_stat(parent_descriptor, &reopened) == 0 &&
                                        reopened.st_dev == parent->device && reopened.st_ino == parent->inode;
@@ -1627,14 +1745,18 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
             continue;
         }
 
-        String16 task_path_w = string16_from_string8(arena, task->path, true);
-        DWORD task_attributes = GetFileAttributesW(task_path_w.pointer);
+        TemporalArena scratch = scratch_begin(&arena, 1);
+        String16Z task_path_w = {0};
+        bool task_path_valid = string16z_from_string8_arena(scratch.arena, task->path, &task_path_w);
+        DWORD task_attributes = task_path_valid ? GetFileAttributesW(task_path_w.pointer) : INVALID_FILE_ATTRIBUTES;
         if (task_attributes == INVALID_FILE_ATTRIBUTES)
         {
-            DWORD error = GetLastError();
+            DWORD error = task_path_valid ? GetLastError() : ERROR_INVALID_PARAMETER;
             result = (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) && result;
+            scratch_end(scratch);
             continue;
         }
+        scratch_end(scratch);
         if (task_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
         {
             result = os_windows_entry_delete(arena, task->path, task_attributes) && result;
@@ -1646,13 +1768,23 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
             continue;
         }
         os_directory_delete_task_push(arena, &tasks, task->path, OS_DIRECTORY_DELETE_POST, task_attributes);
-        String16 pattern = string16_from_string8(arena, string_format_z(arena, S8("{S8}\\*"), task->path), true);
+        String8 pattern_string = string_format_z(arena, S8("{S8}\\*"), task->path);
+        TemporalArena pattern_scratch = scratch_begin(&arena, 1);
+        String16Z pattern = {0};
+        bool pattern_valid = string16z_from_string8_arena(pattern_scratch.arena, pattern_string, &pattern);
+        if (!pattern_valid)
+        {
+            scratch_end(pattern_scratch);
+            result = false;
+            continue;
+        }
         WIN32_FIND_DATAW find_data;
         HANDLE find = FindFirstFileW(pattern.pointer, &find_data);
         if (find == INVALID_HANDLE_VALUE)
         {
             DWORD error = GetLastError();
             result = error == ERROR_FILE_NOT_FOUND && result;
+            scratch_end(pattern_scratch);
             continue;
         }
         bool more = true;
@@ -1671,6 +1803,7 @@ BUSTER_GLOBAL_LOCAL bool os_directory_delete_walk(Arena* arena, String8 root)
         }
         result = GetLastError() == ERROR_NO_MORE_FILES && result;
         FindClose(find);
+        scratch_end(pattern_scratch);
     }
     return result;
 }
@@ -1680,15 +1813,21 @@ bool os_directory_delete(String8 path)
 {
     bool result = false;
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
-    if (path.length)
+    if (path.pointer && path.length)
     {
-        BUSTER_VALIDATE(!path.pointer[path.length]);
         // The walk retains its descriptor frames or pending Windows tasks
         // for the whole traversal. Own their arena so nested scratch scopes can
         // never rewind live frame names or tasks.
         Arena* arena = arena_create((ArenaCreation){0});
-        result = os_directory_delete_walk(arena, path);
-        arena_destroy(arena, 1);
+        if (arena)
+        {
+            String8Z root = {0};
+            if (string8z_copy_arena(arena, path, &root))
+            {
+                result = os_directory_delete_walk(arena, (String8){.pointer = root.pointer, .length = root.length});
+            }
+            arena_destroy(arena, 1);
+        }
     }
 #else
     BUSTER_UNUSED(path);
@@ -1779,55 +1918,60 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
 #endif
     if (path.pointer && !error.v)
     {
+        TemporalArena scratch = scratch_begin(0, 0);
 #if defined(__linux__) || defined(__APPLE__)
-        BUSTER_VALIDATE(!path.pointer[path.length]);
-
-        int o = 0;
-        if (flags.read & flags.write)
+        String8Z path_z = {0};
+        if (!string8z_copy_arena(scratch.arena, path, &path_z))
         {
-            o = O_RDWR;
-        }
-        else if (flags.read)
-        {
-            o = O_RDONLY;
-        }
-        else if (flags.write)
-        {
-            o = O_WRONLY;
+            error = os_file_invalid_error();
         }
         else
         {
-            BUSTER_UNREACHABLE();
-        }
-
-        o |= (flags.truncate) * O_TRUNC;
-        o |= (flags.create) * O_CREAT;
-        o |= (flags.directory) * O_DIRECTORY;
-
-        mode_t mode = permissions.execute ? 0755 : 0644;
-        int fd;
-        do
-        {
-            fd = open((char*)path.pointer, o, mode);
-        } while (fd < 0 && errno == EINTR);
-
-        if (fd >= 0)
-        {
-            result = posix_fd_to_generic_fd(fd);
-        }
-        else
-        {
-            error = os_get_last_error();
-            // Missing paths are expected while probing include and library
-            // candidates. Keep diagnostics for other failures visible.
-            if (program_flag_get(PROGRAM_FLAG_VERBOSE) && error.v != (u32)ENOENT && error.v != (u32)ENOTDIR)
+            int o = 0;
+            if (flags.read & flags.write)
             {
-                string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+                o = O_RDWR;
+            }
+            else if (flags.read)
+            {
+                o = O_RDONLY;
+            }
+            else if (flags.write)
+            {
+                o = O_WRONLY;
+            }
+            else
+            {
+                BUSTER_UNREACHABLE();
+            }
+
+            o |= (flags.truncate) * O_TRUNC;
+            o |= (flags.create) * O_CREAT;
+            o |= (flags.directory) * O_DIRECTORY;
+
+            mode_t mode = permissions.execute ? 0755 : 0644;
+            int fd;
+            do
+            {
+                fd = open((char*)path_z.pointer, o, mode);
+            } while (fd < 0 && errno == EINTR);
+
+            if (fd >= 0)
+            {
+                result = posix_fd_to_generic_fd(fd);
+            }
+            else
+            {
+                error = os_get_last_error();
+                // Missing paths are expected while probing include and library
+                // candidates. Keep diagnostics for other failures visible.
+                if (program_flag_get(PROGRAM_FLAG_VERBOSE) && error.v != (u32)ENOENT && error.v != (u32)ENOTDIR)
+                {
+                    string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+                }
             }
         }
 #elif defined(_WIN32)
-        TemporalArena scratch = scratch_begin(0, 0);
-
         DWORD desired_access = 0;
         DWORD shared_mode = 0;
         SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
@@ -1880,24 +2024,31 @@ OsFileOpenResult os_file_open_checked(String8 path, OpenFlags flags, OpenPermiss
             creation_disposition = OPEN_EXISTING;
         }
 
-        String16 path_w = string16_from_string8(scratch.arena, path, true);
-        HANDLE fd = CreateFileW(path_w.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
-        if (fd != INVALID_HANDLE_VALUE)
+        String16Z path_w = {0};
+        if (!string16z_from_string8_arena(scratch.arena, path, &path_w))
         {
-            result = (OsFileDescriptor*)fd;
+            error = os_file_invalid_error();
         }
         else
         {
-            error = os_get_last_error();
-            // Missing paths are expected while probing include and library
-            // candidates. Keep diagnostics for other failures visible.
-            if (program_flag_get(PROGRAM_FLAG_VERBOSE) && error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
+            HANDLE fd = CreateFileW(path_w.pointer, desired_access, shared_mode, &security_attributes, creation_disposition, flags_and_attributes, template_file);
+            if (fd != INVALID_HANDLE_VALUE)
             {
-                string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+                result = (OsFileDescriptor*)fd;
+            }
+            else
+            {
+                error = os_get_last_error();
+                // Missing paths are expected while probing include and library
+                // candidates. Keep diagnostics for other failures visible.
+                if (program_flag_get(PROGRAM_FLAG_VERBOSE) && error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
+                {
+                    string_print(S8("Error opening {S8}: {EOs}\n"), path, error);
+                }
             }
         }
-        scratch_end(scratch);
 #endif
+        scratch_end(scratch);
     }
     if (!result && !error.v) error = os_file_invalid_error();
 #if BUSTER_INCLUDE_TESTS
@@ -2181,16 +2332,24 @@ OsError os_file_delete_checked(String8 path)
 #endif
     if (!result.v)
     {
+        TemporalArena scratch = scratch_begin(0, 0);
 #if defined(__linux__) || defined(__APPLE__)
-        BUSTER_VALIDATE(!path.pointer[path.length]);
-        if (unlink((const char*)path.pointer) != 0 && errno != ENOENT)
+        String8Z path_z = {0};
+        if (!string8z_copy_arena(scratch.arena, path, &path_z))
+        {
+            result = os_file_invalid_error();
+        }
+        else if (unlink((const char*)path_z.pointer) != 0 && errno != ENOENT)
         {
             result = os_get_last_error();
         }
 #elif defined(_WIN32)
-        TemporalArena scratch = scratch_begin(0, 0);
-        String16 path_w = string16_from_string8(scratch.arena, path, true);
-        if (!DeleteFileW(path_w.pointer))
+        String16Z path_w = {0};
+        if (!string16z_from_string8_arena(scratch.arena, path, &path_w))
+        {
+            result = os_file_invalid_error();
+        }
+        else if (!DeleteFileW(path_w.pointer))
         {
             OsError error = os_get_last_error();
             if (error.v != (u32)ERROR_FILE_NOT_FOUND && error.v != (u32)ERROR_PATH_NOT_FOUND)
@@ -2198,11 +2357,11 @@ OsError os_file_delete_checked(String8 path)
                 result = error;
             }
         }
-        scratch_end(scratch);
 #else
         BUSTER_UNUSED(path);
         result = os_file_invalid_error();
 #endif
+        scratch_end(scratch);
     }
     return result;
 }
@@ -2220,81 +2379,95 @@ FileStats os_file_replacement_target_stats(String8 path)
     }
     else if (!result.error.v)
     {
+        TemporalArena scratch = scratch_begin(0, 0);
 #if defined(__linux__) || defined(__APPLE__)
-        BUSTER_VALIDATE(!path.pointer[path.length]);
-        // O_NONBLOCK keeps a FIFO without a reader from blocking, and O_NOCTTY
-        // keeps a terminal from becoming the controlling terminal.
-        int fd;
-        do
+        String8Z path_z = {0};
+        if (!string8z_copy_arena(scratch.arena, path, &path_z))
         {
-            fd = open((char*)path.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
-        } while (fd < 0 && errno == EINTR);
-        if (fd >= 0)
-        {
-            OsFileDescriptor* file = posix_fd_to_generic_fd(fd);
-            result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
-            OsError close_error = os_file_close_checked(file);
-            if (result.valid && close_error.v)
-            {
-                result = (FileStats){.error = close_error};
-            }
+            result.error = os_file_invalid_error();
         }
         else
         {
-            OsError error = os_get_last_error();
-            result.valid = true;
-            if (error.v == (u32)ENOENT)
+            // O_NONBLOCK keeps a FIFO without a reader from blocking, and O_NOCTTY
+            // keeps a terminal from becoming the controlling terminal.
+            int fd;
+            do
             {
-                result.kind = OS_FILE_KIND_MISSING;
-            }
-            else if (error.v == (u32)ELOOP)
+                fd = open((char*)path_z.pointer, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
+            } while (fd < 0 && errno == EINTR);
+            if (fd >= 0)
             {
-                result.kind = OS_FILE_KIND_LINK;
-            }
-            else if (error.v == (u32)EISDIR)
-            {
-                result.kind = OS_FILE_KIND_DIRECTORY;
-            }
-            else if (error.v == (u32)ENXIO)
-            {
-                result.kind = OS_FILE_KIND_OTHER;
+                OsFileDescriptor* file = posix_fd_to_generic_fd(fd);
+                result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+                OsError close_error = os_file_close_checked(file);
+                if (result.valid && close_error.v)
+                {
+                    result = (FileStats){.error = close_error};
+                }
             }
             else
             {
-                result.valid = false;
-                result.error = error;
+                OsError error = os_get_last_error();
+                result.valid = true;
+                if (error.v == (u32)ENOENT)
+                {
+                    result.kind = OS_FILE_KIND_MISSING;
+                }
+                else if (error.v == (u32)ELOOP)
+                {
+                    result.kind = OS_FILE_KIND_LINK;
+                }
+                else if (error.v == (u32)EISDIR)
+                {
+                    result.kind = OS_FILE_KIND_DIRECTORY;
+                }
+                else if (error.v == (u32)ENXIO)
+                {
+                    result.kind = OS_FILE_KIND_OTHER;
+                }
+                else
+                {
+                    result.valid = false;
+                    result.error = error;
+                }
             }
         }
 #elif defined(_WIN32)
-        TemporalArena scratch = scratch_begin(0, 0);
-        String16 path_w = string16_from_string8(scratch.arena, path, true);
-        // Attribute-only access never conflicts with other handles' share
-        // modes; the reparse flag inspects a link rather than its target.
-        HANDLE handle = CreateFileW(path_w.pointer, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
-                                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, 0);
-        if (handle != INVALID_HANDLE_VALUE)
+        String16Z path_w = {0};
+        if (!string16z_from_string8_arena(scratch.arena, path, &path_w))
         {
-            OsFileDescriptor* file = (OsFileDescriptor*)handle;
-            result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
-            OsError close_error = os_file_close_checked(file);
-            if (result.valid && close_error.v)
-            {
-                result = (FileStats){.error = close_error};
-            }
+            result.error = os_file_invalid_error();
         }
         else
         {
-            OsError error = os_get_last_error();
-            result.valid = error.v == (u32)ERROR_FILE_NOT_FOUND || error.v == (u32)ERROR_PATH_NOT_FOUND;
-            if (!result.valid)
+            // Attribute-only access never conflicts with other handles' share
+            // modes; the reparse flag inspects a link rather than its target.
+            HANDLE handle = CreateFileW(path_w.pointer, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING,
+                                        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, 0);
+            if (handle != INVALID_HANDLE_VALUE)
             {
-                result.error = error;
+                OsFileDescriptor* file = (OsFileDescriptor*)handle;
+                result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+                OsError close_error = os_file_close_checked(file);
+                if (result.valid && close_error.v)
+                {
+                    result = (FileStats){.error = close_error};
+                }
+            }
+            else
+            {
+                OsError error = os_get_last_error();
+                result.valid = error.v == (u32)ERROR_FILE_NOT_FOUND || error.v == (u32)ERROR_PATH_NOT_FOUND;
+                if (!result.valid)
+                {
+                    result.error = error;
+                }
             }
         }
-        scratch_end(scratch);
 #else
         result.error = os_file_invalid_error();
 #endif
+        scratch_end(scratch);
     }
     return result;
 }
@@ -2307,9 +2480,13 @@ BUSTER_GLOBAL_LOCAL AtomicU64 os_file_staging_counter;
 OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, OpenPermissions permissions)
 {
     OsFileStagingResult result = {0};
+    TemporalArena validation_scratch = scratch_begin(&arena, 1);
+    String8Z validated_destination = {0};
+    bool destination_valid = string8z_copy_arena(validation_scratch.arena, destination, &validated_destination) && validated_destination.pointer;
+    scratch_end(validation_scratch);
     // The staging name replaces only the final component, keeping the rename
     // within one directory without lengthening the destination's name.
-    u64 directory_length = destination.pointer ? destination.length : 0;
+    u64 directory_length = destination_valid ? destination.length : 0;
     bool separator = false;
     while (directory_length && !separator)
     {
@@ -2329,7 +2506,7 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
     const OsFileTestStep* step = selected ? os_file_test_take(OS_FILE_TEST_OPEN) : 0;
     if (step) result.error.v = (u32)step->value;
 #endif
-    if (!result.error.v && (!destination.pointer || destination.length == directory_length))
+    if (!result.error.v && (!destination_valid || !destination.length || destination.length == directory_length))
     {
         result.error = os_file_invalid_error();
     }
@@ -2342,22 +2519,34 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
         u64 serial = atomic_u64_increment(&os_file_staging_counter);
         String8 path = string_format_z(arena, S8("{S8}{S8}{u64}-{u64}{S8}"), directory, OS_FILE_STAGING_PREFIX, os_get_current_process_id(), serial,
                                        OS_FILE_STAGING_SUFFIX);
-        OsError error;
+        OsError error = {0};
 #if defined(__linux__) || defined(__APPLE__)
         mode_t mode = permissions.execute ? 0755 : 0644;
-        int fd;
-        do
+        String8Z path_z = {0};
+        int fd = -1;
+        if (!string8z_copy_arena(arena, path, &path_z))
         {
-            fd = open((char*)path.pointer, O_WRONLY | O_CREAT | O_EXCL, mode);
-        } while (fd < 0 && errno == EINTR);
-        error = fd >= 0 ? (OsError){0} : os_get_last_error();
+            error = os_file_invalid_error();
+        }
+        else
+        {
+            do
+            {
+                fd = open((char*)path_z.pointer, O_WRONLY | O_CREAT | O_EXCL, mode);
+            } while (fd < 0 && errno == EINTR);
+            error = fd >= 0 ? (OsError){0} : os_get_last_error();
+        }
         if (fd >= 0)
         {
             result.file = posix_fd_to_generic_fd(fd);
         }
         bool collision = error.v == (u32)EEXIST;
 #elif defined(_WIN32)
-        String16 path_w = string16_from_string8(arena, path, true);
+        String16Z path_w = {0};
+        if (!string16z_from_string8_arena(arena, path, &path_w))
+        {
+            error = os_file_invalid_error();
+        }
         DWORD shared_mode = 0;
         if (permissions.read)
         {
@@ -2368,8 +2557,12 @@ OsFileStagingResult os_file_staging_create(Arena* arena, String8 destination, Op
             shared_mode |= FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         }
         SECURITY_ATTRIBUTES security_attributes = {sizeof(security_attributes), 0, 0};
-        HANDLE handle = CreateFileW(path_w.pointer, GENERIC_WRITE, shared_mode, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
-        error = handle != INVALID_HANDLE_VALUE ? (OsError){0} : os_get_last_error();
+        HANDLE handle = path_w.pointer ? CreateFileW(path_w.pointer, GENERIC_WRITE, shared_mode, &security_attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0)
+                                       : INVALID_HANDLE_VALUE;
+        if (!error.v)
+        {
+            error = handle != INVALID_HANDLE_VALUE ? (OsError){0} : os_get_last_error();
+        }
         if (handle != INVALID_HANDLE_VALUE)
         {
             result.file = (OsFileDescriptor*)handle;
@@ -2417,18 +2610,27 @@ OsError os_file_replace(String8 path, String8 destination)
     if (!result.v)
     {
 #if defined(__linux__) || defined(__APPLE__)
-        BUSTER_VALIDATE(!path.pointer[path.length] && !destination.pointer[destination.length]);
-        if (rename((const char*)path.pointer, (const char*)destination.pointer) != 0)
+        TemporalArena scratch = scratch_begin(0, 0);
+        String8Z path_z = {0};
+        String8Z destination_z = {0};
+        if (!string8z_copy_arena(scratch.arena, path, &path_z) || !string8z_copy_arena(scratch.arena, destination, &destination_z))
+        {
+            result = os_file_invalid_error();
+        }
+        else if (rename((const char*)path_z.pointer, (const char*)destination_z.pointer) != 0)
         {
             result = os_get_last_error();
         }
+        scratch_end(scratch);
 #elif defined(_WIN32)
         TemporalArena scratch = scratch_begin(0, 0);
-        String16 path_w = string16_from_string8(scratch.arena, path, true);
+        String16Z path_w = {0};
         String8 absolute_destination = os_path_absolute_lexical(scratch.arena, destination, true);
-        String16 destination_w = string16_from_string8(scratch.arena, absolute_destination, true);
+        String16Z destination_w = {0};
+        bool paths_valid = string16z_from_string8_arena(scratch.arena, path, &path_w) && absolute_destination.length &&
+                           string16z_from_string8_arena(scratch.arena, absolute_destination, &destination_w);
         u64 rename_bytes = sizeof(FILE_RENAME_INFO) + destination_w.length * sizeof(WindowsChar);
-        if (!absolute_destination.length || rename_bytes > UINT32_MAX)
+        if (!paths_valid || rename_bytes > UINT32_MAX)
         {
             result = os_file_invalid_error();
         }
@@ -3070,7 +3272,11 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 
     if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
     {
-        String16 application = string16_from_string8(temp.arena, executable, true);
+        String16Z application = {0};
+        if (!string16z_from_string8_arena(temp.arena, executable, &application))
+        {
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_EXECUTABLE_LOOKUP, os_process_spawn_invalid_error());
+        }
         WindowsStringList command_line = windows_string_list_from_slice_string(temp.arena, arguments);
         WindowsStringList environment = options.use_process_environment
                                             ? program_state->input.raw_environment
@@ -3085,11 +3291,11 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             creation_flags |= CREATE_SUSPENDED;
         }
         BOOL created = FALSE;
-        if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN))
+        if (result.failure == PROCESS_SPAWN_FAILURE_NONE && OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN))
         {
             os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_process_spawn_injected_error());
         }
-        else
+        else if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
         {
             created = CreateProcessW(application.pointer, command_line, 0, 0, inherited_handle_count != 0, creation_flags, environment, 0,
                                      &startup_info.StartupInfo, &process_information);
@@ -3318,13 +3524,22 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         PosixStringList envp = options.use_process_environment
                                   ? program_state->input.raw_environment
                                   : posix_environment_from_keys_and_values(temp.arena, environment_keys, environment_values);
-        int status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN)
-                         ? EIO
-                         : posix_spawn(&pid, executable.pointer, &file_actions, &attributes, argv, envp);
-        if (status)
+        String8Z executable_z = {0};
+        int status = 0;
+        if (!string8z_copy_arena(temp.arena, executable, &executable_z))
         {
-            pid = -1;
-            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, (OsError){(u32)status});
+            os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_EXECUTABLE_LOOKUP, os_process_spawn_invalid_error());
+        }
+        else
+        {
+            status = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_SPAWN)
+                         ? EIO
+                         : posix_spawn(&pid, executable_z.pointer, &file_actions, &attributes, argv, envp);
+            if (status)
+            {
+                pid = -1;
+                os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, (OsError){(u32)status});
+            }
         }
     }
 
@@ -5395,18 +5610,22 @@ bool os_unreserve(void* address, u64 size)
 
 OsModuleHandle* os_dynamic_library_load(String8 library)
 {
-    OsModuleHandle* result = {0};
-    BUSTER_VALIDATE(BUSTER_SLICE_IS_ZERO_TERMINATED(library));
-
-#if defined(_WIN32)
+    OsModuleHandle* result = 0;
     TemporalArena temp = scratch_begin(0, 0);
-    String16 library_w = string16_from_string8(temp.arena, library, true);
-    result = (OsModuleHandle*)LoadLibraryW(library_w.pointer);
-    scratch_end(temp);
+#if defined(_WIN32)
+    String16Z library_w = {0};
+    if (string16z_from_string8_arena(temp.arena, library, &library_w))
+    {
+        result = (OsModuleHandle*)LoadLibraryW(library_w.pointer);
+    }
 #else
-    result = (OsModuleHandle*)dlopen(library.pointer, RTLD_NOW | RTLD_LOCAL);
+    String8Z library_z = {0};
+    if (string8z_copy_arena(temp.arena, library, &library_z))
+    {
+        result = (OsModuleHandle*)dlopen(library_z.pointer, RTLD_NOW | RTLD_LOCAL);
+    }
 #endif
-
+    scratch_end(temp);
     return result;
 }
 
@@ -5425,13 +5644,20 @@ void os_dynamic_library_unload(OsModuleHandle* module)
 OsSymbol* os_dynamic_library_function_load(OsModuleHandle* module, String8 symbol)
 {
     TemporalArena scratch = scratch_begin(0, 0);
-    String8 terminated_symbol = string_duplicate_arena(scratch.arena, symbol, true);
-    OsSymbol* result = {0};
+    OsSymbol* result = 0;
 
 #if defined(_WIN32)
-    result = (OsSymbol*)GetProcAddress((HMODULE)module, terminated_symbol.pointer);
+    String8Z terminated_symbol = {0};
+    if (string8z_copy_arena(scratch.arena, symbol, &terminated_symbol))
+    {
+        result = (OsSymbol*)GetProcAddress((HMODULE)module, terminated_symbol.pointer);
+    }
 #else
-    result = (OsSymbol*)dlsym((void*)module, terminated_symbol.pointer);
+    String8Z terminated_symbol = {0};
+    if (string8z_copy_arena(scratch.arena, symbol, &terminated_symbol))
+    {
+        result = (OsSymbol*)dlsym((void*)module, terminated_symbol.pointer);
+    }
 #endif
 
     scratch_end(scratch);
@@ -5639,18 +5865,25 @@ void os_thread_set_name(String8 thread_name)
 {
 #if defined(__linux__) || defined(__APPLE__)
     TemporalArena scratch = scratch_begin(0, 0);
-    String8 terminated_name = string_duplicate_arena(scratch.arena, thread_name, true);
+    String8Z terminated_name = {0};
+    bool valid = string8z_copy_arena(scratch.arena, thread_name, &terminated_name);
+    if (valid)
+    {
 #if defined(__linux__)
-    pthread_setname_np(pthread_self(), terminated_name.pointer);
+        pthread_setname_np(pthread_self(), terminated_name.pointer);
 #else
-    pthread_setname_np(terminated_name.pointer);
+        pthread_setname_np(terminated_name.pointer);
 #endif
+    }
     scratch_end(scratch);
 #elif defined(_WIN32)
 #ifndef __TINYC__
     TemporalArena scratch = scratch_begin(0, 0);
-    String16 string = string16_from_string8(scratch.arena, thread_name, true);
-    SetThreadDescription(GetCurrentThread(), string.pointer);
+    String16Z string = {0};
+    if (string16z_from_string8_arena(scratch.arena, thread_name, &string))
+    {
+        SetThreadDescription(GetCurrentThread(), string.pointer);
+    }
     scratch_end(scratch);
 #else
     BUSTER_UNUSED(thread_name);
@@ -6488,23 +6721,30 @@ String8 executable_resolve_in_path(Arena* arena, String8 file)
 #endif
             };
 
-            String8 full_path = string_join_arena(temp.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+            TemporalArena candidate_scratch = scratch_begin(&temp.arena, 1);
+            String8 full_path = string_join_arena(candidate_scratch.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), true);
+            String8Z full_path_z = {0};
+            bool path_valid = string8z_copy_arena(candidate_scratch.arena, full_path, &full_path_z);
 
             bool found;
 #if defined(_WIN32)
-            DWORD file_attributes = GetFileAttributesW(string16_from_string8(temp.arena, full_path, true).pointer);
-            found = file_attributes != INVALID_FILE_ATTRIBUTES && (file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+            String16Z full_path_w = {0};
+            bool wide_path_valid = path_valid && string16z_from_string8_arena(candidate_scratch.arena, full_path, &full_path_w);
+            DWORD file_attributes = wide_path_valid ? GetFileAttributesW(full_path_w.pointer) : INVALID_FILE_ATTRIBUTES;
+            found = wide_path_valid && file_attributes != INVALID_FILE_ATTRIBUTES && (file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 #else
             // access(X_OK) alone also matches directories (e.g. a "cmake/"
             // directory in a "." PATH component); require a regular file.
             struct stat file_stat;
-            found = access(full_path.pointer, X_OK) == 0 && stat(full_path.pointer, &file_stat) == 0 && S_ISREG(file_stat.st_mode);
+            found = path_valid && access(full_path_z.pointer, X_OK) == 0 && stat(full_path_z.pointer, &file_stat) == 0 && S_ISREG(file_stat.st_mode);
 #endif
             if (found)
             {
-                result = string_duplicate_arena(arena, full_path, true);
+                result = string_duplicate_arena(arena, (String8){.pointer = full_path_z.pointer, .length = full_path_z.length}, true);
+                scratch_end(candidate_scratch);
                 break;
             }
+            scratch_end(candidate_scratch);
 
             if (is_end)
             {
