@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import posixpath
 import sys
 from typing import Any
 
@@ -45,7 +46,14 @@ def plan_errors(plan: Any) -> list[str]:
     for field in (*COMMON[1:], "immutable_binary_sha256"):
         if not SHA256_RE.fullmatch(str(plan.get(field))):
             errors.append(f"{field} must be a SHA-256 digest")
-    errors.extend(plan_problems(plan.get("aa_plan")))
+    aa_plan = plan.get("aa_plan")
+    if not isinstance(aa_plan, dict) or set(aa_plan) != {
+        "rounds", "blocks_per_round", "pairs_per_block", "pairs_per_round",
+        "total_pairs", "minimum_interblock_gap_ns", "schedule_sha256",
+        "stopping_rule", "outlier_policy", "decision",
+    }:
+        errors.append("fixed A/A plan fields differ")
+    errors.extend(plan_problems(aa_plan))
     controls = plan.get("controls")
     if not isinstance(controls, dict) or set(controls) != set(KINDS):
         errors.append("both predeclared same-root and cross-root controls required")
@@ -58,7 +66,7 @@ def plan_errors(plan: Any) -> list[str]:
             roots, binaries = control["roots"], control["binaries"]
             if not isinstance(roots, dict) or set(roots) != {"A", "B"} or not all(
                 isinstance(root, str) and root.startswith("/") and root != "/" and
-                "//" not in root and "/../" not in root and not root.endswith("/")
+                posixpath.normpath(root) == root
                 for root in roots.values()
             ):
                 errors.append(f"{kind} build roots malformed")

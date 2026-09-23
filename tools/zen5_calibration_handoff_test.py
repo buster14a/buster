@@ -51,6 +51,9 @@ def run() -> None:
     assert report["status"] == "descriptive-complete" and not report["errors"], report
     assert report["ab_authorized"] is False and report["physical_admission"] == "not-evaluated"
     assert set(report["captures"]) == set(captures)
+    changed_plan = deepcopy(plan)
+    changed_plan["aa_plan"]["regression_threshold"] = 0.05
+    assert replay(changed_plan, sha256_bytes(canonical_bytes(changed_plan)), captures, hashes, hashes)["status"] == "invalid"
 
     assert replay(plan, "0" * 64, captures, hashes, hashes)["status"] == "invalid"
     assert replay(plan, digest, {"immutable": aa}, hashes, hashes)["status"] == "invalid"
