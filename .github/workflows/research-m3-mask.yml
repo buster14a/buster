@@ -70,26 +70,42 @@ jobs:
         id: census
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           record() {
             local name="$1"
             shift
+            local result=0
             printf '%q ' "$@" >> "$M3_EVIDENCE/workload-$name.argv"
             printf '\n' >> "$M3_EVIDENCE/workload-$name.argv"
-            "$@" > "$M3_EVIDENCE/workload-$name.log" 2>&1
-            local result=$?
+            # GitHub invokes bash with -e. An explicit conditional records a
+            # failed child without skipping its status or subsequent workloads.
+            if "$@" > "$M3_EVIDENCE/workload-$name.log" 2>&1; then
+              result=0
+            else
+              result=$?
+            fi
             printf '%s\n' "$result" > "$M3_EVIDENCE/workload-$name.status"
             cat "$M3_EVIDENCE/workload-$name.log"
             return 0
           }
-          record selfhost build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -target x86_64-unknown-linux -fregister-allocator=fast -fno-machine-fallback src/buster/apps/ide/ide.c -lm -o "$M3_EVIDENCE/selfhost-program"
+          # The first attempt's baseline-CPU xgetbv refusal remains failed
+          # evidence in run 35817995483. Use the native CPU profile that the
+          # unchanged build.c self-host gate actually verified, not weaker
+          # fallback policy. This is a new, explicitly identified workload.
+          record selfhost-native build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -v -target x86_64-unknown-linux -march=native -fregister-allocator=fast -fno-machine-fallback src/buster/apps/ide/ide.c -lm -o "$M3_EVIDENCE/selfhost-program"
           record labels-fast build/Release/ide cc -v -target x86_64-unknown-linux -fregister-allocator=fast -fno-machine-fallback -fverify-codegen -c tests/basic_c_labels.c -o "$M3_EVIDENCE/labels-fast.o"
           record labels-none build/Release/ide cc -v -target x86_64-unknown-linux -fregister-allocator=none -c tests/basic_c_labels.c -o "$M3_EVIDENCE/labels-none.o"
           record asm-fast build/Release/ide cc -v -target x86_64-unknown-linux -fregister-allocator=fast -fno-machine-fallback -fverify-codegen -c tests/basic_c_asm.c -o "$M3_EVIDENCE/asm-fast.o"
           record cleanup-fast build/Release/ide cc -v -target x86_64-unknown-linux -fregister-allocator=fast -fno-machine-fallback -fverify-codegen -c tests/basic_c_cleanup.c -o "$M3_EVIDENCE/cleanup-fast.o"
           python3 tools/research/m3_mask_probe.py summarize
-          sha256sum "$M3_EVIDENCE"/*.o "$M3_EVIDENCE/selfhost-program" > "$M3_EVIDENCE/workload-artifacts.sha256"
-          grep -L '^0$' "$M3_EVIDENCE"/workload-*.status > "$M3_EVIDENCE/failed-workloads.txt"
+          # Hash every existing artifact even when another workload failed.
+          find "$M3_EVIDENCE" -maxdepth 1 -type f \( -name '*.o' -o -name selfhost-program \) -exec sha256sum '{}' + > "$M3_EVIDENCE/workload-artifacts.sha256"
+          : > "$M3_EVIDENCE/failed-workloads.txt"
+          for status in "$M3_EVIDENCE"/workload-*.status; do
+            if ! grep -qx '0' "$status"; then
+              printf '%s\n' "$status" >> "$M3_EVIDENCE/failed-workloads.txt"
+            fi
+          done
           test ! -s "$M3_EVIDENCE/failed-workloads.txt"
       - name: Preserve final status and source identity
         if: ${{ always() }}
