@@ -712,6 +712,71 @@ jobs:
             cmd /d /s /c $Modes | Tee-Object -FilePath (Join-Path $Logs 'modes.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Native MSVC reference differential
+        id: msvc_reference
+        if: ${{ !cancelled() && steps.modes_windows.outcome == 'success' && matrix.platform == 'windows' }}
+        shell: powershell
+        env:
+          VS_ARCH: ${{ matrix.vs_arch }}
+          VS_COMPONENT: ${{ matrix.vs_component }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'MSVC toolchain missing' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          $Root = Join-Path $env:RUNNER_TEMP 'buster-ci'
+          $Sources = Join-Path $Root 'msvc source with spaces'
+          $Include = Join-Path $Root 'msvc include with spaces'
+          $Libraries = Join-Path $Root 'msvc library with spaces'
+          New-Item -ItemType Directory -Force -Path $Sources, $Include, $Libraries | Out-Null
+          $Subject = Join-Path $Sources 'subject.c'
+          $Caller = Join-Path $Sources 'caller.c'
+          Copy-Item 'tools/fixtures/msvc_reference_subject.c' $Subject
+          Copy-Item 'tools/fixtures/msvc_reference_caller.c' $Caller
+          $Output = Join-Path $Root 'msvc reference with spaces'
+          $MsvcArgs = @('test_differential', '--ide', 'build/Release/ide.exe', '--cc', 'cl.exe',
+            '--reference-dialect', 'msvc', '--source', $Subject, '--host', $Caller,
+            '--include', $Include, '--library-path', $Libraries, '--minimize', '0',
+            '--strict-mir', '--out', $Output)
+          $ErrorActionPreference = 'Continue'
+          & $Driver @MsvcArgs 2>&1 | Tee-Object -FilePath (Join-Path $Root 'msvc-reference.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Manifest = Join-Path $Output 'manifest.txt'
+          if (-not (Test-Path -LiteralPath $Manifest)) { throw 'MSVC manifest missing' }
+          $ManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Manifest).Hash
+          & $Driver @MsvcArgs 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0 -or (Get-FileHash -Algorithm SHA256 -LiteralPath $Manifest).Hash -ne $ManifestHash) {
+            throw 'Existing MSVC output was reused or changed'
+          }
+          $Controls = @(
+            @{ Name = 'sanitizer'; Extra = @('--sanitize-oracle'); Compiler = 'cl.exe' },
+            @{ Name = 'reduction'; Extra = @('--minimize', '1'); Compiler = 'cl.exe' },
+            @{ Name = 'missing'; Extra = @(); Compiler = 'buster-missing-cl.exe' }
+          )
+          foreach ($Control in $Controls) {
+            $RejectedOutput = Join-Path $Root "msvc-rejected-$($Control.Name)"
+            $RejectedArgs = @('test_differential', '--ide', 'build/Release/ide.exe',
+              '--cc', $Control.Compiler, '--reference-dialect', 'msvc', '--source', $Subject,
+              '--minimize', '0', '--out', $RejectedOutput) + $Control.Extra
+            & $Driver @RejectedArgs 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0 -or (Test-Path -LiteralPath $RejectedOutput)) {
+              throw "MSVC $($Control.Name) control did not fail before execution"
+            }
+          }
+          $BadOutput = Join-Path $Root 'msvc-rejected-dialect'
+          & $Driver test_differential --ide build/Release/ide.exe --cc cl.exe `
+            --reference-dialect unknown --source $Subject --minimize 0 --out $BadOutput 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0 -or (Test-Path -LiteralPath $BadOutput)) {
+            throw 'Unknown reference dialect was accepted'
+          }
+          $RejectOutput = Join-Path $Root 'msvc-invalid-source'
+          & $Driver test_differential --ide build/Release/ide.exe --cc cl.exe --reference-dialect msvc `
+            --source tools/fixtures/msvc_reference_invalid.c --reject --minimize 0 --out $RejectOutput 2>&1 |
+            Tee-Object -FilePath (Join-Path $Root 'msvc-invalid.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Native configuration differential matrix
         id: differential
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
@@ -743,7 +808,7 @@ jobs:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
           # Unix equivalent: BUSTER_CI_REQUIRED: modes differential
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows' || 'modes differential' }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || 'modes differential' }}
           BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for the matching native commands and coverage contract.
         # Unix equivalent: run: python3 tools/ci_summary.py
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
@@ -757,12 +822,13 @@ jobs:
         shell: bash
         env:
           BUSTER_CI_NATIVE_PLATFORM: ${{ matrix.platform }}
-          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
+          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
         run: if test -n "$BUSTER_CI_OBSERVATION_ROOT"; then python_command="$BUSTER_CI_PYTHON"; if test -z "$python_command" || ! command -v "$python_command" >/dev/null 2>&1; then python_command=python3; fi; mkdir -p "$RUNNER_TEMP/native-ci-upload"; pack_status=0; "$python_command" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase evidence_packing --sequence 85 -- "$python_command" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" || pack_status=$?; expect_complete="$BUSTER_CI_NATIVE_COMPLETE"; if test "$pack_status" -ne 0; then expect_complete=0; fi; finalize_status=0; if test "$BUSTER_CI_NATIVE_PLATFORM" = unix; then "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase differential_driver_refresh --required-phase differential_preparation --required-phase differential_producer_check --required-phase differential_corpus --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; else "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; fi; if test "$pack_status" -ne 0; then exit "$pack_status"; fi; exit "$finalize_status"; elif test -n "$BUSTER_CI_PYTHON" && command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; else python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; fi
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
+        uses: ./.github/actions/native-artifact-upload
         with:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-ci-upload/
@@ -778,7 +844,7 @@ jobs:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
           # Unix equivalent: BUSTER_CI_REQUIRED: modes differential pack
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows pack' || 'modes differential pack' }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || 'modes differential pack' }}
           BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for native evidence packaging and fallback.
         # Unix equivalent: run: python3 tools/ci_summary.py
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi

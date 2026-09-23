@@ -1,10 +1,11 @@
 # Approved GitHub action references
 
 `tools/check_action_pins.py` checks every `.yml` and `.yaml` workflow under
-`.github/workflows/`. Each `uses` value must name an approved GitHub action
-path and a full lowercase commit SHA. Mutable branches/tags, unlisted paths
-and unapproved revisions fail. Local and container actions require a separate
-policy decision before use; the one same-commit workflow exception is below.
+`.github/workflows/` and every local action manifest under `.github/actions/`.
+Each remote `uses` value must name an approved GitHub action path and a full
+lowercase commit SHA. Mutable branches/tags, unlisted paths and unapproved
+revisions fail. Local and container references require a separate policy
+decision before use; approved same-commit references are listed below.
 
 The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
 actionlint. The checker now lives under `tools/` because the Forgejo workflows
@@ -29,6 +30,21 @@ Other workflows remain on v4.6.2 until their independent validation.
 Checkout necessarily precedes repository-local checks; its literal pin must
 itself be reviewed in the PR. This policy cannot prevent a PR author from
 changing the checker together with a workflow.
+
+## Approved local native-upload composite action
+
+`./.github/actions/native-artifact-upload` is approved for the packed native
+evidence step in Buster CI. The caller reaches it only after evidence packaging
+succeeds. The composite uses the existing pinned upload-artifact v7 action for
+the initial attempt and one retry, tolerates only the initial failure, waits
+15 seconds, and sets `overwrite: true` on the blocking retry. A retry failure
+keeps the native lane red and writes an explicit evidence-loss summary. The
+workflow leaves its older step order intact; regression coverage in
+`tools/ci_native_observation_test.py` checks the wrapper and both pinned calls.
+
+The checker allows this exact local path, then scans its manifest with the same
+remote action allowlist. It does not authorize arbitrary local or container
+actions.
 
 ## Approved same-commit reusable workflow
 

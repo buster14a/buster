@@ -27,6 +27,7 @@
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   object_buffer_write .. object_writer_capacity  append-only write buffer
+//   object_writer_capacity_aligned                 checked ELF/Mach-O file bound
 //   object_assembly_build_index                    stable section/offset views
 //   object_assembly_append_*                       the disassembly printer
 //                                                  (x86 and AArch64 operand
@@ -163,6 +164,82 @@ BUSTER_GLOBAL_LOCAL u64 object_writer_capacity(ObjectFile* object)
         result += object->symbols[symbol].name.length + 128;
     }
     result += (u64)object->relocation_count * 64;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_writer_capacity_add(u64* total, u64 amount)
+{
+    bool result = total && amount <= UINT64_MAX - *total;
+    if (result)
+    {
+        *total += amount;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_writer_capacity_aligned(ObjectFile* object, ObjectFormat format, u64* capacity)
+{
+    bool format_valid = format == OBJECT_FORMAT_ELF64 || format == OBJECT_FORMAT_MACH_O64;
+    bool result = object && capacity && format_valid;
+    if (capacity)
+    {
+        *capacity = 0;
+    }
+    if (result)
+    {
+        result = (!object->section_count || object->sections) && (!object->symbol_count || object->symbols);
+    }
+    u64 total = 16384;
+    for (u32 section = 0; result && section < object->section_count; section += 1)
+    {
+        ObjectSection* source = object->sections + section;
+        result = object_writer_capacity_add(&total, source->data.length);
+        if (result)
+        {
+            result = object_writer_capacity_add(&total, 256);
+        }
+        if (result && format == OBJECT_FORMAT_ELF64)
+        {
+            // ELF copies each section name and may add one .rela name per section.
+            result = object_writer_capacity_add(&total, source->name.length);
+            if (result)
+            {
+                result = object_writer_capacity_add(&total, 1);
+            }
+            if (result)
+            {
+                result = object_writer_capacity_add(&total, source->name.length);
+            }
+            if (result)
+            {
+                result = object_writer_capacity_add(&total, 6);
+            }
+        }
+        if (result)
+        {
+            // Zero-fill contributes alignment but no serialized payload through data.length.
+            u64 alignment = source->alignment;
+            u64 alignment_padding = alignment ? alignment - 1 : 0;
+            result = object_writer_capacity_add(&total, alignment_padding);
+        }
+    }
+    for (u32 symbol = 0; result && symbol < object->symbol_count; symbol += 1)
+    {
+        result = object_writer_capacity_add(&total, object->symbols[symbol].name.length);
+        if (result)
+        {
+            result = object_writer_capacity_add(&total, 128);
+        }
+    }
+    if (result)
+    {
+        u64 relocation_overhead = format == OBJECT_FORMAT_MACH_O64 ? 80 : 64;
+        result = object_writer_capacity_add(&total, (u64)object->relocation_count * relocation_overhead);
+    }
+    if (result)
+    {
+        *capacity = total;
+    }
     return result;
 }
 
@@ -11096,18 +11173,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_split_initializer_priorities(Arena* arena,
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object)
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64_with_capacity(Arena* arena, ObjectFile* object, u64 capacity)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_ELF64,
     };
-    // One `.init_array.NNNNN`/`.fini_array.NNNNN` section per GNU priority
-    // group, appended past OBJECT_SECTION_COUNT.  Everything below is already
-    // generic over section_count and reads each section's own name, so the
-    // split costs the writer's body nothing.
-    ObjectFile split_object = object_split_initializer_priorities(arena, object, OBJECT_FORMAT_ELF64);
-    object = &split_object;
-    u64 capacity = object_writer_capacity(object);
     ObjectBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
@@ -11357,6 +11427,22 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
         .length = buffer.count,
     };
     result.error = buffer.error;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object)
+{
+    ObjectArtifact result = {
+        .format = OBJECT_FORMAT_ELF64,
+        .error = OBJECT_ERROR_CAPACITY,
+    };
+    // Priority groups become extra sections before the bound is computed.
+    ObjectFile split_object = object_split_initializer_priorities(arena, object, OBJECT_FORMAT_ELF64);
+    u64 capacity = 0;
+    if (object_writer_capacity_aligned(&split_object, OBJECT_FORMAT_ELF64, &capacity))
+    {
+        result = object_write_elf64_with_capacity(arena, &split_object, capacity);
+    }
     return result;
 }
 
@@ -11786,12 +11872,11 @@ BUSTER_GLOBAL_LOCAL bool object_mach_place_difference(ObjectFile* object, Object
             object->sections[relocation->section].kind == OBJECT_SECTION_UNWIND);
 }
 
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFile* object)
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* arena, ObjectFile* object, u64 capacity)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_MACH_O64,
     };
-    u64 capacity = object_writer_capacity(object);
     ObjectBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
@@ -12111,6 +12196,20 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
         .length = buffer.count,
     };
     result.error = buffer.error;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFile* object)
+{
+    ObjectArtifact result = {
+        .format = OBJECT_FORMAT_MACH_O64,
+        .error = OBJECT_ERROR_CAPACITY,
+    };
+    u64 capacity = 0;
+    if (object_writer_capacity_aligned(object, OBJECT_FORMAT_MACH_O64, &capacity))
+    {
+        result = object_write_mach_o64_with_capacity(arena, object, capacity);
+    }
     return result;
 }
 
