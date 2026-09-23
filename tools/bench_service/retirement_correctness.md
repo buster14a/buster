@@ -19,6 +19,12 @@ each skip proof, source, configuration,
 target, stage and execution obligation from those authenticated inputs. No
 candidate output, manifest or request may select these values.
 
+The production gate requires exactly 78,912 canonical rows and 72,672
+compiler-eligible rows from the reviewed version-1 support projection. A
+different count cannot start timing under the current binding. The standalone
+miniature and synthetic-capacity fixtures explicitly opt out of that fixed
+population check; they do not establish a production census.
+
 The required-check array must enumerate every applicable #509 native semantic
 lane, supported configuration matrix, no-fallback/census validation, self-host
 and fixed-point gate. The service executes or independently validates each

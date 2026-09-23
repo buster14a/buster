@@ -29,6 +29,13 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_equal(char const left[65], ch
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_retirement_correctness_population(uint32_t rows, uint32_t eligible)
+{
+    bool ok = rows == BQ_RETIREMENT_CORRECTNESS_V1_ROWS &&
+              eligible == BQ_RETIREMENT_CORRECTNESS_V1_ELIGIBLE;
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_number(Sha256* hash, uint64_t value)
 {
     uint8_t bytes[8];
@@ -232,6 +239,9 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
         if (ok) eligible += row->compiler_eligible;
     }
     if (ok) ok = eligible > 0 && object_rows == prepared->object_rows;
+#ifndef BUSTER_RETIREMENT_CORRECTNESS_FIXTURE
+    if (ok) ok = bq_retirement_correctness_population(prepared->rows, eligible);
+#endif
     for (uint32_t i = 0; ok && i < check_count; i += 1)
     {
         BqRetirementRequiredCheck const* check = &checks[i];

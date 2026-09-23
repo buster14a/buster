@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../src/buster/lib/hash.c"
+#define BUSTER_RETIREMENT_CORRECTNESS_FIXTURE 1
 #include "retirement_correctness.c"
 
 #define BQ_TEST_ROWS 6u
@@ -181,6 +182,15 @@ static void test_valid(void)
     fixture.trusted[2].source_sha256[0] = 'c';
     fixture.gate.prepared.binary_sha256[0][0] = 'f';
     CHECK(!bq_retirement_correctness_ready(&fixture.gate));
+}
+
+static void test_v1_population(void)
+{
+    CHECK(bq_retirement_correctness_population(78912, 72672));
+    CHECK(!bq_retirement_correctness_population(78911, 72672));
+    CHECK(!bq_retirement_correctness_population(78912, 72671));
+    CHECK(!bq_retirement_correctness_population(78913, 72672));
+    CHECK(!bq_retirement_correctness_population(78912, 72673));
 }
 
 static void test_bad_checks(void)
@@ -374,6 +384,7 @@ static void test_large_population(void)
 
 int main(void)
 {
+    test_v1_population();
     test_valid();
     test_bad_checks();
     test_bad_rows();

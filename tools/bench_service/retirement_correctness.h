@@ -10,6 +10,9 @@
 
 #define BQ_RETIREMENT_CORRECTNESS_ROWS_CAP 100000u
 #define BQ_RETIREMENT_CORRECTNESS_CHECKS_CAP 256u
+/* The reviewed #508/#929 v1 projection; changing it needs a new binding. */
+#define BQ_RETIREMENT_CORRECTNESS_V1_ROWS 78912u
+#define BQ_RETIREMENT_CORRECTNESS_V1_ELIGIBLE 72672u
 
 typedef enum BqRetirementCheckKind
 {
