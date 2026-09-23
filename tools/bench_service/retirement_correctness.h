@@ -1,7 +1,9 @@
 /* Private pre-timing gate for #1020. The service imports #1018's verified
  * preparation and #508/#509's authenticated census/check/oracle declarations.
- * begin/check/row/finish preserve the complete population; ready is the only
- * handoff to a measurement plan. This is not a published evidence schema.
+ * begin/check/row/finish preserve the complete population; ready verifies
+ * structural binding only. The service must independently authenticate each
+ * producer and gate the actual measurement launch. This is not a published
+ * evidence schema.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_H
@@ -10,9 +12,6 @@
 
 #define BQ_RETIREMENT_CORRECTNESS_ROWS_CAP 100000u
 #define BQ_RETIREMENT_CORRECTNESS_CHECKS_CAP 256u
-/* The reviewed #508/#929 v1 projection; changing it needs a new binding. */
-#define BQ_RETIREMENT_CORRECTNESS_V1_ROWS 78912u
-#define BQ_RETIREMENT_CORRECTNESS_V1_ELIGIBLE 72672u
 
 typedef enum BqRetirementCheckKind
 {
@@ -49,6 +48,9 @@ typedef struct BqRetirementTrustedRow
     uint32_t compiler_eligible, code_obligation, execution_obligation;
     char identity_sha256[65], source_sha256[65], configuration_sha256[65];
     char skip_proof_sha256[65], independent_oracle_sha256[65];
+    /* Independently derived exact argv/cwd/environment, by trusted binary.
+     * Untimed sides and inapplicable native runtime have empty commands. */
+    char compiler_command_sha256[2][65], runtime_command_sha256[2][65];
 } BqRetirementTrustedRow;
 
 /* Every required check is an independently authenticated, exact-source and
@@ -57,7 +59,7 @@ typedef struct BqRetirementTrustedRow
 typedef struct BqRetirementRequiredCheck
 {
     uint32_t kind, target, rows;
-    char command_sha256[65], configuration_sha256[65];
+    char command_sha256[65], configuration_sha256[65], receipt_sha256[65];
 } BqRetirementRequiredCheck;
 
 typedef struct BqRetirementCheckResult

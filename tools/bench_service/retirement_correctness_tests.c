@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../src/buster/lib/hash.c"
-#define BUSTER_RETIREMENT_CORRECTNESS_FIXTURE 1
 #include "retirement_correctness.c"
 
 #define BQ_TEST_ROWS 6u
@@ -70,6 +69,7 @@ static void fixture_init(BqCorrectnessFixture* fixture)
         memcpy(check->configuration_sha256, required->configuration_sha256, 65);
         memcpy(check->preparation_sha256, prepared->preparation_sha256, 65);
         digest(check->receipt_sha256, (char)('a' + i));
+        memcpy(required->receipt_sha256, check->receipt_sha256, 65);
         for (unsigned side = 0; side < 2; side += 1)
         {
             memcpy(check->source_sha256[side], prepared->source_sha256[side], 65);
@@ -101,6 +101,7 @@ static void fixture_init(BqCorrectnessFixture* fixture)
         {
             BqRetirementObservedSide* observed = &fact->side[side];
             digest(observed->compiler_command_sha256, side ? 'b' : 'a');
+            memcpy(row->compiler_command_sha256[side], observed->compiler_command_sha256, 65);
             digest(observed->artifact_sha256, side ? 'd' : 'c');
             observed->semantic_pass = 1;
             observed->runtime_exit = -1;
@@ -112,6 +113,7 @@ static void fixture_init(BqCorrectnessFixture* fixture)
             if (fact->runtime_eligible)
             {
                 digest(observed->runtime_command_sha256, side ? '8' : '7');
+                memcpy(row->runtime_command_sha256[side], observed->runtime_command_sha256, 65);
                 memcpy(observed->runtime_output_sha256, row->independent_oracle_sha256, 65);
                 observed->runtime_exit = 0;
             }
@@ -168,9 +170,18 @@ static void test_valid(void)
     fixture.trusted[1].independent_oracle_sha256[0] = 'e';
     CHECK(!bq_retirement_correctness_ready(&fixture.gate));
     fixture.trusted[1].independent_oracle_sha256[0] = 'f';
+    fixture.trusted[1].runtime_command_sha256[1][0] = 'f';
+    CHECK(!bq_retirement_correctness_ready(&fixture.gate));
+    fixture.trusted[1].runtime_command_sha256[1][0] = '8';
+    fixture.trusted[2].compiler_command_sha256[0][0] = 'f';
+    CHECK(!bq_retirement_correctness_ready(&fixture.gate));
+    fixture.trusted[2].compiler_command_sha256[0][0] = 'a';
     fixture.required[0].command_sha256[0] = 'f';
     CHECK(!bq_retirement_correctness_ready(&fixture.gate));
     fixture.required[0].command_sha256[0] = '3';
+    fixture.required[0].receipt_sha256[0] = 'f';
+    CHECK(!bq_retirement_correctness_ready(&fixture.gate));
+    fixture.required[0].receipt_sha256[0] = 'a';
     fixture.check_facts[0].receipt_sha256[0] = 'f';
     CHECK(!bq_retirement_correctness_ready(&fixture.gate));
     fixture.check_facts[0].receipt_sha256[0] = 'a';
@@ -184,18 +195,9 @@ static void test_valid(void)
     CHECK(!bq_retirement_correctness_ready(&fixture.gate));
 }
 
-static void test_v1_population(void)
-{
-    CHECK(bq_retirement_correctness_population(78912, 72672));
-    CHECK(!bq_retirement_correctness_population(78911, 72672));
-    CHECK(!bq_retirement_correctness_population(78912, 72671));
-    CHECK(!bq_retirement_correctness_population(78913, 72672));
-    CHECK(!bq_retirement_correctness_population(78912, 72673));
-}
-
 static void test_bad_checks(void)
 {
-    for (unsigned fault = 0; fault < 9; fault += 1)
+    for (unsigned fault = 0; fault < 10; fault += 1)
     {
         BqCorrectnessFixture fixture;
         fixture_init(&fixture);
@@ -210,6 +212,7 @@ static void test_bad_checks(void)
         if (fault == 6) check->binary_sha256[1][0] = '0';
         if (fault == 7) check->command_sha256[0] = '0';
         if (fault == 8) check->receipt_sha256[0] = 0;
+        if (fault == 9) check->receipt_sha256[0] = 'b';
         CHECK(!bq_retirement_correctness_check(&fixture.gate, check));
         CHECK(!bq_retirement_correctness_check(&fixture.gate, &fixture.checks[1]));
         launch_if_ready(&fixture.gate);
@@ -219,7 +222,7 @@ static void test_bad_checks(void)
 
 static void test_bad_rows(void)
 {
-    for (unsigned fault = 0; fault < 12; fault += 1)
+    for (unsigned fault = 0; fault < 13; fault += 1)
     {
         BqCorrectnessFixture fixture;
         fixture_init(&fixture);
@@ -238,12 +241,13 @@ static void test_bad_rows(void)
         if (fault == 9) row->side[0].runtime_exit = 0;
         if (fault == 10) row->side[0].artifact_sha256[0] = 0;
         if (fault == 11) row->code_eligible = 1;
+        if (fault == 12) row->side[0].compiler_command_sha256[0] = 'f';
         CHECK(!bq_retirement_correctness_row(&fixture.gate, row));
         CHECK(!bq_retirement_correctness_finish(&fixture.gate));
         launch_if_ready(&fixture.gate);
         CHECK(launches == 1);
     }
-    for (unsigned fault = 0; fault < 5; fault += 1)
+    for (unsigned fault = 0; fault < 6; fault += 1)
     {
         BqCorrectnessFixture fixture;
         fixture_init(&fixture);
@@ -256,6 +260,7 @@ static void test_bad_rows(void)
         if (fault == 2) row->runtime_eligible = 0;
         if (fault == 3) row->side[0].runtime_command_sha256[0] = 0;
         if (fault == 4) row->side[0].code_bytes = 0;
+        if (fault == 5) row->side[0].runtime_command_sha256[0] = 'f';
         CHECK(!bq_retirement_correctness_row(&fixture.gate, row));
         launch_if_ready(&fixture.gate);
         CHECK(launches == 1);
@@ -264,7 +269,7 @@ static void test_bad_rows(void)
 
 static void test_bad_import(void)
 {
-    for (unsigned fault = 0; fault < 11; fault += 1)
+    for (unsigned fault = 0; fault < 15; fault += 1)
     {
         BqCorrectnessFixture fixture;
         fixture_init(&fixture);
@@ -279,6 +284,10 @@ static void test_bad_import(void)
         if (fault == 8) fixture.trusted[2].census_row = 0;
         if (fault == 9) fixture.prepared.object_rows = 2;
         if (fault == 10) fixture.required[3].rows = 4;
+        if (fault == 11) fixture.trusted[0].compiler_command_sha256[0][0] = 0;
+        if (fault == 12) fixture.trusted[1].runtime_command_sha256[0][0] = 0;
+        if (fault == 13) fixture.trusted[4].runtime_command_sha256[0][0] = 'f';
+        if (fault == 14) fixture.required[0].receipt_sha256[0] = 0;
         CHECK(!bq_retirement_correctness_begin(&fixture.gate, &fixture.prepared,
             fixture.trusted, fixture.required, BQ_TEST_CHECKS,
             fixture.check_facts, fixture.facts, fixture.identity_workspace,
@@ -354,6 +363,7 @@ static void test_large_population(void)
                 row->compiler_eligible = fact->compiler_eligible = 0;
                 row->classification = 4;
                 digest(row->skip_proof_sha256, 'e');
+                memset(row->compiler_command_sha256, 0, sizeof(row->compiler_command_sha256));
                 fact->side[0] = fact->side[1] = (BqRetirementObservedSide){0};
             }
             else eligible += 1;
@@ -384,7 +394,6 @@ static void test_large_population(void)
 
 int main(void)
 {
-    test_v1_population();
     test_valid();
     test_bad_checks();
     test_bad_rows();
