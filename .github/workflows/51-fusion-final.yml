@@ -21,15 +21,52 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat <<'PATCH' | base64 -d | gzip -d > /tmp/51-fixture.patch
-          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
-          PATCH
-          echo 'a6b030cf0e98c2a883377960dbb2e1c051595efda4dc84e02f00302cb59e161f  /tmp/51-fixture.patch' | sha256sum -c -
           expected=2b1be719eb6df68a43f6649aef064f3df9cfdf5d
           test "$(git ls-remote --heads origin refs/heads/astra/51-fusion-20260924 | cut -f1)" = "$expected"
           git switch --detach "$expected"
-          git apply --check /tmp/51-fixture.patch
-          git apply /tmp/51-fixture.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, json, hashlib
+          p = Path('tests/basic_c_macro_task_batches.c')
+          expanded = p.read_text()
+          assert hashlib.sha256(expanded.encode()).hexdigest() == '76d12b5b4b3d17d5393f4e8b600ae43fb70fdf0584d7a0e58fb8894ef3953353'
+          original = subprocess.check_output(['git','show','5d1c314a8ee3c5f9fb713f6afb85ab1e795f44a0:tests/basic_c_macro_task_batches.c'])
+          p.write_bytes(original)
+          d = Path('src/buster/tests/compiler/driver/driver_test.c')
+          s = d.read_text()
+          anchor = '    String8 c_quickjs_regression_paths[] = {'
+          prefix = '''    // Keep the frozen task-batch file unchanged. This additional ordinary
+              // runtime case is owned by the registered driver suite and uses its real
+              // temporary-file path and allocator execution loop.
+              String8 macro_fusion_source_path = buster_test_temporary_path(arguments->arena, S8("buster-macro-fusion-source"), S8(".c"));
+              String8 macro_fusion_source = S8(
+          ''' + ''.join('        '+json.dumps(line)+'\n' for line in expanded.splitlines(keepends=True)) + '''    );
+              bool macro_fusion_written = file_write(macro_fusion_source_path, BUSTER_SLICE_TO_BYTE_SLICE(macro_fusion_source));
+          '''
+          assert s.count(anchor) == 1
+          s = s.replace(anchor, prefix + anchor, 1)
+          a = '        S8("tests/basic_c_preprocessor_short_circuit.c"),\n    };'
+          b = '        S8("buster-c-preprocessor-short-circuit"),\n    };'
+          assert s.count(a) == s.count(b) == 1
+          s = s.replace(a, a[:-6] + '        macro_fusion_source_path,\n    };', 1)
+          s = s.replace(b, b[:-6] + '        S8("buster-c-macro-task-fusion"),\n    };', 1)
+          start = s.index('        for (u64 allocator_index', s.index('    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths)'))
+          end = s.index('    // The C23 attribute syntax', start)
+          block = s[start:end]
+          assert block.endswith('    }\n')
+          block = block[:-6]
+          s = s[:start] + '''        if (fixture_index + 1 < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths) || BUSTER_REQUIRE(arguments, macro_fusion_written))
+                  {
+          ''' + ''.join('    '+line if line.strip() else line for line in block.splitlines(keepends=True)) + '''        }
+              }
+              if (macro_fusion_written)
+              {
+                  BUSTER_TEST(arguments, os_file_delete(macro_fusion_source_path));
+              }
+          ''' + s[end:]
+          assert hashlib.sha256(s.encode()).hexdigest() == 'ba237e84e0b4433367e7d21a2f0700fe7ee5ea52a0510d999e8db38e8039fb6b'
+          d.write_text(s)
+          PY
           git diff --check
           echo 'ab7c10f28f105c012f3624b624193c5e37da51b59350d71f355b48f565fb62e0  tests/basic_c_macro_task_batches.c' | sha256sum -c -
           git config user.name 'github-actions[bot]'
