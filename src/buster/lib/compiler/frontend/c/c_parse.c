@@ -18597,7 +18597,7 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, 
         else if (pointer_depth)
         {
             u64 length = name.length + (u64)pointer_depth + 1;
-            u8* bytes = arena_allocate(arena, u8, length);
+            char8* bytes = arena_allocate(arena, char8, length);
             memcpy(bytes, name.pointer, (size_t)name.length);
             bytes[name.length] = ' ';
             memset(bytes + name.length + 1, '*', pointer_depth);
