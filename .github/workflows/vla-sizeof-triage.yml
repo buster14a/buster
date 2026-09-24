@@ -3,102 +3,210 @@ on:
   push:
     branches: [codex/vla-sizeof-triage-20260924]
 permissions:
-  contents: read
+  contents: write
+  actions: read
 jobs:
   probe:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       BUSTER_TEST_JOBS: '2'
+      VLA_SOURCE: ${{ runner.temp }}/vla-source
+      VLA_EVIDENCE: ${{ runner.temp }}/vla-evidence
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Record source and build trusted diagnostic compiler
-        id: build
+      - name: Build unchanged compiler with registered failure-first tests
+        id: baseline_build
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/vla-evidence"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/vla-evidence/transport.txt"
-          git rev-parse HEAD:src/buster/lib/compiler/frontend/c/c_gen.c > "$RUNNER_TEMP/vla-evidence/c-gen-blob.txt"
-          git archive 055b7f71df518de1cdd7fcb9af7e0a47f81d173a src build.c CMakeLists.txt AGENTS.md docs/agents | gzip > "$RUNNER_TEMP/vla-evidence/source.tar.gz"
-          clang --version > "$RUNNER_TEMP/vla-evidence/clang.txt"
-          gcc --version > "$RUNNER_TEMP/vla-evidence/gcc.txt"
+          mkdir -p "$VLA_EVIDENCE"
+          git rev-parse HEAD HEAD^{tree} > "$VLA_EVIDENCE/transport.txt"
+          git worktree add --detach "$VLA_SOURCE" 055b7f71df518de1cdd7fcb9af7e0a47f81d173a
+          cd "$VLA_SOURCE"
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_gen.c)" = 60bf69ed970fc43d84fa3f7198aac5d1410b0eb9
+          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = 0e4e9e4c63207bc60907d2cceb028731f3da1ec9
+          python3 - <<'PY'
+          import os, pathlib
+          root = pathlib.Path(os.environ['VLA_SOURCE'])
+          p = root / 'src/buster/tests/compiler/frontend/c/c_test.c'
+          s = p.read_text()
+          fixture = (pathlib.Path(os.environ['GITHUB_WORKSPACE']) / 'tools/vla-sizeof-fixture.c').read_text()
+          anchor = 'UnitTestResult c_frontend_tests(UnitTestArguments* arguments)\n{'
+          registration = '    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);'
+          assert s.count(anchor) == s.count(registration) == 1
+          p.write_text(s.replace(anchor, fixture + anchor).replace(registration, registration + '\n    BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);'))
+          PY
+          git diff --check
+          git diff > "$VLA_EVIDENCE/test-only.patch"
+          clang --version > "$VLA_EVIDENCE/clang.txt"
+          gcc --version > "$VLA_EVIDENCE/gcc.txt"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/vla-build"
-          "$RUNNER_TEMP/vla-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$RUNNER_TEMP/vla-evidence/configure.log"
-          "$RUNNER_TEMP/vla-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/vla-evidence/build.log"
-          sha256sum build/Release/ide > "$RUNNER_TEMP/vla-evidence/compiler.sha256"
-      - name: Baseline self-host fixed point
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+          "$RUNNER_TEMP/vla-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$VLA_EVIDENCE/configure.log"
+          "$RUNNER_TEMP/vla-build" build --config Release -t ide 2>&1 | tee "$VLA_EVIDENCE/baseline-build.log"
+          cp build/Release/ide "$RUNNER_TEMP/vla-baseline-ide"
+          sha256sum "$RUNNER_TEMP/vla-baseline-ide" > "$VLA_EVIDENCE/baseline-compiler.sha256"
+      - name: Failure-first full suite
+        if: ${{ !cancelled() && steps.baseline_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd "$VLA_SOURCE"
+          set +e
+          "$RUNNER_TEMP/vla-build" build --config Release -t test_all 2>&1 | tee "$VLA_EVIDENCE/baseline-tests.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > "$VLA_EVIDENCE/baseline-tests.status"
+          test "$status" -ne 0
+          grep -q 'sizeof VLA probe_' "$VLA_EVIDENCE/baseline-tests.log"
+      - name: Build focused candidate
+        id: candidate_build
+        if: ${{ !cancelled() && steps.baseline_build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/vla-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/vla-evidence/self-host.log"
-      - name: Systematic independent-reference family
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+          cd "$VLA_SOURCE"
+          python3 "$GITHUB_WORKSPACE/tools/vla-sizeof-patch.py" src/buster/lib/compiler/frontend/c/c_gen.c
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('docs/agents/frontend/foundations.md')
+          s = p.read_text()
+          old = '  of a named VLA pointer\'s dereference reads the cached suffix size.\n'
+          new = old + ('  A saved size does not suppress evaluation of a VLA-typed operand. The\n'
+                       '  sizeof continuation evaluates its operand once through the existing\n'
+                       '  expression machine, discards the row address, and retains that size.\n'
+                       '  The remaining original C type decides evaluation: a variable outer\n'
+                       '  bound does not make a fixed-size row or scalar operand evaluated.\n'
+                       '  Declaration bounds are not reevaluated and array data is not read.\n'
+                       '  `c_test_sizeof_vla_evaluation` checks raw calls/volatile stores and\n'
+                       '  runtime results across contexts, saved bounds and outer sizeof.\n')
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new))
+          PY
+          git diff --check
+          git diff --stat > "$VLA_EVIDENCE/candidate-stat.txt"
+          git diff > "$VLA_EVIDENCE/candidate.patch"
+          tar -czf "$VLA_EVIDENCE/candidate-sources.tar.gz" src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c docs/agents/frontend/foundations.md
+          "$RUNNER_TEMP/vla-build" build --config Release -t ide 2>&1 | tee "$VLA_EVIDENCE/candidate-build.log"
+          sha256sum build/Release/ide > "$VLA_EVIDENCE/candidate-compiler.sha256"
+      - name: Store exact candidate blobs without changing any branch
+        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, pathlib, subprocess
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'vla-evidence'
+          import hashlib, json, os, pathlib, urllib.request
+          root = pathlib.Path(os.environ['VLA_SOURCE'])
+          out = pathlib.Path(os.environ['VLA_EVIDENCE'])
+          paths = ['src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/compiler/frontend/c/c_test.c', 'docs/agents/frontend/foundations.md']
+          rows = []
+          for path in paths:
+              data = (root / path).read_bytes()
+              expected = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/git/blobs', data=json.dumps({'content': data.decode(), 'encoding': 'utf-8'}).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  published = json.load(response)
+              assert published['sha'] == expected
+              rows.append(dict(path=path, mode='100644', type='blob', sha=expected, sha256=hashlib.sha256(data).hexdigest()))
+          (out / 'candidate-blobs.json').write_text(json.dumps(rows, indent=2))
+          print(json.dumps(rows, indent=2))
+          PY
+      - name: Independent full family including unfixed conditional controls
+        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, os, pathlib, subprocess, urllib.error, urllib.request, zipfile
+          out = pathlib.Path(os.environ['VLA_EVIDENCE']) / 'family'
+          out.mkdir()
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/actions/artifacts/10815042424/zip', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          try:
+              urllib.request.build_opener(NoRedirect).open(request, timeout=60)
+              raise RuntimeError('expected artifact redirect')
+          except urllib.error.HTTPError as e:
+              if e.code not in (301, 302, 303, 307, 308): raise
+              location = e.headers['Location']
+          assert location.startswith('https://')
+          with urllib.request.urlopen(location, timeout=60) as response:
+              archive = response.read()
+          assert hashlib.sha256(archive).hexdigest() == '635368ebb4fbed653ae70e92001ac8f88323bac46484296866c1c872c2b9a9f2'
+          with zipfile.ZipFile(io.BytesIO(archive)) as z:
+              cases = json.loads(z.read('cases.json'))
+              for case in cases:
+                  data = z.read(case['name'] + '.c')
+                  assert hashlib.sha256(data).hexdigest() == case['sha256']
+                  (out / (case['name'] + '.c')).write_bytes(data)
+          extra = [('grouped', 'int n=3; int a[2][n]; return sizeof(((a[index++])));', 12, 1), ('saved_bound', 'int n=3; int a[2][n]; n=7; return sizeof(a[index++]);', 12, 1), ('typedef_row', 'int n=3; typedef int Row[n]; Row a[2]; return sizeof(a[index++]);', 12, 1), ('outer_sizeof', 'int n=3; int a[2][n]; return sizeof(sizeof(a[index++])) != sizeof(sizeof(0));', 0, 0), ('left_value', 'int n=3; int a[2][n]; return 1+sizeof(a[index++]);', 13, 1), ('right_value', 'int n=3; int a[2][n]; return sizeof(a[index++])+1;', 13, 1)]
+          for name, body, size, index in extra:
+              source = 'static volatile unsigned index;\nstatic unsigned long probe(void) {' + body + '}\nint main(void) {unsigned long value=probe();return (value!=' + str(size) + 'ul)|((index!=' + str(index) + 'u)<<1);}\n'
+              data = source.encode()
+              (out / (name + '.c')).write_bytes(data)
+              cases.append(dict(name=name, sha256=hashlib.sha256(data).hexdigest()))
+          data = b'int main(void) { int n=3; int a[2][n]; unsigned index=0; unsigned long size=sizeof a[index++]; return (size!=3*sizeof(int))|((index!=1)<<1); }\n'
+          (out / 'reduced.c').write_bytes(data)
+          cases.append(dict(name='reduced', sha256=hashlib.sha256(data).hexdigest()))
+          (out / 'cases.json').write_text(json.dumps(cases, indent=2))
           common = ['-std=gnu17', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char']
           configs = [('clang_O0', ['clang', '--target=x86_64-linux-gnu', '-O0']), ('clang_O2', ['clang', '--target=x86_64-linux-gnu', '-O2']), ('gcc_O0', ['gcc', '-m64', '-O0']), ('gcc_O2', ['gcc', '-m64', '-O2']), ('clang_sanitize', ['clang', '--target=x86_64-linux-gnu', '-O1', '-fsanitize=address,undefined', '-fno-sanitize-recover=all']), ('gcc_sanitize', ['gcc', '-m64', '-O1', '-fsanitize=address,undefined', '-fno-sanitize-recover=all'])]
-          for mode in ['ssa', 'memory']:
-              configs.append(('buster_' + mode, ['build/Release/ide', 'cc', '-target', 'x86_64-linux', '-g0', '-fregister-allocator=fast', '-fverify-codegen', '-ffrontend-ssa' if mode == 'ssa' else '-fno-frontend-ssa']))
-          layouts = [('vla_array', 'int n = 3; int a[2][n];', 'a', 12, True), ('vla_pointer', 'int n = 3; int a[2][n]; int (*p)[n] = a;', 'p', 12, True), ('fixed_row', 'int n = 3; int a[n][3];', 'a', 12, False), ('scalar', 'int n = 3; int a[n];', 'a', 4, False)]
-          effects = [('postfix', 'index++', 1, 0), ('call', 'tick()', 0, 1), ('conditional', '(choose ? index++ : tick())', 1, 0), ('statement', '({ index += 1; 0; })', 1, 0)]
-          contexts = ['initializer', 'argument', 'return', 'condition', 'statement', 'nested_statement']
-          manifest = []
-          for layout, setup, base, size, evaluated in layouts:
-              for effect, subscript, index_expected, hits_expected in effects:
-                  expr = 'sizeof(' + base + '[' + subscript + '])'
-                  for context in contexts:
-                      name = layout + '_' + effect + '_' + context
-                      if context == 'initializer': body = 'unsigned long value = ' + expr + '; return value;'
-                      elif context == 'argument': body = 'return identity(' + expr + ');'
-                      elif context == 'return': body = 'return ' + expr + ';'
-                      elif context == 'condition': body = 'unsigned long value = 0; if (' + expr + ' == ' + str(size) + 'ul) value = ' + str(size) + 'ul; return value;'
-                      elif context == 'statement': body = expr + '; return 0;'
-                      else: body = 'return ({ unsigned long value = ' + expr + '; value; });'
-                      expected_size = 0 if context == 'statement' else size
-                      expected_index = index_expected if evaluated else 0
-                      expected_hits = hits_expected if evaluated else 0
-                      source = ('static volatile unsigned index;\nstatic volatile unsigned hits;\nstatic volatile int choose = 1;\nstatic unsigned tick(void) { hits += 1; return 0; }\nstatic unsigned long identity(unsigned long value) { return value; }\nstatic unsigned long probe(void) { ' + setup + ' ' + body + ' }\nint main(void) { unsigned long value = probe(); return (value != ' + str(expected_size) + 'ul) | ((index != ' + str(expected_index) + 'u) << 1) | ((hits != ' + str(expected_hits) + 'u) << 2); }\n')
-                      (out / (name + '.c')).write_text(source)
-                      manifest.append({'name': name, 'layout': layout, 'effect': effect, 'context': context, 'expression': expr, 'expected_size': expected_size, 'expected_index': expected_index, 'expected_hits': expected_hits, 'sha256': hashlib.sha256(source.encode()).hexdigest()})
-          (out / 'cases.json').write_text(json.dumps(manifest, indent=2))
-          def run(argv, record):
+          for form in ['ssa', 'memory']:
+              frontend = '-ffrontend-ssa' if form == 'ssa' else '-fno-frontend-ssa'
+              configs.append(('baseline_' + form, [str(pathlib.Path(os.environ['RUNNER_TEMP']) / 'vla-baseline-ide'), 'cc', '-target', 'x86_64-linux', '-g0', '-fregister-allocator=fast', '-fverify-codegen', frontend]))
+              for allocator in ['none', 'mir-stack', 'fast', 'quality']:
+                  for optimization in ['-O0', '-O2']:
+                      configs.append(('candidate_' + form + '_' + allocator + '_' + optimization[1:], [str(pathlib.Path(os.environ['VLA_SOURCE']) / 'build/Release/ide'), 'cc', '-target', 'x86_64-linux', '-g0', '-fregister-allocator=' + allocator, '-fverify-codegen', frontend, optimization]))
+          def run(argv, name):
               try:
                   p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, env=dict(os.environ, ASAN_OPTIONS='halt_on_error=1:detect_leaks=1', UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1'))
-                  r = dict(argv=argv, returncode=p.returncode, stdout=p.stdout.decode(errors='replace'), stderr=p.stderr.decode(errors='replace'))
+                  row = dict(argv=argv, returncode=p.returncode, stdout=p.stdout.decode(errors='replace'), stderr=p.stderr.decode(errors='replace'))
               except subprocess.TimeoutExpired as e:
-                  r = dict(argv=argv, returncode=None, timeout=True, stdout=(e.stdout or b'').decode(errors='replace'), stderr=(e.stderr or b'').decode(errors='replace'))
-              (out / (record + '.json')).write_text(json.dumps(r, indent=2))
-              return r['returncode']
-          summary = []
-          for case in manifest:
+                  row = dict(argv=argv, returncode=None, timeout=True, stdout=(e.stdout or b'').decode(errors='replace'), stderr=(e.stderr or b'').decode(errors='replace'))
+              (out / (name + '.json')).write_text(json.dumps(row, indent=2))
+              return row['returncode']
+          rows = []
+          for case in cases:
               for name, compiler in configs:
                   stem = case['name'] + '-' + name
                   exe = out / stem
-                  rc = run(compiler + common + [str(out / (case['name'] + '.c')), '-o', str(exe)], stem + '-compile')
-                  result = run([str(exe)], stem + '-run') if rc == 0 else None
-                  summary.append(dict(case=case['name'], compiler=name, compile=rc, result=result))
-                  print(stem, 'compile=', rc, 'run=', result, flush=True)
+                  compiled = run(compiler + common + [str(out / (case['name'] + '.c')), '-o', str(exe)], stem + '-compile')
+                  result = run([str(exe)], stem + '-run') if compiled == 0 else None
+                  rows.append(dict(case=case['name'], compiler=name, compile=compiled, result=result))
+                  print(stem, compiled, result, flush=True)
                   if exe.exists(): exe.unlink()
-          (out / 'results.json').write_text(json.dumps(summary, indent=2))
-          failures = [r for r in summary if r['compile'] != 0 or r['result'] != 0]
-          print('ROWS', len(summary), 'FAILURES', len(failures), flush=True)
+          (out / 'results.json').write_text(json.dumps(rows, indent=2))
+          failures = [r for r in rows if not r['compiler'].startswith('baseline_') and (r['compile'] != 0 or r['result'] != 0)]
+          print('Full family failures (including separately retained conditional preparation cases):', len(failures))
           raise SystemExit(bool(failures))
           PY
-      - name: Retain raw evidence
+      - name: Candidate full Release suite
+        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$VLA_SOURCE"
+          "$RUNNER_TEMP/vla-build" build --config Release -t test_all 2>&1 | tee "$VLA_EVIDENCE/candidate-tests.log"
+      - name: Candidate self-host fixed point
+        if: ${{ !cancelled() && steps.candidate_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$VLA_SOURCE"
+          "$RUNNER_TEMP/vla-build" test_self_host --config Release 2>&1 | tee "$VLA_EVIDENCE/candidate-self-host.log"
+      - name: Retain all outcomes
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: vla-sizeof-triage-${{ github.run_id }}
+          name: vla-sizeof-comparison-${{ github.run_id }}
           path: ${{ runner.temp }}/vla-evidence
           retention-days: 14
           if-no-files-found: error
