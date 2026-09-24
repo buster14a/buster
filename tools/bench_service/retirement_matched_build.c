@@ -122,10 +122,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_pinned(BqQueue* qu
             memcpy(build->driver, fixed_driver, strlen(fixed_driver) + 1);
             memcpy(build->preparation_sha256, preparation_sha256, SHA256_HEX_CAPACITY);
             memcpy(build->driver_sha256, observed, SHA256_HEX_CAPACITY);
+            memcpy(build->prepared_source, prepared.subjects, sizeof(build->prepared_source));
         }
     }
     if (result != BQ_OK && build) *build = (BqRetirementMatchedBuild){0};
-    (void)prepared;
     return result;
 }
 
@@ -202,17 +202,39 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_command_sha(BqRetirementBuildStage 
     sha256_finish_hex(&hash, (char8*)digest);
 }
 
-/* The child keeps the verified executable descriptor across chdir; a later
- * rename of the installed name cannot select a different driver. The worker
- * still owns the separate candidate UID and sandbox around this stage. */
-BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer, int directory,
+/* Recheck the prepared source through the same descriptor that the child will
+ * use as its cwd. The preparation record pins both bytes and inode closure. */
+BUSTER_GLOBAL_LOCAL int bq_retirement_build_source_fd(BqRetirementMatchedBuild const* build)
+{
+    u32 side = build->next / 2u;
+    int source = side < 2 ? bq_open_absolute_directory(string_from_pointer(build->source[side])) : -1;
+    BqRetirementSource observed = {0};
+    bool ok = source >= 3 && bq_owned_directory(source, false, true) &&
+        bq_retirement_scan(source, ".source-manifest",
+            string_from_pointer(build->prepared_source[side].commit), &observed, true) &&
+        bq_retirement_same_source(&build->prepared_source[side], &observed) &&
+        !memcmp(build->prepared_source[side].materialized_identity_sha256,
+            observed.installed_identity_sha256, SHA256_HEX_CAPACITY);
+    if (!ok)
+    {
+        if (source >= 0) close(source);
+        source = -1;
+    }
+    return source;
+}
+
+/* The child keeps verified executable and source descriptors through setup;
+ * replacement of either pathname cannot select different bytes or a cwd. The
+ * worker still owns the separate candidate UID and sandbox around this stage. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer, int directory, int source,
     BqRetirementBuildStage const* stage)
 {
     bool ok = dup2(writer, STDOUT_FILENO) == STDOUT_FILENO &&
         dup2(writer, STDERR_FILENO) == STDERR_FILENO;
     if (writer >= 3) close(writer);
     if (directory >= 3) close(directory);
-    if (ok) ok = chdir(stage->cwd) == 0;
+    if (ok) ok = fchdir(source) == 0;
+    if (source >= 3) close(source);
 #if defined(__linux__) && defined(SYS_close_range)
     int input = ok ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
     if (ok) ok = input >= 3 && dup2(input, STDIN_FILENO) == STDIN_FILENO;
@@ -241,6 +263,9 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     char observed[SHA256_HEX_CAPACITY] = {0};
     ok = ok && bq_retirement_build_driver_fd_sha(executable, observed) &&
          !memcmp(observed, build->driver_sha256, SHA256_HEX_CAPACITY);
+    int source = ok ? bq_retirement_build_source_fd(build) : -1;
+    if (ok && source < 3) build->failed = true;
+    ok = ok && source >= 3;
     int directory = ok ? bq_open_absolute_directory(string_from_pointer(build->attempt)) : -1;
     ok = ok && directory >= 3 && bq_owned_directory(directory, true, false) &&
          fstat(directory, &directory_stat) == 0;
@@ -250,8 +275,9 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
          S_ISREG(log_stat.st_mode) && log_stat.st_uid == geteuid() &&
          log_stat.st_nlink == 1 && log_stat.st_size == 0;
     pid_t child = ok ? fork() : -1;
-    if (child == 0) bq_retirement_build_exec_fd(executable, writer, directory, &stage);
+    if (child == 0) bq_retirement_build_exec_fd(executable, writer, directory, source, &stage);
     if (executable >= 0) close(executable);
+    if (source >= 0) close(source);
     ok = ok && child > 0;
     if (ok)
     {
