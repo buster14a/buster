@@ -2206,8 +2206,10 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         }
 #endif
         DConfig config = {.allocator = 0};
-        DObservation telemetry = {.output = S8("warning\nCODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n")};
-        errors += !d_verification(&settings, &telemetry, config) || !string_equal(telemetry.output, S8("warning\n"));
+        DObservation telemetry = {.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n"),
+                                  .error = S8("warning\n")};
+        errors += !d_verification(&settings, &telemetry, config) || telemetry.output.length ||
+                  !string_equal(telemetry.error, S8("warning\n"));
         telemetry.output = S8("CODEGEN_VERIFY version=1 ir=0 mir=0 scheduled=0 allocator=none\n");
         errors += d_verification(&settings, &telemetry, config);
         telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=fast\n");

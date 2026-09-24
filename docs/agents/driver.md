@@ -2,6 +2,22 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+## Compiler output streams
+
+`ide cc` writes warnings, source diagnostics, and `cc: error:` driver errors to
+stderr. With `-E` or `-S` and no `-o`, the generated text goes to stdout;
+warnings cannot enter the preprocessed or assembly stream. `#warning` and
+`#error` messages retain the spelling between the first and last message
+tokens, including punctuation and internal whitespace, without expanding macros.
+
+Opt-in machine-readable records remain on stdout: `CODEGEN_VERIFY`,
+`CODEGEN_FALLBACK*`, `CODEGEN`, `IR_*`, `TARGET`, `GPU`, and the `-v` source
+statistics. The differential runner reads `CODEGEN_VERIFY` there and compares
+captured stderr diagnostics separately; the retirement census reads its
+`-v`/fallback records from stdout. `ide metamorphic` uses stderr first when
+reporting a failed compiler invocation. A `-v -E` invocation also prints the
+requested statistics on stdout; use plain `-E` when piping preprocessed C.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
