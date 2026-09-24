@@ -1,0 +1,40 @@
+name: Macro fusion baseline
+on:
+  push:
+    branches: [astra/51-fusion-transport-20260924]
+    paths: [.github/workflows/51-fusion-baseline.yml]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BUSTER_TEST_JOBS: 2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          persist-credentials: false
+      - name: Baseline build and fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fusion-baseline"
+          exec > >(tee "$RUNNER_TEMP/fusion-baseline/run.log") 2>&1
+          git rev-parse HEAD HEAD^{tree}
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --linker DEFAULT -- -DBUSTER_DEBUG_INFO=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+          sha256sum build/Release/ide
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all
+      - name: Retain exact baseline evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fusion-baseline-${{ github.run_id }}
+          path: ${{ runner.temp }}/fusion-baseline
+          retention-days: 30
+          if-no-files-found: error
