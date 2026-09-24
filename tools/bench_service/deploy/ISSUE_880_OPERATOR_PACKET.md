@@ -20,30 +20,28 @@ If an administrator uses GitHub's environment bypass control, record that
 separate release action; it is not a reviewer approval receipt.
 
 In a trusted checkout at the recorded main commit, inspect
-`GITHUB_ADMISSION.md`, the main and benchmark ruleset policies, installer and
-both verifiers. Confirm the one-runner organization group allows this public
+`GITHUB_ADMISSION.md`, the main ruleset policy, requester policy and read-only
+preflight. Confirm the one-runner organization group allows this public
 repository and only the fixed workflow on `main`, and that the old repository
-runner registration is gone. Apply the reviewed installer only with
-administrator authorization:
+runner registration is gone. Run the reviewed preflight with settings read
+access:
 
 ```sh
 bash tools/bench_service/deploy/configure_github_admission.sh buster14a/buster
 ```
 
-The installer first reads back disabled dispatch and leaves the variable
-unchanged. Explicitly set it to `false` before installation if it is absent;
-do not run the installer as a read-only probe or during an enabled window.
+The preflight first reads back disabled dispatch and leaves the variable
+unchanged. Explicitly set it to `false` before checking if it is absent;
+do not run it during an enabled window.
 Keep its log and separately retrieved, timestamped
 JSON responses for the live `main` ruleset 22537199, the existing requester
-Actions policy, organization runner group, `Benchmark dispatch main protection`
-ruleset, `benchmark-9700x` environment, deployment branch policies and
-`BENCH_SERVICE_DISPATCH_ENABLED`. Its post-install read-back verifier must pass
-with `value=false`. The main queue must retain eight Actions-bound checks,
+Actions policy, organization runner group, `benchmark-9700x` environment,
+deployment branch policies and `BENCH_SERVICE_DISPATCH_ENABLED`. Its read-back
+verifier must pass with `value=false`, and no superseded benchmark branch
+ruleset may be present. The main queue must retain eight Actions-bound checks,
 non-strict status checks, 20-build/one-merge `ALLGREEN` and exactly the two
 reviewed standing bypass actors, Repository admin (role 5) and `davidgmbb`
-(user 39247043), both in `always` mode. The
-benchmark ruleset must protect the exact `main` branch with no bypass, without
-a blanket pull-request review requirement; the environment must require
+(user 39247043), both in `always` mode. The environment must require
 `davidgmbb` to approve with self-review prevention and must allow only the
 exact `main` deployment branch.
 
