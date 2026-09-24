@@ -95,38 +95,32 @@ def main() -> int:
         variable_read = installer.find(
             '"repos/$repo/actions/variables/BENCH_SERVICE_DISPATCH_ENABLED"')
         variable_guard = installer.find('variable.get("value") != "false"')
-        mutation_positions = [
-            position
-            for marker in ("gh api --method PUT", "gh api --method POST")
-            if (position := installer.find(marker)) >= 0
-        ]
         if "gh variable set BENCH_SERVICE_DISPATCH_ENABLED" in installer:
             errors.append("admission installer must leave the dispatch variable unchanged")
-        elif not mutation_positions:
-            errors.append("admission installer is missing repository policy mutations")
-        elif not 0 <= variable_read < variable_guard < min(mutation_positions):
-            errors.append("admission installer must verify disabled dispatch before policy mutation")
+        elif "gh api --method" in installer:
+            errors.append("admission preflight must not mutate repository policies")
+        elif not 0 <= variable_read < variable_guard < installer.find("verify_github_queue.py"):
+            errors.append("admission preflight must verify disabled dispatch before reading main policy")
         elif 'variable.get("name") != "BENCH_SERVICE_DISPATCH_ENABLED"' not in installer:
             errors.append("admission installer must check the dispatch variable identity")
-        elif not 0 <= installer.find("verify_github_queue.py") < min(mutation_positions):
-            errors.append("admission installer must verify the main queue before policy mutation")
         for marker in (
             "orgs/$owner/actions/runner-groups",
             "selected_workflows",
             "repo-runners.json",
             "repos/$repo/actions/policies",
             "policy_matches",
-            '"reviewers": [{"type": "User", "id": 39247043}]',
             "verify_github_actor_policy.py",
+            "verify_github_admission.py",
+            "obsolete benchmark branch ruleset must be removed",
         ):
             if marker not in installer:
                 errors.append(f"admission installer is missing control: {marker}")
         policy_readback = installer.find('"repos/$repo/actions/policies/$policy_id"')
         permission_readback = installer.find('"repos/$repo/collaborators/davidgmbb/permission"')
-        first_mutation = min(mutation_positions) if mutation_positions else -1
-        reviewer_install = installer.find('"reviewers": [{"type": "User", "id": 39247043}]')
-        if not (0 <= policy_readback < permission_readback < first_mutation < reviewer_install):
-            errors.append("requester policy and administrator permission must precede admission mutation")
+        environment_readback = installer.find('"repos/$repo/environments/benchmark-9700x"')
+        if not (0 <= policy_readback < permission_readback < environment_readback <
+                installer.find("verify_github_admission.py")):
+            errors.append("requester policy and administrator permission must precede environment readback")
         if "--input \"$policy\"" in installer:
             errors.append("admission installer must never replace the existing Actions policy")
         if ACTOR_POLICY.is_file():
@@ -157,43 +151,29 @@ def main() -> int:
         else:
             errors.append("missing main merge-queue admission gate")
 
-    if not BENCHMARK_RULESET.is_file() or not MAIN_QUEUE_RULESET.is_file():
-        errors.append("missing benchmark or main queue ruleset")
+    if BENCHMARK_RULESET.exists():
+        errors.append("redundant benchmark branch ruleset policy must be removed")
+    if not MAIN_QUEUE_RULESET.is_file():
+        errors.append("missing main queue ruleset")
     else:
-        benchmark = json.loads(BENCHMARK_RULESET.read_text(encoding="utf-8"))
         queue = json.loads(MAIN_QUEUE_RULESET.read_text(encoding="utf-8"))
-        benchmark_checks = [
-            rule for rule in benchmark["rules"] if rule["type"] == "required_status_checks"
-        ]
         queue_checks = [
             rule for rule in queue["rules"] if rule["type"] == "required_status_checks"
         ]
-        if len(benchmark_checks) != 1 or len(queue_checks) != 1:
-            errors.append("benchmark and main queue must each define one status-check rule")
+        if len(queue_checks) != 1:
+            errors.append("main queue must define one status-check rule")
         else:
-            benchmark_params = benchmark_checks[0]["parameters"]
             queue_params = queue_checks[0]["parameters"]
-            if benchmark_params["strict_required_status_checks_policy"] is not False:
-                errors.append("benchmark checks must preserve non-strict merge-queue admission")
             if queue_params["strict_required_status_checks_policy"] is not False:
                 errors.append("main queue checks must remain non-strict")
-            benchmark_contexts = {
-                check["context"] for check in benchmark_params["required_status_checks"]
-            }
             queue_contexts = {check["context"] for check in queue_params["required_status_checks"]}
-            if not benchmark_contexts <= queue_contexts:
-                errors.append("benchmark checks must be covered by the main queue")
-        if benchmark["bypass_actors"]:
-            errors.append("benchmark ruleset must not allow bypass")
+            if not {"CI complete", "Benchmark service workflow policy"} <= queue_contexts:
+                errors.append("main queue must include the benchmark workflow policy check")
         if queue["bypass_actors"] != [
             {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"},
             {"actor_id": 39247043, "actor_type": "User", "bypass_mode": "always"},
         ]:
             errors.append("main queue bypass actors differ from the reviewed contract")
-        if any(rule["type"] == "pull_request" for rule in benchmark["rules"]):
-            errors.append("benchmark ruleset must not add blanket pull-request reviews")
-        if benchmark["conditions"]["ref_name"] != {"include": ["refs/heads/main"], "exclude": []}:
-            errors.append("benchmark ruleset must apply only to main")
 
     if not POLICY.is_file():
         errors.append("missing bench-service-policy.yml")
