@@ -36,9 +36,19 @@ its required checks. `MERGE` retains merge commits. Required checks still bind
 the exact group and the trusted retirement gate still owns sensitive trees.
 The 360-minute queue timeout exceeds the admission workflow's 310-minute job
 limit and its five-hour bounded wait. A timeout is a failure, not permission to
-merge. Cancellation only coalesces the same PR or merge-group ref; main-push
-policy runs use unique run-ID groups. Workflow concurrency is not a FIFO queue
-and is never used as a replacement for GitHub queue enforcement.
+merge. Workflow concurrency cancellation only coalesces the same PR or
+merge-group ref; main-push policy runs use unique run-ID groups. Separately, the
+trusted default-branch CI lifecycle controller starts from the in-progress
+Buster CI merge-group run. It watches that run's jobs and the live ruleset's
+required GitHub Actions checks across workflows. A completed non-success
+required check or Buster CI job cancels active Actions runs for that exact
+merge-group head. Optional check failures do not invalidate the group.
+Candidate workflows retain read-only authority; the
+write-capable watcher executes only the default-branch controller and never
+checks out candidate bytes or artifacts. Workflow concurrency is not a FIFO
+queue and is never used as a replacement for GitHub queue enforcement.
+The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
+not a `merge_group` workflow, so the queue does not schedule it.
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed
