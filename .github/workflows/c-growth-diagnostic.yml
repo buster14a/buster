@@ -1,0 +1,36 @@
+name: C growth diagnostic
+
+# Disposable branch-only investigation. No benchmark host, secrets, deployment,
+# policy writes, or production changes. Remove before any implementation PR.
+on:
+  push:
+    branches: [codex/c-growth-discovery-2e942e80-astra]
+    paths: [.github/workflows/c-growth-diagnostic.yml, tools/c_growth_experiment.py]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: ${{ github.repository == 'buster14a/buster' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Retain exact baseline source and newest audit identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/c-growth"
+          git rev-parse HEAD HEAD^{tree}
+          git cat-file -e 2e942e80a87666409cf29d3e24a68d322b9e71fd^{commit}
+          git archive --format=tar 2e942e80a87666409cf29d3e24a68d322b9e71fd | gzip -n > "$RUNNER_TEMP/c-growth/base.tar.gz"
+          sha256sum "$RUNNER_TEMP/c-growth/base.tar.gz"
+          python3 tools/new_audit.py --newest
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: c-growth-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/c-growth
+          if-no-files-found: error
+          retention-days: 7
