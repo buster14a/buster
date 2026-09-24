@@ -112,6 +112,27 @@ class SnapshotRetryTests(unittest.TestCase):
                 self.assertEqual(commands, [["apt-get", "update"]])
                 sleep.assert_not_called()
 
+    def test_blank_index_errors_with_snapshot_503_still_retry(self):
+        diagnostics = ("E: Failed to fetch " + self.snapshot + "dists/resolute-updates/InRelease"
+                       "  503  Service Unavailable\n"
+                       "E: Failed to fetch " + self.snapshot + "dists/resolute/main/binary-amd64/Packages.gz  \n"
+                       "E: Some index files failed to download. They have been ignored, or old ones used instead.\n")
+        error = subprocess.CalledProcessError(100, ["apt-get", "update"], stderr=diagnostics)
+        self.assertTrue(ci_apt.transient_snapshot_failure(error, self.data))
+        commands = []
+
+        def run(argv):
+            commands.append(argv)
+            if len(commands) == 1:
+                raise error
+            return "signed indexes refreshed"
+
+        with mock.patch.object(ci_apt.time, "sleep") as sleep:
+            result = ci_apt.run_snapshot_apt(run, ["apt-get", "update"], self.data)
+        self.assertEqual(result, "signed indexes refreshed")
+        self.assertEqual(commands, [["apt-get", "update"], ["apt-get", "update"]])
+        sleep.assert_called_once_with(30)
+
     def test_each_attempt_retains_status_and_diagnostics(self):
         results = [subprocess.CompletedProcess(["apt-get"], 100, "", self.failed_fetch().stderr),
                    subprocess.CompletedProcess(["apt-get"], 100, "", self.failed_fetch(code=502).stderr),

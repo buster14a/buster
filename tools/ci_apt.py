@@ -122,6 +122,8 @@ def transient_snapshot_failure(error, lock):
             diagnostics)
         prefix = "https://snapshot.ubuntu.com/ubuntu/" + lock["snapshot"] + "/"
         fetch = re.compile(r"E: Failed to fetch " + re.escape(prefix) + r"\S+\s+5\d\d(?:\s|$)")
+        # Apt can omit the reason on other indexes in the same failed update.
+        empty_fetch = re.compile(r"E: Failed to fetch " + re.escape(prefix) + r"\S+\s*$")
         tails = {
             "E: Some index files failed to download. They have been ignored, or old ones used instead.",
             "E: Unable to fetch some archives, maybe run apt update or try with --fix-missing?",
@@ -131,6 +133,8 @@ def transient_snapshot_failure(error, lock):
             if line.startswith("E: "):
                 if fetch.match(line):
                     found = True
+                elif empty_fetch.fullmatch(line):
+                    pass
                 elif line not in tails:
                     retryable = False
         retryable = retryable and found
