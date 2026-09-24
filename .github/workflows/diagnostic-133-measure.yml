@@ -1,0 +1,92 @@
+name: Temporary QUALITY matched screening
+on:
+  push:
+    branches: [diagnostics/133-event-equivalence-2e942e8]
+    paths: [.github/workflows/diagnostic-133-measure.yml]
+permissions:
+  contents: read
+jobs:
+  screening:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3704003f742b5c8a26e8f60e86bfe1663d2f4f99
+          path: work
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: b57b539df930a80376608860b65ee0ac5455beb4
+          path: payload
+          persist-credentials: false
+      - name: Run existing ordinary benchmark with frozen matched compilers
+        working-directory: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ../payload/tools/diagnostics/quality133-measure.py 2>&1 | tee "$RUNNER_TEMP/quality133-screening-driver.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: quality133-hosted-matched-screening-v2
+          path: |
+            ${{ runner.temp }}/quality133-screening
+            ${{ runner.temp }}/quality133-screening-driver.log
+            !${{ runner.temp }}/quality133-screening/bin
+            !${{ runner.temp }}/quality133-screening/build-driver
+          retention-days: 30
+          if-no-files-found: error
+  correctness:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 3704003f742b5c8a26e8f60e86bfe1663d2f4f99
+          persist-credentials: false
+      - name: Build exact candidate with registered tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/quality133-correctness"
+          exec > >(tee "$RUNNER_TEMP/quality133-correctness/build.log") 2>&1
+          set -x
+          git rev-parse HEAD 'HEAD^{tree}'
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/quality-build"
+          "$RUNNER_TEMP/quality-build" generate --ci --cc clang -- -DCMAKE_LINKER_TYPE=DEFAULT -DBUSTER_UNITY_BUILD=OFF
+          "$RUNNER_TEMP/quality-build" build --config Release -t ide -- -j2
+          sha256sum build/Release/ide
+      - name: Registered module suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          build/Release/ide test --verbose=1 --ci=1 2>&1 | tee "$RUNNER_TEMP/quality133-correctness/test.log"
+      - name: Existing self-host fixed point
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/quality-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/quality133-correctness/self-host.log"
+      - name: Existing native mode matrix
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/quality-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/quality133-correctness/modes.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: quality133-candidate-hosted-correctness
+          path: |
+            ${{ runner.temp }}/quality133-correctness
+            build/compile_commands.json
+            build/CMakeCache.txt
+          retention-days: 30
+          if-no-files-found: error
