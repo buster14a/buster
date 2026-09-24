@@ -209,6 +209,46 @@ jobs:
           for name in baseline candidate; do
             grep -E 'c_parse_label_expression|c_parse_validate_label_values|c_parse_label_values_needed|c_parse_lookup_entity_chain|c_parse_lookup_entity_symbol|c_parse_scope_for_token|c_parse_validate_lowering_constraints|c_parse_label_address' "evidence/callgrind-$name-syntax.annotate" || true
           done
+      - name: Unity-configuration subjects and instruction counts
+        if: ${{ !cancelled() && steps.builds.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/unity-subjects.log) 2>&1
+          set -x
+          # The trusted compiler is a unity Release build; measure the same
+          # change in that configuration, where the walk's helpers inline.
+          for tree in baseline candidate; do
+            (cd "$tree" && "$RUNNER_TEMP/build-$tree" generate --config Release --cc clang --ci --build-directory build-unity -DBUSTER_UNITY_BUILD=ON -DBUSTER_INCLUDE_TESTS=OFF)
+            (cd "$tree" && "$RUNNER_TEMP/build-$tree" build --config Release --build-directory build-unity -t ide -- -j4)
+            cp "$tree/build-unity/Release/ide" "subjects/$tree-unity"
+            grep -Fx 'BUSTER_UNITY_BUILD:BOOL=ON' "$tree/build-unity/CMakeCache.txt"
+          done
+          sha256sum subjects/*-unity >> evidence/compilers.sha256
+          cd frozen
+          for name in baseline candidate; do
+            "../subjects/$name-unity" cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -ffrontend-ssa src/buster/apps/ide/ide.c -o "../evidence/unity-$name-unitybuild.o" > /dev/null 2> "../evidence/unity-$name-unitybuild.stderr"
+          done
+          cmp ../evidence/unity-baseline-unitybuild.o ../evidence/unity-candidate-unitybuild.o
+          cmp ../evidence/unity-baseline-unitybuild.o ../evidence/unity-baseline-frontend-ssa.o || echo "NOTE: unity-built and non-unity-built compilers differ in output bytes"
+          for action in syntax object; do
+            for name in baseline candidate; do
+              if [ "$action" = syntax ]; then extra=(-fsyntax-only); else extra=(-c -o "../evidence/callgrind-$name-unity.o"); fi
+              if ! valgrind --tool=callgrind --cache-sim=no --branch-sim=no --callgrind-out-file="../evidence/callgrind-$name-unity-$action.out" \
+                   "../subjects/$name-unity" cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -ffrontend-ssa "${extra[@]}" \
+                   src/buster/apps/ide/ide.c > "../evidence/callgrind-$name-unity-$action.stdout" 2> "../evidence/callgrind-$name-unity-$action.stderr"; then
+                echo "CALLGRIND_FAILED $name-unity $action"; tail -5 "../evidence/callgrind-$name-unity-$action.stderr"
+                continue
+              fi
+              callgrind_annotate --inclusive=no "../evidence/callgrind-$name-unity-$action.out" 2>/dev/null | head -80 > "../evidence/callgrind-$name-unity-$action.annotate" || true
+            done
+          done
+          cd ..
+          for action in syntax object; do
+            for name in baseline candidate; do
+              printf '%s-unity %s ' "$name" "$action"; grep -E '^summary:|^totals:' "evidence/callgrind-$name-unity-$action.out" | head -1 || true
+            done
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
