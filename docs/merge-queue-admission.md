@@ -11,6 +11,12 @@ merge commits. The saved response passed `check-ruleset` at main
 describes the desired build limit of 20; verify live settings before relying
 on it. The checker has no write API.
 
+On 2026-09-24, the administrator intentionally added Repository admin (role 5)
+and `davidgmbb` (user 39247043) as `always` bypass actors. The repository
+contract now expects exactly those two. This records the live setting; a bypass
+does not satisfy or replace any of the eight required checks or admission
+receipts for a normal queued merge.
+
 The trusted retirement gate and queue collector have landed. The adapter admits
 one synthetic merge commit only when its first parent is current main and its
 entire tree equals the existing writer's attested PR head. It verifies the open
@@ -133,7 +139,8 @@ truncation and ambiguous results fail closed.
 Immediately before admission, the collector repeats the six-result read and
 trusted-publication verification, requires the same evidence, rechecks live main and the queue ref, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
-preserves independent retirement admission, adds the exact-group gate, rejects visible bypasses/strict branch updates, and
+preserves independent retirement admission, adds the exact-group gate, rejects
+visible bypass inventories other than the two reviewed actors and strict branch updates, and
 requires the exact 20-build/one-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
@@ -144,15 +151,15 @@ GitHub returns `bypass_actors` only to callers with write access to the ruleset.
 The Actions read-only token normally receives no such property. The live
 collector validates the ruleset identity, enforcement, scope, required checks,
 queue settings and every other policy field it can read. An explicitly returned
-bypass list must be empty; an explicitly returned caller bypass capability must
+bypass list must equal the two reviewed actors; an explicitly returned caller bypass capability must
 be `never`. Missing bypass data is recorded as `hidden` in both ruleset reads
 in the admission artifact and explained in the log. It is not reported as a
-verified empty list.
+verified actor inventory.
 
-No-standing-bypass configuration is an administrator-audited deployment
+The exact two-actor bypass configuration is an administrator-audited deployment
 invariant, not something the read-only workflow can independently prove.
 `check-ruleset` remains strict: a saved administrator response must explicitly
-contain `bypass_actors: []`. Audit that response at activation, after every
+contain both actors with `always` mode and no others. Audit that response at activation, after every
 ruleset change, and after any emergency recovery. Do not give the admission
 workflow ruleset-write credentials to expose this field.
 
@@ -231,8 +238,9 @@ python3 -B tools/merge_queue_admission.py check-ruleset /tmp/live-main-ruleset.j
 
 ## Emergency policy
 
-There is no standing bypass. A repair PR
-with genuine passing checks is preferred. Any emergency settings change needs
+There are two reviewed standing bypass actors. A repair PR with genuine
+passing checks is preferred; using bypass does not make a failed or missing
+check successful. Any emergency settings change needs
 explicit administrator authorization, a recorded reason and exact before/after
 settings, followed by restoration and read-back verification. Never mint a green
 check for cancelled, missing, failed or stale validation. Do not run a post-merge

@@ -33,8 +33,10 @@ def main() -> int:
             raise ValueError("main ruleset: ID differs from repository lookup")
         if actual.get("source_type") != "Repository" or actual.get("source") != sys.argv[3]:
             raise ValueError("main ruleset: repository source differs")
-        if actual.get("current_user_can_bypass") != "never":
-            raise ValueError("main ruleset: caller can bypass")
+        # This is a caller property, not a ruleset rule. Administrator reads
+        # can report "always" for the two reviewed bypass actors.
+        if actual.get("current_user_can_bypass") not in ("never", "always"):
+            raise ValueError("main ruleset: caller bypass state is unknown")
         compare(expected, actual, "main ruleset")
     except ValueError as error:
         print(f"QUEUE_POLICY_FAIL {error}", file=sys.stderr)
