@@ -107,6 +107,10 @@ resolves live publication evidence for that PR head,
 including the successful latest writer attempt. Combined-head CI remains required
 on the synthetic SHA. Rebinding checks that existing generated pair in place;
 it does not refresh it into a different, untested group tree.
+The read-only rebinding workflow likewise waits for a later group's predecessor
+under independently checked-out main policy. It verifies the exact queue ref
+and admission/rebinding policy identity before reconstruction. The repository
+job has a 310-minute limit for the bounded five-hour wait.
 
 The workflow has three separately permissioned jobs:
 
@@ -135,6 +139,11 @@ a manual feature-branch rebase. The independent `API migration policy` check
 continues to enforce bounded API compatibility. Configure admission as a
 required GitHub Actions check (integration ID `15368`) without enabling strict
 required-status-check policy or removing any existing required check.
+On PR events, both read-only admission jobs check out independent live `main`
+and require that checkout to match the remote `main` before checking the writer's
+recorded base. The PR event's base SHA may still name the commit that was main
+when the PR opened. Merge groups keep their exact queued base SHA and wait for
+the predecessor to land before final admission.
 
 Evidence records base/head commits and trees, the pre-generation combined tree,
 the final tree, the old trusted rebinder revision/tree and file digests, the
