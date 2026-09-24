@@ -1,12 +1,12 @@
 /* Private #1018 build sequence: begin imports A; stage describes one fixed
- * invocation; complete stores the stage outcome, reimports A and freezes the
- * executable after each successful build. A failed stage poisons the sequence.
- * The #923 stage runner must execute these commands with its existing separate
- * candidate identity and sandbox, capture stdout/stderr and supply its wait
- * status and service-owned log descriptor. This module does not launch a child.
+ * invocation; launch/poll observe that child's wait and capture its output in
+ * a fresh service-owned log. Complete stores that observed outcome, reimports
+ * A and freezes the executable after each successful build. A failed stage
+ * poisons the sequence. The worker still owns isolation and cancellation.
  */
 #include "retirement_matched_build.h"
 #include <pwd.h>
+#include <sys/wait.h>
 
 #define BQ_RETIREMENT_BUILD_LOG_CAP (16u * 1024u * 1024u)
 #define BQ_RETIREMENT_BUILD_DRIVER_CAP (64u * 1024u * 1024u)
@@ -185,6 +185,90 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_command_sha(BqRetirementBuildStage 
     for (u32 i = 0; i < 4; i += 1)
         sha256_add(&hash, stage->env[i], strlen(stage->env[i]) + 1);
     sha256_finish_hex(&hash, (char8*)digest);
+}
+
+bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
+    BqRetirementBuildProcess* process)
+{
+    BqRetirementBuildStage stage = {0};
+    struct stat directory_stat = {0}, log_stat = {0};
+    bool fresh = process && !process->state && !process->process &&
+        !process->directory && !process->writer;
+    bool ok = fresh && bq_retirement_matched_build_stage(build, &stage);
+    char digest[SHA256_HEX_CAPACITY] = {0}, name[32] = {0};
+    if (ok) bq_retirement_build_command_sha(&stage, digest);
+    int length = ok ? snprintf(name, sizeof(name), "build-log-%u", build->next) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(name) && stage.argv[0][0] == '/';
+    int directory = ok ? bq_open_absolute_directory(string_from_pointer(build->attempt)) : -1;
+    ok = ok && directory >= 3 && bq_owned_directory(directory, true, false) &&
+         fstat(directory, &directory_stat) == 0;
+    int writer = ok ? openat(directory, name,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && writer >= 3 && fstat(writer, &log_stat) == 0 &&
+         S_ISREG(log_stat.st_mode) && log_stat.st_uid == geteuid() &&
+         log_stat.st_nlink == 1 && log_stat.st_size == 0;
+    pid_t child = ok ? fork() : -1;
+    if (child == 0)
+    {
+        if (dup2(writer, STDOUT_FILENO) != STDOUT_FILENO ||
+            dup2(writer, STDERR_FILENO) != STDERR_FILENO) _exit(126);
+        close(writer);
+        close(directory);
+        if (chdir(stage.cwd) != 0) _exit(126);
+        execve(stage.argv[0], (char* const*)stage.argv, (char* const*)stage.env);
+        _exit(127);
+    }
+    ok = ok && child > 0;
+    if (ok)
+    {
+        *process = (BqRetirementBuildProcess){0};
+        process->directory = directory;
+        process->writer = writer;
+        process->process = child;
+        process->directory_device = (u64)directory_stat.st_dev;
+        process->directory_inode = (u64)directory_stat.st_ino;
+        process->log_device = (u64)log_stat.st_dev;
+        process->log_inode = (u64)log_stat.st_ino;
+        memcpy(process->name, name, (size_t)length + 1);
+        memcpy(process->command_sha256, digest, sizeof(digest));
+        process->stage = build->next;
+        process->state = BQ_RETIREMENT_BUILD_RUNNING;
+    }
+    else
+    {
+        if (writer >= 0) close(writer);
+        if (directory >= 0) close(directory);
+    }
+    return ok;
+}
+
+int bq_retirement_matched_build_poll(BqRetirementBuildProcess* process)
+{
+    int result = -1;
+    if (process && process->state == BQ_RETIREMENT_BUILD_RUNNING && process->process > 0)
+    {
+        int status = 0;
+        pid_t waited = waitpid(process->process, &status, WNOHANG);
+        if (waited == 0 || (waited < 0 && errno == EINTR)) result = 0;
+        else if (waited == process->process)
+        {
+            process->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            process->state = BQ_RETIREMENT_BUILD_REAPED;
+            process->process = 0;
+            result = process->exit_code == 0 ? 1 : -1;
+        }
+    }
+    return result;
+}
+
+void bq_retirement_matched_build_abort(BqRetirementBuildProcess* process)
+{
+    if (process && process->state != BQ_RETIREMENT_BUILD_RUNNING)
+    {
+        if (process->writer >= 3) close(process->writer);
+        if (process->directory >= 3) close(process->directory);
+        *process = (BqRetirementBuildProcess){0};
+    }
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_build_log_sha(int file, char digest[SHA256_HEX_CAPACITY])
@@ -459,7 +543,7 @@ BqError bq_retirement_matched_build_import(BqQueue* queue, BqJob const* job,
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue* queue,
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed_pinned(BqQueue* queue,
     BqJob const* job, int installed, int workspaces, String8 profile, int stage_log,
     int stage_exit, uid_t candidate_uid, BqRetirementMatchedBuild* build)
 {
@@ -495,15 +579,76 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue*
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue* queue,
+    BqJob const* job, int installed, int workspaces, String8 profile,
+    BqRetirementBuildProcess* process, uid_t candidate_uid, BqRetirementMatchedBuild* build)
+{
+    BqRetirementBuildStage stage = {0};
+    struct stat directory_stat = {0}, named = {0}, writer_stat = {0}, reader_stat = {0};
+    char command_sha256[SHA256_HEX_CAPACITY] = {0};
+    bool ok = process && process->state == BQ_RETIREMENT_BUILD_REAPED &&
+        !process->process && process->writer >= 3 && process->directory >= 3 &&
+        build && !build->failed && process->stage == build->next &&
+        bq_retirement_matched_build_stage(build, &stage);
+    if (ok) bq_retirement_build_command_sha(&stage, command_sha256);
+    int writer_flags = ok ? fcntl(process->writer, F_GETFD) : -1;
+    int access_flags = writer_flags >= 0 ? fcntl(process->writer, F_GETFL) : -1;
+    int current = ok ? bq_open_absolute_directory(string_from_pointer(build->attempt)) : -1;
+    struct stat reopened = {0};
+    ok = ok && process->command_sha256[0] &&
+        !memcmp(process->command_sha256, command_sha256, SHA256_HEX_CAPACITY) &&
+        bq_owned_directory(process->directory, true, false) &&
+        fstat(process->directory, &directory_stat) == 0 &&
+        process->directory_device == (u64)directory_stat.st_dev &&
+        process->directory_inode == (u64)directory_stat.st_ino &&
+        current >= 3 && fstat(current, &reopened) == 0 &&
+        reopened.st_dev == directory_stat.st_dev && reopened.st_ino == directory_stat.st_ino &&
+        writer_flags >= 0 && (writer_flags & FD_CLOEXEC) &&
+        access_flags >= 0 && (access_flags & O_ACCMODE) == O_WRONLY &&
+        fstat(process->writer, &writer_stat) == 0 &&
+        fstatat(process->directory, process->name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+        S_ISREG(writer_stat.st_mode) && writer_stat.st_nlink == 1 &&
+        writer_stat.st_uid == geteuid() && writer_stat.st_size >= 0 &&
+        (u64)writer_stat.st_size <= BQ_RETIREMENT_BUILD_LOG_CAP &&
+        writer_stat.st_dev == named.st_dev && writer_stat.st_ino == named.st_ino &&
+        process->log_device == (u64)writer_stat.st_dev &&
+        process->log_inode == (u64)writer_stat.st_ino;
+    if (current >= 0 && close(current) != 0) ok = false;
+    if (ok) ok = fsync(process->writer) == 0 && fchmod(process->writer, 0400) == 0 &&
+                 fsync(process->writer) == 0 && fsync(process->directory) == 0;
+    if (process && process->state != BQ_RETIREMENT_BUILD_RUNNING && process->writer >= 3)
+    {
+        if (close(process->writer) != 0) ok = false;
+        process->writer = -1;
+    }
+    int log = ok ? openat(process->directory, process->name,
+        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && log >= 3 && fstat(log, &reader_stat) == 0 &&
+        fstatat(process->directory, process->name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+        S_ISREG(reader_stat.st_mode) && reader_stat.st_nlink == 1 &&
+        reader_stat.st_uid == geteuid() && !(reader_stat.st_mode & 0222) &&
+        process->log_device == (u64)reader_stat.st_dev &&
+        process->log_inode == (u64)reader_stat.st_ino &&
+        reader_stat.st_dev == named.st_dev && reader_stat.st_ino == named.st_ino &&
+        reader_stat.st_size == named.st_size && reader_stat.st_mode == named.st_mode;
+    BqError result = ok ? bq_retirement_matched_build_complete_observed_pinned(queue, job,
+        installed, workspaces, profile, log, process->exit_code, candidate_uid, build) : BQ_WORKER_FAILED;
+    if (log >= 0 && close(log) != 0) result = BQ_IO;
+    if (process && process->state != BQ_RETIREMENT_BUILD_RUNNING)
+        bq_retirement_matched_build_abort(process);
+    if (result != BQ_OK && build) build->failed = true;
+    return result;
+}
+
 BqError bq_retirement_matched_build_complete(BqQueue* queue, BqJob const* job,
-    int installed, int workspaces, int stage_log, int stage_exit,
+    int installed, int workspaces, BqRetirementBuildProcess* process,
     BqRetirementMatchedBuild* build)
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
     struct passwd* candidate = getpwnam("buster-bench-candidate");
     BqError result = candidate && candidate->pw_uid != geteuid() ?
         bq_retirement_matched_build_complete_pinned(queue, job, installed,
-            workspaces, profile, stage_log, stage_exit, candidate->pw_uid, build) :
+            workspaces, profile, process, candidate->pw_uid, build) :
         BQ_CONFIGURATION_MISMATCH;
     if (result != BQ_OK && build) build->failed = true;
     return result;

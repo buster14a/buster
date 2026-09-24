@@ -123,7 +123,16 @@ durable attributable evidence.
 
 The existing #923 build driver has fixed Release `--cc clang` generate/build
 stages for both subjects and separates service and candidate identities. The
-integration owner must use the verified `source` directories and
+private matched-build stage helper now creates each log exclusively beneath
+the held attempt directory, launches the exact fixed argv, cwd and explicit
+environment, and polls the actual child wait. Completion freezes and reopens
+that same log inode, checks the launched stage and command digest, then stores
+the observed exit status and log bytes in the durable stage receipt. A caller
+cannot supply an exit code or substitute a log from a different process. The
+whole-job worker still must own process isolation, deadlines, cancellation,
+and cleanup; a stage wait alone is not proof of a trusted Clang build.
+
+The integration owner must use the verified `source` directories and
 `preparation-<job>` facts in that path, replace its smoke-specific command and
 stage policy only when the retirement recipe is admitted, and retain the exact
 build argv/environment, trusted compiler/linker/resource/SDK/sysroot and
@@ -244,6 +253,8 @@ entry bound, unavailable storage query, source mutation, missing file, duplicate
 manifest entry, unlisted file/directory/symlink, byte-equal inode replacement,
 two verified copies, removal of the temporary copy, and frozen binary readback
 after missing output, stale digest, same-byte inode replacement and changed
-content. The #923 integration owner registers this dedicated
+content. The stage fixture also runs the actual fixed child process, retains
+its service-owned log, and rejects a changed launch digest before building any
+binary record. The #923 integration owner registers this dedicated
 test alongside the native and sanitizer service suite, then proves its exact
 submitted head on hosted runners.
