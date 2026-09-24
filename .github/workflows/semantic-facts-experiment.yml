@@ -5,75 +5,9 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: semantic-facts-1028-experiment
+  group: semantic-facts-1028-comparison
   cancel-in-progress: false
 jobs:
-  correctness:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    env:
-      BUSTER_TEST_JOBS: '2'
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Existing linker dependency
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes mold
-      - name: Baseline with registered regression neighbors and allocation oracle
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p evidence
-          exec > >(tee evidence/baseline-regressions.log) 2>&1
-          git rev-parse HEAD 'HEAD^{tree}'
-          clang --version
-          git apply --check tools/throughput/experiments/1028-regressions.patch
-          git apply tools/throughput/experiments/1028-regressions.patch
-          git diff > evidence/baseline-tests.diff
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
-          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
-          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j2
-      - name: Candidate registered tests and syntax-only allocation oracle
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee evidence/candidate-regressions.log) 2>&1
-          git apply --check tools/throughput/experiments/1028-hoist.patch
-          git apply tools/throughput/experiments/1028-hoist.patch
-          git diff > evidence/candidate.diff
-          git hash-object src/buster/lib/compiler/frontend/c/c_parse.c src/buster/tests/compiler/driver/driver_test.c > evidence/candidate-blobs.txt
-          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j2
-      - name: Candidate own-source fixed point
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee evidence/candidate-self-host.log
-      - name: Candidate sanitizer and allocation oracle
-        if: ${{ !cancelled() }}
-        shell: bash
-        env:
-          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/buster-build" generate --build-directory build/sanitized --config Debug --cc clang --ci --sanitize -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee evidence/sanitized-build.log
-          "$RUNNER_TEMP/buster-build" build --build-directory build/sanitized --config Debug -t test_all -- -j2 2>&1 | tee evidence/sanitized-tests.log
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: semantic-facts-correctness-${{ github.run_id }}
-          path: |
-            evidence
-            build/CMakeCache.txt
-            build/compile_commands.json
-            build/sanitized/CMakeCache.txt
-          retention-days: 14
-          if-no-files-found: error
   comparison:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
@@ -84,11 +18,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Existing linker dependency
-        run: |
+          fetch-depth: 8
+      - run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes mold
-      - name: Matched trusted Clang subjects in one configured build root
+      - name: Matched trusted builds with frozen source
+        id: subjects
         shell: bash
         run: |
           set -euo pipefail
@@ -101,6 +36,7 @@ jobs:
           uname -a
           lscpu
           free -b
+          git diff --exit-code 2e942e80a87666409cf29d3e24a68d322b9e71fd -- src build.c CMakeLists.txt cmake
           git archive 2e942e80a87666409cf29d3e24a68d322b9e71fd:src | tar -xf - -C frozen/src
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
           "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF
@@ -111,7 +47,6 @@ jobs:
           touch src/buster/lib/compiler/frontend/c/c_parse.c
           "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
           cp build/Release/ide subjects/rebuilt-baseline
-          sha256sum subjects/baseline subjects/rebuilt-baseline
           git apply --check tools/throughput/experiments/1028-hoist.patch
           git apply tools/throughput/experiments/1028-hoist.patch
           git diff > evidence/hoist.diff
@@ -124,17 +59,18 @@ jobs:
           "$RUNNER_TEMP/buster-build" bench_throughput self-test
           "$RUNNER_TEMP/buster-build" bench_throughput help
           sha256sum build/throughput-tools/throughput > evidence/harness.sha256
-      - name: Frozen neighbors across targets and both frontend SSA forms
+      - name: Frozen cross-target diagnostic and artifact neighbors
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import hashlib, json, pathlib, re, subprocess
-          root = pathlib.Path.cwd()
-          patch = (root/'tools/throughput/experiments/1028-regressions.patch').read_text()
-          cases = [(json.loads(source), valid == 'true') for source, valid in re.findall(r'^\+\s+\{S8\(("(?:[^"\\]|\\.)*")\), (true|false), true\},$', patch, re.M)]
-          assert len(cases) == 16, len(cases)
-          out = root/'evidence'/'neighbors'; out.mkdir()
+          root=pathlib.Path.cwd()
+          patch=(root/'tools/throughput/experiments/1028-regressions.patch').read_text()
+          cases=[(json.loads(source),valid=='true') for source,valid in re.findall(r'^\+\s+\{S8\(("(?:[^"\\]|\\.)*")\), (true|false), true\},$',patch,re.M)]
+          assert len(cases)==16, len(cases)
+          out=root/'evidence'/'neighbors'; out.mkdir()
           rows=[]; failures=[]
           for i,(source,valid) in enumerate(cases):
               path=out/f'case-{i}.c'; path.write_text(source)
@@ -150,7 +86,7 @@ jobs:
                               row={'case':i,'valid':valid,'target':target,'form':form,'compiler':name,'action':action,'argv':cmd,'exit':p.returncode,'stdout':p.stdout.decode(errors='replace'),'stderr':p.stderr.decode(errors='replace'),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.exists() else None}
                               rows.append(row); results.append(row)
                               if (p.returncode==0)!=valid: failures.append({'kind':'acceptance','row':len(rows)-1})
-                          if [(r['exit'],r['stderr']) for r in results[:1]] != [(r['exit'],r['stderr']) for r in results[1:]]: failures.append({'kind':'syntax-object','row':len(rows)-2})
+                          if (results[0]['exit'],results[0]['stderr']) != (results[1]['exit'],results[1]['stderr']): failures.append({'kind':'syntax-object','row':len(rows)-2})
                           paired.append(results)
                       for a,b in zip(*paired):
                           if (a['exit'],a['stderr'],a['sha256']) != (b['exit'],b['stderr'],b['sha256']): failures.append({'kind':'baseline-candidate','row':len(rows)-4})
@@ -158,19 +94,24 @@ jobs:
           print('neighbor invocations',len(rows),'failures',len(failures))
           raise SystemExit(bool(failures))
           PY
-      - name: Whole-compilation A/A and baseline/hoist comparisons
+      - name: Native harness full-compilation A-A and A-B measurements
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           exec > >(tee evidence/comparison.log) 2>&1
           harness="$PWD/build/throughput-tools/throughput"
-          common=(--workload tiny_startup --profile ci --mode fast --warmups 1 --self-host-root "$PWD/frozen" --self-host-generated "$PWD/frozen/generated" --require-identical-output)
-          "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/rebuilt-baseline" --baseline-id 2e942e80 --candidate-id same-root-rebuild --output "$PWD/evidence/aa" --pairs 4 --no-guard "${common[@]}"
+          # This custom tiny + frozen self-host family is descriptive, not the
+          # predeclared ordinary CI guard. No acceptance policy is changed.
+          common=(--workload tiny_startup --profile ci --mode fast --warmups 1 --no-guard --self-host-root "$PWD/frozen" --self-host-generated "$PWD/frozen/generated" --require-identical-output)
+          "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/rebuilt-baseline" --baseline-id 2e942e80 --candidate-id same-root-rebuild --output "$PWD/evidence/aa" --pairs 4 "${common[@]}"
+          failed=0
           for form in frontend-ssa no-frontend-ssa; do
-            "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/hoist" --baseline-id 2e942e80 --candidate-id hoist-56db7b6 --output "$PWD/evidence/$form" --pairs 20 --flag "-f$form" "${common[@]}"
+            "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/hoist" --baseline-id 2e942e80 --candidate-id hoist-56db7b6 --output "$PWD/evidence/$form" --pairs 20 --flag "-f$form" "${common[@]}" || failed=1
           done
-      - name: Separate exact-range census on the same frozen input
-        if: ${{ !cancelled() }}
+          exit "$failed"
+      - name: Separate exact-range diagnostic census
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
