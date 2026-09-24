@@ -137,6 +137,14 @@ cannot supply an exit code or substitute a log from a different process. The
 whole-job worker still must own process isolation, deadlines, cancellation,
 and cleanup; a stage wait alone is not proof of a trusted Clang build.
 
+Before executing the descriptor, the child clears its inherited signal mask,
+restores the default TERM, INT, PIPE and CHLD dispositions, and selects the
+same fixed file creation mask as the existing nested recipe policy: `0077`
+for baseline stages and `0007` for candidate stages. The stage command digest
+includes this mask; the service's ambient mask and transient cancellation
+handlers cannot change the build's process startup policy. Candidate stages
+still require the worker's separate candidate UID and sandbox.
+
 At begin the helper retains both subjects' imported preparation facts. Each
 launch opens the selected source directory, scans its complete manifest and
 same-job inode closure against those facts, then gives the child that held

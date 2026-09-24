@@ -616,8 +616,20 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_held_exec_fd(BqRetirementMatchedBuild* bui
     if (parent_valid && fchmod(parent, parent_info.st_mode & 07777) != 0) ok = false;
     BqRetirementBuildStage stage = *command;
     stage.argv[3] = probe;
+    sigset_t blocked = {0}, prior_mask = {0};
+    struct sigaction ignore_pipe = {.sa_handler = SIG_IGN}, prior_pipe = {0};
+    bool masked = ok && sigemptyset(&blocked) == 0 && sigaddset(&blocked, SIGTERM) == 0 &&
+                  sigaddset(&blocked, SIGINT) == 0 &&
+                  sigprocmask(SIG_BLOCK, &blocked, &prior_mask) == 0;
+    bool ignored = masked && sigemptyset(&ignore_pipe.sa_mask) == 0 &&
+                   sigaction(SIGPIPE, &ignore_pipe, &prior_pipe) == 0;
+    mode_t prior_umask = umask(0000);
+    ok = ok && masked && ignored;
     pid_t child = ok ? fork() : -1;
     if (child == 0) bq_retirement_build_exec_fd(executable, writer, attempt, source, &stage);
+    umask(prior_umask);
+    if (ignored && sigaction(SIGPIPE, &prior_pipe, NULL) != 0) ok = false;
+    if (masked && sigprocmask(SIG_SETMASK, &prior_mask, NULL) != 0) ok = false;
     int status = 0;
     pid_t waited = -1;
     do { if (child > 0) waited = waitpid(child, &status, 0); }
@@ -803,7 +815,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
         BQ_PREP_CHECK(bq_retirement_matched_build_stage(&build, &command) &&
             command.argc == 16 && !strcmp(command.argv[7], "clang") &&
             !strcmp(command.argv[3], build.build) && !strcmp(command.cwd, build.source[0]) &&
-            !strcmp(command.env[0], checked.path));
+            !strcmp(command.env[0], checked.path) && command.file_umask == 0077);
         if (trial == 1 || trial == 6)
             BQ_PREP_CHECK(bq_prep_test_held_exec_fd(&build, driver_path, workspace_path,
                 attempt, &command, trial == 6) &&
@@ -882,7 +894,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             if (trial && stage == 2) ok = renameat(attempt, "matched-build", attempt, "old-build") == 0;
             BqRetirementBuildStage current = {0};
             ok = ok && bq_retirement_matched_build_stage(&build, &current) &&
-                 !strcmp(current.argv[3], command.argv[3]);
+                 !strcmp(current.argv[3], command.argv[3]) &&
+                 current.file_umask == (stage < 2 ? 0077 : 0007);
             BqRetirementBuildProcess process = {0};
             int exit_code = -1;
             if (ok) ok = bq_prep_test_run_stage(&build, &process, &exit_code);

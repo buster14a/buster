@@ -6,6 +6,7 @@
  */
 #include "retirement_matched_build.h"
 #include <pwd.h>
+#include <signal.h>
 #include <sys/wait.h>
 #if defined(__linux__)
 #include <linux/close_range.h>
@@ -157,6 +158,7 @@ bool bq_retirement_matched_build_stage(BqRetirementMatchedBuild* build, BqRetire
     {
         bool generate = (build->next & 1u) == 0;
         stage->cwd = build->source[build->next / 2u];
+        stage->file_umask = build->next < 2u ? 0077 : 0007;
         stage->env[0] = build->toolchain.path;
         stage->env[1] = "LC_ALL=C";
         stage->env[2] = "TZ=UTC";
@@ -193,12 +195,15 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_command_sha(BqRetirementBuildStage 
 {
     Sha256 hash;
     sha256_init(&hash);
-    sha256_add(&hash, "BQ-MATCHED-BUILD-COMMAND-V1", sizeof("BQ-MATCHED-BUILD-COMMAND-V1"));
+    sha256_add(&hash, "BQ-MATCHED-BUILD-COMMAND-V2", sizeof("BQ-MATCHED-BUILD-COMMAND-V2"));
     for (u32 i = 0; i < stage->argc; i += 1)
         sha256_add(&hash, stage->argv[i], strlen(stage->argv[i]) + 1);
     sha256_add(&hash, stage->cwd, strlen(stage->cwd) + 1);
     for (u32 i = 0; i < 4; i += 1)
         sha256_add(&hash, stage->env[i], strlen(stage->env[i]) + 1);
+    char file_umask[5];
+    snprintf(file_umask, sizeof(file_umask), "%04o", (unsigned)stage->file_umask);
+    sha256_add(&hash, file_umask, sizeof(file_umask));
     sha256_finish_hex(&hash, (char8*)digest);
 }
 
@@ -239,6 +244,15 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer,
     int input = ok ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
     if (ok) ok = input >= 3 && dup2(input, STDIN_FILENO) == STDIN_FILENO;
     if (input >= 0) close(input);
+    sigset_t empty = {0};
+    struct sigaction defaults = {.sa_handler = SIG_DFL};
+    if (ok) ok = sigemptyset(&empty) == 0 && sigemptyset(&defaults.sa_mask) == 0 &&
+                 sigaction(SIGTERM, &defaults, NULL) == 0 &&
+                 sigaction(SIGINT, &defaults, NULL) == 0 &&
+                 sigaction(SIGPIPE, &defaults, NULL) == 0 &&
+                 sigaction(SIGCHLD, &defaults, NULL) == 0 &&
+                 sigprocmask(SIG_SETMASK, &empty, NULL) == 0;
+    if (ok) umask(stage->file_umask);
     if (ok) ok = syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) == 0;
     if (ok) fexecve(executable, (char* const*)stage->argv, (char* const*)stage->env);
 #else
