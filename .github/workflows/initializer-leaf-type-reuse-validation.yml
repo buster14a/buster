@@ -1,0 +1,162 @@
+name: Initializer leaf type reuse validation (temporary)
+on:
+  push:
+    branches: [devin/1028-initializer-leaf-type-reuse]
+permissions:
+  contents: read
+concurrency:
+  group: initializer-leaf-type-reuse-1028
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      BUSTER_TEST_JOBS: '2'
+      BASE: 744a948f41291b4238d1755b1507678799f1206d
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 32
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Candidate and baseline builds (tests on, allocation counters on)
+        id: subjects
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence subjects frozen/src frozen/generated
+          exec > >(tee evidence/builds.log) 2>&1
+          git rev-parse HEAD 'HEAD^{tree}'
+          git diff --stat "$BASE" -- src docs
+          clang --version
+          uname -a
+          git archive "$BASE:src" | tar -xf - -C frozen/src
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/candidate
+          cp -a build/generated/. frozen/generated/
+          git hash-object src/buster/lib/compiler/frontend/c/c_parse.c > evidence/candidate-c_parse-blob.txt
+          git checkout "$BASE" -- src/buster/lib/compiler/frontend/c/c_parse.c src/buster/tests/compiler/driver/driver_test.c
+          git hash-object src/buster/lib/compiler/frontend/c/c_parse.c > evidence/baseline-c_parse-blob.txt
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/baseline
+          git checkout HEAD -- src
+          git status --short
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cmp build/Release/ide subjects/candidate && echo "candidate rebuild is byte-identical"
+          sha256sum subjects/* > evidence/compilers.sha256
+      - name: Full test suite on the candidate (includes the 245-case frozen corpus with allocation counters)
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./subjects/candidate test --verbose=0 --ci=1 > evidence/test-candidate.log 2>&1 || { tail -80 evidence/test-candidate.log; exit 1; }
+          tail -25 evidence/test-candidate.log
+      - name: Frozen unity source objects and diagnostics, baseline vs candidate
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/unity.log) 2>&1
+          mkdir -p evidence/unity
+          failed=0
+          for debug in -g0 -g; do
+            for form in frontend-ssa no-frontend-ssa; do
+              for name in baseline candidate; do
+                (cd frozen && ../subjects/$name cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 $debug -c -f$form src/buster/apps/ide/ide.c -o ../evidence/unity/$name$debug-$form.o) > evidence/unity/$name$debug-$form.stdout 2> evidence/unity/$name$debug-$form.stderr
+                echo "$name $debug $form exit=$?"
+              done
+              cmp evidence/unity/baseline$debug-$form.o evidence/unity/candidate$debug-$form.o && echo "object identical ($debug $form)" || { echo "object DIFFERS ($debug $form)"; failed=1; }
+              cmp evidence/unity/baseline$debug-$form.stderr evidence/unity/candidate$debug-$form.stderr && echo "stderr identical ($debug $form)" || failed=1
+            done
+          done
+          sha256sum evidence/unity/*.o > evidence/unity/objects.sha256
+          exit $failed
+      - name: Tracked fixtures and neighbor cases, baseline vs candidate
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/fixtures.log) 2>&1
+          mkdir -p evidence/fixtures
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re, subprocess
+          root = pathlib.Path.cwd()
+          out = root / "evidence" / "fixtures"
+          test_source = (root / "src/buster/tests/compiler/driver/driver_test.c").read_text()
+          neighbors = re.findall(r'^        \{S8\(("(?:[^"\\]|\\.)*")\), (true|false), true\},$', test_source, re.M)
+          inputs = [(p, None) for p in sorted(root.glob("tests/*.c"))]
+          case_dir = out / "cases"; case_dir.mkdir(exist_ok=True)
+          for index, (literal, valid) in enumerate(neighbors):
+              path = case_dir / f"case-{index}.c"
+              path.write_text(json.loads(literal))
+              inputs.append((path, valid == "true"))
+          rows, failures = [], []
+          for path, valid in inputs:
+              for action in ["-fsyntax-only", "-c"]:
+                  for form in (["-ffrontend-ssa", "-fno-frontend-ssa"] if valid is not None else ["-ffrontend-ssa"]):
+                      results = {}
+                      for name in ["baseline", "candidate"]:
+                          artifact = out / f"{name}.o"; artifact.unlink(missing_ok=True)
+                          cmd = [str(root / "subjects" / name), "cc", "-g0"] + (["-std=gnu23", form] if valid is not None else []) + [action, str(path), "-o", str(artifact)]
+                          p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+                          results[name] = {"input": path.name, "action": action, "form": form, "compiler": name, "exit": p.returncode,
+                                           "stderr": p.stderr.decode(errors="replace"),
+                                           "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.exists() else None}
+                          rows.append(results[name])
+                      a, b = results["baseline"], results["candidate"]
+                      if (a["exit"], a["stderr"], a["sha256"]) != (b["exit"], b["stderr"], b["sha256"]):
+                          failures.append({"input": path.name, "action": action, "form": form, "baseline": a["exit"], "candidate": b["exit"], "baseline_stderr": a["stderr"], "candidate_stderr": b["stderr"]})
+                      if valid is not None and (a["exit"] == 0) != valid:
+                          failures.append({"kind": "frozen-expectation", "input": path.name, "action": action, "form": form, "exit": a["exit"], "stderr": a["stderr"]})
+          (out / "results.json").write_text(json.dumps({"rows": rows, "failures": failures}, indent=1) + "\n")
+          print("frozen corpus cases", len(neighbors), "fixtures", len(inputs) - len(neighbors), "invocations", len(rows), "failures", len(failures))
+          for f in failures[:40]:
+              print(f)
+          raise SystemExit(bool(failures))
+          PY
+      - name: Self-host fixed point on the candidate
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release > evidence/self-host.log 2>&1 || { tail -60 evidence/self-host.log; exit 1; }
+          tail -30 evidence/self-host.log
+      - name: Root-query work census on the candidate (diagnostic oracle patch)
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/census.log) 2>&1
+          mkdir -p evidence/census
+          git apply --check tools/throughput/experiments/1028-semantic-oracle.patch
+          git apply tools/throughput/experiments/1028-semantic-oracle.patch
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/candidate-oracle
+          git checkout -- src
+          (cd frozen && BUSTER_SEMANTIC_TRACE="$PWD/../evidence/census/trace.txt" ../subjects/candidate-oracle cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g0 -c src/buster/apps/ide/ide.c -o ../evidence/census/oracle.o) > evidence/census/oracle.stdout 2> evidence/census/oracle.stderr
+          cmp evidence/unity/baseline-g0-frontend-ssa.o evidence/census/oracle.o && echo "oracle object identical to baseline"
+          python3 tools/throughput/experiments/1028_semantic_oracle_analyze.py evidence/census/trace.txt > evidence/census/analysis.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open("evidence/census/analysis.json"))
+          e = report["files"][0]
+          print(json.dumps({k: e["stats"][k] for k in sorted(e["stats"])}, indent=1))
+          print("nocache:", e["nocache"])
+          print("hit mismatches:", e["stats"].get("hit_mismatch", 0))
+          PY
+          gzip -9 evidence/census/trace.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: initializer-leaf-type-reuse-${{ github.run_id }}
+          path: |
+            evidence
+            build/CMakeCache.txt
+          retention-days: 14
+          if-no-files-found: error
