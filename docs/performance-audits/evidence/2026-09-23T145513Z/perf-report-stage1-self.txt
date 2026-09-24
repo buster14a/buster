@@ -1,0 +1,49 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 6K of event 'cpu/cycles/Pu'
+# Event count (approx.): 7802321905
+#
+# Overhead  Command      Shared Object         Symbol
+# ........  ...........  ....................  .............................................................
+#
+     5.33%  main_thread  ide-baseline          [.] c_parse_validate_lowering_constraints
+     4.65%  main_thread  ide-baseline          [.] ir_validate_canonical_module
+     3.94%  main_thread  ide-baseline          [.] c_type_parse_machine_run
+     3.64%  main_thread  ide-baseline          [.] c_ir_ssa_finish
+     3.19%  main_thread  ide-baseline          [.] machine_fast_placement_build_prepassed
+     2.95%  main_thread  ide-baseline          [.] machine_fast_close_live_ranges
+     2.04%  main_thread  ide-baseline          [.] machine_select_canonical_function_x86_64
+     1.94%  main_thread  ide-baseline          [.] codegen_machine_debug_index_build
+     1.92%  main_thread  ide-baseline          [.] c_parse_lookup_entity_symbol
+     1.81%  main_thread  ide-baseline          [.] c_parse_scope_for_token
+     1.76%  main_thread  libc.so.6             [.] 0x000000000018f5ce
+     1.65%  main_thread  ide-baseline          [.] ir_cfg_publish_instruction_rows
+     1.56%  main_thread  ide-baseline          [.] machine_fast_prepass_build
+     1.46%  main_thread  ide-baseline          [.] ir_fast_function
+     1.45%  main_thread  ide-baseline          [.] c_lower_to_ir_with_options
+     1.34%  main_thread  ide-baseline          [.] ir_rewrite_compact
+     1.24%  main_thread  ide-baseline          [.] c_ir_lower_expression_core_step
+     1.24%  main_thread  ide-baseline          [.] codegen_machine_debug_timeline_for
+     1.23%  main_thread  ide-baseline          [.] machine_schedule_frame_access
+     1.18%  main_thread  ide-baseline          [.] c_parse_type_layout_core
+     1.16%  main_thread  ide-baseline          [.] machine_encode_x86_64
+     1.15%  main_thread  ide-baseline          [.] c_conditional_number
+     1.08%  main_thread  ide-baseline          [.] ir_promote_function
+     1.08%  main_thread  ide-baseline          [.] c_preprocess
+     1.04%  main_thread  ide-baseline          [.] c_parse_initializer_designator
+     1.00%  main_thread  ide-baseline          [.] c_ir_lower_body_advance
+     0.98%  main_thread  ide-baseline          [.] c_parse_ast
+     0.97%  main_thread  ide-baseline          [.] c_lex_dispatch
+     0.91%  main_thread  ide-baseline          [.] machine_debug_values_build
+     0.90%  main_thread  ide-baseline          [.] c_ir_ssa_slot
+     0.89%  main_thread  ide-baseline          [.] machine_function_compact_virtual_registers
+     0.89%  main_thread  ide-baseline          [.] c_symbol_intern
+     0.88%  main_thread  ide-baseline          [.] c_parse_expression_type_query
+     0.87%  main_thread  ide-baseline          [.] c_ir_prepare_control_expressions_step
+     0.84%  main_thread  ide-baseline          [.] c_preprocess_expand
+#
+# (Tip: Order by the overhead of source file name and line number: perf report -s srcline)
+#
