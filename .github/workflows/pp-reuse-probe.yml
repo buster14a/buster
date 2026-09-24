@@ -1,0 +1,31 @@
+name: PP reuse source probe (temporary)
+
+on:
+  push:
+    branches: [astra/pp-reuse-probe-20260924]
+    paths:
+      - .github/workflows/pp-reuse-probe.yml
+      - docs/performance-audits/evidence/2026-09-24-pp-reuse/probe.py
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Source census and counterexamples, not performance measurement
+        run: python3 docs/performance-audits/evidence/2026-09-24-pp-reuse/probe.py
+      - name: Retain exact commands, diagnostics and observations
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pp-reuse-probe-${{ github.sha }}
+          path: ${{ runner.temp }}/pp-reuse
+          if-no-files-found: error
+          retention-days: 7
