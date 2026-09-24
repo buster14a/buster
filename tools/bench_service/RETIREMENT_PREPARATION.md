@@ -158,10 +158,14 @@ be checked against the actual reviewed compiler outputs before admission.
 close-on-exec descriptors after importing the durable binary record. It
 recomputes their content and inode identities against that record, repeats
 the source/binary readback, and returns the descriptors only if both still
-match. A pathname swap after acquisition cannot change the file held by the
-service. The launcher must execute these descriptors rather than reopen the
-names, retain them until all dependent launches finish, and call
-`bq_retirement_binaries_release` on every exit path. The private fixture
+match. Descriptors are promoted to at least 3 to meet
+`tp_retirement_executable_init`'s launch boundary even when a standard stream
+was closed. A pathname swap after acquisition cannot change the file held by
+the service. The caller initializes the holder to zero or releases it before
+acquiring; an acquisition refuses to overwrite live descriptors. Release is
+safe for a zeroed holder. The launcher must execute these descriptors rather
+than reopen the names, retain them until all dependent launches finish, and
+call `bq_retirement_binaries_release` on every exit path. The private fixture
 proves a byte-identical replacement makes a new acquisition fail while a
 previously held descriptor still reads the original inode; it does not
 execute a compiler or assert Clang provenance.

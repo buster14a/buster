@@ -21,6 +21,7 @@ typedef struct BqRetirementHeldBinaries
     /* Kept open across correctness and through the last timed launch. The
      * launcher must execute these exact descriptors, not reopen a pathname. */
     int descriptors[2];
+    u32 owned;
 } BqRetirementHeldBinaries;
 
 /* The build producer must first freeze both successful trusted Clang outputs
@@ -32,6 +33,8 @@ BUSTER_F_DECL BqError bq_retirement_binaries_record(BqQueue* queue, BqJob const*
 BUSTER_F_DECL BqError bq_retirement_binaries_import(BqQueue* queue, BqJob const* job,
     int installed, int workspaces, char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const record_sha256[SHA256_HEX_CAPACITY], BqRetirementBinaries* verified);
+/* The holder must be zero-initialized or previously released. Acquisition
+ * refuses to overwrite live descriptors; release accepts a zeroed holder. */
 BUSTER_F_DECL BqError bq_retirement_binaries_acquire(BqQueue* queue, BqJob const* job,
     int installed, int workspaces, char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const record_sha256[SHA256_HEX_CAPACITY], BqRetirementHeldBinaries* held);
