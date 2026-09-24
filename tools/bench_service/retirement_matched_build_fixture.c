@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -19,7 +20,24 @@ int main(int argc, char** argv)
     int result = 1;
     if (argc >= 10 && !strcmp(argv[2], "--build-directory") && argv[3][0] == '/')
     {
-        if (!strcmp(argv[1], "generate") && argc == 16 &&
+        char cwd[512];
+        sigset_t mask = {0};
+        struct sigaction pipe_action = {0}, term_action = {0}, int_action = {0}, child_action = {0};
+        mode_t file_umask = umask(0077);
+        umask(file_umask);
+        char* location = getcwd(cwd, sizeof(cwd));
+        bool candidate = location && strstr(cwd, "/candidate/source");
+        bool baseline = location && (strstr(cwd, "/base/source") || strstr(cwd, "/base/held-source"));
+        bool policy = (baseline || candidate) &&
+            (candidate ? file_umask == 0007 : file_umask == 0077) &&
+            sigprocmask(SIG_SETMASK, NULL, &mask) == 0 &&
+            sigismember(&mask, SIGTERM) == 0 && sigismember(&mask, SIGINT) == 0 &&
+            sigaction(SIGPIPE, NULL, &pipe_action) == 0 && pipe_action.sa_handler == SIG_DFL &&
+            sigaction(SIGTERM, NULL, &term_action) == 0 && term_action.sa_handler == SIG_DFL &&
+            sigaction(SIGINT, NULL, &int_action) == 0 && int_action.sa_handler == SIG_DFL &&
+            sigaction(SIGCHLD, NULL, &child_action) == 0 && child_action.sa_handler == SIG_DFL;
+        if (!policy) result = 7;
+        else if (!strcmp(argv[1], "generate") && argc == 16 &&
             !strcmp(argv[6], "--cc") && !strcmp(argv[7], "clang"))
         {
             /* Deliberate failing stage: the parent verifies that no binary

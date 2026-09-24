@@ -19,6 +19,7 @@ typedef struct BqRetirementBuildStage
     char const* env[5];
     char const* cwd;
     u32 argc;
+    mode_t file_umask;
 } BqRetirementBuildStage;
 
 typedef struct BqRetirementMatchedBuild
