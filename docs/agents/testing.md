@@ -57,8 +57,10 @@
   a partial-rerun carry-forward, is rejected immediately; run a fresh full CI
   attempt rather than treating a copied success label as execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
-  and explicit dispatches without duplicate feature-push runs. Both matrices
-  disable fail-fast, and a combination failure does not hide Unix mode tests.
+  and explicit dispatches without duplicate feature-push runs. Buster CI keeps
+  full matrix diagnostics for pull requests, main/tag pushes and manual runs;
+  only `merge_group` enables matrix fail-fast, so the queue cancels sibling
+  cells after the first matrix failure without hiding ordinary PR diagnostics.
   See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
   cancellation, coverage details, and reproduction. Every job stays inert
   until its repository variable is set, and skips itself outright on Forgejo.
