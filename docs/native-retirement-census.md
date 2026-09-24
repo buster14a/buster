@@ -27,6 +27,19 @@ The trusted digest-reader bootstrap must already be installed before this
 support policy is integrated; the generated source snapshot and aggregate
 binding are published only by the trusted writer.
 
+The #1007 support decision updates only the byte/hash identity of
+`tests/basic_c_f80_machine.c` to add a runtime f80-to-signed-64 assertion at
+`0x1p31L`. The fixture retains its x86-64 SysV x87 guard and independent
+Clang HOST/LIBRARY modes. This is a coverage refinement, not a claim that a
+compiler defect was demonstrated; the input and expected result are in range.
+The fixture remains one subject with the same applicability and compilation
+obligation. The inventory remains 559 inputs, 411 subjects, and 78,912 row
+identities. The exact successor declaration digest is
+`0d878bf0a3df9f0528803a5b08275d950f9edda57e373fd7618229dee264e427`; both
+previous declaration digests remain accepted for historical evidence. Trusted
+reader bootstrap #1086 admits this exact digest before the separate policy
+transition updates the fixture row and benchmark-service pins.
+
 The September 17, 2026 integration retains every subject admitted by the
 current support ledger. The integrated profile has 559 inputs,
 411 subjects, 19,728 groups and 78,912 rows: 405 supported-object
