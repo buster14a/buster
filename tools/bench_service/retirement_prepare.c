@@ -42,7 +42,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_tree_closed(int root, char const* manifes
     u32 active = 0, files = 0, directories = 0, manifests = 0;
     if (ok)
     {
-        int held = fcntl(root, F_DUPFD_CLOEXEC, 3);
+        /* A duplicated descriptor shares the directory offset with root.
+         * Open the held directory again so repeated readback starts at zero
+         * without moving a cursor owned by another consumer. */
+        int held = openat(root, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         stack[0].stream = held >= 0 ? fdopendir(held) : NULL;
         if (!stack[0].stream && held >= 0) close(held);
         ok = stack[0].stream != NULL;
