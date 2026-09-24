@@ -1,0 +1,31 @@
+name: "Temporary #546 ownership diagnostic"
+on:
+  push:
+    branches: [diagnostics/546-consumer-ownership-2e942e80]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          persist-credentials: false
+      - name: Retain exact source and audit identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ownership-546"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/ownership-546/identity.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/ownership-546/source.tar.gz"
+          sha256sum "$RUNNER_TEMP/ownership-546/source.tar.gz" >> "$RUNNER_TEMP/ownership-546/identity.txt"
+          python3 tools/new_audit.py --newest >> "$RUNNER_TEMP/ownership-546/identity.txt"
+          cat "$RUNNER_TEMP/ownership-546/identity.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ownership-546-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ownership-546
+          retention-days: 7
+          if-no-files-found: error
