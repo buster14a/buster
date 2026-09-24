@@ -368,7 +368,10 @@ def check_merge_group(repo: Path, base: str, head: str, current_main: str, api) 
     """
     base, head = commit(repo, base), commit(repo, head)
     if base != require_hex(current_main, HEX40, "current main"):
-        raise AdmissionError("main advanced: rebuild the merge group against current main")
+        raise AdmissionError(
+            f"group base does not equal live main: main={current_main} "
+            f"base={base} head={head}; wait for the predecessor or rebuild the group"
+        )
     parents = commit_parents(repo, head)
     if len(parents) != 2 or parents[0] != base:
         raise AdmissionError("merge groups must contain one candidate with current main as first parent")
