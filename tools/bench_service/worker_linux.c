@@ -1543,7 +1543,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe(BqWorkerBackend* backend, char co
                                                 BqWorkerObserved* observed, u64 deadline)
 {
     BqSystemdContext* context = backend->context;
-    u32 attempts = context->starting ? 20 : 1;
+    /* The socket instance may be cold-started before the manager creates the
+     * unit.  Keep retrying within the existing five-second command deadline. */
+    u32 attempts = context->starting ? 500 : 1;
     BqError error = BQ_OK;
     for (u32 attempt = 0; error == BQ_OK && attempt < attempts; attempt += 1)
     {
