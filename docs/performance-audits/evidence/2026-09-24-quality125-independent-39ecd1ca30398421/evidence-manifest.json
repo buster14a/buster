@@ -1,0 +1,18 @@
+{
+  "region-selection-experiment.zip": {
+    "sha256": "bcc481a8540ee943adc7c720f21f070c26df07a45ca2b762214c7ebbbfb9db98",
+    "bytes": 1271793
+  },
+  "region-selection-report.md": {
+    "sha256": "318bbd0e17d3f135e2aa7fdde518e0b2789142d114efd0c2c206bd9ea80e13f0",
+    "bytes": 21091
+  },
+  "independent-validation.zip": {
+    "sha256": "639ea03423d3ce7515938d94a2f8e1b52449ef0961ae3b813bbd3f471fe13b46",
+    "bytes": 1489824
+  },
+  "independent-review.md": {
+    "sha256": "e08eef79bcc30ed2556c6083d4c3468277aeb8518acfe5d2ee682bc3f76d5ec7",
+    "bytes": 18281
+  }
+}
