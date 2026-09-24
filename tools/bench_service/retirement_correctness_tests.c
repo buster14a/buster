@@ -6,8 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "../../src/buster/lib/hash.c"
 #include "retirement_correctness.c"
@@ -438,6 +440,29 @@ static int frozen_runtime_log(int directory, char const* name, char const* conte
     return result;
 }
 
+static int captured_runtime_log(int directory, char const* name, char const* executable)
+{
+    int output = openat(directory, name, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    pid_t child = output >= 0 ? fork() : -1;
+    if (!child)
+    {
+        char* const arguments[] = {(char*)executable, "--retirement-oracle-output", NULL};
+        if (dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0) _exit(126);
+        close(output);
+        execv(executable, arguments);
+        _exit(127);
+    }
+    int status = 0;
+    pid_t waited = -1;
+    do { if (child > 0) waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    bool ok = waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+              fchmod(output, 0400) == 0;
+    if (output >= 0 && close(output) != 0) ok = false;
+    int result = ok ? openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    return result;
+}
+
 static void test_frozen_artifact_readback(char const* executable)
 {
     char root[] = "/tmp/bq-retirement-artifact-XXXXXX";
@@ -454,8 +479,8 @@ static void test_frozen_artifact_readback(char const* executable)
         sha256_init(&oracle_hash);
         sha256_add(&oracle_hash, oracle_output, strlen(oracle_output));
         sha256_finish_hex(&oracle_hash, oracle_sha256);
-        int base_log = frozen_runtime_log(directory, "base-output", oracle_output);
-        int candidate_log = frozen_runtime_log(directory, "candidate-output", oracle_output);
+        int base_log = captured_runtime_log(directory, "base-output", executable);
+        int candidate_log = captured_runtime_log(directory, "candidate-output", executable);
         int wrong_log = frozen_runtime_log(directory, "wrong-output", "wrong-output\n");
         int empty_log = frozen_runtime_log(directory, "empty-output", "");
         char empty_digest[65];
@@ -474,11 +499,34 @@ static void test_frozen_artifact_readback(char const* executable)
         unsigned host_target = 11, other_machine = 5;
 #endif
         BqRetirementArtifactLocation locations[2] = {{directory, "base"}, {directory, "candidate"}};
-        for (unsigned fault = 0; fault < 10; fault += 1)
+        char* const base_compiler[] = {"/trusted/base-ide", "-c", "input.c", NULL};
+        char* const candidate_compiler[] = {"/trusted/candidate-ide", "-c", "input.c", NULL};
+        char* const changed_compiler[] = {"/trusted/candidate-ide", "-O2", "input.c", NULL};
+        char* const base_runtime[] = {"/scratch/base", NULL};
+        char* const candidate_runtime[] = {"/scratch/candidate", NULL};
+        char* const changed_runtime[] = {"/scratch/other", NULL};
+        char* const environment[] = {"HOME=/nonexistent", "LC_ALL=C", NULL};
+        char* const unordered_environment[] = {"LC_ALL=C", "HOME=/nonexistent", NULL};
+        BqRetirementRowCommands commands[2] = {
+            {{base_compiler, environment, "/source/base", 3, 2},
+             {base_runtime, environment, "/scratch/base", 1, 2}},
+            {{candidate_compiler, environment, "/source/candidate", 3, 2},
+             {candidate_runtime, environment, "/scratch/candidate", 1, 2}}
+        };
+        for (unsigned fault = 0; fault < 15; fault += 1)
         {
             BqCorrectnessFixture fixture;
             fixture_init(&fixture);
             memcpy(fixture.trusted[1].independent_oracle_sha256, oracle_sha256, 65);
+            for (unsigned side = 0; side < 2; side += 1)
+            {
+                CHECK(bq_retirement_command_hash(&commands[side].compiler,
+                    fixture.trusted[1].compiler_command_sha256[side]) &&
+                    bq_retirement_command_hash(&commands[side].runtime,
+                    fixture.trusted[1].runtime_command_sha256[side]));
+            }
+            CHECK(!strcmp(fixture.trusted[1].compiler_command_sha256[0],
+                "141cd1a79c9ab405a08180ed376086cf66fa20354a866cd039c887dedb354b69"));
             unsigned target = fault == 5 ? other_machine : host_target;
             fixture.prepared.native_target = target;
             for (unsigned i = 0; i < BQ_TEST_ROWS; i += 1)
@@ -493,6 +541,8 @@ static void test_frozen_artifact_readback(char const* executable)
                 observed.side[side].code_sha256[0] = 0;
                 observed.side[side].code_bytes = 0;
                 observed.side[side].runtime_output_sha256[0] = 0;
+                observed.side[side].compiler_command_sha256[0] = 0;
+                observed.side[side].runtime_command_sha256[0] = 0;
             }
             observed.code_eligible = 0;
             if (fault == 1) locations[1].name = "linked";
@@ -501,9 +551,14 @@ static void test_frozen_artifact_readback(char const* executable)
             if (fault == 4) CHECK(fchmodat(directory, "candidate", 0600, 0) == 0);
             if (fault == 8) observed.side[0].runtime_output_sha256[0] = 'a';
             if (fault == 9) CHECK(fchmodat(directory, "candidate-output", 0600, 0) == 0);
+            if (fault == 10) commands[1].compiler.arguments = changed_compiler;
+            if (fault == 11) commands[1].compiler.environment = unordered_environment;
+            if (fault == 12) commands[1].runtime.arguments = changed_runtime;
+            if (fault == 13) observed.side[0].compiler_command_sha256[0] = 'a';
+            if (fault == 14) commands[1].compiler.directory = "/source/other";
             int runtime_outputs[2] = {base_log, fault == 6 ? wrong_log : fault == 7 ? -1 : candidate_log};
             bool accepted = bq_retirement_correctness_row_service(&fixture.gate, locations,
-                                                                   runtime_outputs, &observed);
+                                                                   runtime_outputs, commands, &observed);
             CHECK(accepted == (fault == 0));
             if (!fault)
             {
@@ -520,8 +575,9 @@ static void test_frozen_artifact_readback(char const* executable)
                     {
                         BqRetirementArtifactLocation empty[2] = {{directory, NULL}, {directory, NULL}};
                         int absent_logs[2] = {-1, -1};
+                        BqRetirementRowCommands absent_commands[2] = {0};
                         CHECK(bq_retirement_correctness_row_service(&fixture.gate, empty,
-                            absent_logs, &fixture.supplied[i]));
+                            absent_logs, absent_commands, &fixture.supplied[i]));
                     }
                     else CHECK(bq_retirement_correctness_row(&fixture.gate, &fixture.supplied[i]));
                 }
@@ -532,7 +588,23 @@ static void test_frozen_artifact_readback(char const* executable)
             locations[1].name = "candidate";
             if (fault == 4) CHECK(fchmodat(directory, "candidate", 0400, 0) == 0);
             if (fault == 9) CHECK(fchmodat(directory, "candidate-output", 0400, 0) == 0);
+            commands[1].compiler.arguments = candidate_compiler;
+            commands[1].compiler.environment = environment;
+            commands[1].compiler.directory = "/source/candidate";
+            commands[1].runtime.arguments = candidate_runtime;
         }
+        BqCorrectnessFixture untimed;
+        fixture_init(&untimed);
+        begin_fixture(&untimed);
+        checks_fixture(&untimed);
+        for (unsigned i = 0; i < 3; i += 1)
+            CHECK(bq_retirement_correctness_row(&untimed.gate, &untimed.supplied[i]));
+        BqRetirementArtifactLocation absent_artifacts[2] = {{directory, NULL}, {directory, NULL}};
+        int absent_logs[2] = {-1, -1};
+        BqRetirementRowCommands unexpected[2] = {0};
+        unexpected[0].compiler = commands[0].compiler;
+        CHECK(!bq_retirement_correctness_row_service(&untimed.gate, absent_artifacts,
+            absent_logs, unexpected, &untimed.supplied[3]) && untimed.gate.failed);
         CHECK(close(base_log) == 0 && close(candidate_log) == 0 &&
               close(wrong_log) == 0 && close(empty_log) == 0);
         CHECK(unlinkat(directory, "linked", 0) == 0 &&
@@ -549,14 +621,21 @@ static void test_frozen_artifact_readback(char const* executable)
 
 int main(int argc, char** argv)
 {
-    test_valid();
-    test_bad_checks();
-    test_bad_rows();
-    test_bad_import();
-    test_partial_and_sealed();
-    test_large_population();
-    if (argc > 0) test_frozen_artifact_readback(argv[0]);
-    printf("RETIREMENT_CORRECTNESS_TEST assertions=%u failures=%u launches=%u\n",
-           assertions, failures, launches);
-    return failures ? 1 : 0;
+    int result = 0;
+    if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-output"))
+        result = fputs("independent-oracle-output\n", stdout) < 0 || fflush(stdout) != 0;
+    else
+    {
+        test_valid();
+        test_bad_checks();
+        test_bad_rows();
+        test_bad_import();
+        test_partial_and_sealed();
+        test_large_population();
+        if (argc > 0) test_frozen_artifact_readback(argv[0]);
+        printf("RETIREMENT_CORRECTNESS_TEST assertions=%u failures=%u launches=%u\n",
+               assertions, failures, launches);
+        result = failures ? 1 : 0;
+    }
+    return result;
 }

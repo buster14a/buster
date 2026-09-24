@@ -12,10 +12,7 @@
 #include "retirement_artifact.h"
 
 #ifdef __linux__
-#define TP_RETIREMENT_COMMAND_ARGUMENTS 256u
-#define TP_RETIREMENT_COMMAND_ENVIRONMENT 128u
-#define TP_RETIREMENT_COMMAND_BYTES 65536u
-
+#include "retirement_command.h"
 typedef struct TpRetirementExecutable
 {
     int descriptor, valid;
@@ -157,69 +154,11 @@ static int tp_retirement_artifact_file(int descriptor, TpRetirementArtifact* fac
     return ok;
 }
 
-/* Frozen command identity: canonical ASCII JSON with sorted keys argv, cwd,
- * environment. Environment entries are sorted, unique NAME=value strings.
- * No ambient environment participates. All lengths are checked before launch. */
-static int tp_retirement_command_string(Sha256* hash, char const* value, unsigned* remaining)
-{
-    int ok = value && remaining && *remaining;
-    if (ok) sha256_add(hash, "\"", 1);
-    for (unsigned i = 0; ok && value[i]; ++i)
-    {
-        unsigned char c = (unsigned char)value[i];
-        ok = *remaining > 0 && c >= 32 && c <= 126;
-        if (ok)
-        {
-            --*remaining;
-            if (c == '"' || c == '\\') sha256_add(hash, "\\", 1);
-            sha256_add(hash, &c, 1);
-        }
-    }
-    if (ok) ok = *remaining > 0;
-    if (ok) { --*remaining; sha256_add(hash, "\"", 1); }
-    return ok;
-}
-
 static int tp_retirement_command_hash(TpRetirementMeasuredCommand const* command, char digest[65])
 {
-    int ok = command && digest && command->arguments && command->argument_count &&
-        command->argument_count <= TP_RETIREMENT_COMMAND_ARGUMENTS &&
-        command->environment && command->environment_count <= TP_RETIREMENT_COMMAND_ENVIRONMENT &&
-        command->directory && command->directory[0] == '/' &&
-        command->arguments[command->argument_count] == NULL &&
-        command->environment[command->environment_count] == NULL;
-    unsigned remaining = TP_RETIREMENT_COMMAND_BYTES;
-    Sha256 hash;
-    sha256_init(&hash);
-    sha256_add(&hash, "{\"argv\":[", 9);
-    for (unsigned i = 0; ok && i < command->argument_count; ++i)
-    {
-        if (i) sha256_add(&hash, ",", 1);
-        ok = tp_retirement_command_string(&hash, command->arguments[i], &remaining);
-    }
-    sha256_add(&hash, "],\"cwd\":", 8);
-    if (ok) ok = tp_retirement_command_string(&hash, command->directory, &remaining);
-    sha256_add(&hash, ",\"environment\":[", 16);
-    size_t previous_name = 0;
-    for (unsigned i = 0; ok && i < command->environment_count; ++i)
-    {
-        char const* entry = command->environment[i];
-        if (i) sha256_add(&hash, ",", 1);
-        ok = tp_retirement_command_string(&hash, entry, &remaining);
-        char const* equal = ok ? strchr(entry, '=') : NULL;
-        size_t name = equal ? (size_t)(equal - entry) : 0;
-        ok = ok && name;
-        for (size_t j = 0; ok && j < name; ++j)
-            ok = (entry[j] >= 'A' && entry[j] <= 'Z') || (entry[j] >= 'a' && entry[j] <= 'z') ||
-                entry[j] == '_' || (j && entry[j] >= '0' && entry[j] <= '9');
-        if (ok && i)
-            ok = strcmp(command->environment[i - 1], entry) < 0 &&
-                !(name == previous_name && !memcmp(command->environment[i - 1], entry, name));
-        previous_name = name;
-    }
-    sha256_add(&hash, "]}", 2);
-    if (digest) digest[0] = 0;
-    if (ok) sha256_finish_hex(&hash, digest);
+    int ok = tp_retirement_command_fields_hash(command ? command->arguments : NULL,
+        command ? command->argument_count : 0, command ? command->directory : NULL,
+        command ? command->environment : NULL, command ? command->environment_count : 0, digest);
     return ok;
 }
 
