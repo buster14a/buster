@@ -8,66 +8,199 @@ concurrency:
   group: semantic-facts-1028-experiment
   cancel-in-progress: false
 jobs:
-  source:
+  correctness:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
-          persist-credentials: false
-      - run: |
-          mkdir -p "$RUNNER_TEMP/semantic-source"
-          git archive HEAD | gzip > "$RUNNER_TEMP/semantic-source/source.tar.gz"
-          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/semantic-source/revision.txt"
-          sha256sum "$RUNNER_TEMP/semantic-source/source.tar.gz"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: semantic-facts-pinned-source
-          path: ${{ runner.temp }}/semantic-source
-          retention-days: 7
-          if-no-files-found: error
-  baseline:
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       BUSTER_TEST_JOBS: '2'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
           persist-credentials: false
       - name: Existing linker dependency
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes mold
-      - name: Build trusted baseline and reproduce fixed point
+      - name: Baseline with registered regression neighbors and allocation oracle
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p evidence
-          exec > >(tee evidence/baseline.log) 2>&1
+          exec > >(tee evidence/baseline-regressions.log) 2>&1
+          git rev-parse HEAD 'HEAD^{tree}'
+          clang --version
+          git apply --check tools/throughput/experiments/1028-regressions.patch
+          git apply tools/throughput/experiments/1028-regressions.patch
+          git diff > evidence/baseline-tests.diff
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j2
+      - name: Candidate registered tests and syntax-only allocation oracle
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/candidate-regressions.log) 2>&1
+          git apply --check tools/throughput/experiments/1028-hoist.patch
+          git apply tools/throughput/experiments/1028-hoist.patch
+          git diff > evidence/candidate.diff
+          git hash-object src/buster/lib/compiler/frontend/c/c_parse.c src/buster/tests/compiler/driver/driver_test.c > evidence/candidate-blobs.txt
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j2
+      - name: Candidate own-source fixed point
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee evidence/candidate-self-host.log
+      - name: Candidate sanitizer and allocation oracle
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" generate --build-directory build/sanitized --config Debug --cc clang --ci --sanitize -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON 2>&1 | tee evidence/sanitized-build.log
+          "$RUNNER_TEMP/buster-build" build --build-directory build/sanitized --config Debug -t test_all -- -j2 2>&1 | tee evidence/sanitized-tests.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: semantic-facts-correctness-${{ github.run_id }}
+          path: |
+            evidence
+            build/CMakeCache.txt
+            build/compile_commands.json
+            build/sanitized/CMakeCache.txt
+          retention-days: 14
+          if-no-files-found: error
+  comparison:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 55
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Existing linker dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Matched trusted Clang subjects in one configured build root
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence subjects frozen/src frozen/generated
+          exec > >(tee evidence/matched-builds.log) 2>&1
           git rev-parse HEAD 'HEAD^{tree}'
           clang --version
           cmake --version
           ninja --version
           uname -a
           lscpu
+          free -b
+          git archive 2e942e80a87666409cf29d3e24a68d322b9e71fd:src | tar -xf - -C frozen/src
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
-          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON
+          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF
           "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
-          sha256sum build/Release/ide
-          "$RUNNER_TEMP/buster-build" test_self_host --config Release
-          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j2
+          cp build/Release/ide subjects/baseline
+          cp -a build/generated/. frozen/generated/
+          cp build/compile_commands.json evidence/compile-commands-baseline.json
+          touch src/buster/lib/compiler/frontend/c/c_parse.c
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/rebuilt-baseline
+          sha256sum subjects/baseline subjects/rebuilt-baseline
+          git apply --check tools/throughput/experiments/1028-hoist.patch
+          git apply tools/throughput/experiments/1028-hoist.patch
+          git diff > evidence/hoist.diff
+          git hash-object src/buster/lib/compiler/frontend/c/c_parse.c > evidence/candidate-source-blob.txt
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/hoist
+          cp build/compile_commands.json evidence/compile-commands-candidate.json
+          sha256sum subjects/* > evidence/compilers.sha256
+          find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs.sha256
+          "$RUNNER_TEMP/buster-build" bench_throughput self-test
+          "$RUNNER_TEMP/buster-build" bench_throughput help
+          sha256sum build/throughput-tools/throughput > evidence/harness.sha256
+      - name: Frozen neighbors across targets and both frontend SSA forms
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re, subprocess
+          root = pathlib.Path.cwd()
+          patch = (root/'tools/throughput/experiments/1028-regressions.patch').read_text()
+          cases = [(json.loads(source), valid == 'true') for source, valid in re.findall(r'^\+\s+\{S8\(("(?:[^"\\]|\\.)*")\), (true|false), true\},$', patch, re.M)]
+          assert len(cases) == 16, len(cases)
+          out = root/'evidence'/'neighbors'; out.mkdir()
+          rows=[]; failures=[]
+          for i,(source,valid) in enumerate(cases):
+              path=out/f'case-{i}.c'; path.write_text(source)
+              for target in ['x86_64-linux','aarch64-linux','x86_64-windows','aarch64-macos']:
+                  for form in ['-ffrontend-ssa','-fno-frontend-ssa']:
+                      paired=[]
+                      for name in ['baseline','hoist']:
+                          results=[]
+                          for action in ['-fsyntax-only','-c']:
+                              artifact=out/'output.o'; artifact.unlink(missing_ok=True)
+                              cmd=[str(root/'subjects'/name),'cc','-g0','-std=gnu23','-target',target,form,action,str(path),'-o',str(artifact)]
+                              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
+                              row={'case':i,'valid':valid,'target':target,'form':form,'compiler':name,'action':action,'argv':cmd,'exit':p.returncode,'stdout':p.stdout.decode(errors='replace'),'stderr':p.stderr.decode(errors='replace'),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.exists() else None}
+                              rows.append(row); results.append(row)
+                              if (p.returncode==0)!=valid: failures.append({'kind':'acceptance','row':len(rows)-1})
+                          if [(r['exit'],r['stderr']) for r in results[:1]] != [(r['exit'],r['stderr']) for r in results[1:]]: failures.append({'kind':'syntax-object','row':len(rows)-2})
+                          paired.append(results)
+                      for a,b in zip(*paired):
+                          if (a['exit'],a['stderr'],a['sha256']) != (b['exit'],b['stderr'],b['sha256']): failures.append({'kind':'baseline-candidate','row':len(rows)-4})
+          (out/'results.json').write_text(json.dumps({'cases':cases,'rows':rows,'failures':failures},indent=2)+'\n')
+          print('neighbor invocations',len(rows),'failures',len(failures))
+          raise SystemExit(bool(failures))
+          PY
+      - name: Whole-compilation A/A and baseline/hoist comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/comparison.log) 2>&1
+          harness="$PWD/build/throughput-tools/throughput"
+          common=(--workload tiny_startup --profile ci --mode fast --warmups 1 --self-host-root "$PWD/frozen" --self-host-generated "$PWD/frozen/generated" --require-identical-output)
+          "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/rebuilt-baseline" --baseline-id 2e942e80 --candidate-id same-root-rebuild --output "$PWD/evidence/aa" --pairs 4 --no-guard "${common[@]}"
+          for form in frontend-ssa no-frontend-ssa; do
+            "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/hoist" --baseline-id 2e942e80 --candidate-id hoist-56db7b6 --output "$PWD/evidence/$form" --pairs 20 --flag "-f$form" "${common[@]}"
+          done
+      - name: Separate exact-range census on the same frozen input
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/census-build.log) 2>&1
+          git checkout -- src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c_gen.c
+          git apply --check tools/throughput/experiments/1028-census.patch
+          git apply tools/throughput/experiments/1028-census.patch
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/census-baseline
+          git apply --check tools/throughput/experiments/1028-hoist.patch
+          git apply tools/throughput/experiments/1028-hoist.patch
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/census-hoist
+          sha256sum subjects/census-* > evidence/census-compilers.sha256
+          for variant in baseline hoist; do
+            for form in frontend-ssa no-frontend-ssa; do
+              (cd frozen && ../subjects/census-$variant cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -f$form -fsource-metrics=../evidence/census-$variant-$form.metrics src/buster/apps/ide/ide.c -o ../evidence/census-$variant-$form.o) > evidence/census-$variant-$form.stdout 2> evidence/census-$variant-$form.stderr
+            done
+          done
+          sha256sum evidence/census-*.o > evidence/census-outputs.sha256
+          cmp evidence/census-baseline-frontend-ssa.o evidence/census-hoist-frontend-ssa.o
+          cmp evidence/census-baseline-no-frontend-ssa.o evidence/census-hoist-no-frontend-ssa.o
+          find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs-after.sha256
+          cmp evidence/frozen-inputs.sha256 evidence/frozen-inputs-after.sha256
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: semantic-facts-baseline
+          name: semantic-facts-comparison-${{ github.run_id }}
           path: |
             evidence
             build/CMakeCache.txt
-            build/compile_commands.json
           retention-days: 14
           if-no-files-found: error

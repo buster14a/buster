@@ -1,0 +1,46 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 60bf69e..d740248 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -91,6 +91,7 @@
+ //   c_ir_global_initializer, c_lower_to_ir        globals and the driver
+ 
+ #include "c_internal.h"
++#include <stdio.h>
+ #include <buster/lib/compiler/ir/ir_construction.h>
+ 
+ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
+@@ -47729,7 +47730,10 @@ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate_attempt(CIntegerIrBuilder* buil
+ BUSTER_C_INTERNAL bool c_ir_array_bound_evaluate(CIntegerIrBuilder* builder, CArrayBound bound, u64* count_out)
+ {
+     CIrQueryFrame result = {0};
+-    if (!c_ir_query_execute(builder, (CIrQueryFrame){.bound = bound, .kind = C_IR_QUERY_FRAME_ARRAY_BOUND}, &result) || !result.success)
++    bool executed = c_ir_query_execute(builder, (CIrQueryFrame){.bound = bound, .kind = C_IR_QUERY_FRAME_ARRAY_BOUND}, &result);
++    fprintf(stderr, "SF_IR_BOUND %u %u %u %llu %u\n", bound.token_start, bound.token_count,
++            executed && result.success, (unsigned long long)result.integer, bound.has_inferred_count);
++    if (!executed || !result.success)
+     {
+         return false;
+     }
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index b5c6a8e..d4dcaaf 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -88,6 +88,7 @@
+ //   c_analyze_semantics_only                     complete validation without canonical IR
+ 
+ #include "c_internal.h"
++#include <stdio.h>
+ #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
+ 
+ BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
+@@ -19122,6 +19123,9 @@ BUSTER_C_INTERNAL bool c_parse_local_type_is_variable_length(CTypeParseMachine*
+                 CParseConstant value = c_parse_typed_constant(machine, machine->scratch_arena, preprocess, result, scope,
+                                                               bound.token_start, bound.token_start + bound.token_count);
+                 variable = !value.valid;
++                fprintf(stderr, "SF_SEM_BOUND %u %u %u %u %u %llu %llu %u\n", bound.token_start, bound.token_count, scope.value,
++                        value.valid, value.is_float, (unsigned long long)value.integer, (unsigned long long)value.integer_high,
++                        machine->runtime_expression_constraints);
+                 arena_set_position(machine->scratch_arena, mark);
+             }
+         }

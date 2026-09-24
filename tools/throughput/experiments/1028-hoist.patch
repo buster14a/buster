@@ -1,0 +1,44 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index b5c6a8e..56db7b6 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -19891,20 +19891,26 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
+         {
+             c_parse_lowering_constraint_consider(diagnostic, S8("C IR lowering does not yet support atomic wide floating-point objects"), start, location);
+         }
+-        else if (c_parse_local_type_is_variable_length(machine, result, preprocess, entity->scope, entity->type) && entity->is_static_storage)
+-        {
+-            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have static storage duration"), start, location);
+-        }
+-        else if (c_parse_local_type_is_variable_length(machine, result, preprocess, entity->scope, entity->type) &&
+-                 c_parse_declarator_has_initializer(preprocess, start, end))
+-        {
+-            c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have an initializer"), start, location);
+-        }
+-        else if (entity->type.value < result->type_count &&
+-                 (result->types[entity->type.value].kind == C_TYPE_STRUCT || result->types[entity->type.value].kind == C_TYPE_UNION) &&
+-                 !result->types[entity->type.value].is_complete)
++        else
+         {
+-            c_parse_lowering_constraint_consider(diagnostic, S8("local declaration has an invalid alignment"), start, location);
++            // Both storage and initializer constraints ask the same question
++            // in the same scope and evaluation context. No semantic mutation
++            // occurs between them; do not walk/fold the array bounds twice.
++            bool variable_length = c_parse_local_type_is_variable_length(machine, result, preprocess, entity->scope, entity->type);
++            if (variable_length && entity->is_static_storage)
++            {
++                c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have static storage duration"), start, location);
++            }
++            else if (variable_length && c_parse_declarator_has_initializer(preprocess, start, end))
++            {
++                c_parse_lowering_constraint_consider(diagnostic, S8("variable-length array cannot have an initializer"), start, location);
++            }
++            else if (entity->type.value < result->type_count &&
++                     (result->types[entity->type.value].kind == C_TYPE_STRUCT || result->types[entity->type.value].kind == C_TYPE_UNION) &&
++                     !result->types[entity->type.value].is_complete)
++            {
++                c_parse_lowering_constraint_consider(diagnostic, S8("local declaration has an invalid alignment"), start, location);
++            }
+         }
+         CDeclaration local_initializer = {.declarator_start = start, .declarator_count = end - start};
+         u32 shape_start = 0;

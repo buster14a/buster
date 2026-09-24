@@ -1,0 +1,28 @@
+diff --git a/src/buster/tests/compiler/driver/driver_test.c b/src/buster/tests/compiler/driver/driver_test.c
+index c78a251..07d91e0 100644
+--- a/src/buster/tests/compiler/driver/driver_test.c
++++ b/src/buster/tests/compiler/driver/driver_test.c
+@@ -1627,6 +1627,23 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
+         {S8("int g(void) { return _Generic(1, default: 1, default: 2); }\n"), false},
+         {S8("int g(void) { return _Generic(1.0, int: 1); }\n"), false},
+         {S8("int g(void) { return _Generic(1, void: 1, default: 2); }\n"), false},
++        // #1028: one local array classification serves storage and initialization.
++        {S8("int f(void) { int a[2][3] = {0}; return sizeof a; }\n"), true, true},
++        {S8("int f(void) { enum { N=3 }; static int a[N][2]; return sizeof a; }\n"), true, true},
++        {S8("int f(void) { enum { N=2 }; int a[N]={0}; { enum { N=3 }; int b[N]={0}; a[0]=sizeof b; } return a[0]; }\n"), true, true},
++        {S8("int f(void) { int a[sizeof(long)+sizeof(void*)]={0}; return sizeof a; }\n"), true, true},
++        {S8("struct __attribute__((packed)) P { char c; long x; }; int f(void) { int a[sizeof(struct P)]={0}; return sizeof a; }\n"), true, true},
++        {S8("struct P { char c; long x; }; int f(void) { int a[__builtin_offsetof(struct P,x)]={0}; return sizeof a; }\n"), true, true},
++        {S8("int f(int n) { int a[sizeof(++n)]={0}; return n+sizeof a; }\n"), true, true},
++        {S8("int f(void) { int a[sizeof(++42)]={0}; return sizeof a; }\n"), false, true},
++        {S8("int g(int); int f(void) { int a[sizeof(g(1))]={0}; return sizeof a; }\n"), true, true},
++        {S8("int g(int); int f(void) { int a[sizeof(g())]={0}; return sizeof a; }\n"), false, true},
++        {S8("int f(int n) { int a[2][n]; return sizeof a; }\n"), true, true},
++        {S8("int f(int n) { int a[2][n]={0}; return sizeof a; }\n"), false, true},
++        {S8("int f(int n) { static int a[2][n]; return sizeof a; }\n"), false, true},
++        {S8("int f(void) { int a[_Generic(0,int:3,default:4)]={0}; return sizeof a; }\n"), true, true},
++        {S8("int f(void) { int a[] = {1,2,3}; int b[sizeof a]={0}; return sizeof b; }\n"), true, true},
++        {S8("int f(int n) { typedef int A[n]; A a; return sizeof a; }\n"), true, true},
+         {S8("int g(int n) { int a[n] = {1}; return a[0]; }\n"), false},
+         {S8("int g(int n) { static int a[n]; return a[0]; }\n"), false},
+         {S8("int g(int n) { switch(n) { case 1: return 1; case 1: return 2; } return 0; }\n"), false},
