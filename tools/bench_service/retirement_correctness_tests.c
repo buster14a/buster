@@ -464,9 +464,21 @@ static void test_frozen_artifact_readback(char const* executable)
     CHECK(directory >= 0);
     if (directory >= 0)
     {
-        char* resolved = realpath(executable, NULL);
-        CHECK(resolved != NULL);
-        char const* process_executable = resolved ? resolved : executable;
+        char process_path[4096];
+        char const* process_executable = executable;
+        if (executable[0] != '/')
+        {
+            char* cwd = getcwd(process_path, sizeof(process_path));
+            bool fits = cwd && strlen(process_path) + 1 + strlen(executable) < sizeof(process_path);
+            CHECK(fits);
+            if (fits)
+            {
+                size_t prefix = strlen(process_path);
+                process_path[prefix] = '/';
+                memcpy(process_path + prefix + 1, executable, strlen(executable) + 1);
+                process_executable = process_path;
+            }
+        }
         char const* oracle_output = "independent-oracle-output\n";
         char oracle_sha256[65];
         Sha256 oracle_hash;
@@ -517,7 +529,8 @@ static void test_frozen_artifact_readback(char const* executable)
         char* const changed_compiler[] = {"/trusted/candidate-ide", "-O2", "input.c", NULL};
         char* const runtime_arguments[] = {(char*)process_executable,
             "--retirement-oracle-output", NULL};
-        char* const changed_runtime[] = {"/scratch/other", NULL};
+        char* const changed_runtime[] = {"/scratch/other",
+            "--retirement-oracle-output", NULL};
         char* const environment[] = {"HOME=/nonexistent", "LC_ALL=C", NULL};
         char* const unordered_environment[] = {"LC_ALL=C", "HOME=/nonexistent", NULL};
         BqRetirementRowCommands commands[2] = {
@@ -710,7 +723,6 @@ static void test_frozen_artifact_readback(char const* executable)
               unlinkat(directory, "wrong-output", 0) == 0 &&
               unlinkat(directory, "empty-output", 0) == 0);
         CHECK(close(directory) == 0);
-        free(resolved);
     }
     if (created) CHECK(rmdir(root) == 0);
 }
