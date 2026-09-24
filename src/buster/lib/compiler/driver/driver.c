@@ -865,6 +865,7 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 architecture_option = {0};
     bool options_ended = false;
     bool action_seen = false;
+    String8 position_independent_executable_option = {0};
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -1543,16 +1544,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // an offset from the thread pointer, and it decides how every other
         // reference to an interposable symbol is spelled: through the GOT for
         // an address and the PLT for a direct call. -fno-pic asks for the
-        // rip-relative forms back. -fPIE/-fpie stay accepted and inert on
-        // purpose -- a position-independent executable's own thread-local
-        // block is still the initial one, its own definitions are not
-        // interposable, its references to another image's data are what the
-        // linker's copy relocation is for, and every reference this compiler
-        // emits is already rip-relative, so that model asks for no code this
-        // one does not already produce.
+        // rip-relative forms back. PIE-specific reference selection is not
+        // implemented for x86-64 ELF, so -fPIE/-fpie are rejected there
+        // instead of being silently ignored; other targets keep their prior
+        // accepted no-op behavior.
         if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")))
         {
             invocation.position_independent = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")))
+        {
+            position_independent_executable_option = argument;
             continue;
         }
         if (string_equal(argument, S8("-fno-pic")))
@@ -1570,7 +1573,6 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         bool compatible_codegen_option =
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
-            string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")) ||
             string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
             string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")) ||
@@ -1605,6 +1607,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
         }
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && position_independent_executable_option.length && !invocation.has_gpu_target &&
+        invocation.target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(invocation.target) == OBJECT_FORMAT_ELF64)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_executable_option);
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||

@@ -17339,15 +17339,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error;
                                 return result;
                             }
-                            // The call itself is the same rel32 either way.
-                            // Under -fPIC an interposable callee asks for the
-                            // PLT family instead, which is the linker's
-                            // permission to point that rel32 at a procedure
-                            // linkage entry -- without it `ld` refuses a
-                            // direct call to a preemptible function in a
-                            // shared object rather than routing it.
-                            bool procedure_linkage =
-                                position_independent && ir_symbol_is_interposable(ir_symbol_from_id(&program->symbols, instruction->symbol));
+                            // An undefined ELF import needs PLT32 even in the
+                            // default model so an external linker can place
+                            // the -c object in a PIE. Under -fPIC, definitions
+                            // another object could replace use the same entry.
+                            IrSymbol* direct_call_symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+                            bool elf_import_call = target.cpu_arch == CPU_ARCH_X86_64 && direct_call_symbol && !direct_call_symbol->is_definition &&
+                                                   object_format_for_target(target) == OBJECT_FORMAT_ELF64;
+                            bool procedure_linkage = elf_import_call ||
+                                (position_independent && ir_symbol_is_interposable(direct_call_symbol));
                             result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                 .symbol = instruction->symbol,
                                 .offset = call_offset + 1,
