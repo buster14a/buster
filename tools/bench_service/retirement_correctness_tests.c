@@ -440,10 +440,9 @@ static int frozen_runtime_log(int directory, char const* name, char const* conte
     return result;
 }
 
-static int captured_runtime_log(int directory, char const* name, char const* executable)
+static bool capture_runtime_output(int output, char const* executable)
 {
-    int output = openat(directory, name, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
-    pid_t child = output >= 0 ? fork() : -1;
+    pid_t child = output >= 3 ? fork() : -1;
     if (!child)
     {
         char* const arguments[] = {(char*)executable, "--retirement-oracle-output", NULL};
@@ -456,11 +455,7 @@ static int captured_runtime_log(int directory, char const* name, char const* exe
     pid_t waited = -1;
     do { if (child > 0) waited = waitpid(child, &status, 0); }
     while (waited < 0 && errno == EINTR);
-    bool ok = waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
-              fchmod(output, 0400) == 0;
-    if (output >= 0 && close(output) != 0) ok = false;
-    int result = ok ? openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
-    return result;
+    return child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 static void test_frozen_artifact_readback(char const* executable)
@@ -468,9 +463,7 @@ static void test_frozen_artifact_readback(char const* executable)
     char root[] = "/tmp/bq-retirement-artifact-XXXXXX";
     bool created = mkdtemp(root) != NULL;
     int directory = created ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
-    CHECK(directory >= 0 && copy_frozen_artifact(directory, executable, "base") &&
-          copy_frozen_artifact(directory, executable, "candidate") &&
-          symlinkat("base", directory, "linked") == 0);
+    CHECK(directory >= 0);
     if (directory >= 0)
     {
         char const* oracle_output = "independent-oracle-output\n";
@@ -479,14 +472,33 @@ static void test_frozen_artifact_readback(char const* executable)
         sha256_init(&oracle_hash);
         sha256_add(&oracle_hash, oracle_output, strlen(oracle_output));
         sha256_finish_hex(&oracle_hash, oracle_sha256);
-        int base_log = captured_runtime_log(directory, "base-output", executable);
-        int candidate_log = captured_runtime_log(directory, "candidate-output", executable);
         int wrong_log = frozen_runtime_log(directory, "wrong-output", "wrong-output\n");
         int empty_log = frozen_runtime_log(directory, "empty-output", "");
         char empty_digest[65];
-        CHECK(base_log >= 3 && candidate_log >= 3 && wrong_log >= 3 && empty_log >= 3 &&
+        CHECK(wrong_log >= 3 && empty_log >= 3 &&
               bq_retirement_runtime_read(empty_log, empty_digest) &&
               !strcmp(empty_digest, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        BqRetirementArtifactStart stale_artifact = {0};
+        BqRetirementRuntimeStart stale_runtime = {0};
+        BqRetirementArtifactLocation stale = {directory, "wrong-output"};
+        CHECK(!bq_retirement_artifact_start(stale, &stale_artifact) &&
+              !bq_retirement_runtime_start(stale, &stale_runtime) &&
+              !stale_artifact.armed && !stale_runtime.state);
+        CHECK(!bq_retirement_artifact_start(
+            (BqRetirementArtifactLocation){directory, "../base"}, &stale_artifact));
+        BqRetirementArtifactLocation reserved = {directory, "reserved-artifact"};
+        CHECK(bq_retirement_artifact_start(reserved, &stale_artifact) &&
+              !bq_retirement_artifact_start(
+                  (BqRetirementArtifactLocation){directory, "other-artifact"}, &stale_artifact) &&
+              stale_artifact.armed && !strcmp(stale_artifact.name, "reserved-artifact"));
+        BqRetirementArtifactLocation active_log = {directory, "active-output"};
+        CHECK(bq_retirement_runtime_start(active_log, &stale_runtime) &&
+              !bq_retirement_runtime_start(
+                  (BqRetirementArtifactLocation){directory, "unexpected-output"}, &stale_runtime) &&
+              stale_runtime.state == 1);
+        bq_retirement_runtime_abort(&stale_runtime);
+        CHECK(bq_retirement_runtime_absent(&stale_runtime) &&
+              unlinkat(directory, "active-output", 0) == 0);
 #if defined(__APPLE__)
 #if defined(__aarch64__) || defined(__arm64__)
         unsigned host_target = 2, other_machine = 8;
@@ -513,8 +525,30 @@ static void test_frozen_artifact_readback(char const* executable)
             {{candidate_compiler, environment, "/source/candidate", 3, 2},
              {candidate_runtime, environment, "/scratch/candidate", 1, 2}}
         };
-        for (unsigned fault = 0; fault < 15; fault += 1)
+        for (unsigned fault = 0; fault < 18; fault += 1)
         {
+            BqRetirementArtifactStart starts[2] = {0};
+            BqRetirementRuntimeStart runtime_starts[2] = {0};
+            BqRetirementArtifactLocation runtime_locations[2] = {
+                {directory, "base-output"}, {directory, "candidate-output"}
+            };
+            BqRetirementArtifactLocation candidate_start = {
+                directory, fault == 1 ? "linked" : "candidate"
+            };
+            CHECK(bq_retirement_artifact_start(locations[0], &starts[0]) &&
+                  bq_retirement_artifact_start(candidate_start, &starts[1]) &&
+                  copy_frozen_artifact(directory, executable, "base") &&
+                  copy_frozen_artifact(directory, executable, "candidate") &&
+                  symlinkat("base", directory, "linked") == 0);
+            int runtime_outputs[2] = {-1, -1};
+            for (unsigned side = 0; side < 2; side += 1)
+            {
+                CHECK(bq_retirement_runtime_start(runtime_locations[side],
+                    &runtime_starts[side]));
+                CHECK(capture_runtime_output(runtime_starts[side].writer, executable));
+                CHECK(bq_retirement_runtime_finish(&runtime_starts[side],
+                    &runtime_outputs[side]));
+            }
             BqCorrectnessFixture fixture;
             fixture_init(&fixture);
             memcpy(fixture.trusted[1].independent_oracle_sha256, oracle_sha256, 65);
@@ -556,9 +590,20 @@ static void test_frozen_artifact_readback(char const* executable)
             if (fault == 12) commands[1].runtime.arguments = changed_runtime;
             if (fault == 13) observed.side[0].compiler_command_sha256[0] = 'a';
             if (fault == 14) commands[1].compiler.directory = "/source/other";
-            int runtime_outputs[2] = {base_log, fault == 6 ? wrong_log : fault == 7 ? -1 : candidate_log};
+            if (fault == 15) starts[1].directory_inode ^= 1;
+            if (fault == 16) runtime_starts[1].file_inode ^= 1;
+            if (fault == 17)
+            {
+                CHECK(renameat(directory, "candidate-output", directory, "displaced-output") == 0);
+                int replacement = frozen_runtime_log(directory, "candidate-output", oracle_output);
+                CHECK(replacement >= 3);
+                if (replacement >= 3) CHECK(close(replacement) == 0);
+            }
+            int candidate_log = runtime_outputs[1];
+            if (fault == 6) runtime_outputs[1] = wrong_log;
+            if (fault == 7) runtime_outputs[1] = -1;
             bool accepted = bq_retirement_correctness_row_service(&fixture.gate, locations,
-                                                                   runtime_outputs, commands, &observed);
+                starts, runtime_outputs, runtime_starts, commands, &observed);
             CHECK(accepted == (fault == 0));
             if (!fault)
             {
@@ -574,10 +619,13 @@ static void test_frozen_artifact_readback(char const* executable)
                     if (i == 3)
                     {
                         BqRetirementArtifactLocation empty[2] = {{directory, NULL}, {directory, NULL}};
+                        BqRetirementArtifactStart empty_starts[2] = {0};
                         int absent_logs[2] = {-1, -1};
+                        BqRetirementRuntimeStart absent_runtime[2] = {0};
                         BqRetirementRowCommands absent_commands[2] = {0};
                         CHECK(bq_retirement_correctness_row_service(&fixture.gate, empty,
-                            absent_logs, absent_commands, &fixture.supplied[i]));
+                            empty_starts, absent_logs, absent_runtime, absent_commands,
+                            &fixture.supplied[i]));
                     }
                     else CHECK(bq_retirement_correctness_row(&fixture.gate, &fixture.supplied[i]));
                 }
@@ -592,6 +640,17 @@ static void test_frozen_artifact_readback(char const* executable)
             commands[1].compiler.environment = environment;
             commands[1].compiler.directory = "/source/candidate";
             commands[1].runtime.arguments = candidate_runtime;
+            CHECK(bq_retirement_output_absent(&starts[0]) &&
+                  bq_retirement_output_absent(&starts[1]) &&
+                  bq_retirement_runtime_absent(&runtime_starts[0]) &&
+                  bq_retirement_runtime_absent(&runtime_starts[1]));
+            CHECK(close(runtime_outputs[0]) == 0 && close(candidate_log) == 0 &&
+                  unlinkat(directory, "linked", 0) == 0 &&
+                  unlinkat(directory, "base", 0) == 0 &&
+                  unlinkat(directory, "candidate", 0) == 0 &&
+                  unlinkat(directory, "base-output", 0) == 0 &&
+                  unlinkat(directory, "candidate-output", 0) == 0);
+            if (fault == 17) CHECK(unlinkat(directory, "displaced-output", 0) == 0);
         }
         BqCorrectnessFixture untimed;
         fixture_init(&untimed);
@@ -600,18 +659,25 @@ static void test_frozen_artifact_readback(char const* executable)
         for (unsigned i = 0; i < 3; i += 1)
             CHECK(bq_retirement_correctness_row(&untimed.gate, &untimed.supplied[i]));
         BqRetirementArtifactLocation absent_artifacts[2] = {{directory, NULL}, {directory, NULL}};
+        BqRetirementArtifactStart absent_starts[2] = {0};
         int absent_logs[2] = {-1, -1};
+        BqRetirementRuntimeStart absent_runtime[2] = {0};
         BqRetirementRowCommands unexpected[2] = {0};
         unexpected[0].compiler = commands[0].compiler;
         CHECK(!bq_retirement_correctness_row_service(&untimed.gate, absent_artifacts,
-            absent_logs, unexpected, &untimed.supplied[3]) && untimed.gate.failed);
-        CHECK(close(base_log) == 0 && close(candidate_log) == 0 &&
-              close(wrong_log) == 0 && close(empty_log) == 0);
-        CHECK(unlinkat(directory, "linked", 0) == 0 &&
-              unlinkat(directory, "base", 0) == 0 &&
-              unlinkat(directory, "candidate", 0) == 0 &&
-              unlinkat(directory, "base-output", 0) == 0 &&
-              unlinkat(directory, "candidate-output", 0) == 0 &&
+            absent_starts, absent_logs, absent_runtime, unexpected,
+            &untimed.supplied[3]) && untimed.gate.failed);
+        fixture_init(&untimed);
+        begin_fixture(&untimed);
+        checks_fixture(&untimed);
+        for (unsigned i = 0; i < 3; i += 1)
+            CHECK(bq_retirement_correctness_row(&untimed.gate, &untimed.supplied[i]));
+        unexpected[0] = (BqRetirementRowCommands){0};
+        absent_starts[0].directory_inode = 1;
+        CHECK(!bq_retirement_correctness_row_service(&untimed.gate, absent_artifacts,
+            absent_starts, absent_logs, absent_runtime, unexpected,
+            &untimed.supplied[3]) && untimed.gate.failed);
+        CHECK(close(wrong_log) == 0 && close(empty_log) == 0 &&
               unlinkat(directory, "wrong-output", 0) == 0 &&
               unlinkat(directory, "empty-output", 0) == 0);
         CHECK(close(directory) == 0);

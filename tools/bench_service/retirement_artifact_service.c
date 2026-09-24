@@ -63,6 +63,143 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_artifact_stable(struct stat const* first,
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_retirement_output_directory(int directory, struct stat* identity)
+{
+    int flags = directory >= 3 ? fcntl(directory, F_GETFD) : -1;
+    bool ok = flags >= 0 && (flags & FD_CLOEXEC) && fstat(directory, identity) == 0 &&
+        S_ISDIR(identity->st_mode) && identity->st_uid == geteuid() &&
+        !(identity->st_mode & 0022);
+    return ok;
+}
+
+bool bq_retirement_artifact_start(BqRetirementArtifactLocation location,
+    BqRetirementArtifactStart* start)
+{
+    struct stat directory = {0}, existing = {0};
+    bool fresh = start && !start->armed;
+    bool ok = fresh && bq_retirement_artifact_name(location.name) &&
+        strlen(location.name) < BQ_RETIREMENT_OUTPUT_NAME_CAP &&
+        bq_retirement_output_directory(location.directory, &directory) &&
+        fstatat(location.directory, location.name, &existing, AT_SYMLINK_NOFOLLOW) < 0 &&
+        errno == ENOENT;
+    if (fresh)
+    {
+        *start = (BqRetirementArtifactStart){0};
+        if (ok)
+        {
+            start->directory = location.directory;
+            memcpy(start->name, location.name, strlen(location.name) + 1);
+            start->directory_device = (uint64_t)directory.st_dev;
+            start->directory_inode = (uint64_t)directory.st_ino;
+            start->armed = 1;
+        }
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_output_started(BqRetirementArtifactLocation location,
+    BqRetirementArtifactStart const* start)
+{
+    struct stat directory = {0};
+    bool ok = start && start->armed == 1 && location.name &&
+        start->directory == location.directory && !strcmp(start->name, location.name) &&
+        bq_retirement_output_directory(location.directory, &directory) &&
+        start->directory_device == (uint64_t)directory.st_dev &&
+        start->directory_inode == (uint64_t)directory.st_ino;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_output_absent(BqRetirementArtifactStart const* start)
+{
+    return start && !start->directory && !start->name[0] &&
+        !start->directory_device && !start->directory_inode && !start->armed;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_absent(BqRetirementRuntimeStart const* start)
+{
+    return start && bq_retirement_output_absent(&start->location) &&
+        !start->file_device && !start->file_inode && !start->writer && !start->state;
+}
+
+bool bq_retirement_runtime_start(BqRetirementArtifactLocation location,
+    BqRetirementRuntimeStart* start)
+{
+    BqRetirementArtifactStart vacant = {0};
+    bool fresh = start && !start->state;
+    bool ok = fresh && bq_retirement_artifact_start(location, &vacant);
+    int writer = ok ? openat(location.directory, location.name,
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    struct stat file = {0};
+    ok = ok && writer >= 3 && fchmod(writer, 0600) == 0 && fstat(writer, &file) == 0 &&
+        S_ISREG(file.st_mode) && file.st_uid == geteuid() && file.st_nlink == 1 &&
+        file.st_size == 0 && bq_retirement_output_started(location, &vacant);
+    if (fresh)
+    {
+        *start = (BqRetirementRuntimeStart){0};
+        if (ok)
+        {
+            start->location = vacant;
+            start->file_device = (uint64_t)file.st_dev;
+            start->file_inode = (uint64_t)file.st_ino;
+            start->writer = writer;
+            start->state = 1;
+        }
+    }
+    if (!ok && writer >= 0) close(writer);
+    return ok;
+}
+
+void bq_retirement_runtime_abort(BqRetirementRuntimeStart* start)
+{
+    if (start)
+    {
+        if (start->state == 1 && start->writer >= 3) close(start->writer);
+        *start = (BqRetirementRuntimeStart){0};
+    }
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_started(BqRetirementRuntimeStart const* start,
+    int descriptor)
+{
+    struct stat named = {0}, file = {0};
+    BqRetirementArtifactLocation location = {0};
+    if (start) location = (BqRetirementArtifactLocation){start->location.directory, start->location.name};
+    bool ok = start && start->state == 2 && bq_retirement_output_started(location, &start->location) &&
+        descriptor >= 3 && fstat(descriptor, &file) == 0 &&
+        fstatat(location.directory, location.name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+        bq_retirement_artifact_stable(&file, &named) &&
+        start->file_device == (uint64_t)file.st_dev && start->file_inode == (uint64_t)file.st_ino;
+    return ok;
+}
+
+bool bq_retirement_runtime_finish(BqRetirementRuntimeStart* start, int* read_descriptor)
+{
+    struct stat file = {0};
+    bool ok = start && read_descriptor && start->state == 1 && start->writer >= 3 &&
+        fstat(start->writer, &file) == 0 && S_ISREG(file.st_mode) &&
+        file.st_uid == geteuid() && file.st_nlink == 1 &&
+        start->file_device == (uint64_t)file.st_dev && start->file_inode == (uint64_t)file.st_ino &&
+        file.st_size >= 0 && (uint64_t)file.st_size <= BQ_RETIREMENT_RUNTIME_LOG_CAP &&
+        fchmod(start->writer, 0400) == 0 && fsync(start->writer) == 0;
+    if (read_descriptor) *read_descriptor = -1;
+    if (start && start->state == 1 && start->writer >= 3)
+    {
+        if (close(start->writer) != 0) ok = false;
+        start->writer = -1;
+    }
+    int reader = ok ? openat(start->location.directory, start->location.name,
+        O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    if (ok) start->state = 2;
+    if (ok) ok = bq_retirement_runtime_started(start, reader);
+    if (ok) *read_descriptor = reader;
+    else
+    {
+        if (reader >= 0) close(reader);
+        if (start) *start = (BqRetirementRuntimeStart){0};
+    }
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_retirement_artifact_read(BqRetirementArtifactLocation location,
     unsigned format, unsigned machine, unsigned executable, TpRetirementArtifact* facts)
 {
@@ -151,10 +288,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_command_hash(BqRetirementProcessCommand c
 }
 
 bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
-    BqRetirementArtifactLocation locations[2], int runtime_outputs[2],
+    BqRetirementArtifactLocation artifacts[2], BqRetirementArtifactStart starts[2],
+    int runtime_outputs[2], BqRetirementRuntimeStart runtime_starts[2],
     BqRetirementRowCommands const commands[2], BqRetirementRowFact const* observed)
 {
-    bool ok = gate && !gate->failed && !gate->finished && observed && locations && runtime_outputs && commands &&
+    bool ok = gate && !gate->failed && !gate->finished && observed && artifacts && starts &&
+        runtime_outputs && runtime_starts && commands &&
         gate->checks_done == gate->check_count && gate->rows_done < gate->prepared.rows;
     BqRetirementRowFact row = {0};
     if (ok)
@@ -178,8 +317,10 @@ bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
             if (ok && trusted->compiler_eligible)
             {
                 TpRetirementArtifact facts = {0};
-                ok = bq_retirement_artifact_read(locations[side], format, machine,
-                    trusted->stage != BQ_RETIREMENT_STAGE_OBJECT, &facts);
+                ok = bq_retirement_output_started(artifacts[side], &starts[side]) &&
+                     bq_retirement_artifact_read(artifacts[side], format, machine,
+                         trusted->stage != BQ_RETIREMENT_STAGE_OBJECT, &facts) &&
+                     bq_retirement_output_started(artifacts[side], &starts[side]);
                 if (ok)
                 {
                     memcpy(output->artifact_sha256, facts.file_sha256, 65);
@@ -190,17 +331,29 @@ bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
                     }
                 }
             }
-            else if (ok) ok = locations[side].name == NULL;
+            else if (ok) ok = artifacts[side].name == NULL &&
+                              bq_retirement_output_absent(&starts[side]);
             if (ok) ok = runtime ?
                 bq_retirement_command_hash(&commands[side].runtime, output->runtime_command_sha256) :
                 bq_retirement_command_absent(&commands[side].runtime);
-            if (ok) ok = runtime ? bq_retirement_runtime_read(runtime_outputs[side],
-                                        output->runtime_output_sha256) : runtime_outputs[side] == -1;
+            if (ok) ok = runtime ?
+                bq_retirement_runtime_started(&runtime_starts[side], runtime_outputs[side]) &&
+                bq_retirement_runtime_read(runtime_outputs[side], output->runtime_output_sha256) &&
+                bq_retirement_runtime_started(&runtime_starts[side], runtime_outputs[side]) :
+                runtime_outputs[side] == -1 && bq_retirement_runtime_absent(&runtime_starts[side]);
         }
         if (ok) row.code_eligible = trusted->compiler_eligible && trusted->code_obligation &&
                                     row.side[0].code_bytes > 0;
         if (ok) ok = bq_retirement_correctness_row(gate, &row);
     }
+    if (starts && runtime_starts)
+        for (unsigned side = 0; side < 2; side += 1)
+        {
+            starts[side] = (BqRetirementArtifactStart){0};
+            if (runtime_starts[side].state == 1)
+                bq_retirement_runtime_abort(&runtime_starts[side]);
+            else runtime_starts[side] = (BqRetirementRuntimeStart){0};
+        }
     if (gate && !ok) gate->failed = 1;
     return ok;
 }
