@@ -18797,6 +18797,173 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(lazy_operand_temporary);
         }
     }
+    // A call on the right of a comma operator must not be prepared ahead of
+    // its left operand.  The second fixture makes that order observable with
+    // a volatile dereference that would fault if it moved past pointer = 0.
+    // Run both fixtures with each allocator, frontend-SSA mode, and
+    // optimization level so the sequencing contract is independent of those
+    // downstream choices.
+    {
+        String8 comma_sources[] = {
+            S8("static unsigned id(unsigned value)\n"
+               "{\n"
+               "    return value;\n"
+               "}\n"
+               "static unsigned first(unsigned left, unsigned right)\n"
+               "{\n"
+               "    (void)right;\n"
+               "    return left;\n"
+               "}\n"
+               "unsigned g;\n"
+               "int main(void)\n"
+               "{\n"
+               "    unsigned result = 0;\n"
+               "    unsigned value;\n"
+               "    g = 0; id((-(g = 2, id(g = 9)), 4)); if (!result && g != 9) result = 1;\n"
+               "    g = 0; id((0 <= (g = 2, id(g = 9)), 4)); if (!result && g != 9) result = 2;\n"
+               "    g = 0; id((1 + (g = 2, id(g = 9)), 4)); if (!result && g != 9) result = 3;\n"
+               "    g = 0; id(((g = 2, id(g = 9)) + 1, 4)); if (!result && g != 9) result = 4;\n"
+               "    g = 0; id((id((g = 2, id(g = 9))), 4)); if (!result && g != 9) result = 5;\n"
+               "    g = 0; first(0, (0 <= (g = 2, id(g = 9)), 4)); if (!result && g != 9) result = 6;\n"
+               "    g = 0; +((g = 2, id(g = 9)) & 1 || 0); if (!result && g != 9) result = 7;\n"
+               "    g = 0; id(((g = 2, id(g = 9)), 4)); if (!result && g != 9) result = 8;\n"
+               "    g = 0; id((g = 2, id(g = 9))); if (!result && g != 9) result = 9;\n"
+               "    g = 0; first(0, 0 <= (g = 2, id(g = 9))); if (!result && g != 9) result = 10;\n"
+               "    g = 0; first(0, (0 <= (g = 2, g = 9), 4)); if (!result && g != 9) result = 11;\n"
+               "    g = 0; value = (0 <= (g = 2, id(g = 9)), 4); if (!result && (g != 9 || value != 4)) result = 12;\n"
+               "    g = 0; value = -(g = 2, id(g = 9)); if (!result && (g != 9 || value != (unsigned)-9)) result = 13;\n"
+               "    g = 0; if (-(g = 2, id(g = 9))) value = 1; else value = 0;\n"
+               "    if (!result && (g != 9 || value != 1)) result = 14;\n"
+               "    return (int)result;\n"
+               "}\n"),
+            S8("static volatile unsigned char byte = 5;\n"
+               "static int is_null(volatile unsigned char* pointer)\n"
+               "{\n"
+               "    return pointer == 0;\n"
+               "}\n"
+               "static int keep(int value)\n"
+               "{\n"
+               "    return value;\n"
+               "}\n"
+               "int main(void)\n"
+               "{\n"
+               "    volatile unsigned char* pointer = &byte;\n"
+               "    keep((1 != (*pointer, is_null(pointer = 0)), 0));\n"
+               "    return pointer == 0 ? 0 : 1;\n"
+               "}\n"),
+        };
+        String8 comma_allocators[] = {S8("none"), S8("mir-stack"), S8("fast"), S8("quality")};
+        String8 comma_frontend_flags[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        String8 comma_optimization_flags[] = {S8("-O0"), S8("-O2")};
+        for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(comma_sources); fixture_index += 1)
+        {
+            for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(comma_frontend_flags); frontend_index += 1)
+            {
+                for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(comma_allocators); allocator_index += 1)
+                {
+                    for (u32 optimization_index = 0; optimization_index < BUSTER_ARRAY_LENGTH(comma_optimization_flags); optimization_index += 1)
+                    {
+                        Arena* comma_conflicts[] = {arguments->arena, c_asm_arena};
+                        TemporalArena comma_temporary = scratch_begin(comma_conflicts, BUSTER_ARRAY_LENGTH(comma_conflicts));
+                        Arena* comma_arena = comma_temporary.arena;
+                        String8 comma_path = buster_test_temporary_path(
+                            comma_arena, S8("buster-c-comma-sequencing"),
+                            string_format(comma_arena, S8("-{u32}-{u32}-{u32}-{u32}"), fixture_index, frontend_index, allocator_index,
+                                          optimization_index));
+                        String8 comma_input = buster_test_temporary_path(
+                            comma_arena, S8("buster-c-comma-input"),
+                            string_format(comma_arena, S8("-{u32}-{u32}-{u32}-{u32}.c"), fixture_index, frontend_index, allocator_index,
+                                          optimization_index));
+                        String8 comma_command_line[] = {
+                            comma_frontend_flags[frontend_index], comma_optimization_flags[optimization_index],
+                            string_format(comma_arena, S8("-fregister-allocator={S8}"), comma_allocators[allocator_index]),
+                            S8("-o"), comma_path, comma_input,
+                        };
+                        if (BUSTER_REQUIRE(arguments, file_write(comma_input, BUSTER_SLICE_TO_BYTE_SLICE(comma_sources[fixture_index]))))
+                        {
+                            CompilerDriverResult comma_build = compiler_driver_execute_invocation(
+                                comma_arena,
+                                compiler_driver_parse_arguments(comma_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(comma_command_line)));
+                            if (comma_build.error != COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                arguments->show(arguments, S8("C_COMMA fixture={u32} frontend={u32} allocator={u32} optimization={u32} error={u32} diagnostic={S8}\n"),
+                                                fixture_index, frontend_index, allocator_index, optimization_index, (u32)comma_build.error,
+                                                comma_build.diagnostic);
+                            }
+                            BUSTER_TEST(arguments, comma_build.error == COMPILER_DRIVER_ERROR_NONE);
+                            if (comma_build.error == COMPILER_DRIVER_ERROR_NONE)
+                            {
+                                String8 comma_run_arguments[] = {comma_path};
+                                ProcessSpawnResult comma_spawn = os_process_spawn(
+                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(comma_run_arguments), (SliceString8){0}, (SliceString8){0},
+                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                                BUSTER_TEST(arguments, comma_spawn.handle != 0);
+                                if (comma_spawn.handle)
+                                {
+                                    ProcessWaitResult comma_wait = os_process_wait_sync(comma_arena, comma_spawn);
+                                    if (comma_wait.result != PROCESS_RESULT_SUCCESS)
+                                    {
+                                        arguments->show(arguments, S8("C_COMMA fixture={u32} frontend={u32} allocator={u32} optimization={u32} result={u32} status={u32:x}\n"),
+                                                        fixture_index, frontend_index, allocator_index, optimization_index,
+                                                        (u32)comma_wait.result, comma_wait.platform_status);
+                                    }
+                                    BUSTER_TEST(arguments, comma_wait.result == PROCESS_RESULT_SUCCESS);
+                                }
+                            }
+                        }
+                        scratch_end(comma_temporary);
+                    }
+                }
+            }
+        }
+        String8 comma_special_flags[][3] = {
+            {S8("-fno-canonical-local-promotion"), S8("-fno-target-local-promotion"), S8("-O0")},
+            {S8("-fverify-codegen"), S8("-fregister-allocator=quality"), S8("-O0")},
+        };
+        for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(comma_sources); fixture_index += 1)
+        {
+            for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(comma_special_flags); mode_index += 1)
+            {
+                Arena* comma_conflicts[] = {arguments->arena, c_asm_arena};
+                TemporalArena comma_temporary = scratch_begin(comma_conflicts, BUSTER_ARRAY_LENGTH(comma_conflicts));
+                Arena* comma_arena = comma_temporary.arena;
+                String8 comma_path = buster_test_temporary_path(
+                    comma_arena, S8("buster-c-comma-special"), string_format(comma_arena, S8("-{u32}-{u32}"), fixture_index, mode_index));
+                String8 comma_input = buster_test_temporary_path(
+                    comma_arena, S8("buster-c-comma-special-input"), string_format(comma_arena, S8("-{u32}-{u32}.c"), fixture_index, mode_index));
+                String8 comma_command_line[] = {
+                    comma_special_flags[mode_index][0], comma_special_flags[mode_index][1], comma_special_flags[mode_index][2],
+                    S8("-o"), comma_path, comma_input,
+                };
+                if (BUSTER_REQUIRE(arguments, file_write(comma_input, BUSTER_SLICE_TO_BYTE_SLICE(comma_sources[fixture_index]))))
+                {
+                    CompilerDriverResult comma_build = compiler_driver_execute_invocation(
+                        comma_arena,
+                        compiler_driver_parse_arguments(comma_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(comma_command_line)));
+                    if (comma_build.error != COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        arguments->show(arguments, S8("C_COMMA special fixture={u32} mode={u32} error={u32} diagnostic={S8}\n"),
+                                        fixture_index, mode_index, (u32)comma_build.error, comma_build.diagnostic);
+                    }
+                    BUSTER_TEST(arguments, comma_build.error == COMPILER_DRIVER_ERROR_NONE);
+                    if (comma_build.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 comma_run_arguments[] = {comma_path};
+                        ProcessSpawnResult comma_spawn = os_process_spawn(
+                            (SliceString8)BUSTER_ARRAY_TO_SLICE(comma_run_arguments), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, comma_spawn.handle != 0);
+                        if (comma_spawn.handle)
+                        {
+                            ProcessWaitResult comma_wait = os_process_wait_sync(comma_arena, comma_spawn);
+                            BUSTER_TEST(arguments, comma_wait.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                }
+                scratch_end(comma_temporary);
+            }
+        }
+    }
     // The three ELF thread-local models under every allocator, twice: a
     // plain build, where a definition in the module is local-exec and a
     // declaration it does not define is initial-exec, and a -fPIC build,
