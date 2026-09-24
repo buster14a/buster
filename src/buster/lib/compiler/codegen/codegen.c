@@ -6356,6 +6356,68 @@ BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_define_labels(IrProgram* progra
     return valid;
 }
 
+// Make module-level assembly definitions visible before function rows choose
+// their relocations. Assembly is emitted after functions, so discovering a
+// label only during emission would make a repeated codegen pass see a
+// different `is_definition` state for calls to that label.
+BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_predeclare_labels(IrProgram* program, Target target, String8 source)
+{
+    bool valid = true;
+    u64 line_start = 0;
+    while (line_start < source.length && valid)
+    {
+        u64 line_end = line_start;
+        while (line_end < source.length && source.pointer[line_end] != '\n')
+        {
+            line_end += 1;
+        }
+        String8 line = codegen_global_assembly_trim((String8){
+            .pointer = source.pointer + line_start,
+            .length = line_end - line_start,
+        });
+        line_start = line_end < source.length ? line_end + 1 : source.length;
+        if (line.length && line.pointer[0] != '#')
+        {
+            bool done = false;
+            while (valid && !done)
+            {
+                u64 colon = UINT64_MAX;
+                for (u64 index = 0; index < line.length && colon == UINT64_MAX; index += 1)
+                {
+                    colon = line.pointer[index] == ':' ? index : colon;
+                }
+                String8 name = codegen_global_assembly_trim((String8){
+                    .pointer = line.pointer,
+                    .length = colon == UINT64_MAX ? 0 : colon,
+                });
+                if (colon == UINT64_MAX || !codegen_global_assembly_name(name))
+                {
+                    done = true;
+                }
+                else
+                {
+                    IrSymbolId symbol = codegen_global_assembly_symbol(program, name, target, IR_SYMBOL_FUNCTION);
+                    if (symbol.value == IR_ID_UNDERLYING_INVALID)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        program->symbols.symbols[symbol.value].is_definition = true;
+                        program->symbols.symbols[symbol.value].kind = IR_SYMBOL_FUNCTION;
+                        line.pointer += colon + 1;
+                        line.length -= colon + 1;
+                        line = codegen_global_assembly_trim(line);
+                        done = line.length == 0;
+                    }
+                }
+            }
+        }
+    }
+
+    return valid;
+}
+
 // `.byte 1, 2, 0x03`.
 BUSTER_GLOBAL_LOCAL bool codegen_global_assembly_emit_bytes(CodegenBuffer* buffer, String8 values)
 {
@@ -17339,15 +17401,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                 result.error = buffer.error;
                                 return result;
                             }
-                            // The call itself is the same rel32 either way.
-                            // Under -fPIC an interposable callee asks for the
-                            // PLT family instead, which is the linker's
-                            // permission to point that rel32 at a procedure
-                            // linkage entry -- without it `ld` refuses a
-                            // direct call to a preemptible function in a
-                            // shared object rather than routing it.
-                            bool procedure_linkage =
-                                position_independent && ir_symbol_is_interposable(ir_symbol_from_id(&program->symbols, instruction->symbol));
+                            // An undefined ELF import needs PLT32 even in the
+                            // default model so an external linker can place
+                            // the -c object in a PIE. Under -fPIC, definitions
+                            // another object could replace use the same entry.
+                            IrSymbol* direct_call_symbol = ir_symbol_from_id(&program->symbols, instruction->symbol);
+                            bool elf_import_call = target.cpu_arch == CPU_ARCH_X86_64 && direct_call_symbol && !direct_call_symbol->is_definition &&
+                                                   object_format_for_target(target) == OBJECT_FORMAT_ELF64;
+                            bool procedure_linkage = elf_import_call ||
+                                (position_independent && ir_symbol_is_interposable(direct_call_symbol));
                             result.relocations[result.relocation_count++] = (CodegenModuleRelocation){
                                 .symbol = instruction->symbol,
                                 .offset = call_offset + 1,
@@ -23621,6 +23683,21 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     {
         result.error = CODEGEN_ERROR_INVALID_IR;
         return result;
+    }
+    // The ELF default call model depends on whether a symbol has a definition
+    // in this module. Module-level assembly is emitted after the functions,
+    // so publish its label definitions first to keep that decision stable
+    // across repeated codegen passes and allocator modes.
+    if (target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(target) == OBJECT_FORMAT_ELF64)
+    {
+        for (u32 assembly_index = 0; assembly_index < module->assembly_count; assembly_index += 1)
+        {
+            if (!codegen_global_assembly_predeclare_labels(program, target, module->assemblies[assembly_index].source))
+            {
+                result.error = CODEGEN_ERROR_CAPACITY;
+                return result;
+            }
+        }
     }
     CodegenCanonicalX64F80Cache f80_cache = {0};
     CodegenX64MetadataCache* x64_metadata_cache = 0;

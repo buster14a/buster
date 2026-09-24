@@ -7102,6 +7102,30 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
     SliceString8 missing_output = compiler_driver_test_pic_arguments(temporary.arena, S8("gcc"), S8("GNU"), S8(""), S8(""), true);
     BUSTER_TEST(arguments, !missing_compiler.length && !missing_compiler.pointer);
     BUSTER_TEST(arguments, !missing_output.length && !missing_output.pointer);
+    String8 positive_pie_flags[] = {S8("-fPIE"), S8("-fpie")};
+    String8 elf_target[] = {S8("-target"), S8("x86_64-unknown-linux-gnu")};
+    for (u32 flag_index = 0; flag_index < BUSTER_ARRAY_LENGTH(positive_pie_flags); flag_index += 1)
+    {
+        String8 command_line[] = {elf_target[0], elf_target[1], positive_pie_flags[flag_index], S8("tests/basic_c_pic.c")};
+        CompilerDriverInvocation rejected_pie = compiler_driver_parse_arguments(
+            temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
+        BUSTER_TEST(arguments, rejected_pie.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+        String8 diagnostic = flag_index ? S8("unsupported option: -fpie") : S8("unsupported option: -fPIE");
+        BUSTER_STRING_TEST(arguments, rejected_pie.diagnostic, diagnostic);
+    }
+    String8 non_elf_targets[] = {S8("x86_64-macos"), S8("x86_64-windows"), S8("x86_64-uefi"),
+                                 S8("wasm64-unknown-freestanding"), S8("bpfel-unknown-linux")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(non_elf_targets); target_index += 1)
+    {
+        for (u32 flag_index = 0; flag_index < BUSTER_ARRAY_LENGTH(positive_pie_flags); flag_index += 1)
+        {
+            String8 command_line[] = {S8("-target"), non_elf_targets[target_index], positive_pie_flags[flag_index],
+                                      S8("tests/basic_c_pic.c")};
+            CompilerDriverInvocation accepted_pie = compiler_driver_parse_arguments(
+                temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command_line));
+            BUSTER_TEST(arguments, accepted_pie.error == COMPILER_DRIVER_ERROR_NONE);
+        }
+    }
     scratch_end(temporary);
     return result;
 }
@@ -10231,14 +10255,133 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 pic_model_arena,
                 compiler_driver_parse_arguments(pic_model_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(pic_model_default_command_line)));
             BUSTER_TEST(arguments, pic_model_default.error == COMPILER_DRIVER_ERROR_NONE && pic_model_default.has_object);
-            bool default_indirect_found = false;
+            bool default_got_found = false;
+            bool default_external_call_plt = false;
+            bool default_external_address_pc32 = false;
+            bool default_definition_call_pc32 = false;
             for (u32 relocation_index = 0; relocation_index < pic_model_default.object.relocation_count; relocation_index += 1)
             {
-                ObjectRelocationKind kind = pic_model_default.object.relocations[relocation_index].kind;
-                default_indirect_found =
-                    default_indirect_found || object_relocation_kind_is_x86_got(kind) || kind == OBJECT_RELOCATION_X86_64_PLT32;
+                ObjectRelocation* relocation = pic_model_default.object.relocations + relocation_index;
+                if (relocation->section != OBJECT_SECTION_TEXT || relocation->symbol >= pic_model_default.object.symbol_count)
+                {
+                    continue;
+                }
+                ObjectRelocationKind kind = relocation->kind;
+                String8 name = pic_model_default.object.symbols[relocation->symbol].name;
+                default_got_found = default_got_found || object_relocation_kind_is_x86_got(kind);
+                default_external_call_plt = default_external_call_plt ||
+                                            (kind == OBJECT_RELOCATION_X86_64_PLT32 && string_equal(name, S8("buster_pic_model_callee")));
+                default_external_address_pc32 = default_external_address_pc32 ||
+                                                (kind == OBJECT_RELOCATION_X86_64_PC32 && string_equal(name, S8("buster_pic_model_callee")));
+                default_definition_call_pc32 = default_definition_call_pc32 ||
+                                               (kind == OBJECT_RELOCATION_X86_64_PC32 && string_equal(name, S8("buster_pic_model_bump")));
             }
-            BUSTER_TEST(arguments, !default_indirect_found);
+            BUSTER_TEST(arguments, !default_got_found && default_external_call_plt && default_external_address_pc32 && default_definition_call_pc32);
+            // A call-only function value must not leave an unrelated PC32
+            // address relocation beside its call. Keep both forms visible:
+            // an import gets PLT32, while a module-local call stays PC32.
+            String8 direct_call_source_path =
+                buster_test_temporary_path(pic_model_arena, S8("buster-c-pie-direct-call-source"), S8(".c"));
+            String8 direct_call_host_source_path =
+                buster_test_temporary_path(pic_model_arena, S8("buster-c-pie-direct-call-host"), S8(".c"));
+            String8 direct_call_source = S8(
+                "extern int abs(int value);\n"
+                "__attribute__((noinline)) static int buster_pie_local_increment(int value) { return value + 1; }\n"
+                "int buster_pie_call_import(int value) { return abs(buster_pie_local_increment(value)); }\n");
+            String8 direct_call_host_source = S8(
+                "int buster_pie_call_import(int value);\n"
+                "int main(void) { return buster_pie_call_import(-40) != 39; }\n");
+            bool direct_call_fixtures_written =
+                file_write(direct_call_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_source)) &&
+                file_write(direct_call_host_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_host_source));
+            BUSTER_TEST(arguments, direct_call_fixtures_written);
+            String8 direct_call_object_path = buster_test_temporary_path(pic_model_arena, S8("buster-c-pie-direct-call"), S8(".o"));
+            String8 direct_call_command[10] = {0};
+            u32 direct_call_command_count = 0;
+            direct_call_command[direct_call_command_count++] = S8("-c");
+            direct_call_command[direct_call_command_count++] = S8("-target");
+            direct_call_command[direct_call_command_count++] = S8("x86_64-unknown-linux-gnu");
+            direct_call_command[direct_call_command_count++] = pic_model_allocator;
+            direct_call_command[direct_call_command_count++] = S8("-g0");
+            direct_call_command[direct_call_command_count++] = S8("-o");
+            direct_call_command[direct_call_command_count++] = direct_call_object_path;
+            direct_call_command[direct_call_command_count++] = direct_call_source_path;
+            CompilerDriverResult direct_call_object = compiler_driver_execute_invocation(
+                pic_model_arena,
+                compiler_driver_parse_arguments(pic_model_arena,
+                                                (SliceString8){.pointer = direct_call_command, .length = direct_call_command_count}));
+            bool direct_call_object_ready = direct_call_object.error == COMPILER_DRIVER_ERROR_NONE && direct_call_object.has_object &&
+                                            direct_call_object.object.error == OBJECT_ERROR_NONE;
+            if (BUSTER_REQUIRE(arguments, direct_call_object_ready))
+            {
+                bool import_plt32 = false;
+                bool import_pc32 = false;
+                bool local_pc32 = false;
+                u32 import_relocation_count = 0;
+                for (u32 relocation_index = 0; relocation_index < direct_call_object.object.relocation_count; relocation_index += 1)
+                {
+                    ObjectRelocation* relocation = direct_call_object.object.relocations + relocation_index;
+                    if (relocation->section != OBJECT_SECTION_TEXT || relocation->symbol >= direct_call_object.object.symbol_count)
+                    {
+                        continue;
+                    }
+                    String8 name = direct_call_object.object.symbols[relocation->symbol].name;
+                    if (string_equal(name, S8("abs")))
+                    {
+                        import_relocation_count += 1;
+                        import_plt32 = import_plt32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
+                        import_pc32 = import_pc32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC32;
+                    }
+                    if (string_equal(name, S8("buster_pie_local_increment")))
+                    {
+                        local_pc32 = local_pc32 || relocation->kind == OBJECT_RELOCATION_X86_64_PC32;
+                    }
+                }
+                bool direct_call_relocations_valid = import_relocation_count == 1 && import_plt32 && !import_pc32 && local_pc32;
+                BUSTER_TEST(arguments, direct_call_relocations_valid);
+#if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_X86_64 && BUSTER_LINUX && !BUSTER_ANDROID && !BUSTER_IOS
+                if (BUSTER_REQUIRE(arguments, direct_call_relocations_valid))
+                {
+                    String8 pie_executable_path = buster_test_temporary_path(pic_model_arena, S8("buster-pie-direct-call"), S8(""));
+                    String8 host_link_command[10] = {0};
+                    u32 host_link_command_count = 0;
+                    host_link_command[host_link_command_count++] = S8(BUSTER_HOST_C_COMPILER);
+                    if (S8(BUSTER_HOST_C_COMPILER_ARG1).length)
+                    {
+                        host_link_command[host_link_command_count++] = S8(BUSTER_HOST_C_COMPILER_ARG1);
+                    }
+                    host_link_command[host_link_command_count++] = S8("-g0");
+                    host_link_command[host_link_command_count++] = S8("-fPIE");
+                    host_link_command[host_link_command_count++] = S8("-pie");
+                    host_link_command[host_link_command_count++] = direct_call_object_path;
+                    host_link_command[host_link_command_count++] = direct_call_host_source_path;
+                    host_link_command[host_link_command_count++] = S8("-o");
+                    host_link_command[host_link_command_count++] = pie_executable_path;
+                    ProcessSpawnResult host_link_spawn = os_process_spawn(
+                        (SliceString8){.pointer = host_link_command, .length = host_link_command_count}, (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    BUSTER_TEST(arguments, host_link_spawn.handle != 0);
+                    bool host_linked = false;
+                    if (host_link_spawn.handle)
+                    {
+                        host_linked = os_process_wait_sync(pic_model_arena, host_link_spawn).result == PROCESS_RESULT_SUCCESS;
+                    }
+                    BUSTER_TEST(arguments, host_linked);
+                    if (BUSTER_REQUIRE(arguments, host_linked))
+                    {
+                        ProcessSpawnResult pie_run_spawn = os_process_spawn(
+                            (SliceString8){.pointer = &pie_executable_path, .length = 1}, (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, pie_run_spawn.handle != 0);
+                        if (pie_run_spawn.handle)
+                        {
+                            ProcessWaitResult pie_run_wait = os_process_wait_deadline(pic_model_arena, pie_run_spawn, 30000000);
+                            BUSTER_TEST(arguments, !pie_run_wait.timed_out && pie_run_wait.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                }
+#endif
+            }
             scratch_end(pic_model_temporary);
         }
     }

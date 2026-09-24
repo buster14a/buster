@@ -253,8 +253,15 @@ separate arguments, including `zig` with `cc`. An unknown family fails the
 fixture with an explicit diagnostic instead of inheriting Clang's options.
 The argument-policy regression runs on every test host; real ELF fixture
 compilation, relocation inspection, linking and execution are native Linux
-x86-64 checks. They preserve signed absolute `R_X86_64_32S` and GOTPCREL
-coverage; the indexed fixture makes both GCC and Clang produce those forms.
+x86-64 checks. The direct-call regression compiles an undefined import and a
+module-local function through all four allocator modes, requires PLT32 for the
+import and PC32 for the local call, and links/runs each default-model object
+with the configured host compiler as a PIE. It also verifies that a direct-call
+only function value leaves no separate address relocation. The argument-policy
+regression requires `-fPIE` and `-fpie` to be rejected on x86-64 ELF and remain
+accepted on Mach-O, COFF, UEFI, eBPF and Wasm. The existing fixtures preserve
+signed absolute `R_X86_64_32S` and GOTPCREL coverage; the indexed fixture makes
+both GCC and Clang produce those forms.
 The fixture is compiled `-O2`, because that is where both narrow an address to
 32 bits and emit a GOT load with no REX prefix -- the `R_X86_64_GOTPCRELX`
 shapes the linker converts to an absolute immediate rather than to an address
