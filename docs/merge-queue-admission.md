@@ -29,9 +29,15 @@ feature author, constructs and validates the combined candidate.
 Build concurrency and merge batch size are distinct controls; both are one.
 The 360-minute queue timeout exceeds the admission workflow's 310-minute job
 limit and its five-hour bounded wait. A timeout is a failure, not permission to
-merge. Cancellation only coalesces the same PR or merge-group ref; main-push
-policy runs use unique run-ID groups. Workflow concurrency is not a FIFO queue
-and is never used as a replacement for GitHub queue enforcement.
+merge. Workflow concurrency cancellation only coalesces the same PR or
+merge-group ref; main-push policy runs use unique run-ID groups. Separately, the
+trusted default-branch CI lifecycle controller watches the in-progress Buster CI
+merge-group run. Its first completed non-success job cancels active Actions runs
+for that exact merge-group head, so a candidate that can no longer pass stops
+consuming queue CI. Candidate workflows retain read-only authority; the
+write-capable watcher executes only the default-branch controller and never
+checks out candidate bytes or artifacts. Workflow concurrency is not a FIFO
+queue and is never used as a replacement for GitHub queue enforcement.
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed
