@@ -3,7 +3,6 @@ set -euo pipefail
 
 repo="${1:-buster14a/buster}"
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
-ruleset="$root/.github/rulesets/benchmark-main.json"
 main_ruleset="$root/.github/main-merge-queue.ruleset.json"
 actor_policy="$root/.github/benchmark-actions-policy.json"
 api_version=2026-03-10
@@ -15,9 +14,8 @@ fi
 owner="${repo%%/*}"
 gh auth status >/dev/null
 
-# Installation is a staging operation. Never reset an active dispatch window
-# as a side effect of a policy read-back or rerun. Missing and unreadable
-# variables also stop before any policy mutation.
+# This is a read-only preflight. Never reset an active dispatch window as a
+# side effect of a policy read-back. Missing and unreadable variables fail.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 if ! gh api -H "X-GitHub-Api-Version: $api_version" \
@@ -45,6 +43,13 @@ listed_main_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
   --jq '.[] | select(.name == "main") | .id')"
 if [[ "$listed_main_ids" != "$main_ruleset_id" ]]; then
   printf 'exact main merge-queue ruleset is missing or replaced\n' >&2
+  exit 1
+fi
+listed_benchmark_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/rulesets?includes_parents=false" \
+  --jq '.[] | select(.name == "Benchmark dispatch main protection") | .id')"
+if [[ -n "$listed_benchmark_ids" ]]; then
+  printf 'obsolete benchmark branch ruleset must be removed before admission\n' >&2
   exit 1
 fi
 gh api -H "X-GitHub-Api-Version: $api_version" \
@@ -143,69 +148,9 @@ if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" o
     sys.exit("required benchmark reviewer must still be the reviewed repository administrator")
 PY
 
-ruleset_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/rulesets?includes_parents=false" \
-  --jq '.[] | select(.name == "Benchmark dispatch main protection") | .id')"
-if [[ "$ruleset_ids" == *$'\n'* ]]; then
-  printf 'multiple benchmark branch rulesets exist\n' >&2
-  exit 1
-fi
-if [[ -n "$ruleset_ids" ]]; then
-  gh api --method PUT -H "X-GitHub-Api-Version: $api_version" \
-    "repos/$repo/rulesets/$ruleset_ids" --input "$ruleset" >"$tmp/benchmark.json"
-else
-  gh api --method POST -H "X-GitHub-Api-Version: $api_version" \
-    "repos/$repo/rulesets" --input "$ruleset" >"$tmp/benchmark.json"
-fi
-
-python3 - "$ruleset" "$tmp/benchmark.json" <<'PY'
-import json
-import sys
-
-expected_ruleset, live_ruleset = map(
-    lambda path: json.load(open(path)), sys.argv[1:]
-)
-for key in ("name", "target", "enforcement", "bypass_actors", "conditions", "rules"):
-    if live_ruleset.get(key) != expected_ruleset[key]:
-        sys.exit(f"benchmark branch ruleset mismatch: {key}")
-PY
-
-# Connector requests must remain pending until the reviewed administrator
-# approves the environment job. Preserve the exact main branch restriction.
-python3 - >"$tmp/environment.json" <<'PY'
-import json
-import sys
-
-json.dump(
-    {
-        "wait_timer": 0,
-        "prevent_self_review": True,
-        "reviewers": [{"type": "User", "id": 39247043}],
-        "deployment_branch_policy": {
-            "protected_branches": False,
-            "custom_branch_policies": True,
-        },
-    },
-    sys.stdout,
-)
-PY
-gh api --method PUT -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/environments/benchmark-9700x" --input "$tmp/environment.json" >"$tmp/live-environment.json"
-
-# Verify fresh GET responses after installation, including the exact branch
-# restriction and disabled variable. A successful PUT response is not a receipt.
-benchmark_id="$(python3 - "$tmp/benchmark.json" <<'PY'
-import json
-import sys
-
-value = json.load(open(sys.argv[1])).get("id")
-if type(value) is not int or value <= 0:
-    sys.exit("installed benchmark ruleset ID missing")
-print(value)
-PY
-)"
-gh api -H "X-GitHub-Api-Version: $api_version" \
-  "repos/$repo/rulesets/$benchmark_id" >"$tmp/installed-benchmark.json"
+# The existing main ruleset governs edits. Connector requests remain pending
+# until the reviewed administrator releases the protected environment job.
+# Re-read the environment and requester policy; never install or replace them.
 gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/environments/benchmark-9700x" >"$tmp/installed-environment.json"
 gh api -H "X-GitHub-Api-Version: $api_version" \
@@ -228,6 +173,6 @@ if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" o
     sys.exit("required benchmark reviewer lost repository administrator permission")
 PY
 python3 "$root/tools/bench_service/deploy/verify_github_admission.py" \
-  "$ruleset" "$tmp/installed-benchmark.json" "$tmp/installed-environment.json" \
-  "$tmp/installed-branches.json" "$tmp/installed-variable.json"
-printf 'Connector requester policy, administrator reviewer and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'
+  "$tmp/installed-environment.json" "$tmp/installed-branches.json" \
+  "$tmp/installed-variable.json"
+printf 'Existing main ruleset, connector requester policy, administrator reviewer and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'
