@@ -20324,6 +20324,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_metrics_path_identity(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 type_name;
+        u32 line;
+        u32 column;
+        bool has_following_declaration;
+    } invalid[] = {
+        {S8("uint32_t v = 1;\nint following;\n"), S8("uint32_t"), 1, 1, true},
+        {S8("size_t n = 4;\nint following;\n"), S8("size_t"), 1, 1, true},
+        {S8("sttic int v;\nint following;\n"), S8("sttic"), 1, 1, true},
+        {S8("static innt v = 1;\nint following;\n"), S8("innt"), 1, 8, true},
+        {S8("strcut S { int a; } s;\nint following;\n"), S8("strcut"), 1, 1, true},
+        {S8("foo v;\nint following;\n"), S8("foo"), 1, 1, true},
+        {S8("foo *v;\nint following;\n"), S8("foo"), 1, 1, true},
+        {S8("foo v = 1;\nint following;\n"), S8("foo"), 1, 1, true},
+        {S8("static foo v;\nint following;\n"), S8("foo"), 1, 8, true},
+        {S8("extern foo v;\nint following;\n"), S8("foo"), 1, 8, true},
+        {S8("foo bar baz;\nint following;\n"), S8("foo"), 1, 1, true},
+        {S8("hello world\nint a = 1;\nint following;\n"), S8("hello"), 1, 1, true},
+        {S8("q.c:1:2: warning: x\nint a = 1;\nint following;\n"), S8("q"), 1, 1, true},
+        {S8("uint32_t get(void) { return 7; }\nint following;\n"), S8("uint32_t"), 1, 1, true},
+        {S8("int f(foo value);\nint following;\n"), S8("foo"), 1, 7, true},
+        {S8("int f(foo *value);\nint following;\n"), S8("foo"), 1, 7, true},
+        {S8("int f(int value, foo *pointer);\nint following;\n"), S8("foo"), 1, 18, true},
+        {S8("int f(const foo value);\nint following;\n"), S8("foo"), 1, 13, true},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = invalid[case_index].source;
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.source_path = S8("unknown-type-name.c"), .target = target_native,
+                                 .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        String8 expected_message = string_format(temporary.arena, S8("unknown type name '{S8}'"), invalid[case_index].type_name);
+        bool diagnosed = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = parse.diagnostics[diagnostic_index];
+            diagnosed |= diagnostic.kind == C_DIAGNOSTIC_UNKNOWN_TYPE_NAME && string_equal(diagnostic.message, expected_message) &&
+                         diagnostic.location.line == invalid[case_index].line && diagnostic.location.column == invalid[case_index].column;
+        }
+        bool following_declared = false;
+        for (u32 declaration_index = 0; declaration_index < parse.declaration_count; declaration_index += 1)
+        {
+            following_declared |= string_equal(parse.declarations[declaration_index].name, S8("following"));
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, source);
+        BUSTER_TEST_RAW(arguments, diagnosed, source);
+        if (invalid[case_index].has_following_declaration)
+        {
+            BUSTER_TEST_RAW(arguments, following_declared, source);
+        }
+        scratch_end(temporary);
+    }
+
+    String8 valid[] = {
+        S8("typedef unsigned int uint32_t; uint32_t value = 1;\n"),
+        S8("typedef int T; int shadow_parameter(T T) { return T; }\n"),
+        S8("typedef int U; int shadow_object(void) { int U = 0; return U; }\n"),
+        S8("int source; __typeof__(source) copy;\n"),
+        S8("__attribute__((unused)) int attributed; __declspec(noinline) int decorated(void) { return 1; }\n"),
+        S8("int legacy(old_style_argument); int unspecified();\n"),
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(valid); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, valid[case_index],
+            (CPreprocessOptions){.source_path = S8("unknown-type-name-controls.c"), .target = target_native,
+                                 .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        bool unknown_type_diagnostic = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < parse.diagnostic_count; diagnostic_index += 1)
+        {
+            unknown_type_diagnostic |= parse.diagnostics[diagnostic_index].kind == C_DIAGNOSTIC_UNKNOWN_TYPE_NAME;
+        }
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, valid[case_index]);
+        BUSTER_TEST_RAW(arguments, !unknown_type_diagnostic, valid[case_index]);
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_declarator_trailing_token_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -20948,6 +21035,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_ext80_big_live_limbs);
     BUSTER_TEST_FIXTURE(arguments, c_test_float_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
+    BUSTER_TEST_FIXTURE(arguments, c_test_unknown_type_name_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);

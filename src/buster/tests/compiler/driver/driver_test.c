@@ -7719,6 +7719,69 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_type_specifiers(UnitTest
     return result;
 }
 
+// Unknown declaration and parameter type names need a user-facing parser
+// diagnostic in syntax-only mode and must prevent object output in both
+// frontend lowering modes.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_unknown_type_names(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u32 column;
+    } invalid[] = {
+        {S8("uint32_t v;\nint following;\n"), 1},
+        {S8("int f(foo value);\nint following;\n"), 7},
+    };
+    String8 frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    String8 sentinel = S8("existing output must survive an unknown type name");
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(invalid); case_index += 1)
+    {
+        for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(frontends); frontend += 1)
+        {
+            for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* arena = temporary.arena;
+                String8 name = string_format(arena, S8("buster-unknown-type-{u32}-{u32}-{u32}"), case_index, frontend, dialect);
+                String8 input = buster_test_temporary_path(arena, name, S8(".c"));
+                String8 output = buster_test_temporary_path(arena, name, S8(".o"));
+                if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid[case_index].source))) &&
+                    BUSTER_REQUIRE(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel))))
+                {
+                    String8 syntax_arguments[] = {S8("-fsyntax-only"), dialects[dialect], S8("-target"), S8("x86_64-linux"),
+                        frontends[frontend], input};
+                    CompilerDriverResult syntax = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_arguments)));
+                    bool coded = false;
+                    for (u32 diagnostic = 0; diagnostic < syntax.diagnostic_count; diagnostic += 1)
+                    {
+                        coded |= string_equal(syntax.diagnostics[diagnostic].code, S8("c.unknown-type-name")) &&
+                                 syntax.diagnostics[diagnostic].primary.position.line == 1 &&
+                                 syntax.diagnostics[diagnostic].primary.position.column == invalid[case_index].column;
+                    }
+                    BUSTER_TEST_RAW(arguments, syntax.error != COMPILER_DRIVER_ERROR_NONE && !syntax.has_object, invalid[case_index].source);
+                    BUSTER_TEST_RAW(arguments, coded, syntax.diagnostic);
+
+                    String8 compile_arguments[] = {S8("-c"), dialects[dialect], S8("-target"), S8("x86_64-linux"),
+                        frontends[frontend], S8("-o"), output, input};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_arguments)));
+                    BUSTER_TEST_RAW(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && !compiled.has_object, invalid[case_index].source);
+                    BUSTER_TEST_RAW(arguments, string_first_sequence(compiled.diagnostic, S8("unknown type name")) != BUSTER_STRING_NO_MATCH,
+                                    compiled.diagnostic);
+                    BUSTER_STRING_TEST(arguments, BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0})), sentinel);
+                    BUSTER_TEST(arguments, os_file_delete(input));
+                    BUSTER_TEST(arguments, os_file_delete(output));
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 // #665: a positive query must reach the selected non-native backend too.
 // Atomic queries stay false on both; complex construction remains usable on
 // Wasm64, whereas eBPF has no floating-point operations.
@@ -8287,6 +8350,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_unknown_type_names);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
