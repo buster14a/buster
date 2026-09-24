@@ -37,8 +37,8 @@ bash tools/bench_service/deploy/configure_github_admission.sh buster14a/buster
 The installer disables the repository variable first, verifies the exact main
 merge-queue ruleset `22537199`, verifies the runner group and rejects a
 repository-scoped benchmark runner. It reads and verifies the **existing**
-repository Actions policy against `.github/actions-policies/benchmark-dispatch.json`;
-it never creates or replaces that policy. It then installs the additional
+repository Actions policy for the exact workflow, admin role, and manual
+event; it never creates or replaces that policy. It then installs the additional
 benchmark branch ruleset. The existing Actions policy targets
 only the fixed workflow and allows only the `Repository admin` role to trigger
 it, and only through `workflow_dispatch`. Do not add a bot, LLM connector,

@@ -21,7 +21,6 @@ BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 DEPLOYMENT = SERVICE / "deploy" / "VALIDATE_BUSTER_V1.md"
 ADMISSION_INSTALLER = SERVICE / "deploy" / "configure_github_admission.sh"
 BENCHMARK_RULESET = ROOT / ".github" / "rulesets" / "benchmark-main.json"
-ACTIONS_POLICY = ROOT / ".github" / "actions-policies" / "benchmark-dispatch.json"
 MAIN_QUEUE_RULESET = ROOT / ".github" / "main-merge-queue.ruleset.json"
 MAIN_QUEUE_GATE = ROOT / "tools" / "merge_queue_admission.py"
 
@@ -124,6 +123,14 @@ def main() -> int:
             errors.append("existing admin actor policy must be verified before changing admission")
         if "--input \"$policy\"" in installer:
             errors.append("admission installer must never replace the existing Actions policy")
+        for marker in (
+            '"allowed_actors": [{"id": 5, "type": "RepositoryRole"}]',
+            '"allowed_events": ["workflow_dispatch"]',
+            '"include": [".github/workflows/9700x-service-dispatch.yml"]',
+            '"enforcement": "active"',
+        ):
+            if marker not in installer:
+                errors.append(f"admission installer does not verify the existing policy: {marker}")
         if MAIN_QUEUE_GATE.is_file():
             gate_id = re.search(
                 r"(?m)^RULESET_ID = ([1-9][0-9]*)$",
@@ -167,27 +174,6 @@ def main() -> int:
             errors.append("benchmark ruleset must not add blanket pull-request reviews")
         if benchmark["conditions"]["ref_name"] != {"include": ["refs/heads/main"], "exclude": []}:
             errors.append("benchmark ruleset must apply only to main")
-
-    if not ACTIONS_POLICY.is_file():
-        errors.append("missing benchmark admin-only Actions policy")
-    else:
-        actions = json.loads(ACTIONS_POLICY.read_text(encoding="utf-8"))
-        if actions != {
-            "enforcement": "active",
-            "conditions": {"workflow_path": {
-                "include": [".github/workflows/9700x-service-dispatch.yml"],
-                "exclude": [],
-            }},
-            "rules": [
-                {"type": "restrict_actions_actors", "parameters": {
-                    "allowed_actors": [{"id": 5, "type": "RepositoryRole"}],
-                }},
-                {"type": "restrict_action_events", "parameters": {
-                    "allowed_events": ["workflow_dispatch"],
-                }},
-            ],
-        }:
-            errors.append("benchmark Actions policy must authorize only repository admins and manual dispatch")
 
     if not POLICY.is_file():
         errors.append("missing bench-service-policy.yml")

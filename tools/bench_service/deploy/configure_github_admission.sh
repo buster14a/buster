@@ -4,7 +4,6 @@ set -euo pipefail
 repo="${1:-buster14a/buster}"
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 ruleset="$root/.github/rulesets/benchmark-main.json"
-policy="$root/.github/actions-policies/benchmark-dispatch.json"
 main_ruleset="$root/.github/main-merge-queue.ruleset.json"
 api_version=2026-03-10
 
@@ -100,11 +99,26 @@ policy_matches=0
 for policy_id in $policy_ids; do
   gh api -H "X-GitHub-Api-Version: $api_version" \
     "repos/$repo/actions/policies/$policy_id" >"$tmp/candidate-policy.json"
-  if python3 - "$policy" "$tmp/candidate-policy.json" <<'PY'
+  if python3 - "$tmp/candidate-policy.json" <<'PY'
 import json
 import sys
 
-expected, live = (json.load(open(path)) for path in sys.argv[1:])
+live = json.load(open(sys.argv[1]))
+expected = {
+    "enforcement": "active",
+    "conditions": {"workflow_path": {
+        "include": [".github/workflows/9700x-service-dispatch.yml"],
+        "exclude": [],
+    }},
+    "rules": [
+        {"type": "restrict_actions_actors", "parameters": {
+            "allowed_actors": [{"id": 5, "type": "RepositoryRole"}],
+        }},
+        {"type": "restrict_action_events", "parameters": {
+            "allowed_events": ["workflow_dispatch"],
+        }},
+    ],
+}
 if live.get("source_type") != "Repository" or live.get("target") != "actions":
     sys.exit(1)
 if any(live.get(key) != expected[key] for key in ("enforcement", "conditions", "rules")):
