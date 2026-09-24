@@ -11388,78 +11388,92 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
         return 0;
 
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + machine_x64_gpr_encoding_table_count;
+    u8 dynamic_operand_indices[2] = {0};
+    u32 register_value_index = 0;
+    BusterX86MetadataPhysicalOperand operands[4];
+    for (u32 operand_index = 0; operand_index < variant->operand_count; operand_index += 1)
+    {
+        u32 reg = 0;
+        switch ((MachineX64ExactOperandProjection)variant->operand_kinds[operand_index])
+        {
+        case MACHINE_X64_EXACT_OPERAND_GPR: dynamic_operand_indices[register_value_index++] = (u8)operand_index; break;
+        case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO:
+        {
+            dynamic_operand_indices[register_value_index++] = (u8)operand_index;
+            u16 width = variant->operand_widths[operand_index];
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = width,
+                .memory = {
+                    .base = {.index = (u16)reg, .width = 64,
+                             .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                    .address_size = 64,
+                    .scale = 1,
+                    .has_base = true,
+                },
+            };
+            continue;
+        }
+        case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
+        case MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD:
+        {
+            u16 width = variant->operand_widths[operand_index];
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
+                .width = width,
+                .memory = {
+                    .base = {.index = MACHINE_X64_RBP, .width = 64,
+                             .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+                    .address_size = 64,
+                    .scale = 1,
+                    .has_base = true,
+                    .has_displacement = true,
+                },
+            };
+            continue;
+        }
+        case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX: reg = MACHINE_X64_RAX; break;
+        case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX: reg = MACHINE_X64_RDX; break;
+        case MACHINE_X64_EXACT_OPERAND_FIXED_RSP: reg = MACHINE_X64_RSP; break;
+        case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD:
+        {
+            u16 width = variant->operand_widths[operand_index];
+            bool unsigned_immediate = variant->key.form_id == MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID;
+            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
+                .width = width,
+                .has_value = !unsigned_immediate,
+                .has_unsigned_value = unsigned_immediate,
+                .unsigned_value = 0,
+            };
+            continue;
+        }
+        default: return 0;
+        }
+        u16 width = variant->operand_widths[operand_index];
+        operands[operand_index] = (BusterX86MetadataPhysicalOperand){
+            .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
+            .width = width,
+            .reg = {.index = (u16)reg, .width = width, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
+        };
+    }
     bool compact = true;
     for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
     {
-        u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
-        u32 register_value_index = 0;
-        BusterX86MetadataPhysicalOperand operands[4];
-        for (u32 operand_index = 0; operand_index < variant->operand_count; operand_index += 1)
+        for (u32 dynamic_index = 0; dynamic_index < register_operand_count; dynamic_index += 1)
         {
-            u32 reg = 0;
-            switch ((MachineX64ExactOperandProjection)variant->operand_kinds[operand_index])
-            {
-            case MACHINE_X64_EXACT_OPERAND_GPR: reg = register_values[register_value_index++]; break;
-            case MACHINE_X64_EXACT_OPERAND_MEMORY_BASE_ZERO:
-            {
-                reg = register_values[register_value_index++];
-                u16 width = variant->operand_widths[operand_index];
-                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
-                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
-                    .width = width,
-                    .memory = {
-                        .base = {.index = (u16)reg, .width = 64,
-                                 .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-                        .address_size = 64,
-                        .scale = 1,
-                        .has_base = true,
-                    },
-                };
-                continue;
-            }
-            case MACHINE_X64_EXACT_OPERAND_RBP_MEMORY_PAYLOAD:
-            case MACHINE_X64_EXACT_OPERAND_RBP_FRAME_MEMORY_PAYLOAD:
-            {
-                u16 width = variant->operand_widths[operand_index];
-                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
-                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY,
-                    .width = width,
-                    .memory = {
-                        .base = {.index = MACHINE_X64_RBP, .width = 64,
-                                 .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-                        .address_size = 64,
-                        .scale = 1,
-                        .has_base = true,
-                        .has_displacement = true,
-                    },
-                };
-                continue;
-            }
-            case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RAX: reg = MACHINE_X64_RAX; break;
-            case MACHINE_X64_EXACT_OPERAND_GPR_FIXED_RDX: reg = MACHINE_X64_RDX; break;
-            case MACHINE_X64_EXACT_OPERAND_FIXED_RSP: reg = MACHINE_X64_RSP; break;
-            case MACHINE_X64_EXACT_OPERAND_IMMEDIATE_PAYLOAD:
-            {
-                u16 width = variant->operand_widths[operand_index];
-                bool unsigned_immediate = variant->key.form_id == MACHINE_X64_MOV_IMMEDIATE_EXACT_FORM_ID;
-                operands[operand_index] = (BusterX86MetadataPhysicalOperand){
-                    .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_IMMEDIATE,
-                    .width = width,
-                    .has_value = !unsigned_immediate,
-                    .has_unsigned_value = unsigned_immediate,
-                    .unsigned_value = 0,
-                };
-                continue;
-            }
-            default: return 0;
-            }
-            u16 width = variant->operand_widths[operand_index];
-            operands[operand_index] = (BusterX86MetadataPhysicalOperand){
-                .kind = BUSTER_X86_METADATA_PHYSICAL_OPERAND_REGISTER,
-                .width = width,
-                .reg = {.index = (u16)reg, .width = width, .physical_class = BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR},
-            };
+            BusterX86MetadataPhysicalOperand* operand = operands + dynamic_operand_indices[dynamic_index];
+            u16 reg = (u16)((register_key >> (4u * dynamic_index)) & 15u);
+            if (operand->kind == BUSTER_X86_METADATA_PHYSICAL_OPERAND_MEMORY) operand->memory.base.index = reg;
+            else operand->reg.index = reg;
         }
+        // The per-key proofs mutate these fields; restore the common input.
+        if (immediate_operand_index != UINT8_MAX)
+        {
+            operands[immediate_operand_index].value = 0;
+            operands[immediate_operand_index].unsigned_value = 0;
+        }
+        if (displacement_operand_index != UINT8_MAX) operands[displacement_operand_index].memory.displacement = 0;
         MachineX64GprEncoding* encoding = table->encodings + register_key;
         BusterX86MetadataEmitResult emitted = buster_x86_metadata_emit_exact_machine(token, (BusterX86MetadataMachineExactQuery){
             .operands = operands,
