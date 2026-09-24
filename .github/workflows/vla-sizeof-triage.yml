@@ -13,13 +13,16 @@ jobs:
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
       BUSTER_TEST_JOBS: '2'
-      VLA_SOURCE: ${{ runner.temp }}/vla-source
-      VLA_EVIDENCE: ${{ runner.temp }}/vla-evidence
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Resolve invocation-owned paths
+        shell: bash
+        run: |
+          echo "VLA_SOURCE=$RUNNER_TEMP/vla-source" >> "$GITHUB_ENV"
+          echo "VLA_EVIDENCE=$RUNNER_TEMP/vla-evidence" >> "$GITHUB_ENV"
       - name: Build unchanged compiler with registered failure-first tests
         id: baseline_build
         shell: bash
