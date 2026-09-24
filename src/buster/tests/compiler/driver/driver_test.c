@@ -10197,6 +10197,22 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             // A call-only function value must not leave an unrelated PC32
             // address relocation beside its call. Keep both forms visible:
             // an import gets PLT32, while a module-local call stays PC32.
+            String8 direct_call_source_path =
+                buster_test_temporary_path(pic_model_arena, S8("buster-c-pie-direct-call-source"), S8(".c"));
+            String8 direct_call_host_source_path =
+                buster_test_temporary_path(pic_model_arena, S8("buster-c-pie-direct-call-host"), S8(".c"));
+            String8 direct_call_source = S8(
+                "extern int buster_pie_import(int value);\n"
+                "__attribute__((noinline)) static int buster_pie_local_increment(int value) { return value + 1; }\n"
+                "int buster_pie_call_import(int value) { return buster_pie_import(buster_pie_local_increment(value)); }\n");
+            String8 direct_call_host_source = S8(
+                "int buster_pie_call_import(int value);\n"
+                "int buster_pie_import(int value) { return value + 2; }\n"
+                "int main(void) { return buster_pie_call_import(40) != 43; }\n");
+            bool direct_call_fixtures_written =
+                file_write(direct_call_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_source)) &&
+                file_write(direct_call_host_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_host_source));
+            BUSTER_TEST(arguments, direct_call_fixtures_written);
             String8 direct_call_object_path = buster_test_temporary_path(pic_model_arena, S8("buster-c-pie-direct-call"), S8(".o"));
             String8 direct_call_command[10] = {0};
             u32 direct_call_command_count = 0;
@@ -10207,7 +10223,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             direct_call_command[direct_call_command_count++] = S8("-g0");
             direct_call_command[direct_call_command_count++] = S8("-o");
             direct_call_command[direct_call_command_count++] = direct_call_object_path;
-            direct_call_command[direct_call_command_count++] = S8("tests/basic_c_pie_external_call.c");
+            direct_call_command[direct_call_command_count++] = direct_call_source_path;
             CompilerDriverResult direct_call_object = compiler_driver_execute_invocation(
                 pic_model_arena,
                 compiler_driver_parse_arguments(pic_model_arena,
@@ -10256,7 +10272,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                     host_link_command[host_link_command_count++] = S8("-fPIE");
                     host_link_command[host_link_command_count++] = S8("-pie");
                     host_link_command[host_link_command_count++] = direct_call_object_path;
-                    host_link_command[host_link_command_count++] = S8("tests/basic_c_pie_external_host.c");
+                    host_link_command[host_link_command_count++] = direct_call_host_source_path;
                     host_link_command[host_link_command_count++] = S8("-o");
                     host_link_command[host_link_command_count++] = pie_executable_path;
                     ProcessSpawnResult host_link_spawn = os_process_spawn(
