@@ -16,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 KEYRING = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
@@ -31,6 +32,7 @@ READLINE_LIBRARIES = {
     "libreadline.so.8": "/usr/lib/x86_64-linux-gnu/libreadline.so.8",
     "libtinfo.so.6": "/usr/lib/x86_64-linux-gnu/libtinfo.so.6",
 }
+APT_RETRY_DELAYS = (30, 60)
 
 
 def load_lock(path):
@@ -107,8 +109,48 @@ class Commands:
         prefix.with_suffix(".stderr").write_text(result.stderr)
         if result.returncode:
             print(result.stdout + result.stderr, file=sys.stderr)
-            raise subprocess.CalledProcessError(result.returncode, argv)
+            raise subprocess.CalledProcessError(result.returncode, argv, output=result.stdout, stderr=result.stderr)
         return result.stdout
+
+
+def transient_snapshot_failure(error, lock):
+    retryable = error.returncode == 100
+    if retryable:
+        diagnostics = (error.stdout or "") + "\n" + (error.stderr or "")
+        retryable = not re.search(
+            r"(?i)GPG error|NO_PUBKEY|Hash Sum mismatch|not signed|unauthenticated|certificate verification failed",
+            diagnostics)
+        prefix = "https://snapshot.ubuntu.com/ubuntu/" + lock["snapshot"] + "/"
+        fetch = re.compile(r"E: Failed to fetch " + re.escape(prefix) + r"\S+\s+5\d\d(?:\s|$)")
+        tails = {
+            "E: Some index files failed to download. They have been ignored, or old ones used instead.",
+            "E: Unable to fetch some archives, maybe run apt update or try with --fix-missing?",
+        }
+        found = False
+        for line in diagnostics.splitlines():
+            if line.startswith("E: "):
+                if fetch.match(line):
+                    found = True
+                elif line not in tails:
+                    retryable = False
+        retryable = retryable and found
+    return retryable
+
+
+def run_snapshot_apt(run, argv, lock):
+    output = None
+    for attempt in range(len(APT_RETRY_DELAYS) + 1):
+        try:
+            output = run(argv)
+            break
+        except subprocess.CalledProcessError as error:
+            if attempt == len(APT_RETRY_DELAYS) or not transient_snapshot_failure(error, lock):
+                raise
+            delay = APT_RETRY_DELAYS[attempt]
+            print(f"snapshot returned HTTP 5xx; retrying the same apt command in {delay}s "
+                  f"(attempt {attempt + 2}/{len(APT_RETRY_DELAYS) + 1})", file=sys.stderr, flush=True)
+            time.sleep(delay)
+    return output
 
 
 def package_versions(text, expected):
@@ -234,12 +276,13 @@ def install(profile, lock_path, directory):
         (evidence / name / "partial").mkdir(parents=True)
     apt = ["sudo", "env", "DEBIAN_FRONTEND=noninteractive", "LC_ALL=C", "apt-get", *apt_options(evidence)]
     try:
-        run([*apt, "update"])
+        run_snapshot_apt(run, [*apt, "update"], lock)
         packages = lock["profiles"][profile]
         # Reinstall even on image/cache hits, allowing explicit versions to
         # downgrade newer copies but never permitting package removals.
-        run([*apt, "install", "--yes", "--no-install-recommends", "--reinstall", "--allow-downgrades", "--no-remove",
-             *[f"{name}={version}" for name, version in sorted(packages.items())]])
+        run_snapshot_apt(run, [*apt, "install", "--yes", "--no-install-recommends", "--reinstall",
+                               "--allow-downgrades", "--no-remove",
+                               *[f"{name}={version}" for name, version in sorted(packages.items())]], lock)
         inspect(profile, packages, run, evidence)
     finally:
         # Keep signed metadata even on failure, but not large apt caches.
