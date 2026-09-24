@@ -343,6 +343,24 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
                              S8("2222222222222222222222222222222222222222"), S8("/workspace/result")) == BQ_UNSUPPORTED);
 #else
     char boot_id[BQ_WORKER_BOOT_CAP];
+    char const* preparation_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    BqWorkerLeaseMessage message;
+    BQ_CHECK(bq_worker_preparation_matches_recipe(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, preparation_digest) &&
+             bq_worker_preparation_matches_recipe(BQ_RECIPE_VALIDATE_BUSTER, "") &&
+             !bq_worker_preparation_matches_recipe(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, "") &&
+             !bq_worker_preparation_matches_recipe(BQ_RECIPE_VALIDATE_BUSTER, preparation_digest) &&
+             !bq_worker_preparation_matches_recipe(BQ_RECIPE_UNKNOWN, ""));
+    BQ_CHECK(!bq_worker_preparation_digest_valid("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") &&
+             !bq_worker_preparation_digest_valid("abc") && !bq_worker_preparation_digest_valid(NULL) &&
+             bq_worker_lease_message_make(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4, preparation_digest) &&
+             bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4, preparation_digest));
+    message.preparation_sha256[0] = 'b';
+    BQ_CHECK(!bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE,
+                                               "/lease", 1, 2, 3, 4, preparation_digest));
+    BQ_CHECK(bq_worker_lease_message_make(&message, BQ_WORKER_LEASE_RESPONSE, "/lease", 1, 2, 3, 4, ""));
+    message.preparation_sha256[1] = 'a';
+    BQ_CHECK(!bq_worker_lease_message_matches(&message, BQ_WORKER_LEASE_RESPONSE,
+                                               "/lease", 1, 2, 3, 4, ""));
     BQ_CHECK(bq_worker_read_regular("/proc/sys/kernel/random/boot_id", boot_id, sizeof(boot_id)) &&
              bq_worker_boot_valid(boot_id));
     BQ_CHECK(bq_worker_unit(S8("/unsupported"), S8("1"), S8("2"),
@@ -2099,8 +2117,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_transport_boundaries(void)
 
 BUSTER_GLOBAL_LOCAL bool bq_test_worker_probe_locked(char const* path);
 
-BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
+BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(bool retirement)
 {
+    char const* preparation = retirement ?
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" : "";
     char root[] = "/tmp/buster-lease-handoff-XXXXXX";
     char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1];
     int result_directory = -1;
@@ -2133,11 +2153,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
         if (lease.descriptor >= 0) close(lease.descriptor);
         lease.descriptor = -1;
         BqWorkerLease transferred = {.descriptor = -1};
+        char received_preparation[SHA256_HEX_CAPACITY] = {0};
         BqError received = bq_worker_lease_handoff_receive(string_from_pointer(lease_path), string_from_pointer(result_root),
-                                                            S8("1"), S8("2"),
-                                                            &transferred, &phase_descriptor);
+                                                            S8("1"), S8("2"), retirement ?
+                                                            BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED : BQ_RECIPE_VALIDATE_BUSTER,
+                                                            &transferred, &phase_descriptor, received_preparation);
         u8 state = received == BQ_OK && phase_descriptor >= 3 &&
-                   (fcntl(phase_descriptor, F_GETFD) & FD_CLOEXEC) ? 1 : 0;
+                   (fcntl(phase_descriptor, F_GETFD) & FD_CLOEXEC) &&
+                   !strcmp(received_preparation, preparation) ? 1 : 0;
         ssize_t written = write(ready_pipe[1], &state, sizeof(state));
         char release = 0;
         ssize_t released = written == sizeof(state) ? read(release_pipe[0], &release, sizeof(release)) : -1;
@@ -2151,7 +2174,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
     {
         close(ready_pipe[1]);
         close(release_pipe[0]);
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2, &phase_descriptor);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2,
+                                                    preparation, &phase_descriptor);
         if (sent == BQ_OK) bq_worker_lease_release(&lease);
         u8 state = 0;
         ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
@@ -2197,6 +2221,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
 {
+    char const* preparation = mode == 3 ?
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" : "";
     char root[] = "/tmp/buster-lease-handoff-negative-XXXXXX";
     char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1], socket_path[BQ_PATH_CAP + 1];
     int result_directory = -1, ready_pipe[2] = {-1, -1}, hold_pipe[2] = {-1, -1};
@@ -2240,7 +2266,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
         int lease_probe = open(lease_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         received_ok = received_ok && lease_probe >= 0 && fstat(lease_probe, &lease_info) == 0;
         if (lease_probe >= 0) close(lease_probe);
-        received_ok = received_ok && bq_worker_lease_message_make(&request, BQ_WORKER_LEASE_REQUEST, lease_path, 1, 2, 0, 0) &&
+        received_ok = received_ok && bq_worker_lease_message_make(&request, BQ_WORKER_LEASE_REQUEST, lease_path, 1, 2, 0, 0, "") &&
                       send(client, &request, sizeof(request), MSG_NOSIGNAL) == (ssize_t)sizeof(request);
         int received_fd = -1;
         if (received_ok)
@@ -2255,7 +2281,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
             ssize_t count = recvmsg(client, &message, MSG_CMSG_CLOEXEC);
             received_ok = count == (ssize_t)sizeof(response) && !(message.msg_flags & MSG_CTRUNC) &&
                           bq_worker_lease_message_matches(&response, BQ_WORKER_LEASE_RESPONSE, lease_path, 1, 2,
-                                                          (u64)lease_info.st_dev, (u64)lease_info.st_ino);
+                                                          (u64)lease_info.st_dev, (u64)lease_info.st_ino, preparation);
             for (struct cmsghdr* header = received_ok ? CMSG_FIRSTHDR(&message) : NULL; header;
                  header = CMSG_NXTHDR(&message, header))
             {
@@ -2266,11 +2292,12 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
             received_ok = received_ok && received_fd >= 3;
         }
         u8 state = received_ok ? 1 : 0;
-        if (received_ok && mode == 1)
+        if (received_ok && (mode == 1 || mode == 3))
         {
             BqWorkerLeaseMessage invalid = response;
             invalid.phase = BQ_WORKER_LEASE_ACK;
-            invalid.inode += 1;
+            if (mode == 1) invalid.inode += 1;
+            else invalid.preparation_sha256[0] = 'b';
             received_ok = send(client, &invalid, sizeof(invalid), MSG_NOSIGNAL) == (ssize_t)sizeof(invalid);
         }
         if (received_fd >= 0) close(received_fd);
@@ -2290,7 +2317,8 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
         close(ready_pipe[1]);
         close(hold_pipe[0]);
         hold_pipe[0] = -1;
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2, NULL);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2,
+                                                    preparation, NULL);
         u8 state = 0;
         ssize_t read_state = read(ready_pipe[0], &state, sizeof(state));
         bool coordinator_valid = lease.descriptor >= 0 && fcntl(lease.descriptor, F_GETFD) >= 0;
@@ -2351,8 +2379,10 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_cleanup_failure(u32 mode)
         if (lease.descriptor >= 0) close(lease.descriptor);
         lease.descriptor = -1;
         BqWorkerLease transferred = {.descriptor = -1};
+        char received_preparation[SHA256_HEX_CAPACITY] = {0};
         BqError received = bq_worker_lease_handoff_receive(string_from_pointer(lease_path), string_from_pointer(result_root),
-                                                            S8("1"), S8("2"), &transferred, NULL);
+                                                            S8("1"), S8("2"), BQ_RECIPE_VALIDATE_BUSTER,
+                                                            &transferred, NULL, received_preparation);
         u8 state = received == BQ_OK ? 1 : 0;
         ssize_t written = write(ready_pipe[1], &state, sizeof(state));
         char hold = 0;
@@ -2372,7 +2402,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_cleanup_failure(u32 mode)
         bq_worker_test_handoff_fsync_failure = mode == 1;
         bq_worker_test_handoff_listener_close_failure = mode == 2;
         bq_worker_test_handoff_parent_close_failure = mode == 3;
-        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2, NULL);
+        BqError sent = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, 1, 2, "", NULL);
         bq_worker_test_handoff_unlink_failure = false;
         bq_worker_test_handoff_fsync_failure = false;
         bq_worker_test_handoff_listener_close_failure = false;
@@ -4617,10 +4647,12 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #ifdef __linux__
     bq_test_transport_boundaries();
     bq_test_worker_deadlines();
-    bq_test_worker_lease_handoff();
+    bq_test_worker_lease_handoff(false);
+    bq_test_worker_lease_handoff(true);
     bq_test_worker_lease_handoff_negative(0);
     bq_test_worker_lease_handoff_negative(1);
     bq_test_worker_lease_handoff_negative(2);
+    bq_test_worker_lease_handoff_negative(3);
     bq_test_worker_lease_handoff_cleanup_failure(0);
     bq_test_worker_lease_handoff_cleanup_failure(1);
     bq_test_worker_lease_handoff_cleanup_failure(2);

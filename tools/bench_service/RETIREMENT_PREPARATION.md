@@ -65,8 +65,16 @@ request. It records each materialized copy's same-job inode closure in addition
 to its portable manifest identity, so a byte-equal replacement fails on
 readback. A missing, failed, changed or stale record, or a modified source copy,
 prevents launch. The returned service-owned record digest is an A handoff
-identity; matched build manifests and the authenticated B importer are still
-required before timing can become available.
+identity. The supervisor requires its lowercase 64-byte value for the
+retirement recipe and carries it in the V2 authenticated lease response. The
+unit validates the recipe and echoes the digest in the acknowledgement before
+the supervisor releases the lease. Smoke requires an empty value and retains
+its six-argument build-driver interface. On eventual retirement admission the
+fixed private build command receives the digest after the result root, before
+the phase descriptor. The build-side B importer still must independently bind
+that identity to the verified source inputs and matched build manifests before
+timing can become available; a digest relayed through the lease is not itself
+build provenance.
 
 The closure walk opens a new directory description from each held root, so
 repeated verification does not consume the caller's directory cursor. The

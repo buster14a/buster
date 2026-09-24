@@ -23,7 +23,7 @@
 #define BQ_WORKER_POLL_MILLISECONDS 100u
 #define BQ_WORKER_LEASE_HANDOFF_NAME ".lease-handoff"
 #define BQ_WORKER_LEASE_HANDOFF_MILLISECONDS 5000u
-#define BQ_WORKER_LEASE_MAGIC "BQ-LEASE-HANDOFF-V1"
+#define BQ_WORKER_LEASE_MAGIC "BQ-LEASE-HANDOFF-V2"
 
 typedef struct BqSystemdContext
 {
@@ -114,6 +114,7 @@ struct BqWorkerLeaseMessage
 {
     char magic[32];
     char lease_path[BQ_PATH_CAP + 1];
+    char preparation_sha256[SHA256_HEX_CAPACITY];
     u64 job_id;
     u64 attempt_token;
     u64 device;
@@ -358,16 +359,39 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_lease_socket_path(char const* result_root,
     return ok;
 }
 
+/* A successful #1018 record has one exact lowercase digest. The smoke
+ * recipe has no preparation record and must use the empty identity. */
+BUSTER_GLOBAL_LOCAL bool bq_worker_preparation_digest_valid(char const* digest)
+{
+    size_t length = digest ? strnlen(digest, SHA256_HEX_CAPACITY) : SHA256_HEX_CAPACITY;
+    bool ok = length == 0 || length == SHA256_HEX_CAPACITY - 1;
+    for (size_t index = 0; ok && index < length; index += 1)
+        ok = (digest[index] >= '0' && digest[index] <= '9') ||
+             (digest[index] >= 'a' && digest[index] <= 'f');
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_worker_preparation_matches_recipe(BqRecipe recipe, char const* digest)
+{
+    bool ok = bq_worker_preparation_digest_valid(digest) &&
+              ((recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED && digest[0] != 0) ||
+               (recipe == BQ_RECIPE_VALIDATE_BUSTER && digest[0] == 0));
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_worker_lease_message_make(BqWorkerLeaseMessage* message, u32 phase,
                                                         char const* lease_path, u64 job_id,
-                                                        u64 attempt_token, u64 device, u64 inode)
+                                                        u64 attempt_token, u64 device, u64 inode,
+                                                        char const* preparation_sha256)
 {
     *message = (BqWorkerLeaseMessage){0};
     int length = lease_path ? snprintf(message->lease_path, sizeof(message->lease_path), "%s", lease_path) : -1;
-    bool ok = length > 0 && (u32)length < sizeof(message->lease_path);
+    bool ok = length > 0 && (u32)length < sizeof(message->lease_path) &&
+              bq_worker_preparation_digest_valid(preparation_sha256);
     if (ok)
     {
         memcpy(message->magic, BQ_WORKER_LEASE_MAGIC, sizeof(BQ_WORKER_LEASE_MAGIC));
+        memcpy(message->preparation_sha256, preparation_sha256, strlen(preparation_sha256));
         message->job_id = job_id;
         message->attempt_token = attempt_token;
         message->device = device;
@@ -379,12 +403,18 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_lease_message_make(BqWorkerLeaseMessage* mess
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_lease_message_matches(BqWorkerLeaseMessage const* message, u32 phase,
                                                            char const* lease_path, u64 job_id,
-                                                           u64 attempt_token, u64 device, u64 inode)
+                                                           u64 attempt_token, u64 device, u64 inode,
+                                                           char const* preparation_sha256)
 {
+    char expected[SHA256_HEX_CAPACITY] = {0};
+    if (bq_worker_preparation_digest_valid(preparation_sha256))
+        memcpy(expected, preparation_sha256, strlen(preparation_sha256));
     bool ok = message && !memcmp(message->magic, BQ_WORKER_LEASE_MAGIC, sizeof(BQ_WORKER_LEASE_MAGIC)) &&
               message->phase == phase && message->job_id == job_id && message->attempt_token == attempt_token &&
               message->device == device && message->inode == inode && lease_path &&
-              !strcmp(message->lease_path, lease_path);
+              preparation_sha256 && bq_worker_preparation_digest_valid(preparation_sha256) &&
+              !strcmp(message->lease_path, lease_path) &&
+              !memcmp(message->preparation_sha256, expected, sizeof(expected));
     return ok;
 }
 
@@ -527,13 +557,14 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_lease_handoff_poll(int descriptor, short even
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* handoff, int lease_fd,
                                                           char const* lease_path, u64 job_id,
-                                                          u64 attempt_token, int* phase_descriptor)
+                                                          u64 attempt_token, char const* preparation_sha256,
+                                                          int* phase_descriptor)
 {
     if (phase_descriptor) *phase_descriptor = -1;
-    BqError error = BQ_IO;
+    BqError error = bq_worker_preparation_digest_valid(preparation_sha256) ? BQ_IO : BQ_BAD_REQUEST;
     u64 deadline = bq_worker_deadline(bq_worker_monotonic_milliseconds(), BQ_WORKER_LEASE_HANDOFF_MILLISECONDS);
     bool transferred = false;
-    while (!transferred && bq_worker_monotonic_milliseconds() < deadline)
+    while (error == BQ_IO && !transferred && bq_worker_monotonic_milliseconds() < deadline)
     {
         int client = -1;
         if (bq_worker_lease_handoff_poll(handoff->listener, POLLIN, deadline))
@@ -557,7 +588,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* h
             struct stat lease_info = {0};
             bool request_ok = received == (ssize_t)sizeof(request) &&
                               bq_worker_lease_message_matches(&request, BQ_WORKER_LEASE_REQUEST, lease_path,
-                                                               job_id, attempt_token, 0, 0) &&
+                                                               job_id, attempt_token, 0, 0, "") &&
                               fstat(lease_fd, &lease_info) == 0 && S_ISREG(lease_info.st_mode) &&
                               lease_info.st_nlink == 1 && lease_info.st_uid == geteuid() &&
                               (lease_info.st_mode & 077) == 0;
@@ -565,7 +596,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* h
             {
                 BqWorkerLeaseMessage response;
                 request_ok = bq_worker_lease_message_make(&response, BQ_WORKER_LEASE_RESPONSE, lease_path, job_id,
-                                                           attempt_token, (u64)lease_info.st_dev, (u64)lease_info.st_ino);
+                                                           attempt_token, (u64)lease_info.st_dev, (u64)lease_info.st_ino,
+                                                           preparation_sha256);
                 char control[CMSG_SPACE(sizeof(lease_fd))] = {0};
                 struct iovec vector = {&response, sizeof(response)};
                 struct msghdr message = {0};
@@ -592,7 +624,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* h
                 request_ok = received == (ssize_t)sizeof(acknowledgement) &&
                              bq_worker_lease_message_matches(&acknowledgement, BQ_WORKER_LEASE_ACK, lease_path,
                                                               job_id, attempt_token, (u64)lease_info.st_dev,
-                                                              (u64)lease_info.st_ino);
+                                                              (u64)lease_info.st_ino, preparation_sha256);
             }
             transferred = request_ok;
             if (transferred && phase_descriptor) *phase_descriptor = client;
@@ -606,13 +638,17 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_send(BqWorkerLeaseHandoff* h
 
 BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, String8 result_root,
                                                               String8 job_id_text, String8 attempt_token_text,
-                                                              BqWorkerLease* lease, int* phase_descriptor)
+                                                              BqRecipe recipe, BqWorkerLease* lease,
+                                                              int* phase_descriptor,
+                                                              char preparation_sha256[SHA256_HEX_CAPACITY])
 {
     if (phase_descriptor) *phase_descriptor = -1;
+    if (preparation_sha256) preparation_sha256[0] = 0;
     char lease_path[BQ_PATH_CAP + 1], result_path[BQ_PATH_CAP + 1], socket_path[BQ_PATH_CAP + 1];
     IntegerParsingU64 job_value = string8_parse_u64_decimal(job_id_text);
     IntegerParsingU64 token_value = string8_parse_u64_decimal(attempt_token_text);
     bool valid = bq_worker_text(lease_file, lease_path, sizeof(lease_path)) && lease_path[0] == '/' &&
+                 preparation_sha256 &&
                  bq_worker_text(result_root, result_path, sizeof(result_path)) && result_path[0] == '/' &&
                  bq_worker_lease_socket_path(result_path, socket_path) &&
                  job_value.status == INTEGER_PARSING_SUCCESS && job_value.length == job_id_text.length && job_value.value != 0 &&
@@ -661,7 +697,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, 
     {
         BqWorkerLeaseMessage request;
         bool made = bq_worker_lease_message_make(&request, BQ_WORKER_LEASE_REQUEST, lease_path,
-                                                  job_value.value, token_value.value, 0, 0);
+                                                  job_value.value, token_value.value, 0, 0, "");
         ssize_t sent = made ? send(client, &request, sizeof(request), MSG_NOSIGNAL) : -1;
         error = sent == (ssize_t)sizeof(request) && bq_worker_lease_handoff_poll(client, POLLIN, deadline) ? BQ_OK : BQ_IO;
     }
@@ -679,9 +715,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, 
         message.msg_controllen = sizeof(control);
         ssize_t received = recvmsg(client, &message, MSG_CMSG_CLOEXEC);
         bool response_ok = received == (ssize_t)sizeof(response) && !(message.msg_flags & MSG_CTRUNC) &&
+                           bq_worker_preparation_matches_recipe(recipe, response.preparation_sha256) &&
                            bq_worker_lease_message_matches(&response, BQ_WORKER_LEASE_RESPONSE, lease_path,
                                                            job_value.value, token_value.value, response.device,
-                                                           response.inode);
+                                                           response.inode, response.preparation_sha256);
         for (struct cmsghdr* header = response_ok ? CMSG_FIRSTHDR(&message) : NULL; header;
              header = CMSG_NXTHDR(&message, header))
         {
@@ -701,7 +738,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, 
             BqWorkerLeaseMessage acknowledgement;
             response_ok = bq_worker_lease_message_make(&acknowledgement, BQ_WORKER_LEASE_ACK, lease_path,
                                                         job_value.value, token_value.value, response.device,
-                                                        response.inode) &&
+                                                        response.inode, response.preparation_sha256) &&
                           send(client, &acknowledgement, sizeof(acknowledgement), MSG_NOSIGNAL) ==
                               (ssize_t)sizeof(acknowledgement);
         }
@@ -709,6 +746,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, 
         {
             *lease = adopted;
             adopted.descriptor = -1;
+            memcpy(preparation_sha256, response.preparation_sha256, SHA256_HEX_CAPACITY);
             error = BQ_OK;
         }
         else
@@ -3825,18 +3863,21 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering) error = bq_materialize(queue, config->installed_root, config->workspace_root, id, &token);
     if (!recovering) job = error == BQ_OK ? bq_job(&queue->state, *id) : NULL;
     if (error == BQ_OK && !recovering && job) error = bq_worker_result_open(config, job, &finalization, true);
+    char preparation_sha256[SHA256_HEX_CAPACITY] = {0};
     if (error == BQ_OK && !recovering && job &&
         string_equal(bq_field(&job->request, 2), S8("native-retirement-performance-v1")))
     {
         int installed = bq_open_absolute_directory(config->installed_root);
         int workspaces = bq_open_absolute_directory(config->workspace_root);
-        char preparation_sha256[SHA256_HEX_CAPACITY];
         error = installed >= 0 && workspaces >= 0 ?
                 bq_retirement_preparation_ready(queue, job, installed, workspaces, preparation_sha256) :
                 BQ_CONFIGURATION_MISMATCH;
         if (installed >= 0 && close(installed) != 0 && error == BQ_OK) error = BQ_CONFIGURATION_MISMATCH;
         if (workspaces >= 0 && close(workspaces) != 0 && error == BQ_OK) error = BQ_CONFIGURATION_MISMATCH;
     }
+    if (error == BQ_OK && !recovering && job &&
+        !bq_worker_preparation_matches_recipe(bq_request_recipe(&job->request), preparation_sha256))
+        error = BQ_CONFIGURATION_MISMATCH;
     char unit[BQ_WORKER_UNIT_CAP];
     if (error == BQ_OK && !recovering && (!job || !bq_worker_unit_name(unit, job->id, job->token))) error = BQ_WORKER_MISMATCH;
     if (error == BQ_OK && !recovering) error = bq_worker_record_write(queue, job, current_boot, unit);
@@ -3945,7 +3986,7 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
     if (error == BQ_OK && !recovering && handoff.listener >= 0)
     {
         error = bq_worker_lease_handoff_send(&handoff, lease.descriptor, lease_path, job->id, job->token,
-                                              &phase_descriptor);
+                                              preparation_sha256, &phase_descriptor);
         finalization.phases_required = true;
         if (error == BQ_OK && !bq_phase_init(&phases, phase_descriptor, job->id, job->token)) error = BQ_IO;
         if (error == BQ_OK) bq_worker_lease_release(&lease);
@@ -4138,6 +4179,7 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
     BqRecipeFiles files = {0};
     BqWorkerLease lease = {.descriptor = -1};
     int phase_descriptor = -1;
+    char preparation_sha256[SHA256_HEX_CAPACITY] = {0};
     BqError error = !bq_worker_text(lease_file, path, sizeof(path)) || path[0] != '/' ||
                     !bq_worker_text(job_id, job_id_text, sizeof(job_id_text)) || !bq_worker_text(attempt_token, attempt_token_text, sizeof(attempt_token_text)) ||
                     !bq_worker_text(recipe_name, recipe_text, sizeof(recipe_text)) ||
@@ -4147,7 +4189,8 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
                     !bq_worker_text(base_revision, base_text, sizeof(base_text)) || !bq_worker_text(candidate_revision, candidate_text, sizeof(candidate_text)) ||
                     !bq_worker_text(result_root, result_text, sizeof(result_text)) || result_text[0] != '/' ? BQ_BAD_REQUEST : BQ_OK;
     if (error == BQ_OK && bq_worker_lease_handoff_receive(lease_file, result_root, job_id, attempt_token,
-                                                         &lease, &phase_descriptor) != BQ_OK)
+                                                         recipe, &lease, &phase_descriptor,
+                                                         preparation_sha256) != BQ_OK)
         error = BQ_CONFIGURATION_MISMATCH;
     if (error == BQ_OK)
     {
@@ -4168,7 +4211,12 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
         char phase_text[32];
         snprintf(phase_text, sizeof(phase_text), "%d", phase_descriptor);
         char const* arguments[] = {BQ_RECIPE_EXECUTABLE, files.command, job_id_text, attempt_token_text,
-                                   workspace_text, base_text, candidate_text, result_text, phase_text, NULL};
+                                   workspace_text, base_text, candidate_text, result_text, NULL, NULL, NULL};
+        /* The private retirement build importer receives the authenticated A
+         * record identity before the phase channel. Smoke keeps its six-value
+         * build-driver interface. */
+        arguments[8] = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? preparation_sha256 : phase_text;
+        if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) arguments[9] = phase_text;
         execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
         error = BQ_CONFIGURATION_MISMATCH;
     }
