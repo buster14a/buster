@@ -109,6 +109,9 @@ jobs:
           retention-days: 7
 
   test:
+    # Queue desktop shards wait for cheap workflow lint. Ordinary runs still
+    # execute for diagnostics even when lint fails.
+    needs: lint
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -116,7 +119,7 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.lint.result == 'success') }}
     name: ${{ matrix.name }} ${{ matrix.shard }}
     timeout-minutes: 300
     strategy:
@@ -565,7 +568,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 300
     strategy:
-      fail-fast: ${{ github.event_name == 'merge_group' }}
+      fail-fast: false
       matrix:
         include:
           - name: Linux x86-64 native

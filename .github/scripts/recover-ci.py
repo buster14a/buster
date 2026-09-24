@@ -2,8 +2,8 @@
 """Control CI recovery and merge-queue fail-fast without running candidate code.
 
 recover() owns eligibility and the single PR rerun request. watch() observes
-one merge-group Buster CI run and cancels exact-head merge-group runs after the
-first failed job. Only the trusted default-branch workflow executes mutations.
+the live required checks for one merge group, plus Buster CI jobs before its
+aggregate finishes. Only the trusted default-branch workflow mutates runs.
 """
 
 import json
@@ -20,8 +20,20 @@ MAX_ATTEMPTS = 2
 MAX_PAGES = 10
 WORKFLOW_PATH = ".github/workflows/ci.yml"
 OPT_OUT_LABEL = "ci-no-retry"
-WATCH_PROBES = 1200
-WATCH_SECONDS = 15
+WATCH_PROBES = 600
+WATCH_SECONDS = 30
+RULESET_ID = 22537199
+GITHUB_ACTIONS_APP_ID = 15368
+REQUIRED_WORKFLOW_PATHS = {
+    "CI complete": "ci.yml",
+    "Linux x86-64 bootstrap evidence": "self-host-audit.yml",
+    "Canonical TCC bootstrap": "tcc-bootstrap.yml",
+    "GPU Linux consumers": "gpu-toolchains.yml",
+    "Benchmark service workflow policy": "bench-service-policy.yml",
+    "API migration policy": "api-migration-policy.yml",
+    "Native retirement merge admission": "api-migration-policy.yml",
+    "Main integration admission": "merge-queue-admission.yml",
+}
 ACTIVE_RUN_STATUSES = frozenset(("queued", "pending", "waiting", "requested", "in_progress"))
 
 
@@ -141,12 +153,67 @@ def recover(api, event):
 def check_watch_run(run, event_run, repository):
     if (run.get("id") != event_run.get("id") or
             run.get("head_sha") != event_run.get("head_sha") or
+            run.get("head_branch") != event_run.get("head_branch") or
+            not str(run.get("head_branch", "")).startswith("gh-readonly-queue/main/") or
             run.get("workflow_id") != event_run.get("workflow_id") or
             run.get("head_repository", {}).get("full_name") != repository.get("full_name") or
             run.get("path") != WORKFLOW_PATH or
             run.get("event") != "merge_group" or
             run.get("run_attempt") != event_run.get("run_attempt")):
         raise SkipRecovery("Merge-group watch identity changed; refusing cancellation.")
+
+
+def required_checks(api, repository):
+    ruleset = api.request("rulesets/" + str(RULESET_ID))
+    if (ruleset.get("id") != RULESET_ID or ruleset.get("enforcement") != "active" or
+            ruleset.get("source_type") != "Repository" or
+            ruleset.get("source") != repository.get("full_name") or
+            ruleset.get("conditions", {}).get("ref_name", {}).get("include") != ["refs/heads/main"] or
+            not any(rule.get("type") == "merge_queue" for rule in ruleset.get("rules", []))):
+        raise ValueError("Main merge-queue ruleset is not active.")
+    rules = [rule for rule in ruleset.get("rules", []) if rule.get("type") == "required_status_checks"]
+    if len(rules) != 1:
+        raise ValueError("Expected one required-check rule.")
+    rows = rules[0].get("parameters", {}).get("required_status_checks", [])
+    names = [row.get("context") for row in rows]
+    if (len(names) != len(set(names)) or set(names) != set(REQUIRED_WORKFLOW_PATHS) or
+            any(row.get("integration_id") != GITHUB_ACTIONS_APP_ID for row in rows)):
+        raise ValueError("Required GitHub Actions check inventory changed.")
+    return frozenset(names)
+
+
+def latest_group_runs(api, head_sha):
+    rows = api.all("actions/runs", "workflow_runs", event="merge_group", head_sha=head_sha)
+    selected = {}
+    for run in rows:
+        if run.get("head_sha") != head_sha or run.get("event") != "merge_group":
+            raise ValueError("Merge-group run query returned a mismatched source.")
+        path = run.get("path")
+        if not isinstance(path, str) or not isinstance(run.get("check_suite_id"), int):
+            raise ValueError("Merge-group run is missing its workflow or check suite identity.")
+        old = selected.get(path)
+        if old is None or (run["id"], run["run_attempt"]) > (old["id"], old["run_attempt"]):
+            selected[path] = run
+    return selected
+
+
+def required_check_results(api, head_sha, runs, names):
+    rows = api.all("commits/" + head_sha + "/check-runs", "check_runs", filter="all")
+    selected = {}
+    for check in rows:
+        name = check.get("name")
+        if name not in names:
+            continue
+        required_run = runs.get(".github/workflows/" + REQUIRED_WORKFLOW_PATHS[name])
+        if (check.get("head_sha") != head_sha or
+                check.get("app", {}).get("id") != GITHUB_ACTIONS_APP_ID or
+                required_run is None or
+                check.get("check_suite", {}).get("id") != required_run["check_suite_id"]):
+            continue
+        old = selected.get(name)
+        if old is None or check["id"] > old["id"]:
+            selected[name] = check
+    return selected
 
 
 def cancel_merge_group_runs(api, head_sha):
@@ -167,9 +234,13 @@ def watch(api, event, sleep_fn=time.sleep, max_probes=WATCH_PROBES):
         raise SkipRecovery("Watcher accepts only the in-progress workflow_run delivery.")
     if original.get("event") != "merge_group":
         raise SkipRecovery("Watcher accepts only merge-group Buster CI runs.")
+    names = required_checks(api, repository)
     run_path = "actions/runs/" + str(original["id"])
     for probe in range(max_probes):
-        run = api.request(run_path)
+        runs = latest_group_runs(api, original["head_sha"])
+        run = runs.get(WORKFLOW_PATH)
+        if run is None or run.get("id") != original["id"]:
+            raise SkipRecovery("Buster CI merge-group run was superseded or disappeared.")
         check_watch_run(run, original, repository)
         jobs = api.all(run_path + "/jobs", "jobs", filter="latest")
         failed = []
@@ -183,14 +254,20 @@ def watch(api, event, sleep_fn=time.sleep, max_probes=WATCH_PROBES):
                     failed.append(job.get("name", "unnamed"))
             elif conclusion is not None:
                 raise ValueError("Incomplete CI job already has a conclusion.")
-        if failed or (run.get("status") == "completed" and run.get("conclusion") != "success"):
+        checks = required_check_results(api, run["head_sha"], runs, names)
+        bad = sorted(name for name, check in checks.items()
+                     if check.get("status") == "completed" and check.get("conclusion") != "success")
+        if failed or bad or (run.get("status") == "completed" and run.get("conclusion") != "success"):
             cancelled = cancel_merge_group_runs(api, run["head_sha"])
-            reason = ", ".join(sorted(failed)) if failed else "workflow conclusion " + str(run.get("conclusion"))
+            reason = ", ".join(sorted(set(failed + bad)))
+            if not reason:
+                reason = "Buster CI conclusion " + str(run.get("conclusion"))
             return ("Merge-group fail-fast observed " + reason + "; requested cancellation of " +
                     str(len(cancelled)) + " exact-head run(s): " +
                     ", ".join(str(run_id) for run_id in cancelled))
-        if run.get("status") == "completed":
-            return "Merge-group Buster CI completed successfully; no cancellation requested."
+        if names.issubset(checks) and all(checks[name].get("status") == "completed" and
+                                         checks[name].get("conclusion") == "success" for name in names):
+            return "All required merge-group checks completed successfully; no cancellation requested."
         if probe + 1 < max_probes:
             sleep_fn(WATCH_SECONDS)
     raise TimeoutError("Merge-group fail-fast watcher exceeded its bounded polling window.")

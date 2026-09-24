@@ -61,8 +61,10 @@ The native check names append ` native` to Linux x86-64, Linux AArch64,
 macOS x86-64 and macOS AArch64. Their runner labels are unchanged from the
 corresponding combination lanes. Native and mobile jobs have no `needs`
 dependency on combinations. Pull-request, main-push and manual runs retain
-full matrix diagnostics; on `merge_group`, every Buster CI matrix enables
-fail-fast so a failed cell cancels its still-running siblings. `CI complete`
+full matrix diagnostics. On `merge_group`, desktop and mobile matrices enable
+fail-fast, while the native matrix retains `fail-fast: false` under its frozen test
+contract. The desktop shards wait for workflow lint on queue runs; the trusted
+controller cancels the other work after a completed Buster CI failure. `CI complete`
 still rejects failure, cancellation, skips and missing results and requires all
 fifteen jobs including itself, not just the six legacy desktop names.
 The separate `Linux x86-64 bootstrap evidence` check remains separate.

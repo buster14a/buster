@@ -58,14 +58,17 @@
   attempt rather than treating a copied success label as execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Buster CI keeps
-  full matrix diagnostics for pull requests, main/tag pushes and manual runs;
-  only `merge_group` enables matrix fail-fast, so the queue cancels sibling
-  cells after the first matrix failure without hiding ordinary PR diagnostics.
+  full matrix diagnostics for pull requests, main/tag pushes and manual runs.
+  On `merge_group`, desktop and mobile enable matrix fail-fast; the native
+  matrix retains `fail-fast: false` under the frozen CI test contract. The trusted
+  controller cancels exact-head merge-group runs after a failed Buster CI job
+  or required check from another workflow.
   See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
   cancellation, coverage details, and reproduction. Every job stays inert
   until its repository variable is set, and skips itself outright on Forgejo.
   For cancelled current-PR validation, see [bounded CI recovery](../ci-cancellation-recovery.md)
-  and its offline checks: `python3 tests/ci_recovery_test.py`.
+  and its offline checks: `python3 tests/ci_recovery_test.py` and
+  `python3 .github/scripts/test_merge_queue_fail_fast.py`.
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
