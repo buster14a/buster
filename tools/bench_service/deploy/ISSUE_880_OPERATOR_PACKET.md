@@ -62,11 +62,11 @@ existing queue or replace the lease inode. Record and sign off:
 
 | Receipt | Required observation |
 | --- | --- |
-| Software | Main commit/tree, exact service, build driver, harness, gateway/export and helper SHA-256; bootstrap and dependency identities; installed recipes/profiles and blocked retirement descriptor |
+| Software | Main commit/tree, exact service, build driver, harness, gateway/export, systemd broker and helper SHA-256; bootstrap and dependency identities; installed recipes/profiles and blocked retirement descriptor |
 | Sources | Immutable reviewed commit-to-tree-to-manifest mapping; full closure, sorted inventory, file counts/bytes/hashes; source manifest over 4 KiB for the normal attempt |
 | Principals | Numeric service, candidate, runner and operator UID/GID/supplementary groups; runner can invoke only the fixed installed gateway, candidate cannot mutate queue, lease, policy or results |
 | State | Canonical queue/workspace/result/source/runtime paths, symlink/hard-link checks and permissions, filesystem identity and space; stable lease device/inode observed before and after each attempt |
-| Supervisor | Host/boot/kernel/microcode, systemd version, exact service/unit files, fixed system-bus authority, cgroup v2 ancestry and effective CPU/memory/swap/tasks/runtime; real UID/GID and process absence |
+| Supervisor | Host/boot/kernel/microcode, systemd version, exact service/broker/socket/unit files, root-owned stable-lease identity, fixed system-bus authority, cgroup v2 ancestry and effective CPU/memory/swap/tasks/runtime; real UID/GID and process absence |
 | Exclusivity | Drained GitHub and Forgejo jobs, timers, cron, agents, profilers, backups, indexers and manual work from preparation through cleanup; recorded negative audit and no unresolved queue job |
 
 Reject broad `manage-units`, wildcard executable authorization, service
@@ -74,7 +74,9 @@ identity for the runner, candidate-selected source/policy, or arbitrary
 shell access. Test the installed verifier after a fresh boot, with the service
 stopped and host quiet. Preserve the exact read-only commands and their
 output, without secrets. The operator must approve a narrow systemd/polkit
-configuration for this host; this repository does not install one.
+configuration for this host. The reviewed candidate broker and exact operator
+checks are in [SYSTEMD_BROKER.md](SYSTEMD_BROKER.md); these references do not
+install or approve it.
 
 ## 3. Protected execution, once both receipts pass
 
