@@ -64,8 +64,7 @@ dependency on combinations. Pull-request, main-push and manual runs retain
 full matrix diagnostics; on `merge_group`, every Buster CI matrix enables
 fail-fast so a failed cell cancels its still-running siblings. `CI complete`
 still rejects failure, cancellation, skips and missing results and requires all
-fifteen jobs including itself, not just the six
-legacy desktop names. Failure, cancellation, skips and missing results fail.
+fifteen jobs including itself, not just the six legacy desktop names.
 The separate `Linux x86-64 bootstrap evidence` check remains separate.
 
 No compiler/configuration row, fixture, allocator, optimization setting,
