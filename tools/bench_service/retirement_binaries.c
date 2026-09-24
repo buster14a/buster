@@ -35,8 +35,15 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_frozen_binary_open(int directory, char co
 {
     *held = -1;
     int file = openat(directory, name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    bool raised = true;
+    if (file >= 0 && file < 3)
+    {
+        int higher = fcntl(file, F_DUPFD_CLOEXEC, 3);
+        raised = close(file) == 0;
+        file = higher;
+    }
     struct stat named = {0}, first = {0}, last = {0}, after = {0};
-    bool ok = file >= 0 && fstatat(directory, name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+    bool ok = raised && file >= 3 && fstatat(directory, name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
               fstat(file, &first) == 0 && S_ISREG(first.st_mode) && first.st_nlink == 1 &&
               first.st_uid == geteuid() && (first.st_mode & 0222) == 0 &&
               (first.st_mode & S_IXUSR) != 0 && first.st_size > 0 &&
@@ -231,7 +238,7 @@ void bq_retirement_binaries_release(BqRetirementHeldBinaries* held)
 {
     if (held)
     {
-        for (u32 side = 0; side < 2; side += 1)
+        for (u32 side = 0; held->owned == 1 && side < 2; side += 1)
         {
             if (held->descriptors[side] >= 0) close(held->descriptors[side]);
         }
@@ -243,8 +250,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_acquire_pinned(BqQueue* queue
     int installed, int workspaces, String8 profile, char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const record_sha256[SHA256_HEX_CAPACITY], BqRetirementHeldBinaries* held)
 {
-    BqError result = held ? BQ_OK : BQ_RECIPE_MISMATCH;
-    if (held) *held = (BqRetirementHeldBinaries){.descriptors = {-1, -1}};
+    BqError result = held && !held->owned ? BQ_OK : BQ_RECIPE_MISMATCH;
+    bool started = result == BQ_OK;
+    if (started)
+    {
+        *held = (BqRetirementHeldBinaries){.descriptors = {-1, -1}};
+        held->owned = 1;
+    }
     BqRetirementBinaries verified = {0};
     if (result == BQ_OK)
         result = bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, profile,
@@ -285,7 +297,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_acquire_pinned(BqQueue* queue
         if (result == BQ_OK && !same) result = BQ_SOURCE_MISMATCH;
     }
     if (result == BQ_OK) held->verified = verified;
-    else if (held) bq_retirement_binaries_release(held);
+    else if (started) bq_retirement_binaries_release(held);
     return result;
 }
 

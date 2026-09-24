@@ -299,12 +299,42 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
     if (record >= 0) close(record);
     BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &imported) == BQ_OK);
+    pid_t child = fork();
+    if (child == 0)
+    {
+        (void)close(STDIN_FILENO);
+        char bytes[SHA256_HEX_CAPACITY] = {0}, identity[SHA256_HEX_CAPACITY] = {0};
+        int pinned_binary = -1;
+        bool ready = bq_retirement_frozen_binary_open(directory, "base-ide", bytes, identity,
+                                                       &pinned_binary) && pinned_binary >= 3 &&
+                     !strcmp(bytes, imported.binary_sha256[0]) &&
+                     (fcntl(pinned_binary, F_GETFD) & FD_CLOEXEC) != 0;
+        if (pinned_binary >= 0) close(pinned_binary);
+        _exit(ready ? 0 : 1);
+    }
+    int child_status = 0;
+    BQ_PREP_CHECK(child > 0 && waitpid(child, &child_status, 0) == child &&
+                  WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    int witnesses[2] = {-1, -1};
+    BQ_PREP_CHECK(pipe(witnesses) == 0);
+    BqRetirementHeldBinaries empty = {0};
+    empty.descriptors[0] = witnesses[0];
+    empty.descriptors[1] = witnesses[1];
+    bq_retirement_binaries_release(&empty);
+    BQ_PREP_CHECK(empty.descriptors[0] == -1 && empty.descriptors[1] == -1 &&
+                  fcntl(witnesses[0], F_GETFD) >= 0 && fcntl(witnesses[1], F_GETFD) >= 0);
+    if (witnesses[0] >= 0) close(witnesses[0]);
+    if (witnesses[1] >= 0) close(witnesses[1]);
     BqRetirementHeldBinaries held = {.descriptors = {-1, -1}};
     BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &held) == BQ_OK &&
-                  held.descriptors[0] >= 0 && held.descriptors[1] >= 0 &&
+                  held.owned == 1 && held.descriptors[0] >= 3 && held.descriptors[1] >= 3 &&
                   !strcmp(held.verified.binary_sha256[0], imported.binary_sha256[0]) &&
                   (fcntl(held.descriptors[0], F_GETFD) & FD_CLOEXEC) != 0);
+    int live_descriptor = held.descriptors[0];
+    BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &held) == BQ_RECIPE_MISMATCH &&
+                  held.descriptors[0] == live_descriptor && fcntl(live_descriptor, F_GETFD) >= 0);
     struct stat pinned_info = {0}, after_swap = {0};
     BQ_PREP_CHECK(held.descriptors[0] >= 0 && fstat(held.descriptors[0], &pinned_info) == 0 &&
                   directory >= 0 && fchmod(directory, 0700) == 0 &&
@@ -321,7 +351,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
     BqRetirementHeldBinaries refused = {.descriptors = {-1, -1}};
     BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &refused) == BQ_CORRUPT &&
-                  refused.descriptors[0] == -1 && refused.descriptors[1] == -1 &&
+                  refused.owned == 0 && refused.descriptors[0] == -1 && refused.descriptors[1] == -1 &&
                   !refused.verified.preparation_sha256[0]);
     BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
                   unlinkat(directory, "base-ide", 0) == 0 &&
@@ -329,7 +359,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
                   fchmod(directory, 0500) == 0);
     int old_descriptor = held.descriptors[0];
     bq_retirement_binaries_release(&held);
-    BQ_PREP_CHECK(held.descriptors[0] == -1 && held.descriptors[1] == -1 &&
+    BQ_PREP_CHECK(held.owned == 0 && held.descriptors[0] == -1 && held.descriptors[1] == -1 &&
                   !held.verified.preparation_sha256[0] &&
                   fcntl(old_descriptor, F_GETFD) == -1 && errno == EBADF);
     BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
