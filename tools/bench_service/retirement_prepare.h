@@ -37,5 +37,12 @@ BUSTER_F_DECL bool bq_retirement_preparation_record(BqQueue* queue, BqJob const*
 BUSTER_F_DECL BqError bq_retirement_preparation_ready(BqQueue* queue, BqJob const* job,
                                                      int installed, int workspaces,
                                                      char record_sha256[SHA256_HEX_CAPACITY]);
+/* The service-side correctness/build importer supplies the digest received by
+ * the authenticated worker handoff. Facts are returned only after rereading
+ * the durable record, the installed inventory and both materialized trees. */
+BUSTER_F_DECL BqError bq_retirement_preparation_import(BqQueue* queue, BqJob const* job,
+                                                      int installed, int workspaces,
+                                                      char const record_sha256[SHA256_HEX_CAPACITY],
+                                                      BqRetirementPreparation* verified);
 
 #endif
