@@ -36,7 +36,7 @@ CHECKS = {
 QUEUE = {
     "check_response_timeout_minutes": 360,
     "grouping_strategy": "ALLGREEN",
-    "max_entries_to_build": 1,
+    "max_entries_to_build": 20,
     "max_entries_to_merge": 1,
     "merge_method": "MERGE",
     "min_entries_to_merge": 1,
@@ -167,8 +167,17 @@ def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
     require(isinstance(rules, list), "rules must be a list")
     by_type = {rule["type"]: rule for rule in rules}
     require(len(by_type) == len(rules), "duplicate rule types")
-    require(by_type.get("merge_queue", {}).get("parameters") == QUEUE,
-            "queue must serialize builds and merges with ALLGREEN and MERGE")
+    queue = by_type.get("merge_queue", {}).get("parameters")
+    if queue != QUEUE:
+        if isinstance(queue, dict):
+            differences = [f"{key}: expected {QUEUE.get(key, '<absent>')!r}, "
+                           f"got {queue.get(key, '<absent>')!r}"
+                           for key in sorted(QUEUE.keys() | queue.keys())
+                           if key not in QUEUE or key not in queue or QUEUE[key] != queue[key]]
+            detail = "; ".join(differences)
+        else:
+            detail = f"expected {QUEUE!r}, got {queue!r}"
+        raise AdmissionError("queue parameters differ from repository contract: " + detail)
     checks = by_type.get("required_status_checks", {}).get("parameters", {})
     require(checks.get("strict_required_status_checks_policy") is False,
             "do not require feature-branch updates")
