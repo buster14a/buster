@@ -20845,6 +20845,76 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_transparent_union_abi(UnitTestArgument
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_post_tag_declaration_specifiers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = S8(
+        "struct S { int value; };\n"
+        "struct S static gs;\n"
+        "union U { int value; };\n"
+        "union U extern gu;\n"
+        "enum E { E_VALUE = 7 };\n"
+        "enum E typedef EA;\n"
+        "EA alias_value;\n"
+        "enum E inline post_tag_inline(void) { return E_VALUE; }\n"
+        "struct S static _Thread_local tls;\n"
+        "struct S _Noreturn post_tag_noreturn(void);\n"
+        "int post_tag_block(void) { struct S static local; return local.value; }\n"
+        "int take(void) { return gs.value + gu.value + alias_value + post_tag_inline() + tls.value + post_tag_block(); }\n");
+    CPreprocessResult tokens = {0};
+    CParseResult parse = {0};
+    CIRLowerResult lowered = c_test_lower_source(temporary.arena, source, S8("post-tag-declaration-specifiers.c"), target_native, &tokens, &parse);
+    BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0 && lowered.diagnostic_count == 0, source);
+
+    struct
+    {
+        String8 name;
+        CEntityKind kind;
+        bool is_static_storage;
+        bool is_thread_local;
+        bool check_definition;
+        bool is_definition;
+    } expected[] = {
+        {S8("gs"), C_ENTITY_OBJECT, true, false, false, false},
+        {S8("gu"), C_ENTITY_OBJECT, false, false, true, false},
+        {S8("EA"), C_ENTITY_TYPEDEF, false, false, false, false},
+        {S8("alias_value"), C_ENTITY_OBJECT, false, false, false, false},
+        {S8("post_tag_inline"), C_ENTITY_FUNCTION, false, false, true, true},
+        {S8("tls"), C_ENTITY_OBJECT, true, true, false, false},
+        {S8("post_tag_noreturn"), C_ENTITY_FUNCTION, false, false, true, false},
+        {S8("post_tag_block"), C_ENTITY_FUNCTION, false, false, true, true},
+        {S8("take"), C_ENTITY_FUNCTION, false, false, true, true},
+        {S8("local"), C_ENTITY_LOCAL, true, false, false, false},
+    };
+    for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
+    {
+        CEntity* entity = 0;
+        for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+        {
+            if (string_equal(parse.entities[entity_index].name, expected[expected_index].name))
+            {
+                entity = &parse.entities[entity_index];
+                break;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, entity != 0, expected[expected_index].name);
+        if (!entity)
+        {
+            continue;
+        }
+        BUSTER_TEST_RAW(arguments, entity->kind == expected[expected_index].kind, expected[expected_index].name);
+        BUSTER_TEST_RAW(arguments, entity->is_static_storage == expected[expected_index].is_static_storage, expected[expected_index].name);
+        BUSTER_TEST_RAW(arguments, entity->is_thread_local == expected[expected_index].is_thread_local, expected[expected_index].name);
+        if (expected[expected_index].check_definition)
+        {
+            BUSTER_TEST_RAW(arguments, entity->is_definition == expected[expected_index].is_definition, expected[expected_index].name);
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -20950,6 +21020,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_spelling_consistency);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_trailing_token_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
+    BUSTER_TEST_FIXTURE(arguments, c_test_post_tag_declaration_specifiers);
     BUSTER_TEST_FIXTURE(arguments, c_test_same_scope_tag_redefinition_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_constant_entity_lookup);
 
