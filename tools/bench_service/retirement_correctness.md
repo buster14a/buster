@@ -5,6 +5,22 @@
 does not change the blocked recipe descriptor. The importer and the production
 caller have not yet been wired to this child branch.
 
+`retirement_correctness_service.{h,c}` provides the private service entry
+point for the first A→B join. It imports the same-attempt preparation and
+binary record using service-held installed/workspace descriptors and the
+authenticated record digests, opens both verified frozen binaries, checks
+the independently supplied B declaration's preparation, source and binary
+digests against that readback, and checks its support declaration against the
+compiled profile pin. Only then does it call `bq_retirement_correctness_begin`.
+Failure poisons a fresh gate and releases any descriptors acquired by this
+call; an already live holder is left alone. A successful holder stays open
+through all correctness work and subsequent dependent launches and must be
+released by the caller. The #923 integrator must compile this private module
+after the A and B implementations and call the public entry point from the
+actual service producer. The current dedicated fixture uses the real A
+materializer/readback with a one-row synthetic B declaration; it does not
+provide a trusted build, full population, oracle receipt or timed invocation.
+
 ## Trusted inputs
 
 The service must first verify the complete #1018 preparation and independently
