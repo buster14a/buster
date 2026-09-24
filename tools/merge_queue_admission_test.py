@@ -359,10 +359,8 @@ class CombinedTreeTests(unittest.TestCase):
             gate.git(repo, "add", ".")
             gate.git(repo, "commit", "-m", "base")
             main = gate.git(repo, "rev-parse", "HEAD")
-            (repo / ".github/workflows").mkdir(parents=True)
-            (repo / ".github/workflows/native-retirement-rebind.yml").write_text(
-                "new rebinding policy\n"
-            )
+            (repo / "tools").mkdir()
+            (repo / "tools/native_retirement_rebind.py").write_text("new rebinding policy\n")
             gate.git(repo, "add", ".")
             gate.git(repo, "commit", "-m", "predecessor changes policy")
             predecessor = gate.git(repo, "rev-parse", "HEAD")

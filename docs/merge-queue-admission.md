@@ -60,8 +60,8 @@ queue and is never used as a replacement for GitHub queue enforcement.
 The read-only native-retirement rebinding workflow also waits for the exact
 predecessor to land before checking a later group's closure. It loads that
 wait policy from independently checked-out main, checks that the predecessor
-did not change admission policy, and requires the queue ref to retain the same
-group identity at admission. Its bounded 310-minute job accommodates the
+did not change admission or rebinding policy, and requires the queue ref to
+retain the same group identity at admission. Its bounded 310-minute job accommodates the
 five-hour wait.
 The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
 not a `merge_group` workflow, so the queue does not schedule it.

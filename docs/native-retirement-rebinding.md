@@ -109,8 +109,8 @@ on the synthetic SHA. Rebinding checks that existing generated pair in place;
 it does not refresh it into a different, untested group tree.
 The read-only rebinding workflow likewise waits for a later group's predecessor
 under independently checked-out main policy. It verifies the exact queue ref
-and policy identity before reconstruction. The repository job has a 310-minute
-limit for the bounded five-hour wait.
+and admission/rebinding policy identity before reconstruction. The repository
+job has a 310-minute limit for the bounded five-hour wait.
 
 The workflow has three separately permissioned jobs:
 
