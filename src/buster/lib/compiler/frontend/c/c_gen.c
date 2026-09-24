@@ -29402,6 +29402,54 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
             }
+            // A literal left operand determines whether the right operand is
+            // reached. Avoid creating and lowering a disconnected right block:
+            // its edge into the join would make a value defined only on the
+            // live path appear to be used before its definition in machine IR.
+            u32 left_start = task.start;
+            u32 left_end = operation;
+            while (left_start + 2 < left_end &&
+                   c_token_is_punctuator(&builder->preprocess.tokens[left_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                   !c_ir_group_is_statement_expression(builder, left_start, left_end) &&
+                   c_ir_matching_delimiter_cached(builder, left_start, left_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                  C_PUNCTUATOR_RIGHT_PARENTHESIS) == left_end - 1)
+            {
+                left_start += 1;
+                left_end -= 1;
+            }
+            if (left_start + 1 == left_end)
+            {
+                CToken leaf = builder->preprocess.tokens[left_start];
+                bool literal = leaf.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                               (leaf.kind == C_TOKEN_IDENTIFIER &&
+                                (string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("true")) ||
+                                 string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("false"))));
+                u64 constant = 0;
+                if (literal && c_ir_constant_condition_evaluate(builder, left_start, left_end, &constant))
+                {
+                    bool is_or = operation == logical_or;
+                    if ((constant != 0) == is_or)
+                    {
+                        IrBlockId target = is_or ? task.true_block : task.false_block;
+                        if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, frame->as.condition.source))
+                        {
+                            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        tasks[frame->as.condition.task_count++] = (CIrConditionTask){
+                            .start = operation + 1,
+                            .end = task.end,
+                            .block = task.block,
+                            .true_block = task.true_block,
+                            .false_block = task.false_block,
+                        };
+                    }
+                    continue;
+                }
+            }
             IrBlockId right = c_ir_block_create(builder);
             if (right.value == IR_ID_UNDERLYING_INVALID)
             {

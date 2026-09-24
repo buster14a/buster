@@ -340,6 +340,14 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnosticBackend compiler_driver_backend_context(Ar
         .instruction_id = code.failed_instruction.value, .opcode_id = code.failed_opcode < IR_OPCODE_COUNT ? (u32)code.failed_opcode : UINT32_MAX,
         .operation_id = UINT32_MAX,
     };
+    if (code.error == CODEGEN_ERROR_INVALID_IR && code.failed_opcode >= IR_OPCODE_COUNT)
+    {
+        result.opcode = S8("unknown");
+    }
+    if (code.failed_machine_verification.error != MACHINE_VERIFY_NONE)
+    {
+        result.reason = machine_verify_error_name(code.failed_machine_verification.error);
+    }
     if (code.failed_function.value < module->function_count)
     {
         IrFunction* function = module->functions + code.failed_function.value;

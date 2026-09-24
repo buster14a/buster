@@ -7172,6 +7172,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTe
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_constant_short_circuit_verification(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = arguments->arena;
+    String8 input = buster_test_temporary_path(arena, S8("constant-short-circuit"), S8(".c"));
+    String8 source = S8("int dead_relational(void) { return 1 || (0 > (0 || 0) || 0); }\n"
+                        "int dead_nonunit(void) { return 5 || (0 > (0 || 0) || 0); }\n"
+                        "int dead_group(void) { return 1 || ((0 > (0 || 0)) || 0); }\n"
+                        "int dead_and(void) { return 1 || (0 > (0 && 0) || 0); }\n"
+                        "int dead_less(void) { return 1 || (0 < (0 || 0) || 0); }\n"
+                        "int trailing_control(void) { return 1 || (0 > (0 || 0)); }\n"
+                        "int equal_control(void) { return 1 || (0 == (0 || 0) || 0); }\n"
+                        "int live_control(int a) { return a || (0 > (0 || 0) || 0); }\n");
+    bool wrote = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, wrote);
+    String8 targets[] = {S8("--target=x86_64-linux"), S8("--target=aarch64-linux")};
+    String8 modes[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"),
+                       S8("-fregister-allocator=quality")};
+    for (u32 target = 0; wrote && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 frontend = 0; frontend < 2; frontend += 1)
+            {
+                for (u32 traced = 0; traced < 2; traced += 1)
+                {
+                    TemporalArena attempt = arena_begin_temporal(arena);
+                    String8 output = buster_test_temporary_path(arena, S8("constant-short-circuit"), S8(".o"));
+                    String8 prefix = buster_test_temporary_path(arena, S8("constant-short-circuit-trace"), S8(""));
+                    String8 command[] = {targets[target], modes[mode], frontend ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                                         S8("-fno-machine-fallback"),
+                                         traced ? string_format(arena, S8("-fbootstrap-trace={S8}"), prefix) : S8("-fverify-codegen"),
+                                         S8("-c"), input, S8("-o"), output};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    String8 description = string_format(arena, S8("constant short circuit target={u32} mode={u32} frontend={u32} trace={u32}: {S8}"),
+                                                        target, mode, frontend, traced, compiled.diagnostic);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object &&
+                                               compiled.codegen_statistics.fallback_function_count == 0, description);
+                    scratch_end(attempt);
+                }
+            }
+        }
+    }
+    scratch_end(temporary);
+    return result;
+}
+
 #include <buster/tests/compiler/driver/driver_fast_test.c>
 #include <buster/tests/compiler/driver/preprocessed_input_test.c>
 #include <buster/tests/compiler/driver/archive_test.c>
@@ -8391,6 +8440,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocessed_c_input);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_validation_values);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_constant_short_circuit_verification);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_assembler_language);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);

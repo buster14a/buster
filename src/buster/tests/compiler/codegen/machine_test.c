@@ -6491,11 +6491,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_constant_short_circuit(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("int dead_relational(void) { return 1 || (0 > (0 || 0) || 0); }\n"
+                        "int dead_nonunit(void) { return 5 || (0 > (0 || 0) || 0); }\n"
+                        "int dead_group(void) { return 1 || ((0 > (0 || 0)) || 0); }\n"
+                        "int dead_and(void) { return 1 || (0 > (0 && 0) || 0); }\n"
+                        "int dead_less(void) { return 1 || (0 < (0 || 0) || 0); }\n"
+                        "int trailing_control(void) { return 1 || (0 > (0 || 0)); }\n"
+                        "int equal_control(void) { return 1 || (0 == (0 || 0) || 0); }\n"
+                        "int live_control(int a) { return a || (0 > (0 || 0) || 0); }\n");
+    Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+                        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            IrProgram* program = machine_test_compile_c_with_options(arguments->arena, S8("constant-short-circuit.c"), source, targets[target],
+                                                                     (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (program && program->module_count == 1)
+            {
+                IrModule* module = program->modules;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->function_count == 8);
+                for (u32 function_index = 0; prepared.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
+                {
+                    MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program,
+                                                                                       module->functions + function_index, targets[target]);
+                    MachineVerifyResult verified = selected.supported ? machine_verify_function(&selected.function) : (MachineVerifyResult){0};
+                    String8 description = string_format(arguments->arena, S8("constant short circuit target={u32} frontend={u32} function='{S8}' error={S8}"),
+                                                        target, frontend, module->functions[function_index].name,
+                                                        machine_verify_error_name(verified.error));
+                    BUSTER_TEST_RAW(arguments, selected.supported && selected.selector_certified && verified.error == MACHINE_VERIFY_NONE, description);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_constant_short_circuit);
     BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);

@@ -11222,6 +11222,9 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     CodegenModule result = {
         .ir_module = module,
         .abi = codegen_abi_for_target(target),
+        .failed_function = IR_FUNCTION_ID_INVALID,
+        .failed_instruction = IR_INSTRUCTION_ID_INVALID,
+        .failed_opcode = IR_OPCODE_COUNT,
     };
     // The one place -fPIC is turned into a fact about this module. It is a
     // statement about which references `ld` will place in a shared object, so
@@ -11611,6 +11614,8 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         result.failed_function = (IrFunctionId){
             .value = function_index,
         };
+        result.failed_instruction = IR_INSTRUCTION_ID_INVALID;
+        result.failed_opcode = IR_OPCODE_COUNT;
         if (function->state != IR_FUNCTION_LOWERED)
         {
             continue;
@@ -12160,6 +12165,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 {
                     // Do not let a selector certificate bypass a failed
                     // audit verifier and feed invalid MIR to allocation.
+                    result.failed_machine_verification = bootstrap_trace->invalid_validation;
                     buffer.error = CODEGEN_ERROR_INVALID_IR;
                     scratch_end(machine_scratch);
                     break;
@@ -12178,13 +12184,15 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             // Keep the verifier as the authority for replayed/manual machine
             // IR, but do not reread every freshly selected row before its
             // immediate allocator consumer.
-            MachineVerifyError verify_error = selected.supported && (options.verify_invariants || !selected.selector_certified)
-                                                  ? machine_verify_function(&selected.function).error : MACHINE_VERIFY_NONE;
+            MachineVerifyResult verification = selected.supported && (options.verify_invariants || !selected.selector_certified)
+                                                   ? machine_verify_function(&selected.function) : (MachineVerifyResult){0};
+            MachineVerifyError verify_error = verification.error;
             if (options.verify_invariants && selected.supported)
             {
                 result.statistics.verified_mir_function_count += 1;
                 if (verify_error != MACHINE_VERIFY_NONE)
                 {
+                    result.failed_machine_verification = verification;
                     buffer.error = CODEGEN_ERROR_INVALID_IR;
                     scratch_end(machine_scratch);
                     break;
@@ -12227,8 +12235,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (options.verify_invariants)
                         {
                             result.statistics.verified_scheduled_function_count += 1;
-                            if (machine_verify_function(&scheduled.function).error != MACHINE_VERIFY_NONE)
+                            MachineVerifyResult scheduled_verification = machine_verify_function(&scheduled.function);
+                            if (scheduled_verification.error != MACHINE_VERIFY_NONE)
                             {
+                                result.failed_machine_verification = scheduled_verification;
+                                result.failed_machine_scheduled = true;
                                 buffer.error = CODEGEN_ERROR_INVALID_IR;
                                 scratch_end(machine_scratch);
                                 break;
