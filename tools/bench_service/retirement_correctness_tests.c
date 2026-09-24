@@ -2,11 +2,16 @@
  * registers this file in the shared service/hosted test graph after #1018's
  * importer and the production pre-timing boundary are wired.
  */
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "../../src/buster/lib/hash.c"
 #include "retirement_correctness.c"
+#include "retirement_artifact_service.c"
 
 #define BQ_TEST_ROWS 6u
 #define BQ_TEST_CHECKS (BQ_RETIREMENT_CHECK_COUNT - 1u)
@@ -392,7 +397,116 @@ static void test_large_population(void)
     free(trusted);
 }
 
-int main(void)
+static bool copy_frozen_artifact(int directory, char const* source, char const* name)
+{
+    int input = open(source, O_RDONLY | O_CLOEXEC);
+    int output = input >= 0 ? openat(directory, name, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600) : -1;
+    bool ok = input >= 0 && output >= 0;
+    char buffer[16384];
+    while (ok)
+    {
+        ssize_t size = read(input, buffer, sizeof(buffer));
+        if (size < 0 && errno == EINTR) continue;
+        if (size <= 0)
+        {
+            ok = size == 0;
+            break;
+        }
+        ssize_t offset = 0;
+        while (ok && offset < size)
+        {
+            ssize_t written = write(output, buffer + offset, (size_t)(size - offset));
+            if (written < 0 && errno == EINTR) continue;
+            ok = written > 0;
+            if (ok) offset += written;
+        }
+    }
+    if (output >= 0 && fchmod(output, 0400) != 0) ok = false;
+    if (output >= 0 && close(output) != 0) ok = false;
+    if (input >= 0 && close(input) != 0) ok = false;
+    return ok;
+}
+
+static void test_frozen_artifact_readback(char const* executable)
+{
+    char root[] = "/tmp/bq-retirement-artifact-XXXXXX";
+    bool created = mkdtemp(root) != NULL;
+    int directory = created ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    CHECK(directory >= 0 && copy_frozen_artifact(directory, executable, "base") &&
+          copy_frozen_artifact(directory, executable, "candidate") &&
+          symlinkat("base", directory, "linked") == 0);
+    if (directory >= 0)
+    {
+#if defined(__APPLE__)
+#if defined(__aarch64__) || defined(__arm64__)
+        unsigned host_target = 2, other_machine = 8;
+#else
+        unsigned host_target = 8, other_machine = 2;
+#endif
+#elif defined(__aarch64__) || defined(__arm64__)
+        unsigned host_target = 5, other_machine = 11;
+#else
+        unsigned host_target = 11, other_machine = 5;
+#endif
+        BqRetirementArtifactLocation locations[2] = {{directory, "base"}, {directory, "candidate"}};
+        for (unsigned fault = 0; fault < 6; fault += 1)
+        {
+            BqCorrectnessFixture fixture;
+            fixture_init(&fixture);
+            unsigned target = fault == 5 ? other_machine : host_target;
+            fixture.prepared.native_target = target;
+            for (unsigned i = 0; i < BQ_TEST_ROWS; i += 1)
+                fixture.trusted[i].target = i == 4 ? (target == 1 ? 2 : 1) : target;
+            begin_fixture(&fixture);
+            checks_fixture(&fixture);
+            CHECK(bq_retirement_correctness_row(&fixture.gate, &fixture.supplied[0]));
+            BqRetirementRowFact observed = fixture.supplied[1];
+            for (unsigned side = 0; side < 2; side += 1)
+            {
+                observed.side[side].artifact_sha256[0] = 0;
+                observed.side[side].code_sha256[0] = 0;
+                observed.side[side].code_bytes = 0;
+            }
+            observed.code_eligible = 0;
+            if (fault == 1) locations[1].name = "linked";
+            if (fault == 2) locations[1].name = "../base";
+            if (fault == 3) observed.side[0].code_sha256[0] = 'a';
+            if (fault == 4) CHECK(fchmodat(directory, "candidate", 0600, 0) == 0);
+            bool accepted = bq_retirement_correctness_row_service(&fixture.gate, locations, &observed);
+            CHECK(accepted == (fault == 0));
+            if (!fault)
+            {
+                CHECK(fixture.facts[1].side[0].code_bytes > 0 &&
+                      fixture.facts[1].side[1].code_bytes > 0 &&
+                      fixture.facts[1].code_eligible &&
+                      strcmp(fixture.facts[1].side[0].artifact_sha256,
+                             fixture.facts[1].side[0].code_sha256));
+                for (unsigned i = 2; i < BQ_TEST_ROWS; i += 1)
+                {
+                    if (i == 3)
+                    {
+                        BqRetirementArtifactLocation empty[2] = {{directory, NULL}, {directory, NULL}};
+                        CHECK(bq_retirement_correctness_row_service(&fixture.gate, empty,
+                            &fixture.supplied[i]));
+                    }
+                    else CHECK(bq_retirement_correctness_row(&fixture.gate, &fixture.supplied[i]));
+                }
+                CHECK(bq_retirement_correctness_finish(&fixture.gate) &&
+                      bq_retirement_correctness_ready(&fixture.gate));
+            }
+            else CHECK(fixture.gate.failed && !bq_retirement_correctness_ready(&fixture.gate));
+            locations[1].name = "candidate";
+            if (fault == 4) CHECK(fchmodat(directory, "candidate", 0400, 0) == 0);
+        }
+        CHECK(unlinkat(directory, "linked", 0) == 0 &&
+              unlinkat(directory, "base", 0) == 0 &&
+              unlinkat(directory, "candidate", 0) == 0);
+        CHECK(close(directory) == 0);
+    }
+    if (created) CHECK(rmdir(root) == 0);
+}
+
+int main(int argc, char** argv)
 {
     test_valid();
     test_bad_checks();
@@ -400,6 +514,7 @@ int main(void)
     test_bad_import();
     test_partial_and_sealed();
     test_large_population();
+    if (argc > 0) test_frozen_artifact_readback(argv[0]);
     printf("RETIREMENT_CORRECTNESS_TEST assertions=%u failures=%u launches=%u\n",
            assertions, failures, launches);
     return failures ? 1 : 0;
