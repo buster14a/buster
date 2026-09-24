@@ -1,0 +1,56 @@
+name: Frontend common-symbol diagnostic
+on:
+  push:
+    branches: [diagnostics/frontend-common-2e942e8]
+    paths: [.github/workflows/frontend-common-probe.yml, tools/frontend_common_probe.py]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      PROBE_OUT: ${{ runner.temp }}/frontend-common-evidence
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - name: Freeze the exact production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROBE_OUT"
+          git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/diagnostic-source.txt"
+          cp tools/frontend_common_probe.py "$RUNNER_TEMP/frontend_common_probe.py"
+          cp tools/frontend_common_probe.py "$PROBE_OUT/"
+          git checkout --detach 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          test "$(git rev-parse HEAD^{tree})" = f976bfd7cdb8830a8a15d959ef36f0152f1b767d
+          git diff --exit-code
+          git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/production-source.txt"
+          git archive --format=tar.gz HEAD src/buster/lib/compiler src/buster/tests/compiler_driver_test.c docs/agents AGENTS.md CMakeLists.txt > "$PROBE_OUT/source-excerpts.tar.gz"
+      - name: Build the trusted compiler using the hosted bootstrap exception
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version | tee "$PROBE_OUT/producer.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-probe-build" 2>&1 | tee "$PROBE_OUT/bootstrap.log"
+          "$RUNNER_TEMP/buster-probe-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$PROBE_OUT/configure.log"
+          "$RUNNER_TEMP/buster-probe-build" build --config Release -t ide 2>&1 | tee "$PROBE_OUT/build.log"
+          sha256sum build/Release/ide > "$PROBE_OUT/compiler.sha256"
+          cp build/compile_commands.json "$PROBE_OUT/" || test ! -e build/compile_commands.json
+      - name: Observe symbol and link semantics with independent controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/frontend_common_probe.py" | tee "$PROBE_OUT/probe.log"
+      - name: Retain every outcome
+        if: ${{ always() }}
+        uses: ./.github/actions/native-artifact-upload
+        with:
+          label: frontend-common
+          label_title: Frontend common
+          name: frontend-common-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PROBE_OUT }}
+          retention-days: '30'
