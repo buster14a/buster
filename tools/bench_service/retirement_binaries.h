@@ -10,6 +10,7 @@
 typedef struct BqRetirementBinaries
 {
     char preparation_sha256[SHA256_HEX_CAPACITY];
+    char directory_identity_sha256[SHA256_HEX_CAPACITY];
     char source_sha256[2][SHA256_HEX_CAPACITY];
     char binary_sha256[2][SHA256_HEX_CAPACITY];
     char binary_identity_sha256[2][SHA256_HEX_CAPACITY];

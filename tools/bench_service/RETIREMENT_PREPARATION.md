@@ -144,11 +144,13 @@ put exactly the timed executables at `job-<id>-attempt-<token>/trusted-build/`
 each executable must be service-owned, single-link, executable, mode-read-only,
 nonempty and at most 512 MiB. The recorder independently imports A, hashes
 both actual files through no-follow descriptors, checks their inode identities,
-and writes a single durable `binaries-<job>` queue record. The importer repeats
-both source and binary observations and accepts only the exact canonical
+checks that the frozen directory contains exactly those two executable files,
+binds its device/inode identity, and writes a single durable V2
+`binaries-<job>` queue record. The importer repeats both source and binary
+observations and accepts only the exact canonical
 record digest provided through a service-authenticated channel. It clears
-returned facts on failure. A missing output, failed A handoff, edited file,
-same-byte inode replacement, stale attempt or changed record cannot yield
+returned facts on failure. A missing output, planted entry, replaced directory,
+failed A handoff, edited file, same-byte inode replacement, stale attempt or changed record cannot yield
 binary facts. The fixture's tiny executable-shaped bytes cover this readback
 boundary; they are not real compiler builds.
 The 512 MiB file ceiling is a fail-closed interim bound; final capacity must
@@ -157,7 +159,7 @@ be checked against the actual reviewed compiler outputs before admission.
 `bq_retirement_binaries_acquire` now opens both exact files as held,
 close-on-exec descriptors after importing the durable binary record. It
 recomputes their content and inode identities against that record, repeats
-the source/binary readback, and returns the descriptors only if both still
+the directory closure and source/binary readback, and returns the descriptors only if both still
 match. Descriptors are promoted to at least 3 to meet
 `tp_retirement_executable_init`'s launch boundary even when a standard stream
 was closed. A pathname swap after acquisition cannot change the file held by

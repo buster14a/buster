@@ -7,9 +7,58 @@
  * build logs separately before recording or passing these files to B.
  */
 #include "retirement_binaries.h"
+#include <dirent.h>
 
 #define BQ_RETIREMENT_BINARY_BYTES_CAP (512ull * 1024ull * 1024ull)
 #define BQ_RETIREMENT_BINARIES_RECORD_CAP 1024u
+
+/* Check the exact frozen output closure through a fresh cursor. Reopening the
+ * held directory leaves its caller's cursor untouched on repeated readback. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_binary_directory(int attempt, int directory,
+    char identity_sha256[SHA256_HEX_CAPACITY])
+{
+    struct stat held = {0}, named = {0};
+    bool ok = fstat(directory, &held) == 0 && S_ISDIR(held.st_mode) &&
+              bq_owned_directory(directory, true, true);
+    int scan = ok ? openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    DIR* entries = scan >= 0 ? fdopendir(scan) : NULL;
+    if (!entries && scan >= 0) close(scan);
+    ok = ok && entries != NULL;
+    u32 seen = 0;
+    while (ok)
+    {
+        errno = 0;
+        struct dirent* entry = readdir(entries);
+        if (!entry)
+        {
+            ok = errno == 0;
+            break;
+        }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        u32 bit = !strcmp(entry->d_name, "base-ide") ? 1u :
+                  !strcmp(entry->d_name, "candidate-ide") ? 2u : 0u;
+        struct stat info = {0};
+        ok = bit && !(seen & bit) && fstatat(dirfd(entries), entry->d_name, &info, AT_SYMLINK_NOFOLLOW) == 0 &&
+             S_ISREG(info.st_mode) && info.st_nlink == 1 && info.st_uid == geteuid() &&
+             (info.st_mode & 0222) == 0 && (info.st_mode & S_IXUSR) != 0 &&
+             info.st_size > 0 && (u64)info.st_size <= BQ_RETIREMENT_BINARY_BYTES_CAP;
+        if (ok) seen |= bit;
+    }
+    if (entries && closedir(entries) != 0) ok = false;
+    ok = ok && seen == 3 && fstatat(attempt, "trusted-build", &named, AT_SYMLINK_NOFOLLOW) == 0 &&
+         S_ISDIR(named.st_mode) && held.st_dev == named.st_dev && held.st_ino == named.st_ino &&
+         bq_owned_directory(directory, true, true);
+    if (ok)
+    {
+        Sha256 identity;
+        sha256_init(&identity);
+        sha256_add(&identity, &held.st_dev, sizeof(held.st_dev));
+        sha256_add(&identity, &held.st_ino, sizeof(held.st_ino));
+        sha256_finish_hex(&identity, (char8*)identity_sha256);
+    }
+    else identity_sha256[0] = 0;
+    return ok;
+}
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_binary_stable(struct stat const* before, struct stat const* after)
 {
@@ -117,13 +166,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_observe(BqQueue* queue, BqJob
         attempt = path ? openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
         directory = attempt >= 0 && bq_owned_directory(attempt, true, false) ?
                     openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        result = directory >= 0 && bq_owned_directory(directory, true, true) ? BQ_OK : BQ_SOURCE_MISMATCH;
+        result = directory >= 0 && bq_retirement_binary_directory(attempt, directory,
+                      observed->directory_identity_sha256) ? BQ_OK : BQ_SOURCE_MISMATCH;
     }
     for (u32 side = 0; result == BQ_OK && side < 2; side += 1)
     {
         bool ok = bq_retirement_frozen_binary(directory, side ? "candidate-ide" : "base-ide",
             observed->binary_sha256[side], observed->binary_identity_sha256[side]);
         if (!ok) result = BQ_SOURCE_MISMATCH;
+    }
+    if (result == BQ_OK)
+    {
+        char identity[SHA256_HEX_CAPACITY] = {0};
+        result = bq_retirement_binary_directory(attempt, directory, identity) &&
+                 !memcmp(identity, observed->directory_identity_sha256, SHA256_HEX_CAPACITY) ?
+                 BQ_OK : BQ_SOURCE_MISMATCH;
     }
     if (directory >= 0 && close(directory) != 0 && result == BQ_OK) result = BQ_IO;
     if (attempt >= 0 && close(attempt) != 0 && result == BQ_OK) result = BQ_IO;
@@ -156,11 +213,12 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_binaries_format(char body[BQ_RETIREMENT_BI
     BqJob const* job, BqRetirementBinaries const* binaries)
 {
     int length = snprintf(body, BQ_RETIREMENT_BINARIES_RECORD_CAP,
-                          "BQ-RETIREMENT-BINARIES-V1\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\n"
-                          "preparation=%.64s\nbase-source=%.64s\ncandidate-source=%.64s\n"
+                          "BQ-RETIREMENT-BINARIES-V2\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\n"
+                          "preparation=%.64s\ndirectory=%.64s\nbase-source=%.64s\ncandidate-source=%.64s\n"
                           "base-binary=%.64s %.64s\ncandidate-binary=%.64s %.64s\n",
                           (uint64_t)job->id, (uint64_t)job->token, job->digest,
-                          binaries->preparation_sha256, binaries->source_sha256[0], binaries->source_sha256[1],
+                          binaries->preparation_sha256, binaries->directory_identity_sha256,
+                          binaries->source_sha256[0], binaries->source_sha256[1],
                           binaries->binary_sha256[0], binaries->binary_identity_sha256[0],
                           binaries->binary_sha256[1], binaries->binary_identity_sha256[1]);
     return length;
@@ -269,7 +327,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_acquire_pinned(BqQueue* queue
                   openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
         directory = attempt >= 0 && bq_owned_directory(attempt, true, false) ?
                     openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-        result = directory >= 0 && bq_owned_directory(directory, true, true) ? BQ_OK : BQ_SOURCE_MISMATCH;
+        char identity[SHA256_HEX_CAPACITY] = {0};
+        result = directory >= 0 && bq_retirement_binary_directory(attempt, directory, identity) &&
+                 !memcmp(identity, verified.directory_identity_sha256, SHA256_HEX_CAPACITY) ?
+                 BQ_OK : BQ_SOURCE_MISMATCH;
     }
     for (u32 side = 0; result == BQ_OK && side < 2; side += 1)
     {
@@ -280,6 +341,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_acquire_pinned(BqQueue* queue
                  !memcmp(identity, verified.binary_identity_sha256[side], SHA256_HEX_CAPACITY) ?
                  BQ_OK : BQ_SOURCE_MISMATCH;
     }
+    if (result == BQ_OK)
+    {
+        char identity[SHA256_HEX_CAPACITY] = {0};
+        result = bq_retirement_binary_directory(attempt, directory, identity) &&
+                 !memcmp(identity, verified.directory_identity_sha256, SHA256_HEX_CAPACITY) ?
+                 BQ_OK : BQ_SOURCE_MISMATCH;
+    }
     if (directory >= 0 && close(directory) != 0 && result == BQ_OK) result = BQ_IO;
     if (attempt >= 0 && close(attempt) != 0 && result == BQ_OK) result = BQ_IO;
     if (result == BQ_OK)
@@ -288,7 +356,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_binaries_acquire_pinned(BqQueue* queue
         result = bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, profile,
                                                        preparation_sha256, record_sha256, &current);
         bool same = result == BQ_OK &&
-                    !memcmp(current.preparation_sha256, verified.preparation_sha256, SHA256_HEX_CAPACITY);
+                    !memcmp(current.preparation_sha256, verified.preparation_sha256, SHA256_HEX_CAPACITY) &&
+                    !memcmp(current.directory_identity_sha256, verified.directory_identity_sha256, SHA256_HEX_CAPACITY);
         for (u32 side = 0; same && side < 2; side += 1)
             same = !memcmp(current.source_sha256[side], verified.source_sha256[side], SHA256_HEX_CAPACITY) &&
                    !memcmp(current.binary_sha256[side], verified.binary_sha256[side], SHA256_HEX_CAPACITY) &&

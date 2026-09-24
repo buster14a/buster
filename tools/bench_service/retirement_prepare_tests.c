@@ -322,7 +322,40 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
                   !strcmp(imported.source_sha256[0], prepared->subjects[0].manifest_sha256) &&
                   !strcmp(imported.source_sha256[1], prepared->subjects[1].manifest_sha256) &&
                   strcmp(imported.binary_sha256[0], imported.binary_sha256[1]) &&
+                  strlen(imported.directory_identity_sha256) == 64 &&
                   strlen(imported.binary_identity_sha256[0]) == 64);
+    /* The same two binaries with an unlisted file cannot be frozen as a
+     * complete trusted-build output closure. Repeated scans are independent. */
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  bq_prep_test_binary(directory, "unlisted", "other\n") && fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  unlinkat(directory, "unlisted", 0) == 0 && fchmod(directory, 0500) == 0 &&
+                  bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  renameat(attempt, "trusted-build", attempt, "held-trusted-build") == 0 &&
+                  mkdirat(attempt, "trusted-build", 0700) == 0);
+    int replacement_directory = openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(replacement_directory >= 0 &&
+                  renameat(directory, "base-ide", replacement_directory, "base-ide") == 0 &&
+                  renameat(directory, "candidate-ide", replacement_directory, "candidate-ide") == 0 &&
+                  fchmod(replacement_directory, 0500) == 0 && fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(replacement_directory >= 0 && fchmod(replacement_directory, 0700) == 0 &&
+                  fchmod(directory, 0700) == 0 &&
+                  renameat(replacement_directory, "base-ide", directory, "base-ide") == 0 &&
+                  renameat(replacement_directory, "candidate-ide", directory, "candidate-ide") == 0 &&
+                  unlinkat(attempt, "trusted-build", AT_REMOVEDIR) == 0 &&
+                  renameat(attempt, "held-trusted-build", attempt, "trusted-build") == 0 &&
+                  fchmod(directory, 0500) == 0 &&
+                  bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    if (replacement_directory >= 0) close(replacement_directory);
     bq_prep_test_correctness_join(queue, job, installed, workspaces, pinned,
                                   preparation_digest, record_digest, &imported);
     char wrong[SHA256_HEX_CAPACITY];
