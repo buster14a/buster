@@ -1,4 +1,4 @@
-name: Issue 124 isolated encoder census
+name: Issue 124 matched prewarm experiment
 on:
   push:
     branches: [codex/124-encoding-lab-20260924-a]
@@ -6,7 +6,153 @@ on:
 permissions:
   contents: read
 jobs:
-  census:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.publish.outputs.candidate }}
+      hoist: ${{ steps.publish.outputs.hoist }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Decode and verify fixed patches
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os, pathlib
+          expected = {'candidate':'edc03422f26f18972e33c63d57ec5e33f457e43b566769c88eb6bd0fc2090526', 'hoist':'e916ab4f59d3a58dfadc423e01be979d3a68f4e19773fc0c5cd946c205d9bfd1'}
+          for name, digest in expected.items():
+              data = gzip.decompress(base64.b64decode(pathlib.Path(f'tools/issue124_{name}.patch.b64').read_text()))
+              assert hashlib.sha256(data).hexdigest() == digest, name
+              pathlib.Path(os.environ['RUNNER_TEMP'], name + '.patch').write_bytes(data)
+          PY
+      - name: Publish only new session-owned experiment branches
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          base=2e942e80a87666409cf29d3e24a68d322b9e71fd
+          git fetch --no-tags origin "$base"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          for kind in candidate hoist; do
+            branch="codex/124-gpr-prewarm-$kind-20260924-a"
+            if [[ -n $(git ls-remote --heads origin "refs/heads/$branch") ]]; then echo 'Ref already exists; refusing to overwrite'; exit 1; fi
+            git checkout --detach "$base"
+            git apply --check "$RUNNER_TEMP/$kind.patch"
+            git apply "$RUNNER_TEMP/$kind.patch"
+            git diff --check
+            git add src/buster/lib/compiler/codegen/machine_x86_64.c src/buster/lib/compiler/codegen/machine_x86_64_internal.h src/buster/tests/compiler/codegen/machine_test.c
+            git commit -m "experiment(#124): $kind GPR prewarm comparison"
+            sha=$(git rev-parse HEAD)
+            tree=$(git rev-parse HEAD^{tree})
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$sha:refs/heads/$branch"
+            echo "$kind=$sha" >> "$GITHUB_OUTPUT"
+            printf '%s %s %s\n' "$kind" "$sha" "$tree"
+          done
+  measure:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BASE: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+      CANDIDATE: ${{ needs.publish.outputs.candidate }}
+      HOIST: ${{ needs.publish.outputs.hoist }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          persist-credentials: false
+      - name: Freeze infrastructure, inputs and comparison design
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/issue124-matched"
+          mkdir -p "$E" build "$E/frozen"
+          echo "E=$E" >> "$GITHUB_ENV"
+          echo "DRIVER=$RUNNER_TEMP/issue124-driver" >> "$GITHUB_ENV"
+          { clang --version; cmake --version; ninja --version; lscpu; uname -a; } > "$E/host.txt"
+          env | sort | grep -Ev 'TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL' > "$E/environment.txt"
+          git fetch --no-tags origin "$CANDIDATE" "$HOIST"
+          git archive "$BASE" | tar -x -C "$E/frozen"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/issue124-driver"
+          "$RUNNER_TEMP/issue124-driver" bench_throughput self-test > "$E/harness-tests.log" 2>&1
+          "$RUNNER_TEMP/issue124-driver" bench_throughput help > "$E/harness-help.txt" 2>&1
+          cp build/throughput-tools/throughput "$E/throughput"
+          sha256sum "$E/throughput" "$RUNNER_TEMP/issue124-driver" > "$E/infrastructure.sha256"
+          printf 'G=%s\nH=%s\nS=%s\n' "$BASE" "$HOIST" "$CANDIDATE" > "$E/design.txt"
+          printf '%s\n' 'Build order: G,H,S,G2; one configured path, serial construction; freeze all binaries before timing.' 'A/A then G/H, G/S, H/S; ci default six workloads, all four modes, 20 pairs in each of two rounds, two warmups, exact output equality.' 'Frozen compiler unity: G/H, G/S, H/S, FAST, two 20-pair rounds; stage 1 trusted host primary, stage 2 separate, fixed-point validation retained.' 'Shared hosted CPU; hardware counters and physical Zen 5 acceptance not claimed. No sample trimming or selective retries.' >> "$E/design.txt"
+      - name: Matched serial trusted Clang builds and same-root rebuild control
+        shell: bash
+        run: |
+          set -euo pipefail
+          for label in G H S G2; do
+            case "$label" in G|G2) sha=$BASE;; H) sha=$HOIST;; S) sha=$CANDIDATE;; esac
+            git checkout --detach "$sha"
+            mkdir -p "$E/$label"
+            git rev-parse HEAD HEAD^{tree} > "$E/$label/revision.txt"
+            /usr/bin/time -v -o "$E/$label/build-time.txt" bash -c '"$DRIVER" generate --build-directory build/issue124-subject --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DCMAKE_LINKER_TYPE=DEFAULT && "$DRIVER" build --build-directory build/issue124-subject --config Release -t ide -- -j2' > "$E/$label/build.log" 2>&1
+            cp build/issue124-subject/Release/ide "$E/$label/ide"
+            cp build/issue124-subject/{CMakeCache.txt,compile_commands.json} "$E/$label/"
+            sha256sum "$E/$label/ide" > "$E/$label/compiler.sha256"
+            nm -S --size-sort "$E/$label/ide" > "$E/$label/symbols.txt"
+            size -A "$E/$label/ide" > "$E/$label/sections.txt"
+            objdump -d --disassemble=machine_x86_64_exact_prewarm "$E/$label/ide" > "$E/$label/prewarm.asm"
+            if [[ $label == G ]]; then cp -a build/issue124-subject/generated "$E/generated"; fi
+          done
+          cmp "$E/G/ide" "$E/G2/ide" > "$E/same-root-byte-control.txt" 2>&1 || echo 'Different same-source bytes; retain both and investigate before claiming a small effect.' >> "$E/same-root-byte-control.txt"
+          printf 'extern int issue124_declared(void);\n' > "$E/prewarm-control.c"
+          for label in G H S G2; do
+            "$E/$label/ide" cc -c -g0 -O0 "$E/prewarm-control.c" -o "$E/$label/prewarm-control.o" > "$E/$label/preflight.log" 2>&1
+          done
+          cmp "$E/G/prewarm-control.o" "$E/H/prewarm-control.o"
+          cmp "$E/G/prewarm-control.o" "$E/S/prewarm-control.o"
+      - name: Native paired A/A and G/H/S end-to-end object comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          for pair in G-G G-H G-S H-S; do
+            a=${pair%-*}; b=${pair#*-}
+            aid=$(head -1 "$E/$a/revision.txt"); bid=$(head -1 "$E/$b/revision.txt")
+            rc=0
+            "$E/throughput" run --baseline "$E/$a/ide" --candidate "$E/$b/ide" --output "$E/object-$pair" --baseline-id "$aid" --candidate-id "$bid" --profile ci --mode all --pairs 20 --warmups 2 --timeout 120 --cpu auto --require-identical-output > "$E/object-$pair.log" 2>&1 || rc=$?
+            printf 'object-%s\t%s\n' "$pair" "$rc" | tee -a "$E/status.tsv"
+            if [[ $rc != 0 ]]; then status=1; fi
+          done
+          exit "$status"
+      - name: Native paired frozen compiler unity comparisons
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          for pair in G-H G-S H-S; do
+            a=${pair%-*}; b=${pair#*-}
+            aid=$(head -1 "$E/$a/revision.txt"); bid=$(head -1 "$E/$b/revision.txt")
+            rc=0
+            "$E/throughput" run --baseline "$E/$a/ide" --candidate "$E/$b/ide" --output "$E/unity-$pair" --baseline-id "$aid" --candidate-id "$bid" --profile ci --workload tiny_startup --mode fast --pairs 20 --warmups 2 --timeout 180 --cpu auto --require-identical-output --self-host-root "$E/frozen" --self-host-generated "$E/generated" --no-guard > "$E/unity-$pair.log" 2>&1 || rc=$?
+            printf 'unity-%s\t%s\n' "$pair" "$rc" | tee -a "$E/status.tsv"
+            if [[ $rc != 0 ]]; then status=1; fi
+          done
+          exit "$status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue124-matched-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/issue124-matched/
+            !${{ runner.temp }}/issue124-matched/frozen/
+          retention-days: 14
+          if-no-files-found: error
+  validate:
+    needs: publish
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
@@ -14,92 +160,31 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          ref: ${{ needs.publish.outputs.candidate }}
           persist-credentials: false
-      - name: Record host and construct native driver
+      - name: Build and run registered candidate regressions
         shell: bash
         run: |
           set -euo pipefail
-          E="$RUNNER_TEMP/issue124-census"
+          E="$RUNNER_TEMP/issue124-validation"
           mkdir -p "$E" build
           echo "E=$E" >> "$GITHUB_ENV"
           git rev-parse HEAD HEAD^{tree} > "$E/revision.txt"
-          { clang --version; cmake --version; ninja --version; lscpu; uname -a; } > "$E/host.txt"
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/driver
-          ./build/driver bench_throughput generate --output "$E/inputs" --profile ci
-          printf 'extern int issue124_declared(void);\n' > "$E/inputs/prewarm_control.c"
-      - name: Build immutable uninstrumented trusted compiler
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/issue124-driver
+          ./build/issue124-driver generate --build-directory build/issue124-tests --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_UNITY_BUILD=OFF -DCMAKE_LINKER_TYPE=DEFAULT > "$E/configure.log" 2>&1
+          ./build/issue124-driver build --build-directory build/issue124-tests --config Release -t ide -- -j2 > "$E/build.log" 2>&1
+          cp build/issue124-tests/compile_commands.json "$E/"
+          build/issue124-tests/Release/ide test --verbose=1 --ci=1 > "$E/registered-tests.log" 2>&1
+      - name: Canonical candidate self-host fixed point
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          ./build/driver generate --build-directory build/issue124-subject --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DCMAKE_LINKER_TYPE=DEFAULT 2>&1 | tee "$E/baseline-configure.log"
-          ./build/driver build --build-directory build/issue124-subject --config Release -t ide -- -j2 2>&1 | tee "$E/baseline-build.log"
-          cp build/issue124-subject/Release/ide "$E/baseline-ide"
-          cp build/issue124-subject/{CMakeCache.txt,compile_commands.json} "$E/"
-          sha256sum "$E/baseline-ide" > "$E/baseline.sha256"
-          nm -S --size-sort "$E/baseline-ide" > "$E/baseline-symbols.txt"
-          size -A "$E/baseline-ide" > "$E/baseline-sections.txt"
-          for symbol in machine_x64_emit_exact_form machine_x64_emit_exact_recipe machine_x64_emit_fixed_template machine_x64_metadata_shape_cache_find machine_encode_x86_64; do
-            objdump -d --disassemble="$symbol" "$E/baseline-ide" > "$E/$symbol.asm"
-          done
-          mkdir -p "$E/frozen"
-          git archive HEAD | tar -x -C "$E/frozen"
-          cp -a build/issue124-subject/generated "$E/generated"
-      - name: Build separate diagnostic coverage compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build/driver generate --build-directory build/issue124-subject --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DCMAKE_LINKER_TYPE=DEFAULT '-DCMAKE_C_FLAGS=-fprofile-instr-generate -fcoverage-mapping' 2>&1 | tee "$E/diagnostic-configure.log"
-          ./build/driver build --build-directory build/issue124-subject --config Release -t ide -- -j2 2>&1 | tee "$E/diagnostic-build.log"
-          cp build/issue124-subject/Release/ide "$E/diagnostic-ide"
-          cp build/issue124-subject/compile_commands.json "$E/diagnostic-commands.json"
-          sha256sum "$E/diagnostic-ide" > "$E/diagnostic.sha256"
-          MAJOR=$(clang -dumpversion | cut -d. -f1)
-          PROF=$(command -v llvm-profdata-$MAJOR || command -v llvm-profdata)
-          COV=$(command -v llvm-cov-$MAJOR || command -v llvm-cov)
-          "$PROF" --version > "$E/profile-tools.txt"
-          "$COV" --version >> "$E/profile-tools.txt"
-          echo "PROF=$PROF" >> "$GITHUB_ENV"
-          echo "COV=$COV" >> "$GITHUB_ENV"
-      - name: Census frozen native harness inputs and unity source
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$E/profiles" "$E/objects" "$E/coverage"
-          status=0
-          while IFS= read -r -d '' source; do
-            name=$(basename "$source" .c)
-            for mode in none mir-stack fast quality; do
-              label="$name-$mode"
-              mkdir -p "$E/profiles/$label"
-              rc=0
-              LLVM_PROFILE_FILE="$E/profiles/$label/%p.profraw" timeout 120 "$E/diagnostic-ide" cc -c -g0 -O0 "-fregister-allocator=$mode" "$source" -o "$E/objects/$label.o" > "$E/objects/$label.log" 2>&1 || rc=$?
-              printf '%s\t%s\n' "$label" "$rc" | tee -a "$E/compile-status.tsv"
-              if [[ $rc != 0 ]]; then status=1; fi
-            done
-          done < <(find "$E/inputs" -name '*.c' -print0 | sort -z)
-          for mode in fast mir-stack; do
-            label="unity-$mode"
-            mkdir -p "$E/profiles/$label"
-            rc=0
-            (cd "$E/frozen"; LLVM_PROFILE_FILE="$E/profiles/$label/%p.profraw" timeout 180 "$E/diagnostic-ide" cc -g -O0 -Isrc "-I$E/generated" -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -lm "-fregister-allocator=$mode" src/buster/apps/ide/ide.c -o "$E/objects/$label.exe") > "$E/objects/$label.log" 2>&1 || rc=$?
-            printf '%s\t%s\n' "$label" "$rc" | tee -a "$E/compile-status.tsv"
-            if [[ $rc != 0 ]]; then status=1; fi
-          done
-          for dir in "$E/profiles"/*; do
-            name=$(basename "$dir")
-            if compgen -G "$dir/*.profraw" > /dev/null; then
-              "$PROF" merge -sparse "$dir"/*.profraw -o "$E/coverage/$name.profdata"
-              "$COV" export "$E/diagnostic-ide" -instr-profile="$E/coverage/$name.profdata" src/buster/lib/compiler/codegen/machine_x86_64.c > "$E/coverage/$name.json"
-              "$COV" show "$E/diagnostic-ide" -instr-profile="$E/coverage/$name.profdata" src/buster/lib/compiler/codegen/machine_x86_64.c -show-branches=count > "$E/coverage/$name.txt"
-            fi
-          done
-          printf 'instrumentation=diagnostic-only\nperformance-verdict=NOT-RUN\n' > "$E/disposition.txt"
-          exit "$status"
+          ./build/issue124-driver test_self_host --build-directory build/issue124-tests --config Release > "$E/self-host.log" 2>&1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: issue124-census-${{ github.run_id }}
-          path: ${{ runner.temp }}/issue124-census/
+          name: issue124-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue124-validation/
           retention-days: 14
           if-no-files-found: error
