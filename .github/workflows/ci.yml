@@ -120,7 +120,7 @@ jobs:
     name: ${{ matrix.name }} ${{ matrix.shard }}
     timeout-minutes: 300
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         lane: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64, windows-aarch64]
         shard: [release, checks]
@@ -565,7 +565,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 300
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         include:
           - name: Linux x86-64 native
@@ -868,7 +868,7 @@ jobs:
     name: ${{ matrix.name }}
     timeout-minutes: 300
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         include:
           - name: Android x86-64
