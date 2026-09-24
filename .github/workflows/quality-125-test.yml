@@ -1,0 +1,124 @@
+name: QUALITY 125 exact prototype validation
+on:
+  push:
+    branches: [astra/125-region-census-20260924]
+    paths: [.github/workflows/quality-125-test.yml]
+permissions:
+  contents: read
+concurrency:
+  group: quality-125-test-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.product.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+      - id: product
+        name: Publish only the owned five-file prototype from its pinned base
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=2e942e80a87666409cf29d3e24a68d322b9e71fd
+          branch=astra/125-region-sparse-20260924
+          test "$(git ls-remote origin "refs/heads/$branch" | cut -f1)" = "$base"
+          git fetch --depth=1 origin "$base"
+          python3 tools/quality_125_apply.py
+          export GIT_INDEX_FILE="$RUNNER_TEMP/quality-125-product-index"
+          git read-tree "$base"
+          git add CMakeLists.txt src/buster/lib/compiler/codegen/register_allocator_quality.c src/buster/lib/compiler/codegen/register_allocator_quality_internal.h src/buster/tests/compiler/codegen/machine_test.c src/buster/tests/compiler/codegen/quality_regions_test_internal.h
+          tree=$(git write-tree)
+          test "$tree" = 8c2d92d4a74bca79043e6530a0e3f87ac782846c
+          candidate=$(printf '%s\n' 'perf(quality): prototype bounded sparse region traffic and exact region heaps (#125)' | git -c user.name=OpenAI -c user.email=noreply@openai.com commit-tree "$tree" -p "$base")
+          git push origin "$candidate:refs/heads/$branch"
+          printf 'candidate=%s\n' "$candidate" >> "$GITHUB_OUTPUT"
+          printf 'base=%s\ntree=%s\ncandidate=%s\n' "$base" "$tree" "$candidate"
+  diagnostic:
+    needs: prepare
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [release, sanitized]
+    env:
+      BUSTER_TEST_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - name: Build the exact product and diagnostic-only decision overlay
+        shell: bash
+        env:
+          CONFIG: ${{ matrix.config }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/quality-125-$CONFIG"
+          mkdir -p "$evidence"
+          exec > >(tee "$evidence/build.log") 2>&1
+          git rev-parse HEAD 'HEAD^{tree}'
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          clang --version
+          uname -a
+          lscpu
+          git show --format=fuller --stat HEAD > "$evidence/revision.txt"
+          git archive HEAD | gzip -n > "$evidence/product-source.tar.gz"
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/buster/lib/compiler/codegen/register_allocator_quality.c')
+          s=p.read_text()
+          anchor='                BUSTER_QUALITY_COUNT(selected_regions, 1);'
+          assert s.count(anchor)==1
+          s=s.replace(anchor,anchor+'\n                string_print(S8("Q125_DECISION f={u64} s={u32} r={u32} w={u64}\\n"), machine_quality_census_totals.functions, candidate_slot, best_region, best_traffic);')
+          p.write_text(s)
+          PY
+          git diff > "$evidence/diagnostic-overlay.patch"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/quality-125-driver"
+          flags=()
+          build_config=Release
+          if test "$CONFIG" = sanitized; then flags+=(--sanitize); build_config=Debug; fi
+          "$RUNNER_TEMP/quality-125-driver" generate --config "$build_config" --cc clang --ci --linker DEFAULT "${flags[@]}" -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
+          "$RUNNER_TEMP/quality-125-driver" build --config "$build_config" -t ide -- -j2
+          sha256sum "build/$build_config/ide" > "$evidence/compiler.sha256"
+          cp build/compile_commands.json build/CMakeCache.txt "$evidence/"
+      - name: Run the full registered suite
+        shell: bash
+        env:
+          CONFIG: ${{ matrix.config }}
+        run: |
+          set -euo pipefail
+          build_config=Release
+          if test "$CONFIG" = sanitized; then build_config=Debug; fi
+          "$RUNNER_TEMP/quality-125-driver" build --config "$build_config" -t test_all -- -j2 2>&1 | tee "$RUNNER_TEMP/quality-125-$CONFIG/tests.log"
+      - name: Census and exact decision trace on the original frozen source
+        if: ${{ success() && matrix.config == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/quality-125-release"
+          git fetch --depth=1 origin 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          git restore --source=2e942e80a87666409cf29d3e24a68d322b9e71fd -- CMakeLists.txt src/buster/lib/compiler/codegen/register_allocator_quality.c src/buster/lib/compiler/codegen/register_allocator_quality_internal.h src/buster/tests/compiler/codegen/machine_test.c
+          for form in direct memory; do
+            flags=()
+            if test "$form" = memory; then flags+=(-fno-frontend-ssa); fi
+            build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g0 -O0 -fregister-allocator=quality "${flags[@]}" -fsource-metrics="$evidence/$form.metrics" -c src/buster/apps/ide/ide.c -o "build/unity-$form.o" > "$evidence/$form.decisions.log" 2> "$evidence/$form.stderr.log"
+            sha256sum "build/unity-$form.o" > "$evidence/$form.output.sha256"
+          done
+          test "$(sha256sum build/unity-direct.o | cut -d' ' -f1)" = 3970c01865d8b5cfee0d7934d5d26c7b5b3188fb8f2284f18bdeb9673d48922f
+          test "$(sha256sum build/unity-memory.o | cut -d' ' -f1)" = 856212a4001b7f1504a01409127d570b82fa3098dd5cc6bb11d32178179d19ee
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: quality-125-${{ matrix.config }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quality-125-${{ matrix.config }}
+          retention-days: 14
+          if-no-files-found: error
