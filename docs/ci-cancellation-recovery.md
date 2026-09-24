@@ -1,4 +1,4 @@
-# Recovering cancelled PR validation
+# CI cancellation recovery and merge-queue fail-fast
 
 On 2026-09-08, PRs #243, #244, #249, #250, #251 and #252 had cancelled
 `Buster CI` runs on their current head commits with no replacement. Run
@@ -59,10 +59,11 @@ guarantee of available runner capacity. GitHub does not offer an atomic
 "retry only if PR head still equals SHA" operation: a push immediately after
 the final read can still race the request; normal stale-run cancellation remains.
 
-The write-enabled job checks out only `github.sha` from its own repository:
-for `workflow_run`, that is the trusted default-branch revision. It never
-checks out the triggering branch or reads its artifacts. Only that job has
-`actions: write`; the separate offline test job has `contents: read`.
+The write-enabled watcher and recovery jobs check out only `github.sha` from
+their own repository: for `workflow_run`, that is the trusted default-branch
+revision. They never check out the triggering branch or read its artifacts.
+Only those lifecycle jobs have `actions: write`; the separate offline test job
+has `contents: read`.
 
 ## Merge-queue fail-fast
 
