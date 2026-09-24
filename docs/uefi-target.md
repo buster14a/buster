@@ -112,8 +112,9 @@ boot` job installs those exact packages from the snapshot and is required by
 `CI complete`. It uses the ordinary PR merge checkout, main/tag pushes,
 merge groups and manual dispatches, under the existing `GH_ACTIONS_CI_ENABLED`
 switch. Apt retries transient snapshot fetch errors up to three times per
-request and fails on any incomplete index refresh; it does not change the
-signed source, package versions or required boot result. Update the snapshot,
+request, then makes up to three complete attempts per apt command with 30- and
+60-second backoffs. It fails on any incomplete index refresh and never changes
+the signed source, package versions or required boot result. Update the snapshot,
 package versions, firmware hashes and machine configuration together when
 intentionally refreshing the reference lane.
 
