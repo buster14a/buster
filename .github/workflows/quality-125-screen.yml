@@ -3,7 +3,7 @@ name: QUALITY 125 pinned screening
 on:
   push:
     branches: [astra/125-region-census-20260924]
-    paths: [.github/workflows/quality-125-screen.yml]
+    paths: [.github/workflows/quality-125-screen.yml, tools/quality_125_population_probe.py]
 
 permissions:
   contents: read
@@ -61,61 +61,6 @@ jobs:
           build/Release/ide cc -g0 -O0 -fregister-allocator=quality -fsource-metrics="$evidence/pressure.metrics" -c tests/basic_c_register_pressure.c -o build/pressure.o > "$evidence/pressure.rows.log" 2> "$evidence/pressure.stderr.log"
           sha256sum build/pressure.o > "$evidence/pressure.output.sha256"
           find build/generated -type f -print0 | sort -z | xargs -0 sha256sum > "$evidence/generated.sha256"
-      - name: Summarize independent populations and retained exact rows
-        shell: bash
-        env:
-          EVIDENCE: ${{ runner.temp }}/quality-125-populations
-        run: |
-          python3 - <<'PY'
-          import collections, json, os, pathlib
-          root = pathlib.Path(os.environ['EVIDENCE'])
-          for path in sorted(root.glob('*.rows.log')):
-              tables = {}
-              decisions = []
-              for line in path.read_text().splitlines():
-                  fields = line.split()
-                  if not fields or not fields[0].startswith('Q125_'):
-                      continue
-                  kind = fields[0]
-                  data = dict(token.split('=', 1) for token in fields[1:] if '=' in token)
-                  data = {key: int(value) for key, value in data.items()}
-                  f = data['f']
-                  if kind == 'Q125_TABLE':
-                      tables[f] = {**data, 'rows': {}, 'queries': {}}
-                  elif kind == 'Q125_ROW':
-                      tables[f]['rows'][data['s']] = [[int(x) for x in token.split(':')] for token in fields[1:] if ':' in token]
-                  elif kind == 'Q125_QUERY':
-                      assert data['s'] not in tables[f]['queries']
-                      tables[f]['queries'][data['s']] = data['q']
-                  elif kind == 'Q125_DECISION':
-                      decisions.append(data)
-              for table in tables.values():
-                  assert len(table['rows']) == table['c']
-                  assert sum(map(len, table['rows'].values())) == table['p']
-                  for row in table['rows'].values():
-                      assert all(row[i][0] < row[i+1][0] for i in range(len(row)-1))
-              cohorts = []
-              for limit in [0, 1, 2, 4, 8, 16, 32, 64]:
-                  subset = [t for t in tables.values() if t['l'] > limit]
-                  cells = sum(t['c'] * t['l'] for t in subset)
-                  p = sum(t['p'] for t in subset)
-                  c = sum(t['c'] for t in subset)
-                  cohorts.append(dict(regions_gt=limit, tables=len(subset), c=c, cells=cells, nonzeros=p,
-                      dense_bytes=8*cells, csr_soa_bytes=12*p+8*c+4*len(subset), csr_aos_bytes=16*p+8*c+4*len(subset),
-                      dense_query_cells=sum(sum(t['queries'].values())*t['l'] for t in subset),
-                      sparse_query_cells=sum(q*len(t['rows'][s]) for t in subset for s,q in t['queries'].items())))
-              summary = dict(tables=len(tables), max_regions=max([t['l'] for t in tables.values()],default=0),
-                  max_candidates=max([t['c'] for t in tables.values()],default=0),
-                  unordered_tables=[t['f'] for t in tables.values() if not t['ordered']],
-                  row_degree_histogram=dict(sorted(collections.Counter(len(r) for t in tables.values() for r in t['rows'].values()).items())),
-                  queried_degree_histogram=dict(sorted(collections.Counter(len(t['rows'][s]) for t in tables.values() for s in t['queries']).items())),
-                  query_count_histogram=dict(sorted(collections.Counter(q for t in tables.values() for q in t['queries'].values()).items())),
-                  selected_regions=len(decisions), cohorts=cohorts)
-              stem = path.name.removesuffix('.rows.log')
-              (root / (stem+'.population.json')).write_text(json.dumps(dict(summary=summary,tables=tables,decisions=decisions), separators=(',',':'))+'\n')
-              (root / (stem+'.summary.json')).write_text(json.dumps(summary, indent=2)+'\n')
-              print(stem, json.dumps(summary, indent=2))
-          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
