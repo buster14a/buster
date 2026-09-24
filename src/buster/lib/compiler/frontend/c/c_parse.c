@@ -11727,6 +11727,75 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
     return element_type;
 }
 
+BUSTER_C_INTERNAL bool c_parse_token_in_c23_attribute(CPreprocessResult preprocess, u32 token_index, u32 start, u32 end)
+{
+    // Declaration recovery may start its token span at the first attribute
+    // name when the C23 attribute itself was the unrecognized part. In that
+    // case, extend the probe back to the start of this declaration statement.
+    u32 scan_start = BUSTER_MIN(start, token_index);
+    if (scan_start == token_index || end <= token_index)
+    {
+        scan_start = token_index;
+        while (scan_start)
+        {
+            u32 previous = scan_start - 1;
+            CToken token = preprocess.tokens[previous];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                break;
+            }
+            scan_start = previous;
+        }
+    }
+    u32 token_count = (u32)preprocess.token_count;
+    for (u32 index = scan_start; index < token_index && index + 1 < token_count; index += 1)
+    {
+        u32 after = 0;
+        if (c_parse_c23_attribute_at(preprocess, index, token_count, &after) && token_index < after)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index,
+                                                            bool parameter, u32 segment_start, u32 segment_end)
+{
+    bool unknown = false;
+    if (token_index < preprocess.token_count && preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
+        !c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[token_index]))
+    {
+        CToken token = preprocess.tokens[token_index];
+        CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, (CScopeId){.value = 0}, &token);
+        if (entity.value == C_ID_UNDERLYING_INVALID)
+        {
+            entity = c_parse_lookup_typedef_name(result, c_token_spelling(preprocess.spelling_base, token), true);
+        }
+        bool is_typedef = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+        // GCC and Clang accept these floating-point spellings as builtin type
+        // words, although this frontend does not model them yet. Preserve
+        // their prior unsupported type behavior instead of reporting them as
+        // unknown identifiers.
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        bool is_unmodeled_builtin_type = string_equal(spelling, S8("__float128")) || string_equal(spelling, S8("_Float128")) ||
+                                        string_equal(spelling, S8("_Float64x")) || string_equal(spelling, S8("_Float128x"));
+        // A one-word identifier segment in a function declarator is the
+        // legacy identifier-list form, not a parameter declaration with a
+        // missing type specifier. Keep it out of the unknown-type diagnostic;
+        // typed parameters with a misspelled specifier contain another token.
+        bool is_old_style_identifier = parameter && token_index == segment_start && segment_end == segment_start + 1;
+        bool is_attribute_identifier = c_parse_token_in_c23_attribute(preprocess, token_index, segment_start, segment_end);
+        unknown = !is_typedef && !is_unmodeled_builtin_type && !is_old_style_identifier && !is_attribute_identifier;
+        if (unknown)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
+                               string_format(result->arena, S8("unknown type name '{S8}'"), spelling));
+        }
+    }
+}
+
 BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                     CDeclaration declaration, u32 start, u32 end)
 {
@@ -11742,9 +11811,14 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     }
     u32 derived_start = result->type_count;
     u32 declarator_start = start;
+    u32 type_diagnostic_start = result->diagnostic_count;
     CTypeId type = c_parse_scalar_type(machine, result, preprocess, start, end, &declarator_start);
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
+        if (declarator_start < end || result->diagnostic_count == type_diagnostic_start)
+        {
+            c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, true, start, end);
+        }
         return false;
     }
     type = c_parse_pointer_chain(result, preprocess, type, &declarator_start, end);
@@ -12069,9 +12143,16 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
         }
         u32 declarator_start = declaration->token_start;
         CTypeId base = inherited_base;
+        u32 type_diagnostic_start = result->diagnostic_count;
         if (base.value == C_ID_UNDERLYING_INVALID)
         {
             base = c_parse_scalar_type(machine, result, preprocess, declaration->token_start, name_index, &declarator_start);
+            if (base.value == C_ID_UNDERLYING_INVALID && !declaration->is_declarator_continuation &&
+                (declarator_start < name_index ||
+                 (declarator_start == name_index && result->diagnostic_count == type_diagnostic_start)))
+            {
+                c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, false, declaration->token_start, name_index);
+            }
             base = c_parse_apply_vector_attribute(result, preprocess, declaration->scope, base, declaration->token_start, name_index);
         }
         else
