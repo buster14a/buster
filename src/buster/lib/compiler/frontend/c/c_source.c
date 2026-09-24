@@ -4542,7 +4542,7 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
 BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansionTaskStack* tasks, CMacro* macro, CMacroArgument const* arguments,
                                                     CPpToken invocation)
 {
-    u32 stamp = invocation.stamp & C_PP_STAMP_MASK;
+    u32 stamp = invocation.stamp;
     u8 const* definition_spaces = macro->definition.replacement_space;
     u32 const* parameter_indices = macro->definition.parameter_index;
     u64 token_count = macro->definition.plain_count;
@@ -4564,7 +4564,7 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
             *cursor = (CMacroExpansionTask){
                 .token = {
                     .token = macro->definition.replacement[replacement_index],
-                    .stamp = stamp,
+                    .stamp = stamp & C_PP_STAMP_MASK,
                     .foreign = true,
                     .preceded_by_space = replacement_space,
                 },
@@ -4577,7 +4577,7 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
             for (u64 argument_index = 0; argument_index < argument.expanded_token_count; argument_index += 1)
             {
                 CPpToken argument_token = argument.expanded_tokens[argument_index];
-                argument_token.stamp = stamp;
+                argument_token.stamp = stamp & C_PP_STAMP_MASK;
                 argument_token.foreign = true;
                 if (!argument_index)
                 {
