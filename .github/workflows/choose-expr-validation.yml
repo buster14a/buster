@@ -1,0 +1,144 @@
+name: Temporary choose-expression validation
+on:
+  push:
+    branches: [codex/choose-expr-transport-20260924-astra]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      head: ${{ steps.source.outputs.head }}
+      test_head: ${{ steps.source.outputs.test_head }}
+      tree: ${{ steps.source.outputs.tree }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - id: source
+        name: Publish only guarded source and embedded tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 .github/choose-candidate.py
+  verify:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      TEST_HEAD: ${{ needs.publish.outputs.test_head }}
+      FIX_HEAD: ${{ needs.publish.outputs.head }}
+      FIX_TREE: ${{ needs.publish.outputs.tree }}
+    defaults:
+      run:
+        working-directory: source
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: transport
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.publish.outputs.head }}
+          fetch-depth: 3
+          path: source
+          persist-credentials: false
+      - name: Pin identities and build test-only baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/choose-evidence"
+          printf '%s\n' "$TEST_HEAD" "$FIX_HEAD" "$FIX_TREE" | tee "$RUNNER_TEMP/choose-evidence/revisions.txt"
+          test "$(git rev-parse HEAD^{tree})" = "$FIX_TREE"
+          git diff --check 744a948f41291b4238d1755b1507678799f1206d HEAD
+          git diff --binary 744a948f41291b4238d1755b1507678799f1206d HEAD > "$RUNNER_TEMP/choose-evidence/source.patch"
+          git checkout --detach "$TEST_HEAD"
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_gen.c)" = 60bf69ed970fc43d84fa3f7198aac5d1410b0eb9
+          sudo apt-get update -qq
+          sudo apt-get install -y mold ninja-build cmake
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/choose-build"
+          "$RUNNER_TEMP/choose-build" generate --cc clang
+          "$RUNNER_TEMP/choose-build" build --config Release -t ide
+      - id: baseline_suite
+        name: Failure-first registered suite and canonical observations
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/choose-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/choose-evidence/baseline-suite.log"
+      - name: Baseline independent references and reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ../transport/.github/choose-reference.py build/Release/ide ../transport/.github/choose-fixture.txt "$RUNNER_TEMP/choose-evidence/baseline"
+      - name: Build exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach "$FIX_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$FIX_TREE"
+          "$RUNNER_TEMP/choose-build" build --config Release -t ide
+          sha256sum build/Release/ide | tee "$RUNNER_TEMP/choose-evidence/candidate-binary.txt"
+      - id: candidate_suite
+        name: Candidate full registered Release suite
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/choose-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/choose-evidence/candidate-suite.log"
+      - id: self_host
+        name: Candidate ordinary self-host fixed point
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/choose-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/choose-evidence/candidate-self-host.log"
+      - name: Candidate independent controls and accept exact results
+        shell: bash
+        env:
+          BASELINE_SUITE: ${{ steps.baseline_suite.outcome }}
+          CANDIDATE_SUITE: ${{ steps.candidate_suite.outcome }}
+          SELF_HOST: ${{ steps.self_host.outcome }}
+        run: |
+          set -euo pipefail
+          python3 ../transport/.github/choose-reference.py build/Release/ide ../transport/.github/choose-fixture.txt "$RUNNER_TEMP/choose-evidence/candidate"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'choose-evidence'
+          baseline = json.loads((root / 'baseline/results.json').read_text())
+          candidate = json.loads((root / 'candidate/results.json').read_text())
+          assert all(r['compile'] == 0 and r['run'] == 0 for r in baseline if not r['config'].startswith('buster_'))
+          assert all(r['compile'] == 0 and r['run'] == 2 for r in baseline if r['name'] == 'reduced' and r['config'].startswith('buster_'))
+          assert all(r['compile'] == 0 and r['run'] == 0 for r in candidate), candidate
+          assert 'mark=1/0' in (root / 'baseline-suite.log').read_text()
+          assert os.environ['BASELINE_SUITE'] == 'failure'
+          assert os.environ['CANDIDATE_SUITE'] == 'success'
+          assert os.environ['SELF_HOST'] == 'success'
+          print('CHOOSE_ACCEPTED exact candidate, independent controls, canonical failure-first, full suite, self-host')
+          PY
+      - name: Preserve exact changed files
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/choose-evidence/changed"
+          cp src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c "$RUNNER_TEMP/choose-evidence/changed/"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/choose-evidence/checked-out-at-end.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: choose-expression-evidence
+          path: ${{ runner.temp }}/choose-evidence
+          retention-days: 30
+          if-no-files-found: error
