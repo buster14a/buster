@@ -57,6 +57,22 @@ publish cache entries. Immutable scalar query types are created before query
 checkpoints; declarator and qualified types remain independent. All borrowed
 cache pointers are cleared before the semantic model is returned.
 
+The cache exists only inside the per-function-body loop; file-scope validation
+(static initializers, deferred assertions, bit-field widths, alignment and
+array-bound inference) runs uncached. Where a family has just typed a range with
+`c_parse_checked_expression_type` and immediately needs the type-only answer for
+the same range in the same machine state, it passes that answer instead of
+querying again: `c_parse_initializer_expression_constraint` hands its checked
+leaf type to `c_parse_incompatible_aggregate_value_typed`, and only a failed
+checked query falls back to the querying `c_parse_incompatible_aggregate_value`.
+This is the same checked-answers-unchecked rule the cache applies, without a
+table, and it must stay statement-local: the type is valid only until the next
+query, rollback or model copy. Lowering never consumes these facts;
+`c_ir_predict_expression_type` answers a different question (value-context decay
+with an `s32` fallback) from the raw checked type, and the model reaches
+`c_lower_to_ir_with_options` by value after the machine and its scratch arena
+are gone.
+
 ## Regression contract
 
 `compiler_driver_test_syntax_diagnostic_equivalence` contains frozen acceptance

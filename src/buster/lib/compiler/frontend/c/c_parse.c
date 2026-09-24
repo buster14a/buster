@@ -18515,14 +18515,18 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_function_initializer(CTypeParseMachi
                                                                     CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
                                                                     u32 start, u32 end);
 
-BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* machine, CParseResult* result,
-                                                              CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
-                                                              u32 start, u32 end)
+// The compatibility question over an already-typed value. `source` must be the
+// type the expression query answers for [start, end) in the current machine
+// state: a caller that has just typed the same range passes that answer instead
+// of asking the machine again. Inside a function body the per-body query cache
+// makes the second query a table probe; at file scope there is no cache, and a
+// static initializer leaf would otherwise run the type machine twice.
+BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value_typed(CTypeParseMachine* machine, CParseResult* result,
+                                                                    CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
+                                                                    CTypeId source, u32 start, u32 end)
 {
-    CTypeId source = C_TYPE_ID_INVALID;
     bool incompatible = false;
-    if (destination.value < result->type_count &&
-        c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source) && source.value < result->type_count)
+    if (destination.value < result->type_count && source.value < result->type_count)
     {
         CType target = result->types[destination.value];
         CType from = result->types[source.value];
@@ -18573,6 +18577,20 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
             incompatible = !layout || !first_scalar || !compatible || source_size > target_size || source_alignment > target_alignment;
             arena_set_position(machine->scratch_arena, mark);
         }
+    }
+    return incompatible;
+}
+
+BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* machine, CParseResult* result,
+                                                              CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
+                                                              u32 start, u32 end)
+{
+    CTypeId source = C_TYPE_ID_INVALID;
+    bool incompatible = false;
+    if (destination.value < result->type_count &&
+        c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source))
+    {
+        incompatible = c_parse_incompatible_aggregate_value_typed(machine, result, preprocess, scope, destination, source, start, end);
     }
     return incompatible;
 }
@@ -19238,8 +19256,13 @@ BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachi
     CTypeId source = C_TYPE_ID_INVALID;
     if (start < end)
     {
-        c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source, &checked);
-        if (!checked.message.length && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end))
+        // A checked type answers the unchecked compatibility question over the
+        // same range, exactly as the function-body cache already lets it. Only a
+        // failed checked query falls back to asking the machine again.
+        bool typed = c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source, &checked);
+        if (!checked.message.length &&
+            (typed ? c_parse_incompatible_aggregate_value_typed(machine, result, preprocess, scope, destination, source, start, end)
+                   : c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end)))
             c_parse_lowering_constraint_consider(&checked, S8("initializer has an incompatible type"), start, end);
     }
     if (checked.message.length) c_parse_initializer_fail(diagnostic, checked.message, checked.location_token_index, destination);

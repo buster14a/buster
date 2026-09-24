@@ -1837,6 +1837,32 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("const int *e(void); void f(int c) {const int x=1;if(c) *e()=22;}\n"), false, true},
         {S8("const int *e(void); void f(int c) {const int x=1;if(c) (x)=22;}\n"), false, true},
         {S8("struct D { int fd; }; int *error(void);\n#define errno (*error())\n#define dirfd(d) ({ struct D *p=(d); int r=-1; if (p == 0 || p->fd < 0) errno=22; else r=p->fd; r; })\nint f(struct D *d) { int directory=dirfd(d); return directory; }\n\n"), true, true},
+        // Initializer-leaf compatibility neighbors: the checked leaf type feeds
+        // the aggregate/scalar compatibility check without a second query, at
+        // file scope (no query cache) and in automatic and static block scope.
+        {S8("struct S {int a;}; struct T { struct S inner; int b; }; struct T t = { {1}, 2 };\n"), true, true},
+        {S8("struct S {int a;}; struct T { struct S inner; int b; }; struct T t = { 1, 2 };\n"), true, true},
+        {S8("struct S {int a;}; struct T { struct S inner; int b; }; struct T t = { (struct S){1}, 2 };\n"), true, true},
+        {S8("struct S {int a;}; struct T { struct S inner; int b; }; struct T t = { 1.5, 2 };\n"), true, true},
+        {S8("struct S {int a;}; struct T { struct S inner; int b; }; struct T t = { .b = 2, .inner = {1} };\n"), true, true},
+        {S8("struct S {int a;}; struct T { struct S inner; int b; }; struct T t = { .b = 2, .inner = 1 };\n"), true, true},
+        {S8("struct S {int a;}; struct T { struct S inner; int b; }; struct T t = { .b = 2, .inner = (struct S){1} };\n"), true, true},
+        {S8("struct S {int a;}; struct S s = { 1.5 };\n"), true, true},
+        {S8("union V { int i; float f; }; struct W { union V v; int z; }; struct W w = { { .f = 1.0f }, 2 };\n"), true, true},
+        {S8("union V { int i; float f; }; struct W { union V v; int z; }; struct W w = { 3, 2 };\n"), true, true},
+        {S8("struct S {int a;}; struct S s = { 1 }; struct S *ps[] = { &s, (struct S *)0 };\n"), true, true},
+        {S8("struct S {int a;}; int f(void) { struct T { struct S inner; int b; } t = { 1, 2 }; return t.b; }\n"), true, true},
+        {S8("struct S {int a;}; int f(void) { static struct T { struct S inner; int b; } t = { .inner = (struct S){1}, .b = 2 }; return t.b; }\n"), true, true},
+        {S8("struct S {int a;}; struct S s = { (struct S){1} };\n"), false, true},
+        {S8("struct S {int a;}; int x = (struct S){1};\n"), false, true},
+        {S8("struct U { char *p; }; struct U u = { 1.5 };\n"), false, true},
+        {S8("struct S {int a;}; int arr[2] = { (struct S){1}, 2 };\n"), false, true},
+        {S8("struct S {int a;}; struct T { struct S inner; int b; }; struct T t = { .b = (struct S){1} };\n"), false, true},
+        {S8("struct S {int a;}; struct S s = { 1 }; struct S *ps[] = { &s, 1.5 };\n"), false, true},
+        {S8("struct S {int a;}; struct S s = { 1 }; struct S *ps[] = { s };\n"), false, true},
+        {S8("struct S {int a;}; int f(void) { struct T { struct S inner; int b; } t = { .b = (struct S){1} }; return t.b; }\n"), false, true},
+        {S8("struct S {int a;}; int f(void) { static int x = (struct S){1}; return x; }\n"), false, true},
+        {S8("struct S {int a;}; int f(void) { int x = (struct S){1}; return x; }\n"), false, true},
     };
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
