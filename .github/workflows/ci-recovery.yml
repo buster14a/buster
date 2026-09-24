@@ -18,7 +18,8 @@ on:
 
 permissions: {}
 
-# Duplicate completion deliveries cannot make concurrent retry decisions.
+# Serialize lifecycle deliveries for one Buster CI run so the trusted watcher
+# finishes before any completion-recovery decision.
 concurrency:
   group: ci-recovery-${{ github.event.workflow_run.id || github.run_id }}
   cancel-in-progress: false
