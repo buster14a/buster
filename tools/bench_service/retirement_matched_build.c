@@ -257,6 +257,11 @@ int bq_retirement_matched_build_poll(BqRetirementBuildProcess* process)
             process->process = 0;
             result = process->exit_code == 0 ? 1 : -1;
         }
+        else
+        {
+            process->state = BQ_RETIREMENT_BUILD_WAIT_FAILED;
+            process->process = 0;
+        }
     }
     return result;
 }

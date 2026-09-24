@@ -43,7 +43,8 @@ typedef struct BqRetirementMatchedBuild
 enum
 {
     BQ_RETIREMENT_BUILD_RUNNING = 1,
-    BQ_RETIREMENT_BUILD_REAPED = 2
+    BQ_RETIREMENT_BUILD_REAPED = 2,
+    BQ_RETIREMENT_BUILD_WAIT_FAILED = 3
 };
 
 typedef struct BqRetirementBuildProcess

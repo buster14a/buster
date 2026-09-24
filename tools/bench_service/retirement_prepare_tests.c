@@ -668,7 +668,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
     int length = snprintf(profile, sizeof(profile), "%sbuild-driver-sha256=%.64s\n",
                           original_profile, driver_digest);
     BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(profile));
-    for (u32 trial = 0; trial < 8; trial += 1)
+    for (u32 trial = 0; trial < 9; trial += 1)
     {
         BqJob job = *original;
         job.id = 30 + trial;
@@ -755,6 +755,20 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             }
             bq_retirement_matched_build_abort(&live);
             BQ_PREP_CHECK(!live.state && !live.process && !live.writer);
+        }
+        if (trial == 8)
+        {
+            BqRetirementBuildProcess stolen = {0};
+            BQ_PREP_CHECK(bq_retirement_matched_build_launch(&build, &stolen));
+            int status = 0;
+            pid_t waited = -1;
+            do { if (stolen.process > 0) waited = waitpid(stolen.process, &status, 0); }
+            while (waited < 0 && errno == EINTR);
+            BQ_PREP_CHECK(waited > 0 && bq_retirement_matched_build_poll(&stolen) == -1 &&
+                stolen.state == BQ_RETIREMENT_BUILD_WAIT_FAILED && !stolen.process &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &stolen, geteuid(), &build) == BQ_WORKER_FAILED &&
+                build.failed && !stolen.state);
         }
         for (u32 stage = 0; ok && stage < (trial ? 4u : 1u); stage += 1)
         {

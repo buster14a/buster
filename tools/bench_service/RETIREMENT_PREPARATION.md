@@ -255,6 +255,8 @@ two verified copies, removal of the temporary copy, and frozen binary readback
 after missing output, stale digest, same-byte inode replacement and changed
 content. The stage fixture also runs the actual fixed child process, retains
 its service-owned log, and rejects a changed launch digest before building any
-binary record. The #923 integration owner registers this dedicated
+binary record. An unexpectedly reaped child cannot become a successful stage
+and releases its local descriptors after failing the build. The #923
+integration owner registers this dedicated
 test alongside the native and sanitizer service suite, then proves its exact
 submitted head on hosted runners.
