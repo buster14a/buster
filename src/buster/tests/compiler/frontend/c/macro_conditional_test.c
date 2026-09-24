@@ -49,9 +49,130 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_compare_semantic_tokens(U
 }
 #endif
 
+// Definition-owned argument demand is reused, never a previous expansion's
+// tokens or stamps. Count checks pin both omitted work and once-only prescan.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_argument_demand_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 expected;
+        u64 expansions;
+        u32 limit;
+    } cases[] = {
+        // raw-only
+        {S8("#define BAD(x,y) x+y\n#define RAW(x) #x\nRAW(BAD(1))\n"), S8("\"BAD(1)\""), 1, 0},
+        // unused
+        {S8("#define BAD(x,y) x+y\n#define UNUSED(x) 7\nUNUSED(BAD(1))\n"), S8("7"), 1, 0},
+        // paste-only
+        {S8("#define BAD(x,y) x+y\n#define PREFIX(x) prefix##x\nPREFIX(BAD(1))\n"), S8("prefixBAD(1)"), 1, 0},
+        // mixed-stringize
+        {S8("#define N 7\n#define MIX(x) #x x x\nMIX(N)\n"), S8("\"N\" 7 7"), 2, 0},
+        // mixed-paste
+        {S8("#define N 7\n#define MIX(x) x prefix##x\nMIX(N)\n"), S8("7 prefixN"), 2, 0},
+        // nested-ordinary
+        {S8("#define N 7\n#define ID(x) x\nID(ID(N))\n"), S8("7"), 3, 0},
+        // disabled
+        {S8("#define SELF a.SELF\n#define ID(x) x\nID(ID(SELF))\n"), S8("a.SELF"), 3, 0},
+        // raw-line-file
+        {S8("#define RAW(x) #x\n#define UNUSED(x) 7\nRAW(__LINE__) UNUSED(__FILE__)\n"), S8("\"__LINE__\" 7"), 2, 0},
+        // empty
+        {S8("#define RAW(x) #x\n#define CAT(a,b) a##b\nRAW() CAT(,) CAT(,x) CAT(x,)\n"), S8("\"\" x x"), 4, 0},
+        // raw-variadic
+        {S8("#define BAD(x,y) x+y\n#define VS(...) #__VA_ARGS__\nVS(BAD(1), BAD(2))\n"), S8("\"BAD(1), BAD(2)\""), 1, 0},
+        // ordinary-variadic
+        {S8("#define N 7\n#define V(...) __VA_ARGS__\nV(N,N)\n"), S8("7,7"), 3, 0},
+        // paste-rescan
+        {S8("#define CAT(a,b) a##b\nCAT(LA,TE)\n#define LATE 8\nCAT(LA,TE)\n#undef LATE\nCAT(LA,TE)\n"), S8("LATE 8 LATE"), 4, 0},
+        // redefinition
+        {S8("#define F(x) #x\n#define N 7\nF(N)\n#undef F\n#define F(x) x\nF(N)\n#undef F\n#define F(x) #x\nF(N)\n"), S8("\"N\" 7 \"N\""), 4, 0},
+        // snapshot
+        {S8("#define F(x) #x\n#define N 7\n#pragma push_macro(\"F\")\n#undef F\n#define F(x) x\nF(N)\n#pragma pop_macro(\"F\")\nF(N)\n"), S8("7 \"N\""), 3, 0},
+        // pragma
+        {S8("#define P \"push_macro(\\\"N\\\")\"\n#define Q \"pop_macro(\\\"N\\\")\"\n#define N 7\n_Pragma(P)\n#undef N\n#define N 9\nN\n_Pragma(Q)\nN\n"), S8("9 7"), 6, 0},
+        // raw-expansion-budget
+        {S8("#define A B\n#define B 9\n#define RAW(x) #x\nRAW(A)\n"), S8("\"A\""), 1, 1},
+        // unused-expansion-budget
+        {S8("#define A B\n#define B 9\n#define UNUSED(x) 7\nUNUSED(A)\n"), S8("7"), 1, 1},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult actual = c_preprocess(temporary.arena, cases[case_index].source,
+                                                     (CPreprocessOptions){.source_path = S8("argument-demand.c"),
+                                                                          .dialect = dialects[dialect_index],
+                                                                          .expansion_limit = cases[case_index].limit});
+            CLexResult expected = c_lex(temporary.arena, cases[case_index].expected);
+            BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+            BUSTER_TEST(arguments, actual.token_count == expected.token_count);
+            BUSTER_TEST(arguments, actual.detail->preprocessed.expansions == cases[case_index].expansions);
+            for (u64 token_index = 0; token_index < actual.token_count && token_index < expected.token_count; token_index += 1)
+            {
+                BUSTER_TEST(arguments, actual.tokens[token_index].kind == expected.tokens[token_index].kind);
+                BUSTER_STRING_TEST(arguments, c_token_spelling(actual.spelling_base, actual.tokens[token_index]),
+                                   c_token_spelling(expected.spelling_base, expected.tokens[token_index]));
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    String8 located = S8("#define MIX(x) #x x\n#define N 7\n"
+                         "#line 40 \"demand-a.c\"\nMIX(N)\n"
+                         "#line 90 \"demand-b.c\"\nMIX(N)\n");
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult actual = c_preprocess(temporary.arena, located, (CPreprocessOptions){.source_path = S8("demand-input.c")});
+    BUSTER_TEST(arguments, actual.diagnostic_count == 0);
+    if (BUSTER_REQUIRE(arguments, actual.token_count == 5))
+    {
+        for (u32 index = 0; index < 4; index += 1)
+        {
+            CSourceLocation location = c_preprocess_token_location(&actual, actual.tokens[index]);
+            BUSTER_TEST(arguments, location.line == (index < 2 ? 40u : 90u));
+            BUSTER_TEST(arguments, location.column == 1);
+            if (BUSTER_REQUIRE(arguments, location.file < actual.file_count))
+            {
+                BUSTER_STRING_TEST(arguments, actual.files[location.file], index < 2 ? S8("demand-a.c") : S8("demand-b.c"));
+            }
+        }
+    }
+    scratch_end(temporary);
+
+    // Any ordinary use still requires prescan, even beside # or ##. The
+    // error belongs to the nested invocation, not to an earlier expansion.
+    String8 invalid[] = {
+        S8("#define BAD(x,y) x+y\n#define MIX(x) #x x\n#line 80 \"needed.c\"\nMIX(BAD(1))\n"),
+        S8("#define BAD(x,y) x+y\n#define MIX(x) prefix##x x\n#line 80 \"needed.c\"\nMIX(BAD(1))\n"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        actual = c_preprocess(temporary.arena, invalid[index], (CPreprocessOptions){.source_path = S8("demand-input.c")});
+        if (BUSTER_REQUIRE(arguments, actual.diagnostic_count == 1))
+        {
+            CDiagnostic diagnostic = actual.diagnostics[0];
+            BUSTER_TEST(arguments, diagnostic.kind == C_DIAGNOSTIC_INVALID_MACRO_INVOCATION);
+            BUSTER_TEST(arguments, diagnostic.location.line == 80);
+            BUSTER_TEST(arguments, diagnostic.location.column == 5);
+            if (BUSTER_REQUIRE(arguments, diagnostic.location.file < actual.file_count))
+            {
+                BUSTER_STRING_TEST(arguments, actual.files[diagnostic.location.file], S8("needed.c"));
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult demand = c_macro_argument_demand_tests(arguments);
+    result.test_count += demand.test_count;
+    result.succeeded_test_count += demand.succeeded_test_count;
     String8 source = S8("#define ENABLED 1\n"
                         "#define MISSING_VALUE 0\n"
                         "#define ID(x) x\n"
