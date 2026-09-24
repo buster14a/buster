@@ -29,7 +29,7 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = f976bfd7cdb8830a8a15d959ef36f0152f1b767d
           git diff --exit-code
           git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/production-source.txt"
-          git archive --format=tar.gz HEAD src/buster/lib/compiler src/buster/tests/compiler_driver_test.c docs/agents AGENTS.md CMakeLists.txt > "$PROBE_OUT/source-excerpts.tar.gz"
+          git archive --format=tar.gz HEAD src/buster/lib/compiler src/buster/tests docs/agents AGENTS.md CMakeLists.txt > "$PROBE_OUT/source-excerpts.tar.gz"
       - name: Build the trusted compiler using the hosted bootstrap exception
         shell: bash
         run: |
