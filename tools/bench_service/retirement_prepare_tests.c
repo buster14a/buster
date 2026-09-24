@@ -745,7 +745,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
     int length = snprintf(profile, sizeof(profile), "%sbuild-driver-sha256=%.64s\n",
                           original_profile, driver_digest);
     BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(profile));
-    for (u32 trial = 0; trial < 9; trial += 1)
+    for (u32 trial = 0; trial < 10; trial += 1)
     {
         BqJob job = *original;
         job.id = 30 + trial;
@@ -851,6 +851,20 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 bq_retirement_matched_build_complete_pinned(queue, &job,
                     installed, workspaces, pinned, &stolen, geteuid(), &build) == BQ_WORKER_FAILED &&
                 build.failed && !stolen.state);
+        }
+        if (trial == 9)
+        {
+            BqRetirementBuildProcess flooded = {0};
+            int exit_code = -1;
+            BQ_PREP_CHECK(bq_prep_test_run_stage(&build, &flooded, &exit_code) &&
+                exit_code == 0 && flooded.log_eof && flooded.log_overflow &&
+                !flooded.capture_failed && flooded.log_bytes == BQ_RETIREMENT_BUILD_LOG_CAP);
+            struct stat bounded = {0};
+            BQ_PREP_CHECK(flooded.writer >= 3 && fstat(flooded.writer, &bounded) == 0 &&
+                bounded.st_size == BQ_RETIREMENT_BUILD_LOG_CAP &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &flooded, geteuid(), &build) ==
+                    BQ_WORKER_FAILED && build.failed && !build.next && !flooded.state);
         }
         for (u32 stage = 0; ok && stage < (trial ? 4u : 1u); stage += 1)
         {
