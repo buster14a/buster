@@ -2,7 +2,11 @@
 """Adversarial read-back fixtures for benchmark admission."""
 
 import copy
+import os
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from verify_github_admission import verify
 
@@ -71,6 +75,41 @@ class AdmissionReadbackTest(unittest.TestCase):
         self.branches["branch_policies"][0]["name"] = "release"
         with self.assertRaises(ValueError):
             self.check()
+
+    def test_installer_preserves_existing_dispatch_state(self):
+        installer = Path(__file__).with_name("configure_github_admission.sh")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mock = root / "gh"
+            log = root / "calls"
+            mock.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$*" >>"$GH_CALLS"\n'
+                'if [ "$1" = auth ]; then exit 0; fi\n'
+                'if [ "$1" = api ] && [ "$4" = '
+                'repos/buster14a/buster/actions/variables/BENCH_SERVICE_DISPATCH_ENABLED ]; then\n'
+                '  if [ "$GH_VALUE" = absent ]; then exit 1; fi\n'
+                '  printf \'{"name":"BENCH_SERVICE_DISPATCH_ENABLED","value":"%s"}\\n\' "$GH_VALUE"\n'
+                '  exit 0\n'
+                'fi\n'
+                'exit 1\n', encoding="utf-8")
+            mock.chmod(0o755)
+            for value in ("true", "absent", "false"):
+                with self.subTest(value=value):
+                    log.write_text("", encoding="utf-8")
+                    env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
+                               GH_CALLS=str(log), GH_VALUE=value)
+                    result = subprocess.run(
+                        ["bash", str(installer), "buster14a/buster"], env=env,
+                        capture_output=True, text=True, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    calls = log.read_text(encoding="utf-8")
+                    self.assertNotIn("variable set", calls)
+                    self.assertNotIn("--method", calls)
+                    if value == "false":
+                        self.assertIn("rulesets", calls)
+                    else:
+                        self.assertNotIn("rulesets", calls)
 
 
 if __name__ == "__main__":
