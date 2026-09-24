@@ -914,7 +914,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("test_differential", desktop.replace("test_differential --self-test", ""))
         self.assertEqual(desktop.count("test_differential --self-test"), 1)
         self.assertNotIn("test_all_combinations_ci", native)
-        self.assertIn("fail-fast: false", native)
+        self.assertIn("fail-fast: ${{ github.event_name == 'merge_group' }}", native)
         self.assertNotIn("actions/download-artifact", native)
         self.assertIn("BUSTER_CI_REQUIRED: modes differential", native)
         entries = re.findall(r"(?m)^          - name: (.+)\n            runner: (.+)$", native)
