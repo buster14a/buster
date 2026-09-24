@@ -20990,6 +20990,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
                         if (BUSTER_REQUIRE(arguments, function != 0))
                         {
                             u32 operations = 0;
+                            IrValueId arithmetic_result = IR_VALUE_ID_INVALID;
                             u32 volatile_loads = 0;
                             u32 volatile_stores = 0;
                             for (u32 index = 0; index < function->instruction_count; index += 1)
@@ -20999,17 +21000,33 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
                                 volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
                                 if (instruction->opcode == IR_OPCODE_BINARY)
                                 {
-                                    operations += 1;
                                     IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
                                     if (BUSTER_REQUIRE(arguments, type != 0))
                                     {
-                                        bool matched = instruction->binary_operation == expected.operation && type->bit_width == expected.width &&
-                                            type->kind == (expected.floating ? IR_TYPE_FLOAT : IR_TYPE_INTEGER) &&
-                                            (expected.floating || type->is_signed == expected.signed_integer);
-                                        BUSTER_TEST_RAW(arguments, matched, string_format(temporary.arena,
-                                            S8("COMPOUND_IR case={u32} target={u32} form={u32} operation={u32}/{u32} width={u32}/{u32} source={S8}"),
-                                            case_index, target_index, form, (u32)instruction->binary_operation, (u32)expected.operation,
-                                            type->bit_width, expected.width, expected.source));
+                                        if (type->kind == IR_TYPE_BOOLEAN && instruction->binary_operation == IR_BINARY_INTEGER_NOT_EQUAL)
+                                        {
+                                            // Store/result conversion to _Bool compares the arithmetic
+                                            // result with zero. It is not another arithmetic operation,
+                                            // and must not normalize the RHS before subtraction.
+                                            if (BUSTER_REQUIRE(arguments, instruction->operands && instruction->operand_count == 2))
+                                            {
+                                                BUSTER_TEST_RAW(arguments, arithmetic_result.value != IR_ID_UNDERLYING_INVALID &&
+                                                    (instruction->operands[0].value == arithmetic_result.value ||
+                                                     instruction->operands[1].value == arithmetic_result.value), expected.source);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            operations += 1;
+                                            arithmetic_result = instruction->result;
+                                            bool matched = instruction->binary_operation == expected.operation && type->bit_width == expected.width &&
+                                                type->kind == (expected.floating ? IR_TYPE_FLOAT : IR_TYPE_INTEGER) &&
+                                                (expected.floating || type->is_signed == expected.signed_integer);
+                                            BUSTER_TEST_RAW(arguments, matched, string_format(temporary.arena,
+                                                S8("COMPOUND_IR case={u32} target={u32} form={u32} operation={u32}/{u32} width={u32}/{u32} source={S8}"),
+                                                case_index, target_index, form, (u32)instruction->binary_operation, (u32)expected.operation,
+                                                type->bit_width, expected.width, expected.source));
+                                        }
                                     }
                                 }
                             }
