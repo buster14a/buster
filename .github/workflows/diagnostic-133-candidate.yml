@@ -1,0 +1,154 @@
+name: Temporary QUALITY event-equivalence experiment
+on:
+  push:
+    branches: [diagnostics/133-event-equivalence-2e942e8]
+    paths: [.github/workflows/diagnostic-133-candidate.yml]
+permissions:
+  contents: read
+jobs:
+  objects:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.prepare.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          path: work
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: payload
+          persist-credentials: false
+      - name: Verify reviewed patch and prepare Git objects without updating refs
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
+          base='2e942e80a87666409cf29d3e24a68d322b9e71fd'
+          base_tree='f976bfd7cdb8830a8a15d959ef36f0152f1b767d'
+          expected_tree='5b0b268022bc8c6b17b49df239e6b7a0df415376'
+          expected_patch='35a032eecedda1fa211d399ddfd7175dd139a450e655200ef3edcb453b5e282c'
+          allowed=['CMakeLists.txt','src/buster/lib/compiler/codegen/machine_schedule.c','src/buster/lib/compiler/codegen/machine_schedule_internal.h','src/buster/tests/compiler/codegen/machine_schedule_test.c','src/buster/tests/compiler/codegen/machine_schedule_test.h','src/buster/tests/test.c']
+          root=pathlib.Path('work')
+          def git(*args):
+              return subprocess.check_output(['git','-C',str(root),*args],text=True).strip()
+          assert git('rev-parse','HEAD')==base and git('rev-parse','HEAD^{tree}')==base_tree
+          patch=gzip.decompress(base64.b64decode(pathlib.Path('payload/tools/diagnostics/quality133.patch.gz.b64').read_bytes()))
+          assert len(patch)==52864 and hashlib.sha256(patch).hexdigest()==expected_patch
+          subprocess.run(['git','-C',str(root),'apply','--index','-'],input=patch,check=True)
+          assert git('diff','--cached','--name-only').splitlines()==allowed
+          assert git('write-tree')==expected_tree
+          subprocess.run(['git','-C',str(root),'diff','--cached','--check'],check=True)
+          def post(endpoint, value):
+              request=urllib.request.Request('https://api.github.com/repos/buster14a/buster/git/'+endpoint,data=json.dumps(value).encode(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},method='POST')
+              with urllib.request.urlopen(request,timeout=60) as response:
+                  return json.load(response)
+          entries=[]
+          for path in allowed:
+              data=(root/path).read_bytes()
+              blob=post('blobs',{'content':base64.b64encode(data).decode(),'encoding':'base64'})['sha']
+              assert blob==git('hash-object',path)
+              entries.append({'path':path,'mode':'100644','type':'blob','sha':blob})
+          tree=post('trees',{'base_tree':base_tree,'tree':entries})['sha']
+          assert tree==expected_tree
+          commit=post('commits',{'message':'machine: preserve QUALITY queue events while reusing static role projections (#133)','tree':tree,'parents':[base]})['sha']
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'quality133-objects';out.mkdir()
+          (out/'manifest.json').write_text(json.dumps({'base':base,'base_tree':base_tree,'candidate':commit,'candidate_tree':tree,'patch_sha256':expected_patch,'entries':entries,'refs_updated':False},indent=2)+'\n')
+          (out/'candidate.patch').write_bytes(patch)
+          print((out/'manifest.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output: output.write('commit='+commit+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: quality133-candidate-objects
+          path: ${{ runner.temp }}/quality133-objects
+          retention-days: 30
+          if-no-files-found: error
+  screening:
+    needs: objects
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      CANDIDATE: ${{ needs.objects.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.objects.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Serial same-root trusted builds and frozen ordinary QUALITY comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/quality133-screening"
+          mkdir -p "$E/bin" "$E/builds"
+          exec > >(tee "$E/experiment.log") 2>&1
+          set -x
+          clang --version
+          cmake --version
+          ninja --version
+          uname -a
+          lscpu
+          git rev-parse HEAD 'HEAD^{tree}'
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$E/build-driver"
+          "$E/build-driver" bench_throughput help
+          cp build/throughput "$E/bin/throughput"
+          export E
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,time
+          e=pathlib.Path(os.environ['E']);base='2e942e80a87666409cf29d3e24a68d322b9e71fd';candidate=os.environ['CANDIDATE']
+          def run(args,log):
+              with open(log,'w') as f:
+                  print('COMMAND',json.dumps(args),flush=True)
+                  subprocess.run(args,stdout=f,stderr=subprocess.STDOUT,check=True)
+          records=[]
+          for label,revision in [('base',base),('base-rebuild',base),('simple',base),('projected',candidate)]:
+              subprocess.run(['git','checkout','--detach',revision],check=True)
+              if label=='simple':
+                  p=pathlib.Path('src/buster/lib/compiler/codegen/machine_schedule.c');s=p.read_text()
+                  a='            growth -= (role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && demanded;\n            growth += (role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE) && !demanded;'
+                  b='            if (demanded)\n            {\n                growth -= role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;\n            }\n            else\n            {\n                growth += role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;\n            }'
+                  assert s.count(a)==1;p.write_text(s.replace(a,b))
+                  (e/'simple.patch').write_bytes(subprocess.check_output(['git','diff','--binary']))
+              out=e/'builds'/label;out.mkdir()
+              (out/'source.patch').write_bytes(subprocess.check_output(['git','diff','--binary']))
+              config=[str(e/'build-driver'),'generate','--ci','--cc','clang','--','-DBUSTER_INCLUDE_TESTS=OFF','-DBUSTER_UNITY_BUILD=OFF','-DBUSTER_BENCH_ALLOCATIONS=OFF','-DCMAKE_LINKER_TYPE=DEFAULT']
+              build=[str(e/'build-driver'),'build','--config','Release','-t','ide','--','-j2']
+              run(config,out/'configure.log');run(build,out/'build.log')
+              binary=pathlib.Path('build/Release/ide').read_bytes();frozen=e/'bin'/label;frozen.write_bytes(binary);frozen.chmod(0o500)
+              for name in ['CMakeCache.txt','compile_commands.json']:
+                  (out/name).write_bytes((pathlib.Path('build')/name).read_bytes())
+              run(['objdump','-h',str(frozen)],out/'sections.txt')
+              run(['nm','-a',str(frozen)],out/'symbols.txt')
+              # Timing executables must contain neither the test oracle nor trace writer.
+              symbols=(out/'symbols.txt').read_text();assert 'machine_schedule_queue_growth_descriptor' not in symbols and 'machine_schedule_function_trace' not in symbols and 'machine_schedule_trace_write' not in symbols
+              records.append({'label':label,'revision':revision,'source_patch_sha256':hashlib.sha256((out/'source.patch').read_bytes()).hexdigest(),'binary_sha256':hashlib.sha256(binary).hexdigest(),'binary_bytes':len(binary),'cwd':os.getcwd(),'configure':config,'build':build})
+              if label=='simple': subprocess.run(['git','restore','src/buster/lib/compiler/codegen/machine_schedule.c'],check=True)
+          (e/'build-identities.json').write_text(json.dumps(records,indent=2)+'\n')
+          print((e/'build-identities.json').read_text(),flush=True)
+          # All builds have finished. No probes or compilation overlap timing.
+          for name,left,right,right_id in [('same-root-control','base','base-rebuild',base),('simple','base','simple',base+'+simple.patch'),('projected','base','projected',candidate)]:
+              argv=[str(e/'bin'/'throughput'),'run','--baseline',str(e/'bin'/left),'--candidate',str(e/'bin'/right),'--baseline-id',base,'--candidate-id',right_id,'--output',str(e/name),'--profile','ci','--mode','quality','--pairs','20','--warmups','2','--timeout','120','--cpu','auto','--require-identical-output','--no-guard']
+              run(argv,e/(name+'.log'))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: quality133-hosted-matched-screening
+          path: |
+            ${{ runner.temp }}/quality133-screening
+            !${{ runner.temp }}/quality133-screening/bin
+            !${{ runner.temp }}/quality133-screening/build-driver
+          retention-days: 30
+          if-no-files-found: error
