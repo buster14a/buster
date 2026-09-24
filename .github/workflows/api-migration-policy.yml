@@ -115,6 +115,7 @@ jobs:
             tool="$GITHUB_WORKSPACE/candidate/tools/native_retirement_merge_gate.py"
           fi
           status_args=()
+          wait_base_supported=false
           if [[ "$EVENT_NAME" == pull_request ]]; then
             rows="$RUNNER_TEMP/native-retirement-status-rows.json"
             gh api --paginate --slurp \
@@ -133,11 +134,24 @@ jobs:
             status_args=(--repository "$GITHUB_REPOSITORY")
             # The queued base can be an unmerged predecessor. Only the code
             # checked out from live main may wait; candidate bytes are input.
-            python3 -B "$GITHUB_WORKSPACE/trusted/tools/merge_queue_admission.py" wait-base \
-              --repo-root "$GITHUB_WORKSPACE/candidate" \
-              --trusted-root "$GITHUB_WORKSPACE/trusted" \
-              --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
-              --sha "$GITHUB_SHA" --wait-seconds 18000
+            # The first queue merge of this policy still runs under the older
+            # trusted main, which has no wait-base command. It is safe only
+            # when that trusted revision is the group's already-landed base.
+            if python3 -B "$GITHUB_WORKSPACE/trusted/tools/merge_queue_admission.py" \
+                wait-base --help >/dev/null 2>&1; then
+              wait_base_supported=true
+              python3 -B "$GITHUB_WORKSPACE/trusted/tools/merge_queue_admission.py" wait-base \
+                --repo-root "$GITHUB_WORKSPACE/candidate" \
+                --trusted-root "$GITHUB_WORKSPACE/trusted" \
+                --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
+                --sha "$GITHUB_SHA" --wait-seconds 18000
+            else
+              trusted_main=$(git -C trusted rev-parse HEAD)
+              if [[ "$BASE_SHA" != "$trusted_main" ]]; then
+                echo '::error::Speculative group requires trusted main with wait-base support.' >&2
+                exit 1
+              fi
+            fi
           fi
           current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
           [[ "$current_main" =~ ^[0-9a-f]{40}$ ]]
@@ -150,11 +164,19 @@ jobs:
             "${status_args[@]}" \
             | tee "$RUNNER_TEMP/native-retirement-admission.json"
           if [[ "$EVENT_NAME" == merge_group ]]; then
-            python3 -B "$GITHUB_WORKSPACE/trusted/tools/merge_queue_admission.py" wait-base \
-              --repo-root "$GITHUB_WORKSPACE/candidate" \
-              --trusted-root "$GITHUB_WORKSPACE/trusted" \
-              --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
-              --sha "$GITHUB_SHA" --wait-seconds 0
+            if [[ "$wait_base_supported" == true ]]; then
+              python3 -B "$GITHUB_WORKSPACE/trusted/tools/merge_queue_admission.py" wait-base \
+                --repo-root "$GITHUB_WORKSPACE/candidate" \
+                --trusted-root "$GITHUB_WORKSPACE/trusted" \
+                --event "$GITHUB_EVENT_PATH" --repository "$GITHUB_REPOSITORY" \
+                --sha "$GITHUB_SHA" --wait-seconds 0
+            else
+              current_main=$(git -C candidate ls-remote --refs origin refs/heads/main | cut -f1)
+              if [[ "$current_main" != "$BASE_SHA" ]]; then
+                echo '::error::Main advanced during first-position legacy admission.' >&2
+                exit 1
+              fi
+            fi
           fi
       - name: Invalidate stale trusted integrations after main advances
         if: ${{ github.event_name == 'push' }}

@@ -53,6 +53,10 @@ class AdmissionWorkflowTests(unittest.TestCase):
         step = self.step("Test native-retirement merge admission")
         return textwrap.dedent(step.split("        run: |\n", 1)[1])
 
+    def enforce_script(self) -> str:
+        step = self.step("Enforce trusted native-retirement integration")
+        return textwrap.dedent(step.split("        run: |\n", 1)[1])
+
     def test_selftests_use_immutable_combined_checkout_not_old_head(self):
         checkout = self.step("Check out exact combined validation tree")
         self.assertIn("          ref: ${{ github.sha }}\n", checkout)
@@ -92,6 +96,50 @@ class AdmissionWorkflowTests(unittest.TestCase):
         self.assertIn('--wait-seconds 0', enforce)
         self.assertNotIn("$GITHUB_WORKSPACE/validation", enforce)
         self.assertNotIn("--allow-pending", enforce)
+
+    def test_first_queue_group_uses_older_trusted_gate_and_rejects_speculative_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            trusted = workspace / "trusted"
+            git(workspace, "init", "-b", "main", str(trusted))
+            git(trusted, "config", "user.name", "Admission Test")
+            git(trusted, "config", "user.email", "test@example.invalid")
+            (trusted / "tools").mkdir()
+            # This represents main before this PR: its admission CLI has no
+            # wait-base command, while its native gate can check a landed base.
+            (trusted / "tools/merge_queue_admission.py").write_text(
+                "raise SystemExit(2)\n"
+            )
+            (trusted / "tools/native_retirement_merge_gate.py").write_text(
+                "import sys\n"
+                "assert sys.argv[1] == 'check', sys.argv\n"
+                "print('trusted native gate passed')\n"
+            )
+            git(trusted, "add", "tools")
+            git(trusted, "commit", "-m", "older trusted policy")
+            base = git(trusted, "rev-parse", "HEAD")
+            git(workspace, "clone", str(trusted), str(workspace / "candidate"))
+            (workspace / "event.json").write_text("{}")
+            env = {**os.environ, "GITHUB_WORKSPACE": str(workspace),
+                   "RUNNER_TEMP": str(workspace), "GITHUB_EVENT_PATH": str(workspace / "event.json"),
+                   "GITHUB_REPOSITORY": "owner/repo", "GITHUB_SHA": "a" * 40,
+                   "EVENT_NAME": "merge_group", "HEAD_SHA": "a" * 40}
+
+            def enforce(base_sha: str) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail",
+                     "-c", self.enforce_script()], cwd=workspace,
+                    env={**env, "BASE_SHA": base_sha},
+                    capture_output=True, text=True, check=False,
+                )
+
+            first = enforce(base)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertIn("trusted native gate passed", first.stdout)
+            later = enforce("b" * 40)
+            self.assertNotEqual(later.returncode, 0)
+            self.assertIn("requires trusted main with wait-base", later.stderr)
+            self.assertNotIn("trusted native gate passed", later.stdout)
 
     def history(self, root: Path) -> tuple[Path, Path, Path, str, str]:
         repo = root / "repo"

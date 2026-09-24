@@ -243,8 +243,11 @@ do not close #867 based on settings or offline fixtures alone:
    queue experiment is claimed by the offline fixtures.
 
 This policy repair requires a first-position queue merge under the old trusted
-admission code. Keep the repair at the front of the queue during rollout; older
-later groups still run the old code and can fail. After the repair lands, queue
+admission code. The native workflow uses that older gate directly only when
+the group base equals the trusted main revision; a speculative base requires
+the new trusted `wait-base` command and fails closed until the repair lands.
+Keep the repair at the front of the queue during rollout; older later groups
+still run the old code and can fail. After the repair lands, queue
 fresh groups and retain their exact-head workflow and queue progression links.
 The read-only collector cannot alter the ruleset or enqueue a PR. Do not report
 the offline M/G1/G2 fixtures as a live acceptance trace.
