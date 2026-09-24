@@ -55,6 +55,7 @@ POLICY_PATHS = (
     "tools/native_retirement_integration.py",
     ".github/workflows/merge-queue-admission.yml",
     ".github/workflows/api-migration-policy.yml",
+    ".github/workflows/native-retirement-rebind.yml",
     ".github/main-merge-queue.ruleset.json",
     "docs/native-retirement-dependencies-v1.json",
 )
