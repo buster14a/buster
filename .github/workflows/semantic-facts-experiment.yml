@@ -1,4 +1,4 @@
-name: Semantic facts experiment (temporary)
+name: Semantic facts evidence publication (temporary)
 on:
   push:
     branches: [astra/1028-semantic-facts-2e942e80]
@@ -6,116 +6,117 @@ permissions:
   contents: read
 concurrency:
   group: semantic-facts-1028-comparison
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
-  comparison:
+  archive:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 35
-    env:
-      BUSTER_TEST_JOBS: '2'
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
           fetch-depth: 12
-      - run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes mold
-      - name: Matched trusted subjects and frozen source
-        id: subjects
+      - name: Hash-check known evidence and create immutable blobs only
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p evidence subjects frozen/src frozen/generated
-          exec > >(tee evidence/matched-builds.log) 2>&1
-          git rev-parse HEAD 'HEAD^{tree}'
-          clang --version
-          cmake --version
-          ninja --version
-          uname -a
-          lscpu
-          free -b
-          git diff --exit-code 2e942e80a87666409cf29d3e24a68d322b9e71fd -- src build.c CMakeLists.txt cmake tools/throughput/throughput.c tools/throughput/tests.c
-          git archive 2e942e80a87666409cf29d3e24a68d322b9e71fd:src | tar -xf - -C frozen/src
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
-          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF
-          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
-          cp build/Release/ide subjects/baseline
-          cp -a build/generated/. frozen/generated/
-          cp build/compile_commands.json evidence/compile-commands-baseline.json
-          touch src/buster/lib/compiler/frontend/c/c_parse.c
-          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
-          cp build/Release/ide subjects/rebuilt-baseline
-          git apply --check tools/throughput/experiments/1028-hoist.patch
-          git apply tools/throughput/experiments/1028-hoist.patch
-          git diff > evidence/hoist.diff
-          git hash-object src/buster/lib/compiler/frontend/c/c_parse.c > evidence/candidate-source-blob.txt
-          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
-          cp build/Release/ide subjects/hoist
-          cp build/compile_commands.json evidence/compile-commands-candidate.json
-          sha256sum subjects/* > evidence/compilers.sha256
-          find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs.sha256
-          "$RUNNER_TEMP/buster-build" bench_throughput self-test
-          mv build/throughput-tool-tests "$RUNNER_TEMP/stock-throughput-tool-tests"
-          git apply --check tools/throughput/experiments/1028-trusted-only.patch
-          git apply tools/throughput/experiments/1028-trusted-only.patch
-          git diff -- tools/throughput/throughput.c tools/throughput/tests.c > evidence/harness-selection.diff
-          "$RUNNER_TEMP/buster-build" bench_throughput self-test
-          "$RUNNER_TEMP/buster-build" bench_throughput help
-          sha256sum build/throughput-tools/throughput > evidence/harness.sha256
-      - name: Separate exact-range census before timing
-        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee evidence/census-build.log) 2>&1
-          git checkout -- src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c_gen.c
-          git apply tools/throughput/experiments/1028-census.patch
-          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
-          cp build/Release/ide subjects/census-baseline
-          git apply tools/throughput/experiments/1028-hoist.patch
-          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
-          cp build/Release/ide subjects/census-hoist
-          sha256sum subjects/census-* > evidence/census-compilers.sha256
-          for variant in baseline hoist; do
-            for form in frontend-ssa no-frontend-ssa; do
-              (cd frozen && ../subjects/census-$variant cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -f$form -fsource-metrics=../evidence/census-$variant-$form.metrics src/buster/apps/ide/ide.c -o ../evidence/census-$variant-$form.o) > evidence/census-$variant-$form.stdout 2> evidence/census-$variant-$form.stderr
-            done
-          done
-          sha256sum evidence/census-*.o > evidence/census-outputs.sha256
-          cmp evidence/census-baseline-frontend-ssa.o evidence/census-hoist-frontend-ssa.o
-          cmp evidence/census-baseline-no-frontend-ssa.o evidence/census-hoist-no-frontend-ssa.o
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: ${{ !cancelled() }}
-        with:
-          name: semantic-facts-census-${{ github.run_id }}
-          path: evidence
-          retention-days: 14
-          if-no-files-found: error
-      - name: Trusted-only total compilation, fixed A-A and A-B rounds
-        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee evidence/comparison.log) 2>&1
-          harness="$PWD/build/throughput-tools/throughput"
-          common=(--workload tiny_startup --profile ci --mode fast --warmups 1 --no-guard --self-host-root "$PWD/frozen" --self-host-generated "$PWD/frozen/generated" --require-identical-output)
-          "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/rebuilt-baseline" --baseline-id 2e942e80 --candidate-id same-root-rebuild --output "$PWD/evidence/aa" --pairs 4 "${common[@]}"
-          failed=0
-          for form in frontend-ssa no-frontend-ssa; do
-            "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/hoist" --baseline-id 2e942e80 --candidate-id hoist-56db7b6 --output "$PWD/evidence/$form" --pairs 20 --flag "-f$form" "${common[@]}" || failed=1
-          done
-          find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs-after.sha256
-          cmp evidence/frozen-inputs.sha256 evidence/frozen-inputs-after.sha256
-          sha256sum -c evidence/compilers.sha256
-          exit "$failed"
+          mkdir publication
+          python3 - <<'PY'
+          import base64, gzip, hashlib, io, json, pathlib, subprocess, tarfile, zipfile
+          repo='buster14a/buster'
+          def api(path):
+              return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}']))
+          records=[
+              ('baseline',35998036207,10807615277,'a624a7d93c5b85d749f492194dc4aebca6a56d7bf53e1c86b555b610ab9f4c9371'),
+              ('correctness-FAIL',35999209013,10808192346,'8a38214db558b26b4cd1c8e1bc86e23511179fd53b57347029a36acf9e6051ba'),
+              ('incomplete-timing-completed-neighbors',35999553738,10808541994,'bdcc08604ea5ccdb6530cda5ae9c0afa58b9fbb2fcaad39810e71409c0cdcec8'),
+              ('setup-FAIL',36001796078,10808811079,'d013249c5b7e917c244e33aafc0856fc1f6274608aa1b6260d99abe5f30cf37c'),
+          ]
+          run=api('actions/runs/36002456521')
+          assert run['status']=='completed', run['status']
+          assert run['head_sha']=='ef084a638f58e70a237d351ffe90b376eeb61852',run['head_sha']
+          artifacts=api('actions/runs/36002456521/artifacts?per_page=100')['artifacts']
+          matches=[x for x in artifacts if x['name']=='semantic-facts-comparison-36002456521']
+          assert len(matches)==1 and not matches[0]['expired'],matches
+          final=matches[0]
+          assert final['digest'].startswith('sha256:'),final
+          records.append(('complete-comparison',36002456521,final['id'],final['digest'][7:]))
+          members={}; origins=[]
+          allowed={'.json','.csv','.md','.txt','.log','.sha256','.metrics','.diff','.stderr','.stdout','.c','.h','.patch','.yml','.yaml'}
+          for label,run_id,artifact_id,expected in records:
+              metadata=api(f'actions/artifacts/{artifact_id}')
+              assert metadata['workflow_run']['id']==run_id,metadata
+              payload=subprocess.check_output(['gh','api',f'repos/{repo}/actions/artifacts/{artifact_id}/zip'])
+              actual=hashlib.sha256(payload).hexdigest()
+              assert actual==expected,(artifact_id,actual,expected)
+              selected=[]; omitted=[]
+              with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                  for entry in archive.infolist():
+                      if entry.is_dir(): continue
+                      path=pathlib.PurePosixPath(entry.filename)
+                      assert not path.is_absolute() and '..' not in path.parts,entry.filename
+                      if path.suffix not in allowed:
+                          omitted.append(entry.filename); continue
+                      assert entry.file_size<=32*1024*1024,(entry.filename,entry.file_size)
+                      data=archive.read(entry)
+                      name=f'{label}/{entry.filename}'
+                      assert name not in members,name
+                      members[name]=data
+                      selected.append({'path':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+              origins.append({'label':label,'run_id':run_id,'artifact_id':artifact_id,'zip_sha256':actual,'metadata':metadata,'selected':selected,'omitted':omitted})
+          for path in sorted(pathlib.Path('tools/throughput/experiments').glob('1028-*.patch')):
+              members['prototype/'+path.name]=path.read_bytes()
+          for label,sha in [('correctness','17e5df3a89473a08ab046dc4fb53169f9a28bcd6'),('comparison','ef084a638f58e70a237d351ffe90b376eeb61852')]:
+              members[f'replay/{label}-{sha}.yml']=subprocess.check_output(['git','show',f'{sha}:.github/workflows/semantic-facts-experiment.yml'])
+          members['README.txt']=(
+              'Ordinary #1028 semantic-fact experiment, pinned compiler/input base 2e942e80a87666409cf29d3e24a68d322b9e71fd.\n'
+              'This archive preserves measurements and failures, not an automatic performance verdict. Read the adjacent audit.\n'
+              'The correctness suites retain a known-valid sizeof(++n) case and FAIL identically for baseline and hoist.\n'
+              'The incomplete-timing directory is NOT used for a performance verdict; its completed neighbor matrix is retained.\n'
+              'The complete-comparison directory contains the fixed-round trusted-compiler series and separate untimed census.\n'
+              'Prototype patches are experiments, not production source changes. Replay YAML records exact hosted commands.\n'
+              'Apply patches to a clean checkout of the pinned base; do not apply them to arbitrary current main.\n'
+              'Build subjects serially in one configured root; freeze inputs/generated headers and executable copies before timing.\n'
+              'Normal self-host fixed point is separate from the temporary trusted-stage-only harness selection.\n'
+              'Binary executables/objects are omitted; their hashes and all selected raw text files are preserved.\n'
+              'No desktop, dedicated-host service, retirement binding or acceptance-policy changes are part of this experiment.\n'
+          ).encode()
+          manifest={'schema':1,'base_commit':'2e942e80a87666409cf29d3e24a68d322b9e71fd','base_tree':'f976bfd7cdb8830a8a15d959ef36f0152f1b767d','timing_run':run,'origins':origins,'members':[{'path':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()} for name,data in sorted(members.items())]}
+          manifest_bytes=(json.dumps(manifest,indent=2)+'\n').encode()
+          members['manifest.json']=manifest_bytes
+          buffer=io.BytesIO()
+          with gzip.GzipFile(filename='',mode='wb',fileobj=buffer,mtime=0) as compressed:
+              with tarfile.open(fileobj=compressed,mode='w',format=tarfile.PAX_FORMAT) as archive:
+                  for name,data in sorted(members.items()):
+                      info=tarfile.TarInfo(name); info.size=len(data); info.mode=0o644; info.mtime=0
+                      archive.addfile(info,io.BytesIO(data))
+          packed=buffer.getvalue()
+          assert len(packed)<16*1024*1024,len(packed)
+          output=pathlib.Path('publication')
+          (output/'raw-evidence.tar.gz').write_bytes(packed)
+          (output/'manifest.json').write_bytes(manifest_bytes)
+          receipts=[]
+          for name in ['raw-evidence.tar.gz','manifest.json']:
+              data=(output/name).read_bytes()
+              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()}).encode()
+              response=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{repo}/git/blobs','--input','-'],input=body))
+              local_sha=hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+              assert response['sha']==local_sha,(response,local_sha)
+              receipts.append({'name':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'git_blob':local_sha})
+          receipt={'schema':1,'writes':'immutable Git blobs only; no refs, branches, policies or PRs mutated','files':receipts}
+          (output/'publication.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt,indent=2))
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: semantic-facts-comparison-${{ github.run_id }}
-          path: |
-            evidence
-            build/CMakeCache.txt
+          name: semantic-facts-durable-evidence-${{ github.run_id }}
+          path: publication
           retention-days: 14
           if-no-files-found: error
