@@ -10207,7 +10207,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 "int buster_pie_call_import(int value) { return abs(buster_pie_local_increment(value)); }\n");
             String8 direct_call_host_source = S8(
                 "int buster_pie_call_import(int value);\n"
-                "int main(void) { return buster_pie_call_import(-40) != 41; }\n");
+                "int main(void) { return buster_pie_call_import(-40) != 39; }\n");
             bool direct_call_fixtures_written =
                 file_write(direct_call_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_source)) &&
                 file_write(direct_call_host_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_host_source));
