@@ -3,7 +3,7 @@ name: Cancelled CI recovery
 on:
   workflow_run:
     workflows: [Buster CI]
-    types: [completed]
+    types: [in_progress, completed]
   pull_request:
     paths:
       - '.github/workflows/ci-recovery.yml'
@@ -37,12 +37,39 @@ jobs:
       - name: Test recovery decisions without network access
         run: python3 tests/ci_recovery_test.py
 
+  watch-merge-group:
+    if: >-
+      ${{ github.server_url == 'https://github.com' &&
+          vars.GH_ACTIONS_CI_ENABLED == 'true' &&
+          github.event_name == 'workflow_run' &&
+          github.event.action == 'in_progress' &&
+          github.event.workflow_run.event == 'merge_group' &&
+          github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 305
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # workflow_run executes this trusted default-branch revision, not the
+      # merge-group candidate. Never execute candidate bytes or read artifacts.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Cancel a doomed merge group on first CI job failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/recover-ci.py watch
+
   recover:
     if: >-
       ${{ github.server_url == 'https://github.com' &&
           vars.GH_ACTIONS_CI_ENABLED == 'true' &&
           vars.GH_ACTIONS_CI_RECOVERY_ENABLED != 'false' &&
           github.event_name == 'workflow_run' &&
+          github.event.action == 'completed' &&
           github.event.workflow_run.run_attempt == 1 &&
           github.event.workflow_run.head_repository.full_name == github.repository &&
           (github.event.workflow_run.conclusion == 'cancelled' ||
