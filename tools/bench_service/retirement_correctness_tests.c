@@ -529,7 +529,8 @@ static void test_frozen_artifact_readback(char const* executable)
         char* const changed_compiler[] = {"/trusted/candidate-ide", "-O2", "input.c", NULL};
         char* const runtime_arguments[] = {(char*)process_executable,
             "--retirement-oracle-output", NULL};
-        char* const changed_runtime[] = {"/scratch/other", NULL};
+        char* const changed_runtime[] = {"/scratch/other",
+            "--retirement-oracle-output", NULL};
         char* const environment[] = {"HOME=/nonexistent", "LC_ALL=C", NULL};
         char* const unordered_environment[] = {"LC_ALL=C", "HOME=/nonexistent", NULL};
         BqRetirementRowCommands commands[2] = {
