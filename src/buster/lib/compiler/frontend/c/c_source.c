@@ -4221,7 +4221,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
         for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
         {
             u32 parameter_index = parameter_indices[replacement_index];
-            if (parameter_index != C_MACRO_PARAMETER_NONE)
+            if (parameter_index != C_MACRO_PARAMETER_NONE && arguments)
             {
                 CMacroArgument argument = arguments[parameter_index];
                 capacity += BUSTER_MAX(argument.token_count, argument.expanded_token_count);
@@ -4249,7 +4249,7 @@ BUSTER_C_INTERNAL bool c_macro_replacement_tokens(Arena* arena, CSpellingSpace* 
                 }
             }
             u32 parameter_index = parameter_indices[replacement_index];
-            if (parameter_index == C_MACRO_PARAMETER_NONE)
+            if (parameter_index == C_MACRO_PARAMETER_NONE || !arguments)
             {
                 // GNU's comma-deletion idiom, recognized on the definition's own
                 // spelling: a `##` written between a literal comma and the
@@ -4545,8 +4545,9 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
     u32 stamp = invocation.stamp;
     u8 const* definition_spaces = macro->definition.replacement_space;
     u32 const* parameter_indices = macro->definition.parameter_index;
+    u32 parameter_count = arguments ? macro->definition.parameter_count : 0;
     u64 token_count = macro->definition.plain_count;
-    for (u32 parameter_index = 0; parameter_index < macro->definition.parameter_count; parameter_index += 1)
+    for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
     {
         token_count += (u64)macro->definition.parameter_use_count[parameter_index] * arguments[parameter_index].expanded_token_count;
     }
@@ -4558,7 +4559,7 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
     {
         bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
         u32 parameter_index = parameter_indices[replacement_index];
-        if (parameter_index == C_MACRO_PARAMETER_NONE)
+        if (parameter_index == C_MACRO_PARAMETER_NONE || !arguments)
         {
             cursor -= 1;
             *cursor = (CMacroExpansionTask){
