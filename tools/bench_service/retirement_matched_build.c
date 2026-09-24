@@ -60,7 +60,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_driver_sha(char const* path,
 
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_pinned(BqQueue* queue,
     BqJob const* job, int installed, int workspaces, String8 workspace_root, String8 profile,
-    char const* fixed_driver, char const preparation_sha256[SHA256_HEX_CAPACITY],
+    char const* fixed_driver, char const* fixed_toolchain,
+    char const preparation_sha256[SHA256_HEX_CAPACITY],
     bool require_new, BqRetirementMatchedBuild* build)
 {
     BqError result = build && fixed_driver ? BQ_OK : BQ_RECIPE_MISMATCH;
@@ -82,6 +83,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_begin_pinned(BqQueue* qu
                  !memcmp(expected, observed, SHA256_HEX_CAPACITY) ? BQ_OK : BQ_CONFIGURATION_MISMATCH;
         if (root >= 0 && close(root) != 0 && result == BQ_OK) result = BQ_IO;
     }
+    if (result == BQ_OK)
+        result = bq_retirement_toolchain_verify(installed, profile, fixed_toolchain,
+                                                &build->toolchain);
     if (result == BQ_OK)
     {
         char name[64];
@@ -116,7 +120,8 @@ BqError bq_retirement_matched_build_begin(BqQueue* queue, BqJob const* job,
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
     BqError result = bq_retirement_matched_build_begin_pinned(queue, job, installed, workspaces,
-        workspace_root, profile, BQ_RETIREMENT_BUILD_DRIVER, preparation_sha256, true, build);
+        workspace_root, profile, BQ_RETIREMENT_BUILD_DRIVER, BQ_RETIREMENT_TOOLCHAIN_ROOT,
+        preparation_sha256, true, build);
     return result;
 }
 
@@ -124,12 +129,20 @@ bool bq_retirement_matched_build_stage(BqRetirementMatchedBuild* build, BqRetire
 {
     bool ok = build && stage && !build->failed && build->preparation_sha256[0] &&
               build->next < BQ_RETIREMENT_BUILD_STAGES;
+    if (ok)
+    {
+        char current[SHA256_HEX_CAPACITY] = {0};
+        ok = bq_retirement_toolchain_recheck(&build->toolchain) &&
+             bq_retirement_build_driver_sha(build->driver, current) &&
+             !memcmp(current, build->driver_sha256, SHA256_HEX_CAPACITY);
+        if (!ok) build->failed = true;
+    }
     if (stage) *stage = (BqRetirementBuildStage){0};
     if (ok)
     {
         bool generate = (build->next & 1u) == 0;
         stage->cwd = build->source[build->next / 2u];
-        stage->env[0] = "PATH=/usr/bin:/bin";
+        stage->env[0] = build->toolchain.path;
         stage->env[1] = "LC_ALL=C";
         stage->env[2] = "TZ=UTC";
         stage->env[3] = "HOME=/nonexistent";
@@ -213,10 +226,12 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_build_stage_format(char body[1024],
     BqJob const* job, BqRetirementMatchedBuild const* build, u32 stage, int exit_code)
 {
     int count = snprintf(body, 1024,
-        "BQ-MATCHED-BUILD-STAGE-V1\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\n"
-        "preparation=%.64s\ndriver=%.64s\nstage=%u\ncommand=%.64s\nlog=%.64s\nexit=%d\n",
+        "BQ-MATCHED-BUILD-STAGE-V2\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\n"
+        "preparation=%.64s\ndriver=%.64s\ntoolchain=%.64s\ntoolchain-identity=%.64s\n"
+        "stage=%u\ncommand=%.64s\nlog=%.64s\nexit=%d\n",
         (uint64_t)job->id, (uint64_t)job->token, job->digest,
-        build->preparation_sha256, build->driver_sha256, stage,
+        build->preparation_sha256, build->driver_sha256, build->toolchain.manifest_sha256,
+        build->toolchain.identity_sha256, stage,
         build->command_sha256[stage], build->log_sha256[stage], exit_code);
     return count;
 }
@@ -325,11 +340,13 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_build_final_format(char body[2048],
     BqJob const* job, BqRetirementMatchedBuild const* build)
 {
     int count = snprintf(body, 2048,
-        "BQ-MATCHED-BUILDS-V1\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\n"
-        "preparation=%.64s\ndriver=%.64s\nbinaries=%.64s\n"
+        "BQ-MATCHED-BUILDS-V2\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\n"
+        "preparation=%.64s\ndriver=%.64s\ntoolchain=%.64s\ntoolchain-identity=%.64s\n"
+        "binaries=%.64s\n"
         "stage-0=%.64s\nstage-1=%.64s\nstage-2=%.64s\nstage-3=%.64s\n",
         (uint64_t)job->id, (uint64_t)job->token, job->digest,
-        build->preparation_sha256, build->driver_sha256,
+        build->preparation_sha256, build->driver_sha256, build->toolchain.manifest_sha256,
+        build->toolchain.identity_sha256,
         build->binary_record_sha256, build->stage_receipt_sha256[0],
         build->stage_receipt_sha256[1], build->stage_receipt_sha256[2],
         build->stage_receipt_sha256[3]);
@@ -382,7 +399,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_import(BqQueue* queue,
 
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_pinned(BqQueue* queue,
     BqJob const* job, int installed, int workspaces, String8 workspace_root,
-    String8 profile, char const* fixed_driver,
+    String8 profile, char const* fixed_driver, char const* fixed_toolchain,
     char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const binary_record_sha256[SHA256_HEX_CAPACITY],
     char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementMatchedBuild* verified)
@@ -393,7 +410,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_import_pinned(BqQueue* q
         bq_retirement_hex(string_from_pointer(build_record_sha256), 64);
     BqRetirementMatchedBuild current = {0};
     BqError result = valid ? bq_retirement_matched_build_begin_pinned(queue, job, installed,
-        workspaces, workspace_root, profile, fixed_driver, preparation_sha256, false, &current) :
+        workspaces, workspace_root, profile, fixed_driver, fixed_toolchain,
+        preparation_sha256, false, &current) :
         BQ_RECIPE_MISMATCH;
     BqRetirementBinaries binaries = {0};
     if (result == BQ_OK)
@@ -435,7 +453,8 @@ BqError bq_retirement_matched_build_import(BqQueue* queue, BqJob const* job,
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
     BqError result = bq_retirement_matched_build_import_pinned(queue, job, installed,
-        workspaces, workspace_root, profile, BQ_RETIREMENT_BUILD_DRIVER, preparation_sha256,
+        workspaces, workspace_root, profile, BQ_RETIREMENT_BUILD_DRIVER,
+        BQ_RETIREMENT_TOOLCHAIN_ROOT, preparation_sha256,
         binary_record_sha256, build_record_sha256, verified);
     return result;
 }
@@ -455,6 +474,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue*
     if (result == BQ_OK)
         result = bq_retirement_build_stage_evidence(queue, job, stage_log, stage_exit, build);
     if (result == BQ_OK && stage_exit != 0) result = BQ_WORKER_FAILED;
+    if (result == BQ_OK && !bq_retirement_toolchain_recheck(&build->toolchain))
+        result = BQ_CONFIGURATION_MISMATCH;
     if (result == BQ_OK)
     {
         BqRetirementPreparation reread = {0};

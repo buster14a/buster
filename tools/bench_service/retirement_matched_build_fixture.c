@@ -53,7 +53,11 @@ int main(int argc, char** argv)
                 pid_t child = fork();
                 if (!child)
                 {
-                    char* const compile[] = {"/usr/bin/cc", "-std=c11", "-O2", source, "-o", output, NULL};
+                    /* The fixture host compiler finds its assembler/linker
+                     * via this test-only fixed path. Production keeps the
+                     * bundle-only PATH and must use pinned tool inputs. */
+                    char* const compile[] = {"/usr/bin/cc", "-B/usr/bin/", "-std=c11", "-O2",
+                                             source, "-o", output, NULL};
                     execv(compile[0], compile);
                     _exit(127);
                 }

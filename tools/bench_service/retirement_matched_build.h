@@ -5,6 +5,7 @@
 #define BUSTER_BENCH_RETIREMENT_MATCHED_BUILD_H
 
 #include "retirement_binaries.h"
+#include "retirement_toolchain.h"
 
 #define BQ_RETIREMENT_BUILD_STAGES 4u
 #define BQ_RETIREMENT_BUILD_PATH_CAP 512u
@@ -26,6 +27,7 @@ typedef struct BqRetirementMatchedBuild
     char build[BQ_RETIREMENT_BUILD_PATH_CAP];
     char source[2][BQ_RETIREMENT_BUILD_PATH_CAP];
     char driver[BQ_RETIREMENT_BUILD_PATH_CAP];
+    BqRetirementToolchain toolchain;
     char preparation_sha256[SHA256_HEX_CAPACITY];
     char driver_sha256[SHA256_HEX_CAPACITY];
     char command_sha256[BQ_RETIREMENT_BUILD_STAGES][SHA256_HEX_CAPACITY];

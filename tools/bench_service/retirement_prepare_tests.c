@@ -88,6 +88,42 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_inventory(char const* installed, BqRetirem
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_toolchain(char const* installed,
+                                                char digest[SHA256_HEX_CAPACITY])
+{
+    char parent[512], root[512], bin[512], path[512], manifest[1024];
+    int length = snprintf(parent, sizeof(parent), "%s/toolchain", installed);
+    bool ok = length > 0 && (size_t)length < sizeof(parent);
+    length = ok ? snprintf(root, sizeof(root), "%s/native-retirement-performance-v1", parent) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(root);
+    length = ok ? snprintf(bin, sizeof(bin), "%s/bin", root) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(bin) &&
+         mkdir(parent, 0700) == 0 && mkdir(root, 0700) == 0 && mkdir(bin, 0700) == 0;
+    char const* names[] = {"clang", "cmake", "ld", "ninja"};
+    char const* body = "fixture only\n";
+    char tool_digest[SHA256_HEX_CAPACITY];
+    bq_digest(body, (u32)strlen(body), (char8*)tool_digest);
+    u32 used = (u32)snprintf(manifest, sizeof(manifest),
+        "BQ-RETIREMENT-TOOLCHAIN-V1\nplatform=linux-x86_64\n");
+    ok = ok && used < sizeof(manifest);
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        length = snprintf(path, sizeof(path), "%s/%s", bin, names[index]);
+        ok = length > 0 && (size_t)length < sizeof(path) &&
+             bq_prep_test_write(path, body) && chmod(path, 0555) == 0;
+        length = ok ? snprintf(manifest + used, sizeof(manifest) - used,
+                               "%.64s bin/%s\n", tool_digest, names[index]) : -1;
+        ok = ok && length > 0 && (u32)length < sizeof(manifest) - used;
+        if (ok) used += (u32)length;
+    }
+    length = ok ? snprintf(path, sizeof(path), "%s/toolchain.manifest", root) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(path) &&
+         bq_prep_test_write(path, manifest) && chmod(path, 0444) == 0 &&
+         chmod(bin, 0555) == 0 && chmod(root, 0555) == 0 && chmod(parent, 0555) == 0;
+    if (ok) bq_digest(manifest, used, (char8*)digest);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_prep_test_setup(char installed[80], char workspaces[80],
                                             BqRetirementSource subjects[2], char profile[512], BqRequest* request)
 {
@@ -102,11 +138,17 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_setup(char installed[80], char workspaces[
          mkdir(recipes, 0700) == 0;
     char const* base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     char const* candidate = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    char toolchain_digest[SHA256_HEX_CAPACITY] = {0};
     ok = ok && bq_prep_test_source(installed, base, "int a;\n", &subjects[0]) &&
          bq_prep_test_source(installed, candidate, "int b;\n", &subjects[1]) &&
          bq_prep_test_inventory(installed, subjects, profile) &&
+         bq_prep_test_toolchain(installed, toolchain_digest);
+    size_t used = strlen(profile);
+    length = ok ? snprintf(profile + used, 512 - used,
+                           "toolchain-manifest-sha256=%.64s\n", toolchain_digest) : -1;
+    ok = ok && length > 0 && (size_t)length < 512 - used &&
          chmod(recipes, 0500) == 0 && chmod(sources, 0500) == 0 &&
-         chmod(installed, 0500) == 0 && chmod(workspaces, 02710) == 0;
+         chmod(installed, 0555) == 0 && chmod(workspaces, 02710) == 0;
     String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("id"), S8("validate-buster-v1"),
         string_from_pointer(base), string_from_pointer(candidate)};
     ok = ok && bq_request_make(fields, request) == BQ_OK;
@@ -200,7 +242,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_binary(int directory, char const* name, ch
 BUSTER_GLOBAL_LOCAL void bq_prep_test_correctness_join(BqQueue* queue, BqJob const* job,
     int installed, int workspaces, String8 profile, char const* preparation_digest,
     char const* record_digest, BqRetirementBinaries const* observed,
-    String8 workspace_root, char const* fixed_driver, char const* build_record_digest)
+    String8 workspace_root, char const* fixed_driver, char const* fixed_toolchain,
+    char const* build_record_digest)
 {
     BqRetirementPrepared prepared = {.rows = 1, .object_rows = 1, .native_target = 1};
     memcpy(prepared.preparation_sha256, preparation_digest, SHA256_HEX_CAPACITY);
@@ -236,6 +279,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_correctness_join(BqQueue* queue, BqJob con
     BqRetirementCorrectness gate = {0};
     BqError begin = build_record_digest ? bq_retirement_correctness_begin_service_built_pinned(
         queue, job, installed, workspaces, workspace_root, profile, fixed_driver,
+        fixed_toolchain,
         preparation_digest, record_digest, build_record_digest, &prepared, &row, required,
         BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
         census, BUSTER_ARRAY_LENGTH(census), &held, &gate) :
@@ -365,7 +409,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
     if (replacement_directory >= 0) close(replacement_directory);
     bq_prep_test_correctness_join(queue, job, installed, workspaces, pinned,
                                    preparation_digest, record_digest, &imported,
-                                   (String8){0}, NULL, NULL);
+                                   (String8){0}, NULL, NULL, NULL);
     char wrong[SHA256_HEX_CAPACITY];
     memcpy(wrong, record_digest, sizeof(wrong));
     wrong[0] = wrong[0] == 'a' ? 'b' : 'a';
@@ -562,7 +606,8 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_run_stage(BqRetirementBuildStage const* st
 }
 
 BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const* original,
-    int installed, int workspaces, char const* workspace_path, char const* original_profile,
+    int installed, int workspaces, char const* installed_path, char const* workspace_path,
+    char const* original_profile,
     BqRetirementPreparation const* original_preparation)
 {
     char driver_path[256];
@@ -571,11 +616,63 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                   bq_prep_test_compile_driver(driver_path));
     char driver_digest[SHA256_HEX_CAPACITY] = {0};
     BQ_PREP_CHECK(bq_retirement_build_driver_sha(driver_path, driver_digest));
+    char toolchain_root[BQ_RETIREMENT_TOOLCHAIN_PATH_CAP];
+    int root_length = snprintf(toolchain_root, sizeof(toolchain_root),
+        "%s/toolchain/native-retirement-performance-v1", installed_path);
+    BqRetirementToolchain checked = {0};
+    BQ_PREP_CHECK(root_length > 0 && (size_t)root_length < sizeof(toolchain_root) &&
+        bq_retirement_toolchain_verify(installed, string_from_pointer(original_profile),
+            toolchain_root, &checked) == BQ_OK && checked.entries == 4 &&
+        bq_retirement_toolchain_recheck(&checked));
+    char wrong_pin[512];
+    memcpy(wrong_pin, original_profile, strlen(original_profile) + 1);
+    char* pin = strstr(wrong_pin, "toolchain-manifest-sha256=");
+    if (pin) pin[26] = pin[26] == 'a' ? 'b' : 'a';
+    BqRetirementToolchain refused = {0};
+    BQ_PREP_CHECK(pin && bq_retirement_toolchain_verify(installed,
+        string_from_pointer(wrong_pin), toolchain_root, &refused) == BQ_CONFIGURATION_MISMATCH &&
+        !refused.manifest_sha256[0]);
+    BQ_PREP_CHECK(bq_retirement_toolchain_verify(installed,
+        S8("schema=1\n"), toolchain_root, &refused) == BQ_RECIPE_MISMATCH &&
+        bq_retirement_toolchain_verify(installed, string_from_pointer(original_profile),
+            workspace_path, &refused) == BQ_CONFIGURATION_MISMATCH);
+    char tool_bin[512], extra[512];
+    int bin_length = snprintf(tool_bin, sizeof(tool_bin), "%s/bin", toolchain_root);
+    int extra_length = snprintf(extra, sizeof(extra), "%s/unlisted", tool_bin);
+    BQ_PREP_CHECK(bin_length > 0 && (size_t)bin_length < sizeof(tool_bin) &&
+        extra_length > 0 && (size_t)extra_length < sizeof(extra) &&
+        chmod(tool_bin, 0700) == 0 && bq_prep_test_write(extra, "extra\n") &&
+        chmod(tool_bin, 0555) == 0 && !bq_retirement_toolchain_recheck(&checked));
+    BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(extra) == 0 &&
+        symlink("/etc/passwd", extra) == 0 && chmod(tool_bin, 0555) == 0 &&
+        !bq_retirement_toolchain_recheck(&checked));
+    BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(extra) == 0 &&
+        chmod(tool_bin, 0555) == 0 && bq_retirement_toolchain_recheck(&checked));
+    char clang_path[512];
+    int clang_length = snprintf(clang_path, sizeof(clang_path), "%s/clang", tool_bin);
+    char held_tool[512];
+    int held_length = snprintf(held_tool, sizeof(held_tool), "%s/held-tool-clang", workspace_path);
+    BQ_PREP_CHECK(clang_length > 0 && (size_t)clang_length < sizeof(clang_path) &&
+        held_length > 0 && (size_t)held_length < sizeof(held_tool) &&
+        chmod(tool_bin, 0700) == 0 &&
+        rename(clang_path, held_tool) == 0 &&
+        bq_prep_test_write(clang_path, "fixture only\n") &&
+        chmod(clang_path, 0555) == 0 && chmod(tool_bin, 0555) == 0);
+    BqRetirementToolchain replacement = {0};
+    BQ_PREP_CHECK(bq_retirement_toolchain_verify(installed,
+        string_from_pointer(original_profile), toolchain_root, &replacement) == BQ_OK &&
+        strcmp(replacement.identity_sha256, checked.identity_sha256) &&
+        !bq_retirement_toolchain_recheck(&checked));
+    /* The old inode is outside the bundle. A byte-equal replacement verifies
+     * under a fresh pin but must fail this job's previously held identity. */
+    BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 &&
+        unlink(clang_path) == 0 && rename(held_tool, clang_path) == 0 &&
+        chmod(tool_bin, 0555) == 0 && bq_retirement_toolchain_recheck(&checked));
     char profile[640];
     int length = snprintf(profile, sizeof(profile), "%sbuild-driver-sha256=%.64s\n",
                           original_profile, driver_digest);
     BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(profile));
-    for (u32 trial = 0; trial < 3; trial += 1)
+    for (u32 trial = 0; trial < 4; trial += 1)
     {
         BqJob job = *original;
         job.id = 30 + trial;
@@ -614,7 +711,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                       pinned, preparation_digest, NULL) == BQ_OK);
         BqRetirementMatchedBuild build = {0};
         BQ_PREP_CHECK(bq_retirement_matched_build_begin_pinned(queue, &job, installed, workspaces,
-            string_from_pointer(workspace_path), pinned, driver_path, preparation_digest, true,
+            string_from_pointer(workspace_path), pinned, driver_path, toolchain_root,
+            preparation_digest, true,
             &build) == BQ_OK);
         if (trial == 1)
         {
@@ -625,16 +723,26 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             BqRetirementMatchedBuild refused = {0};
             BQ_PREP_CHECK(pin && bq_retirement_matched_build_begin_pinned(queue, &job,
                 installed, workspaces, string_from_pointer(workspace_path),
-                string_from_pointer(wrong_profile), driver_path, preparation_digest,
+                string_from_pointer(wrong_profile), driver_path, toolchain_root, preparation_digest,
                 true, &refused) == BQ_CONFIGURATION_MISMATCH && !refused.preparation_sha256[0]);
         }
         BqRetirementBuildStage command = {0};
         BQ_PREP_CHECK(bq_retirement_matched_build_stage(&build, &command) &&
             command.argc == 16 && !strcmp(command.argv[7], "clang") &&
             !strcmp(command.argv[3], build.build) && !strcmp(command.cwd, build.source[0]) &&
-            !strcmp(command.env[0], "PATH=/usr/bin:/bin"));
+            !strcmp(command.env[0], checked.path));
         for (u32 stage = 0; ok && stage < (trial ? 4u : 1u); stage += 1)
         {
+            if (trial == 3 && stage == 2)
+            {
+                BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 &&
+                    bq_prep_test_write(extra, "unlisted after build\n") &&
+                    chmod(tool_bin, 0555) == 0 &&
+                    !bq_retirement_matched_build_stage(&build, &command) && build.failed);
+                BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(extra) == 0 &&
+                    chmod(tool_bin, 0555) == 0 && bq_retirement_toolchain_recheck(&checked));
+                break;
+            }
             if (trial && stage == 2) ok = renameat(attempt, "matched-build", attempt, "old-build") == 0;
             BqRetirementBuildStage current = {0};
             ok = ok && bq_retirement_matched_build_stage(&build, &current) &&
@@ -657,7 +765,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
         {
             char record_name[48], bytes[16];
             u32 size = 0;
-            BQ_PREP_CHECK(build.failed && build.next == (trial ? 3u : 0u) &&
+            BQ_PREP_CHECK(build.failed && build.next == (trial == 3 ? 2u : trial ? 3u : 0u) &&
                 !build.binary_record_sha256[0] &&
                 !bq_retirement_matched_build_stage(&build, &command) &&
                 bq_record_name(record_name, "binaries", job.id) &&
@@ -670,7 +778,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 "0000000000000000000000000000000000000000000000000000000000000000";
             BQ_PREP_CHECK(bq_retirement_correctness_begin_service_built_pinned(
                 queue, &job, installed, workspaces, string_from_pointer(workspace_path),
-                pinned, driver_path, preparation_digest, missing, missing,
+                pinned, driver_path, toolchain_root, preparation_digest, missing, missing,
                 NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, &held, &gate) != BQ_OK &&
                 gate.failed && !held.owned && !bq_retirement_correctness_ready(&gate));
         }
@@ -687,12 +795,28 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 strcmp(build.command_sha256[0], build.command_sha256[2]));
             BQ_PREP_CHECK(bq_retirement_matched_build_import_pinned(queue, &job,
                 installed, workspaces, string_from_pointer(workspace_path), pinned,
-                driver_path, preparation_digest, build.binary_record_sha256,
+                driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
                 build.build_record_sha256, &observed) == BQ_OK && observed.next == 4 &&
                 !strcmp(observed.stage_receipt_sha256[3], build.stage_receipt_sha256[3]));
+            BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 &&
+                rename(clang_path, held_tool) == 0 &&
+                bq_prep_test_write(clang_path, "fixture only\n") &&
+                chmod(clang_path, 0555) == 0 && chmod(tool_bin, 0555) == 0);
+            BQ_PREP_CHECK(bq_retirement_matched_build_import_pinned(queue, &job,
+                installed, workspaces, string_from_pointer(workspace_path), pinned,
+                driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
+                build.build_record_sha256, &observed) == BQ_CORRUPT &&
+                !observed.preparation_sha256[0]);
+            BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(clang_path) == 0 &&
+                rename(held_tool, clang_path) == 0 && chmod(tool_bin, 0555) == 0 &&
+                bq_retirement_matched_build_import_pinned(queue, &job,
+                    installed, workspaces, string_from_pointer(workspace_path), pinned,
+                    driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
+                    build.build_record_sha256, &observed) == BQ_OK);
             bq_prep_test_correctness_join(queue, &job, installed, workspaces, pinned,
                 preparation_digest, build.binary_record_sha256, &imported,
-                string_from_pointer(workspace_path), driver_path, build.build_record_sha256);
+                string_from_pointer(workspace_path), driver_path, toolchain_root,
+                build.build_record_sha256);
             char record_name[48];
             BQ_PREP_CHECK(bq_record_name(record_name, "matched-log-2", job.id));
             int tampered = openat(queue->directory_fd, record_name,
@@ -705,7 +829,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             if (tampered >= 0) close(tampered);
             BQ_PREP_CHECK(bq_retirement_matched_build_import_pinned(queue, &job,
                 installed, workspaces, string_from_pointer(workspace_path), pinned,
-                driver_path, preparation_digest, build.binary_record_sha256,
+                driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
                 build.build_record_sha256, &observed) == BQ_CORRUPT && !observed.preparation_sha256[0]);
         }
         if (attempt >= 0) close(attempt);
@@ -715,7 +839,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
 /* Exercise the service's durable producer/readback boundary through the real
  * source copier. This internal test request cannot be submitted: the public
  * registry still rejects the blocked retirement descriptor. */
-BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspaces, char const* workspaces_path,
+BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspaces,
+    char const* installed_path, char const* workspaces_path,
     BqRetirementPreparation* prepared, char const* profile)
 {
     char queue_path[80] = "/tmp/bq-retirement-queue-XXXXXX";
@@ -785,7 +910,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
                               prepared->subjects[1].materialized_identity_sha256) &&
                       !strcmp(imported.subjects[0].manifest_sha256, prepared->subjects[0].manifest_sha256) &&
                       imported.source_reservation_bytes == prepared->source_reservation_bytes);
-        bq_prep_test_matched_build(&queue, &job, installed, workspaces, workspaces_path,
+        bq_prep_test_matched_build(&queue, &job, installed, workspaces, installed_path,
+                                   workspaces_path,
                                    profile, prepared);
         char binary_digest[SHA256_HEX_CAPACITY];
         bq_prep_test_binary_handoff(&queue, &job, installed, workspaces, root, profile, digest,
@@ -929,7 +1055,7 @@ int main(void)
         BqRetirementSource verified_base = preparation.subjects[0];
         BQ_PREP_CHECK(preparation.subjects[0].entries == 1 && preparation.subjects[1].entries == 1 &&
                       preparation.source_reservation_bytes > BQ_RETIREMENT_COPY_OVERHEAD);
-        bq_prep_test_ready_handoff(input, output, workspaces, &preparation, profile);
+        bq_prep_test_ready_handoff(input, output, installed, workspaces, &preparation, profile);
 
         char wrong_profile[512];
         memcpy(wrong_profile, profile, sizeof(wrong_profile));
