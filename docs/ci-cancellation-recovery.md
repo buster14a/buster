@@ -79,8 +79,8 @@ do not trigger cancellation; completed or different-head runs are never targeted
 It keeps watching after Buster CI succeeds and stops only when every required
 check has succeeded. The bounded watch lasts at most five hours.
 
-On `merge_group`, Buster CI's desktop and mobile matrices, plus the independent
-rebinding and materializer matrices, use native matrix `fail-fast`. The twelve
+On `merge_group`, Buster CI's desktop and mobile matrices and the independent
+materializer matrix use native matrix `fail-fast`. The twelve
 desktop shards first wait for the cheap workflow-lint job; ordinary PR, main,
 tag, and manual runs still execute after a lint failure for diagnostics. The
 Buster native matrix retains `fail-fast: false` under the frozen CI test
