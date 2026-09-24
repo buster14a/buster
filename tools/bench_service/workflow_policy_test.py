@@ -91,19 +91,22 @@ def main() -> int:
         errors.append("missing configure_github_admission.sh")
     else:
         installer = ADMISSION_INSTALLER.read_text(encoding="utf-8")
-        disable_command = 'gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body false --repo "$repo"'
-        disable_count = installer.count(disable_command)
+        variable_read = installer.find(
+            '"repos/$repo/actions/variables/BENCH_SERVICE_DISPATCH_ENABLED"')
+        variable_guard = installer.find('variable.get("value") != "false"')
         mutation_positions = [
             position
             for marker in ("gh api --method PUT", "gh api --method POST")
             if (position := installer.find(marker)) >= 0
         ]
-        if disable_count != 1:
-            errors.append("admission installer must disable dispatch exactly once")
+        if "gh variable set BENCH_SERVICE_DISPATCH_ENABLED" in installer:
+            errors.append("admission installer must leave the dispatch variable unchanged")
         elif not mutation_positions:
             errors.append("admission installer is missing repository policy mutations")
-        elif installer.find(disable_command) > min(mutation_positions):
-            errors.append("admission installer must disable dispatch before its first policy mutation")
+        elif not 0 <= variable_read < variable_guard < min(mutation_positions):
+            errors.append("admission installer must verify disabled dispatch before policy mutation")
+        elif 'variable.get("name") != "BENCH_SERVICE_DISPATCH_ENABLED"' not in installer:
+            errors.append("admission installer must check the dispatch variable identity")
         elif not 0 <= installer.find("verify_github_queue.py") < min(mutation_positions):
             errors.append("admission installer must verify the main queue before policy mutation")
         for marker in (

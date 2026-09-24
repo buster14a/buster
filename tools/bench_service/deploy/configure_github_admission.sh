@@ -14,8 +14,29 @@ fi
 owner="${repo%%/*}"
 gh auth status >/dev/null
 
-# Reconfiguration must fail closed, including on reruns after activation.
-gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body false --repo "$repo"
+# Installation is a staging operation. Never reset an active dispatch window
+# as a side effect of a policy read-back or rerun. Missing and unreadable
+# variables also stop before any policy mutation.
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+if ! gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/actions/variables/BENCH_SERVICE_DISPATCH_ENABLED" >"$tmp/staged-variable.json"; then
+  printf 'readable BENCH_SERVICE_DISPATCH_ENABLED=false is required before installation\n' >&2
+  exit 1
+fi
+python3 - "$tmp/staged-variable.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        variable = json.load(source)
+    if variable.get("name") != "BENCH_SERVICE_DISPATCH_ENABLED" or variable.get("value") != "false":
+        raise ValueError("dispatch is not staged disabled")
+except (OSError, ValueError, AttributeError) as error:
+    print(f"BENCH_ADMISSION_FAIL {error}; leave the variable unchanged", file=sys.stderr)
+    sys.exit(1)
+PY
 
 main_ruleset_id=22537199
 listed_main_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
@@ -25,8 +46,6 @@ if [[ "$listed_main_ids" != "$main_ruleset_id" ]]; then
   printf 'exact main merge-queue ruleset is missing or replaced\n' >&2
   exit 1
 fi
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
 gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/rulesets/$main_ruleset_id" >"$tmp/main.json"
 python3 "$root/tools/bench_service/deploy/verify_github_queue.py" \
