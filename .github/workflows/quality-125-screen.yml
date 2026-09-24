@@ -3,94 +3,123 @@ name: QUALITY 125 pinned screening
 on:
   push:
     branches: [astra/125-region-census-20260924]
+    paths: [.github/workflows/quality-125-screen.yml]
 
 permissions:
   contents: read
 
 concurrency:
   group: quality-125-screen-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  source:
+  populations:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
-          persist-credentials: false
-      - name: Export exact tracked source without credentials
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/quality-125-source"
-          git rev-parse HEAD 'HEAD^{tree}' | tee "$RUNNER_TEMP/quality-125-source/revision.txt"
-          test "$(git rev-parse HEAD)" = 2e942e80a87666409cf29d3e24a68d322b9e71fd
-          test "$(git rev-parse 'HEAD^{tree}')" = f976bfd7cdb8830a8a15d959ef36f0152f1b767d
-          git archive --format=tar.gz HEAD -o "$RUNNER_TEMP/quality-125-source/source.tar.gz"
-          git ls-tree -r HEAD > "$RUNNER_TEMP/quality-125-source/tree.txt"
-          python3 tools/new_audit.py --newest | tee "$RUNNER_TEMP/quality-125-source/newest-audit.txt"
-          sha256sum "$RUNNER_TEMP/quality-125-source/source.tar.gz"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: quality-125-source-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/quality-125-source
-          retention-days: 14
-          if-no-files-found: error
-
-  census:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 35
+    timeout-minutes: 20
     env:
       BUSTER_TEST_JOBS: '2'
       CMAKE_BUILD_PARALLEL_LEVEL: '2'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Build existing diagnostic compiler
+      - name: Build isolated per-function diagnostic compiler
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/quality-125-evidence"
-          exec > >(tee "$RUNNER_TEMP/quality-125-evidence/build.log") 2>&1
+          evidence="$RUNNER_TEMP/quality-125-populations"
+          mkdir -p "$evidence"
+          exec > >(tee "$evidence/build.log") 2>&1
           set -x
           git rev-parse HEAD 'HEAD^{tree}'
+          printf '%s\n' 2e942e80a87666409cf29d3e24a68d322b9e71fd > "$evidence/base.txt"
           clang --version
           uname -a
           lscpu
+          python3 tools/quality_125_population_probe.py | tee "$evidence/overlay.json"
+          git diff -- src/buster/lib/compiler/codegen/register_allocator_quality.c > "$evidence/overlay.patch"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/quality-125-driver"
           "$RUNNER_TEMP/quality-125-driver" generate --config Release --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON
           "$RUNNER_TEMP/quality-125-driver" build --config Release -t ide -- -j2
-          sha256sum build/Release/ide > "$RUNNER_TEMP/quality-125-evidence/compiler.sha256"
-          cp build/compile_commands.json build/CMakeCache.txt "$RUNNER_TEMP/quality-125-evidence/"
+          sha256sum build/Release/ide > "$evidence/compiler.sha256"
+          cp build/compile_commands.json build/CMakeCache.txt "$evidence/"
+          git restore -- src/buster/lib/compiler/codegen/register_allocator_quality.c
           git diff --exit-code
-      - name: Census frozen unity input in QUALITY
+      - name: Replay frozen current source without timing claims
         shell: bash
         run: |
           set -euo pipefail
-          evidence="$RUNNER_TEMP/quality-125-evidence"
+          evidence="$RUNNER_TEMP/quality-125-populations"
           for form in direct memory; do
             flags=()
             if test "$form" = memory; then flags+=(-fno-frontend-ssa); fi
             printf '%s\n' "build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g0 -O0 -fregister-allocator=quality -c src/buster/apps/ide/ide.c ${flags[*]}" > "$evidence/$form.command.txt"
-            build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g0 -O0 -fregister-allocator=quality "${flags[@]}" -fsource-metrics="$evidence/$form.metrics" -c src/buster/apps/ide/ide.c -o "build/unity-$form.o" > "$evidence/$form.stdout.log" 2> "$evidence/$form.stderr.log"
+            build/Release/ide cc -Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g0 -O0 -fregister-allocator=quality "${flags[@]}" -fsource-metrics="$evidence/$form.metrics" -c src/buster/apps/ide/ide.c -o "build/unity-$form.o" > "$evidence/$form.rows.log" 2> "$evidence/$form.stderr.log"
             sha256sum "build/unity-$form.o" > "$evidence/$form.output.sha256"
-            grep '^quality_census\.' "$evidence/$form.metrics"
           done
+          build/Release/ide cc -g0 -O0 -fregister-allocator=quality -fsource-metrics="$evidence/pressure.metrics" -c tests/basic_c_register_pressure.c -o build/pressure.o > "$evidence/pressure.rows.log" 2> "$evidence/pressure.stderr.log"
+          sha256sum build/pressure.o > "$evidence/pressure.output.sha256"
           find build/generated -type f -print0 | sort -z | xargs -0 sha256sum > "$evidence/generated.sha256"
-      - name: Run registered diagnostic regressions
-        if: ${{ !cancelled() }}
+      - name: Summarize independent populations and retained exact rows
         shell: bash
+        env:
+          EVIDENCE: ${{ runner.temp }}/quality-125-populations
         run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/quality-125-driver" build --config Release -t test_all -- -j2 2>&1 | tee "$RUNNER_TEMP/quality-125-evidence/tests.log"
+          python3 - <<'PY'
+          import collections, json, os, pathlib
+          root = pathlib.Path(os.environ['EVIDENCE'])
+          for path in sorted(root.glob('*.rows.log')):
+              tables = {}
+              decisions = []
+              for line in path.read_text().splitlines():
+                  fields = line.split()
+                  if not fields or not fields[0].startswith('Q125_'):
+                      continue
+                  kind = fields[0]
+                  data = dict(token.split('=', 1) for token in fields[1:] if '=' in token)
+                  data = {key: int(value) for key, value in data.items()}
+                  f = data['f']
+                  if kind == 'Q125_TABLE':
+                      tables[f] = {**data, 'rows': {}, 'queries': {}}
+                  elif kind == 'Q125_ROW':
+                      tables[f]['rows'][data['s']] = [[int(x) for x in token.split(':')] for token in fields[1:] if ':' in token]
+                  elif kind == 'Q125_QUERY':
+                      assert data['s'] not in tables[f]['queries']
+                      tables[f]['queries'][data['s']] = data['q']
+                  elif kind == 'Q125_DECISION':
+                      decisions.append(data)
+              for table in tables.values():
+                  assert len(table['rows']) == table['c']
+                  assert sum(map(len, table['rows'].values())) == table['p']
+                  for row in table['rows'].values():
+                      assert all(row[i][0] < row[i+1][0] for i in range(len(row)-1))
+              cohorts = []
+              for limit in [0, 1, 2, 4, 8, 16, 32, 64]:
+                  subset = [t for t in tables.values() if t['l'] > limit]
+                  cells = sum(t['c'] * t['l'] for t in subset)
+                  p = sum(t['p'] for t in subset)
+                  c = sum(t['c'] for t in subset)
+                  cohorts.append(dict(regions_gt=limit, tables=len(subset), c=c, cells=cells, nonzeros=p,
+                      dense_bytes=8*cells, csr_soa_bytes=12*p+8*c+4*len(subset), csr_aos_bytes=16*p+8*c+4*len(subset),
+                      dense_query_cells=sum(sum(t['queries'].values())*t['l'] for t in subset),
+                      sparse_query_cells=sum(q*len(t['rows'][s]) for t in subset for s,q in t['queries'].items())))
+              summary = dict(tables=len(tables), max_regions=max([t['l'] for t in tables.values()],default=0),
+                  max_candidates=max([t['c'] for t in tables.values()],default=0),
+                  unordered_tables=[t['f'] for t in tables.values() if not t['ordered']],
+                  row_degree_histogram=dict(sorted(collections.Counter(len(r) for t in tables.values() for r in t['rows'].values()).items())),
+                  queried_degree_histogram=dict(sorted(collections.Counter(len(t['rows'][s]) for t in tables.values() for s in t['queries']).items())),
+                  query_count_histogram=dict(sorted(collections.Counter(q for t in tables.values() for q in t['queries'].values()).items())),
+                  selected_regions=len(decisions), cohorts=cohorts)
+              stem = path.name.removesuffix('.rows.log')
+              (root / (stem+'.population.json')).write_text(json.dumps(dict(summary=summary,tables=tables,decisions=decisions), separators=(',',':'))+'\n')
+              (root / (stem+'.summary.json')).write_text(json.dumps(summary, indent=2)+'\n')
+              print(stem, json.dumps(summary, indent=2))
+          PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ !cancelled() }}
         with:
-          name: quality-125-census-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/quality-125-evidence
+          name: quality-125-populations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quality-125-populations
           retention-days: 14
           if-no-files-found: error
