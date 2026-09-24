@@ -1,23 +1,121 @@
-name: 51 fusion source transport
+name: 51 fusion hosted experiment
 on:
   push:
     branches: [astra/51-fusion-20260924-transport]
 permissions:
   contents: read
 jobs:
-  snapshot:
+  publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      head: ${{ steps.patch.outputs.head }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 5d1c314a8ee3c5f9fb713f6afb85ab1e795f44a0
-      - name: Archive immutable source
+          fetch-depth: 0
+      - id: patch
+        name: Publish exact four-file candidate on a new branch
+        shell: bash
         run: |
+          set -euo pipefail
+          sed 's/M6g6d4/M6gk6d4/' 51-fusion.patch.gz.b64 | base64 -d | gzip -d > /tmp/51-fusion.patch
+          echo '44e989e3ae03f881c0d0e9fd889537626e1bcb8c9b67ec6a06a06f420a94e320  /tmp/51-fusion.patch' | sha256sum -c -
+          test -z "$(git ls-remote --heads origin refs/heads/astra/51-fusion-20260924)"
+          git switch --detach 5d1c314a8ee3c5f9fb713f6afb85ab1e795f44a0
+          git apply --check /tmp/51-fusion.patch
+          git apply /tmp/51-fusion.patch
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/lib/compiler/frontend/c/c_source.c src/buster/tests/compiler/frontend/c/c_test.c tests/basic_c_macro_task_batches.c docs/agents/frontend/foundations.md
+          test "$(git diff --cached --name-only | wc -l)" -eq 4
+          git commit -m 'c: produce paste-free macro replacements directly into task batches (#51)'
           git rev-parse HEAD HEAD^{tree}
-          git archive --format=tar.gz -o /tmp/buster-51-base.tar.gz HEAD
-      - uses: actions/upload-artifact@v4
+          git push origin HEAD:refs/heads/astra/51-fusion-20260924
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  correctness:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_TEST_JOBS: '2'
+      HEAD: ${{ needs.publish.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: buster-51-base
-          path: /tmp/buster-51-base.tar.gz
-          retention-days: 3
+          ref: ${{ needs.publish.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install existing Linux link dependency
+        run: sudo apt-get update -qq && sudo apt-get install -y mold
+      - name: Build matched baseline and candidate serially
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          clang --version | tee evidence/clang.txt
+          lscpu > evidence/cpu.txt
+          uname -a > evidence/kernel.txt
+          git rev-parse HEAD HEAD^{tree} > evidence/candidate-source.txt
+          git checkout --detach 5d1c314a8ee3c5f9fb713f6afb85ab1e795f44a0
+          git rev-parse HEAD HEAD^{tree} > evidence/baseline-source.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/51-build"
+          "$RUNNER_TEMP/51-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON 2>&1 | tee evidence/configure.log
+          "$RUNNER_TEMP/51-build" build --config Release -t ide -- -j2 2>&1 | tee evidence/baseline-build.log
+          cp build/Release/ide evidence/base-ide
+          cp build/compile_commands.json evidence/base-compile-commands.json
+          size -A evidence/base-ide > evidence/base-sections.txt
+          git checkout --detach "$HEAD"
+          "$RUNNER_TEMP/51-build" build --config Release -t ide -- -j2 2>&1 | tee evidence/candidate-build.log
+          cp build/Release/ide evidence/candidate-ide
+          cp build/compile_commands.json evidence/candidate-compile-commands.json
+          cp build/CMakeCache.txt evidence/CMakeCache.txt
+          sha256sum evidence/base-ide evidence/candidate-ide > evidence/compiler-sha256.txt
+          size -A evidence/candidate-ide > evidence/candidate-sections.txt
+      - name: Complete preprocessing and independent compile-run outcomes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/oracles
+          for source in tests/basic_c_macro*.c; do
+            stem=$(basename "$source" .c)
+            sha256sum "$source" >> evidence/input-sha256.txt
+            evidence/base-ide cc -E "$source" -o "evidence/oracles/$stem.base.i"
+            evidence/candidate-ide cc -E "$source" -o "evidence/oracles/$stem.candidate.i"
+            cmp "evidence/oracles/$stem.base.i" "evidence/oracles/$stem.candidate.i"
+          done
+          source=tests/basic_c_macro_task_batches.c
+          clang -std=c17 "$source" -o evidence/oracles/clang-oracle
+          evidence/oracles/clang-oracle
+          for compiler in base candidate; do
+            for mode in none mir-stack fast quality; do
+              for ssa in -ffrontend-ssa -fno-frontend-ssa; do
+                out="evidence/oracles/$compiler-$mode$ssa"
+                "evidence/$compiler-ide" cc -g0 "$ssa" -fregister-allocator="$mode" "$source" -o "$out"
+                "$out"
+              done
+            done
+          done
+          sha256sum evidence/oracles/* > evidence/oracle-sha256.txt
+          echo 'PASS: complete macro preprocessing equality; Clang runtime oracle; 16 Buster compile/run cells' | tee evidence/oracles-result.txt
+      - name: Registered full candidate tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence/candidate-ide test --verbose=1 --ci=1 2>&1 | tee evidence/candidate-tests.log
+      - name: Ordinary matched compilation experiment (hosted diagnostic only)
+        if: ${{ !cancelled() && success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/51-build" bench_throughput run --baseline "$PWD/evidence/base-ide" --candidate "$PWD/evidence/candidate-ide" --baseline-id 5d1c314a8ee3c5f9fb713f6afb85ab1e795f44a0 --candidate-id "$HEAD" --output evidence/throughput --profile ci --workload tiny_startup --workload macros --mode fast --pairs 12 --warmups 2 --no-guard --require-identical-output 2>&1 | tee evidence/throughput.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 51-fusion-hosted-${{ github.run_id }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
