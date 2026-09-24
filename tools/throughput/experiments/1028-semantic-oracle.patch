@@ -1,5 +1,5 @@
 diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
-index 60bf69ed..cf641b1f 100644
+index 60bf69ed..56405b55 100644
 --- a/src/buster/lib/compiler/frontend/c/c_gen.c
 +++ b/src/buster/lib/compiler/frontend/c/c_gen.c
 @@ -93,6 +93,61 @@
@@ -117,31 +117,41 @@ index 60bf69ed..cf641b1f 100644
                  IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
                  if (!expression || !expression->layout.resolved)
                  {
-@@ -31605,6 +31661,23 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* build
-     return result.result_type;
+@@ -31595,14 +31651,30 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
+     return result.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : result;
  }
  
 +// DIAGNOSTIC PATCH (#1028 semantic-reuse boundary experiment): trace each root
 +// type prediction with its call site and whether the s32 fallback answered.
-+BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_traced(CIntegerIrBuilder* builder, u32 start, u32 end, char const* site)
-+{
-+    CIrQueryFrame result = {0};
++BUSTER_GLOBAL_LOCAL char const* c_ir_trace_site = "untagged";
++
+ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* builder, u32 start, u32 end)
+ {
+     CIrQueryFrame result = {0};
+-    if (!c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) || !result.success)
 +    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) && result.success;
 +    IrTypeId type = success ? result.result_type : builder->s32_type;
 +    FILE* trace = c_ir_trace_file();
 +    if (trace)
-+    {
-+        fprintf(trace, "LP %s %u %u success=%u sig=", site, start, end, success);
+     {
+-        return builder->s32_type;
++        fprintf(trace, "LP %s %u %u success=%u sig=", c_ir_trace_site, start, end, success);
 +        c_ir_trace_type_signature(trace, builder->program, type);
 +        fprintf(trace, "\n");
-+    }
+     }
+-    return result.result_type;
++    c_ir_trace_site = "untagged";
 +    return type;
 +}
 +
++BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_traced(CIntegerIrBuilder* builder, u32 start, u32 end, char const* site)
++{
++    c_ir_trace_site = site;
++    return c_ir_predict_expression_type(builder, start, end);
+ }
+ 
  BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* builder)
- {
-     CIrLowerMachine* machine = &builder->lower_machine;
-@@ -31691,8 +31764,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
+@@ -31691,8 +31763,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
              }
              return;
          }
@@ -152,7 +162,7 @@ index 60bf69ed..cf641b1f 100644
          IrType* true_type_value = ir_type_from_id(&builder->program->types, true_type);
          IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
          IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
-@@ -32213,8 +32286,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
+@@ -32213,8 +32285,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                                        &nested_expression_end);
              if (nested_conditional)
              {
@@ -163,7 +173,7 @@ index 60bf69ed..cf641b1f 100644
                  IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, conditional_question + 1, conditional_colon,
                                                                      conditional_colon + 1, conditional_end);
                  IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[conditional_start]);
-@@ -40854,7 +40927,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
+@@ -40854,7 +40926,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
              }
          }
      }
