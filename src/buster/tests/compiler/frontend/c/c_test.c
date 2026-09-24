@@ -7115,7 +7115,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
         .value = S8("expanded warning"),
     };
     CPreprocessResult preprocess_diagnostics = c_preprocess(arguments->arena,
-                                                            S8("#warning direct warning\n"
+                                                            S8("#warning hello-warning\n"
                                                                "#warning DIAGNOSTIC_TEXT\n"
                                                                "#if 0\n"
                                                                "#error inactive error\n"
@@ -7133,14 +7133,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     {
         BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[0].kind == C_DIAGNOSTIC_PREPROCESSOR_WARNING);
         BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[0].severity == C_DIAGNOSTIC_WARNING);
-        BUSTER_STRING_TEST(arguments, preprocess_diagnostics.diagnostics[0].message, S8("direct warning"));
+        BUSTER_STRING_TEST(arguments, preprocess_diagnostics.diagnostics[0].message, S8("hello-warning"));
         BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[1].kind == C_DIAGNOSTIC_PREPROCESSOR_WARNING);
         BUSTER_TEST(arguments, preprocess_diagnostics.diagnostics[1].severity == C_DIAGNOSTIC_WARNING);
         BUSTER_STRING_TEST(arguments, preprocess_diagnostics.diagnostics[1].message, S8("DIAGNOSTIC_TEXT"));
     }
     CPreprocessResult preprocess_error = c_preprocess(arguments->arena,
                                                       S8("#define ERROR_TEXT expanded error\n"
-                                                         "#error ERROR_TEXT\n"
+                                                         "#error ERROR_TEXT:hello-error\n"
                                                          "#warning trailing warning\n"
                                                          "int after_error;\n"),
                                                       (CPreprocessOptions){0});
@@ -7151,7 +7151,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_preprocess(UnitTestArgume
     {
         BUSTER_TEST(arguments, preprocess_error.diagnostics[0].kind == C_DIAGNOSTIC_PREPROCESSOR_ERROR);
         BUSTER_TEST(arguments, preprocess_error.diagnostics[0].severity == C_DIAGNOSTIC_ERROR);
-        BUSTER_STRING_TEST(arguments, preprocess_error.diagnostics[0].message, S8("ERROR_TEXT"));
+        BUSTER_STRING_TEST(arguments, preprocess_error.diagnostics[0].message, S8("ERROR_TEXT:hello-error"));
     }
 
     CPreprocessResult expanded_pragmas = c_preprocess(arguments->arena,

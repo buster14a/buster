@@ -400,6 +400,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-streams"), S8(".c"));
+    String8 preprocessed_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-streams"), S8(".i"));
+    String8 object_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-streams"), S8(".o"));
+    String8 assembly_path = buster_test_temporary_path(arguments->arena, S8("diagnostic-streams"), S8(".s"));
+    String8 source = S8("#warning hello-warning\nint x = 1;\n");
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = 1, .search_path = 1};
+    bool source_written = file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    if (BUSTER_REQUIRE(arguments, source_written))
+    {
+        String8 preprocess[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-E"), source_path};
+        ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess),
+                                                      (SliceString8){0}, (SliceString8){0}, capture);
+        if (BUSTER_REQUIRE(arguments, spawned.handle != 0))
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, spawned, 30000000);
+            String8 output = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+            String8 error = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
+            BUSTER_TEST(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, string_first_sequence(output, S8("int x = 1;")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(output, S8("hello-warning")) == BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(error, S8("warning: hello-warning")) != BUSTER_STRING_NO_MATCH);
+            if (BUSTER_REQUIRE(arguments, file_write(preprocessed_path, waited.streams[STANDARD_STREAM_OUTPUT])))
+            {
+                String8 round_trip[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-c"), preprocessed_path,
+                                        S8("-o"), object_path};
+                ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(round_trip),
+                                                            (SliceString8){0}, (SliceString8){0}, capture);
+                if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                {
+                    ProcessWaitResult compiled = os_process_wait_deadline(arguments->arena, child, 30000000);
+                    BUSTER_TEST(arguments, !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS);
+                    BUSTER_TEST(arguments, compiled.streams[STANDARD_STREAM_OUTPUT].length == 0);
+                    BUSTER_TEST(arguments, compiled.streams[STANDARD_STREAM_ERROR].length == 0);
+                }
+            }
+        }
+        String8 compile_commands[][6] = {
+            {program_state->input.arguments.pointer[0], S8("cc"), S8("-c"), source_path, S8("-o"), object_path},
+            {program_state->input.arguments.pointer[0], S8("cc"), S8("-S"), source_path, S8("-o"), assembly_path},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(compile_commands); index += 1)
+        {
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(compile_commands[index]),
+                                                        (SliceString8){0}, (SliceString8){0}, capture);
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult compiled = os_process_wait_deadline(arguments->arena, child, 30000000);
+                BUSTER_TEST(arguments, !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS);
+                BUSTER_TEST(arguments, compiled.streams[STANDARD_STREAM_OUTPUT].length == 0);
+                BUSTER_TEST(arguments, string_first_sequence(BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR]),
+                                                             S8("warning: hello-warning")) != BUSTER_STRING_NO_MATCH);
+            }
+        }
+        BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("#error bad-token\nint main(void) { return 0; }\n"))));
+        String8 link_mode[] = {program_state->input.arguments.pointer[0], S8("cc"), source_path, S8("-o"), object_path};
+        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link_mode),
+                                                    (SliceString8){0}, (SliceString8){0}, capture);
+        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+        {
+            ProcessWaitResult rejected = os_process_wait_deadline(arguments->arena, child, 30000000);
+            BUSTER_TEST(arguments, !rejected.timed_out && rejected.result != PROCESS_RESULT_SUCCESS);
+            BUSTER_TEST(arguments, rejected.streams[STANDARD_STREAM_OUTPUT].length == 0);
+            String8 diagnostic = BYTE_SLICE_TO_STRING(8, rejected.streams[STANDARD_STREAM_ERROR]);
+            BUSTER_TEST(arguments, string_first_sequence(diagnostic, S8("cc: error:")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(diagnostic, S8("bad-token")) != BUSTER_STRING_NO_MATCH);
+        }
+    }
+    if (source_written) { BUSTER_TEST(arguments, os_file_delete(source_path)); }
+    (void)os_file_delete(preprocessed_path);
+    (void)os_file_delete(object_path);
+    (void)os_file_delete(assembly_path);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // The function the one R_X86_64_64 in `.rela<section>` registers, for an
 // initializer array section.  A relocated slot carries no name of its own, so
 // naming its symbol is the only way to prove a `.init_array.NNNNN` group holds
@@ -8279,6 +8361,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);

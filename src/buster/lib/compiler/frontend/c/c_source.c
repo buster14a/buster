@@ -6636,47 +6636,28 @@ BUSTER_C_INTERNAL u32 c_preprocess_tokens_from_nodes(CPreprocessTokenNode* first
 
 BUSTER_C_INTERNAL String8 c_preprocess_message_from_tokens(Arena* arena, char8 const* base, CToken* tokens, u32 token_count)
 {
-    u64 length = 0;
-    u32 message_token_count = 0;
+    CToken first = {0};
+    CToken last = {0};
+    bool has_message = false;
     for (u32 token_index = 0; token_index < token_count; token_index += 1)
     {
         if (tokens[token_index].kind != C_TOKEN_PRAGMA)
         {
-            length += c_token_length(base, tokens[token_index]);
-            message_token_count += 1;
+            if (!has_message) { first = tokens[token_index]; }
+            last = tokens[token_index];
+            has_message = true;
         }
     }
-    if (!message_token_count)
+    String8 result = {0};
+    if (has_message)
     {
-        return (String8){0};
+        // These tokens belong to one directive line in the original spelling
+        // space. Keep punctuation and the gaps between tokens as written.
+        String8 spelling = {.pointer = (char8*)base + first.offset,
+                            .length = last.offset + c_token_length(base, last) - first.offset};
+        result = string_duplicate_arena(arena, spelling, true);
     }
-    length += message_token_count - 1;
-    char8* message = arena_allocate(arena, char8, length + 1);
-    u64 output = 0;
-    u64 emitted = 0;
-    for (u32 token_index = 0; token_index < token_count; token_index += 1)
-    {
-        CToken token = tokens[token_index];
-        if (token.kind == C_TOKEN_PRAGMA)
-        {
-            continue;
-        }
-        if (emitted++)
-        {
-            message[output++] = ' ';
-        }
-        String8 spelling = c_token_spelling(base, token);
-        if (spelling.length)
-        {
-            memcpy(message + output, spelling.pointer, spelling.length);
-            output += spelling.length;
-        }
-    }
-    message[output] = 0;
-    return (String8){
-        .pointer = message,
-        .length = output,
-    };
+    return result;
 }
 
 BUSTER_C_INTERNAL CSourceLocation c_preprocess_logical_location(CPreprocessSourceFrame* frame, CSourceLocation location);
