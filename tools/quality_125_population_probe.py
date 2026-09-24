@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
-import sys
 
 path = pathlib.Path('src/buster/lib/compiler/codegen/register_allocator_quality.c')
 text = path.read_text()
@@ -18,7 +17,7 @@ def replace_once(old: str, new: str) -> None:
         raise SystemExit(f'non-unique diagnostic anchor: {old[:100]!r}')
     text = text.replace(old, new)
 
-replace_once('        BUSTER_QUALITY_COUNT(candidate_region_nonzero_cells, nonzero_cells);', '''        BUSTER_QUALITY_COUNT(candidate_region_nonzero_cells, nonzero_cells);
+replace_once('        BUSTER_QUALITY_COUNT(candidate_region_nonzero_cells, nonzero);', '''        BUSTER_QUALITY_COUNT(candidate_region_nonzero_cells, nonzero);
         bool probe_ordered = true;
         for (u32 probe_edit = 1; probe_edit < baseline.edit_count; probe_edit += 1)
         {
@@ -26,7 +25,7 @@ replace_once('        BUSTER_QUALITY_COUNT(candidate_region_nonzero_cells, nonze
         }
         string_print(S8("Q125_TABLE f={u64} c={u32} l={u32} p={u64} e={u32} ordered={u32}\\n"),
                      machine_quality_census_totals.functions, heap_count, merged_span_count,
-                     nonzero_cells, baseline.edit_count, (u32)probe_ordered);
+                     nonzero, baseline.edit_count, (u32)probe_ordered);
         for (u32 probe_slot = 0; probe_slot < heap_count; probe_slot += 1)
         {
             string_print(S8("Q125_ROW f={u64} s={u32}"), machine_quality_census_totals.functions, probe_slot);
