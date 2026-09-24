@@ -229,13 +229,13 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_build_source_fd(BqRetirementMatchedBuild c
 BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer, int directory, int source,
     BqRetirementBuildStage const* stage)
 {
+#if defined(__linux__) && defined(SYS_close_range)
     bool ok = dup2(writer, STDOUT_FILENO) == STDOUT_FILENO &&
         dup2(writer, STDERR_FILENO) == STDERR_FILENO;
     if (writer >= 3) close(writer);
     if (directory >= 3) close(directory);
     if (ok) ok = fchdir(source) == 0;
     if (source >= 3) close(source);
-#if defined(__linux__) && defined(SYS_close_range)
     int input = ok ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
     if (ok) ok = input >= 3 && dup2(input, STDIN_FILENO) == STDIN_FILENO;
     if (input >= 0) close(input);
@@ -243,6 +243,10 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer,
     if (ok) fexecve(executable, (char* const*)stage->argv, (char* const*)stage->env);
 #else
     (void)executable;
+    (void)writer;
+    (void)directory;
+    (void)source;
+    (void)stage;
 #endif
     _exit(126);
 }
