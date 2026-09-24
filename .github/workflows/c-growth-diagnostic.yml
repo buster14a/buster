@@ -12,25 +12,23 @@ jobs:
   inspect:
     if: ${{ github.repository == 'buster14a/buster' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-          fetch-depth: 2
-      - name: Retain exact baseline source and newest audit identity
+          fetch-depth: 8
+      - name: Bounded frontend census with matched Clang builds
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/c-growth"
-          git rev-parse HEAD HEAD^{tree}
-          git cat-file -e 2e942e80a87666409cf29d3e24a68d322b9e71fd^{commit}
-          git archive --format=tar 2e942e80a87666409cf29d3e24a68d322b9e71fd | gzip -n > "$RUNNER_TEMP/c-growth/base.tar.gz"
-          sha256sum "$RUNNER_TEMP/c-growth/base.tar.gz"
-          python3 tools/new_audit.py --newest
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          mkdir -p "$RUNNER_TEMP/c-growth-evidence"
+          python3 tools/c_growth_experiment.py 2>&1 | tee "$RUNNER_TEMP/c-growth-evidence/experiment.log"
+      - name: Retain every completed and failed observation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: c-growth-source-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/c-growth
+          name: c-growth-census-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/c-growth-evidence
           if-no-files-found: error
           retention-days: 7
