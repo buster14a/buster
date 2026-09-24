@@ -68,6 +68,16 @@ prevents launch. The returned service-owned record digest is an A handoff
 identity; matched build manifests and the authenticated B importer are still
 required before timing can become available.
 
+The closure walk opens a new directory description from each held root, so
+repeated verification does not consume the caller's directory cursor. The
+combined preparation/readback fixture verifies that an unlisted directory in
+a materialized copy rejects the durable handoff, that removing it restores the
+same record digest, and that a byte-equal file replacement still rejects after
+the old name is removed. Directory closure must not mask inode-identity checks.
+The supervisor's absolute deadline starts at lease acquisition and is retained
+across this readback and final result validation; readback never starts a new
+execution budget.
+
 ## Capacity derivation
 
 At the inspected #923 head `ffdc9213e74128df5e759c76d52897eddfe4cd7e`,

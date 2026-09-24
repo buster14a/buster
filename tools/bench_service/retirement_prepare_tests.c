@@ -171,6 +171,13 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_large_manifest(void)
                       observed.entries == 1024 && observed.bytes == 1024 &&
                       observed.directories == 2 && observed.max_path == 11 && observed.max_depth == 2 &&
                       observed.manifest_bytes == used);
+        /* Readback must not consume the caller's directory cursor: the same
+         * held source is used by verification and later evidence consumers. */
+        BqRetirementSource repeated = {0};
+        BQ_PREP_CHECK(bq_retirement_scan(destination, ".source-manifest", string_from_pointer(revision),
+                                         &repeated, true) &&
+                      bq_retirement_same_source(&observed, &repeated) &&
+                      !memcmp(observed.installed_identity_sha256, repeated.installed_identity_sha256, 64));
         if (installed >= 0) close(installed);
         if (destination >= 0) close(destination);
     }
@@ -254,13 +261,27 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
         int length = snprintf(copied_path, sizeof(copied_path), "%s/base/source/src", attempt);
         int copied = length > 0 && (u32)length < sizeof(copied_path) ?
                      bq_open_directory_path(workspaces, string_from_pointer(copied_path)) : -1;
+        /* Exercise directory closure at the durable consumer, not only at
+         * preflight. Failure must not damage the immutable preparation record. */
+        char original_digest[SHA256_HEX_CAPACITY];
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), original_digest) == BQ_OK);
+        BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 && mkdirat(copied, "unlisted", 0500) == 0 &&
+                      fchmod(copied, 0500) == 0);
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest) == BQ_SOURCE_MISMATCH && !digest[0]);
+        BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
+                      unlinkat(copied, "unlisted", AT_REMOVEDIR) == 0 && fchmod(copied, 0500) == 0);
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest) == BQ_OK && !strcmp(digest, original_digest));
         BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
                       renameat(copied, "main.c", copied, "old.c") == 0);
         if (copied >= 0)
         {
             int replacement = openat(copied, "main.c", O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
             BQ_PREP_CHECK(replacement >= 0 && bq_write_all(replacement, (u8 const*)"int a;\n", 7) &&
-                          fchmod(replacement, 0400) == 0 && fchmod(copied, 0500) == 0);
+                          fchmod(replacement, 0400) == 0 && unlinkat(copied, "old.c", 0) == 0 &&
+                          fchmod(copied, 0500) == 0);
             if (replacement >= 0) close(replacement);
             BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
                           string_from_pointer(profile), digest) == BQ_SOURCE_MISMATCH && !digest[0]);
