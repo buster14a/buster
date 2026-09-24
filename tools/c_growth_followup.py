@@ -56,9 +56,9 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId 
     bool hit = valid && c_growth_last.valid && c_growth_last.key.value == unqualified.value &&
                c_growth_last.is_atomic == is_atomic && c_growth_last.is_volatile == is_volatile;
     bool mismatch = hit && c_growth_last.result.value != result.value;
-    fprintf(stderr, "C_GROWTH_QUERY key=%u atomic=%u volatile=%u result=%u valid=%u visits=%llu ticks=%llu cache_hit=%u mismatch=%u table=%u\n",
+    fprintf(stderr, "C_GROWTH_QUERY key=%u atomic=%u volatile=%u result=%u valid=%u visits=%llu ns=%llu cache_hit=%u mismatch=%u table=%u\n",
             unqualified.value, (u32)is_atomic, (u32)is_volatile, result.value, (u32)valid,
-            visits, (unsigned long long)(end - start), (u32)hit, (u32)mismatch, program->types.count);
+            visits, (unsigned long long)timestamp_ns_between(start, end), (u32)hit, (u32)mismatch, program->types.count);
     if (valid)
     {
         c_growth_last.key = unqualified;
@@ -75,6 +75,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(IrProgram* program, IrTypeId 
 
 def instrumentation(original):
     text = initial.instrumentation(original)
+    text = replace_once(text, '#include <stdio.h>', '#include <stdio.h>\n#include <buster/lib/time.h>')
     text = replace_once(text,
                         'BUSTER_C_INTERNAL IrTypeId c_ir_add_qualified_type(',
                         'BUSTER_C_INTERNAL IrTypeId c_ir_growth_qualified_original(')
