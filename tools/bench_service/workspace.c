@@ -1452,6 +1452,7 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
 
 #include "retirement_prepare.c"
 #include "retirement_binaries.c"
+#include "retirement_matched_build.c"
 
 #else
 bool bq_workspace_name(char result[64], u64 id, u64 token)
