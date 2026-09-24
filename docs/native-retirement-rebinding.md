@@ -97,9 +97,13 @@ Manual generated edits, edits stacked on unrecognized integration output and
 genuine conflicts remain blocked. A fresh dispatch is still required after main
 advances; this recovery does not grant automated dispatcher authority.
 
-Merge-group admission is read-only: GitHub's single-candidate synthetic commit
-must have current main first, the attested integration head second, and exactly
-the attested final tree. It resolves live publication evidence for that PR head,
+Merge-group admission is read-only: a speculative base waits until it has landed
+as current main, using the independently trusted main policy checked out at
+workflow start. A queued predecessor that changes that policy requires a fresh
+group. The synthetic commit must then have current main first, the attested
+integration head second, and exactly the attested final tree. A stale writer
+head still needs a fresh authorized dispatch and replacement group. The gate
+resolves live publication evidence for that PR head,
 including the successful latest writer attempt. Combined-head CI remains required
 on the synthetic SHA. Rebinding checks that existing generated pair in place;
 it does not refresh it into a different, untested group tree.
