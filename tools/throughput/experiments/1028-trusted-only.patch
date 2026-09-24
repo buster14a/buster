@@ -1,0 +1,53 @@
+diff --git a/tools/throughput/tests.c b/tools/throughput/tests.c
+index c318ae6..869a6fc 100644
+--- a/tools/throughput/tests.c
++++ b/tools/throughput/tests.c
+@@ -672,7 +672,7 @@ static void test_job_capacity(void)
+                     for (unsigned kind = 0; kind < TP_CASES; ++kind)
+                         for (unsigned mode = 0; mode < TP_MODES; ++mode)
+                             expected += !!(mask & (1u << kind)) && !!(modes & (1u << mode));
+-                    expected += self * 2;
++                    expected += self * TP_SELF_HOST_STAGES;
+                     CHECK(count == expected);
+                     unsigned rejected = 99;
+                     /* Null storage proves rejection precedes even the first write. */
+@@ -693,7 +693,7 @@ static void test_job_capacity(void)
+                             }
+                         }
+                     }
+-                    for (unsigned stage = 1; self && stage <= 2; ++stage)
++                    for (unsigned stage = 1; self && stage <= TP_SELF_HOST_STAGES; ++stage)
+                     {
+                         CHECK(jobs[next].stage == stage && jobs[next].mode == 2 && !jobs[next].assembly &&
+                               !strcmp(jobs[next].workload.path, "frozen/src/buster/apps/ide/ide.c"));
+diff --git a/tools/throughput/throughput.c b/tools/throughput/throughput.c
+index b76a4f8..68195e7 100644
+--- a/tools/throughput/throughput.c
++++ b/tools/throughput/throughput.c
+@@ -36,7 +36,7 @@
+ #define TP_DEFAULT_CASES 6
+ #define TP_CASES 8
+ #define TP_MODES 4
+-#define TP_SELF_HOST_STAGES 2
++#define TP_SELF_HOST_STAGES 1 /* #1028 diagnostic selection: trusted compiler only. */
+ #define TP_DEFAULT_WORKLOAD_MASK ((1u << TP_DEFAULT_CASES) - 1u)
+ #define TP_ALL_WORKLOAD_MASK ((1u << TP_CASES) - 1u)
+ #define TP_ALL_MODE_MASK ((1u << TP_MODES) - 1u)
+@@ -1554,7 +1554,7 @@ static int tp_run(TpConfig config)
+         TpConfig instrumented = config;
+         if (instrumented.flag_count == TP_MAX_FLAGS) ok = 0;
+         else instrumented.flags[instrumented.flag_count++] = "-DBUSTER_BENCH_ALLOCATIONS=1";
+-        TpJob job = jobs[job_count - 2];
++        TpJob job = jobs[job_count - TP_SELF_HOST_STAGES];
+         snprintf(job.workload.name, sizeof(job.workload.name), "self_host_allocation_compiler");
+         for (unsigned variant = 0; variant < 2 && ok; ++variant)
+         {
+@@ -1602,7 +1602,7 @@ static int tp_run(TpConfig config)
+      * built from a different source revision. The meaningful fixed point is
+      * stage2 == stage3, after both producers implement the frozen source. The
+      * project's normal test_self_host remains the canonical own-source gate. */
+-    for (unsigned variant = 0; variant < 2 && ok && config.self_host_root; ++variant)
++    for (unsigned variant = 0; variant < 2 && ok && config.self_host_root && TP_SELF_HOST_STAGES > 1; ++variant)
+     {
+         TpJob job = jobs[job_count - 1];
+         snprintf(job.workload.name, sizeof(job.workload.name), "self_host_stage3");

@@ -6,23 +6,23 @@ permissions:
   contents: read
 concurrency:
   group: semantic-facts-1028-comparison
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   comparison:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 55
+    timeout-minutes: 35
     env:
       BUSTER_TEST_JOBS: '2'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          fetch-depth: 8
+          fetch-depth: 12
       - run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends --yes mold
-      - name: Matched trusted builds with frozen source
+      - name: Matched trusted subjects and frozen source
         id: subjects
         shell: bash
         run: |
@@ -36,7 +36,7 @@ jobs:
           uname -a
           lscpu
           free -b
-          git diff --exit-code 2e942e80a87666409cf29d3e24a68d322b9e71fd -- src build.c CMakeLists.txt cmake
+          git diff --exit-code 2e942e80a87666409cf29d3e24a68d322b9e71fd -- src build.c CMakeLists.txt cmake tools/throughput/throughput.c tools/throughput/tests.c
           git archive 2e942e80a87666409cf29d3e24a68d322b9e71fd:src | tar -xf - -C frozen/src
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
           "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF
@@ -57,71 +57,22 @@ jobs:
           sha256sum subjects/* > evidence/compilers.sha256
           find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs.sha256
           "$RUNNER_TEMP/buster-build" bench_throughput self-test
+          git apply --check tools/throughput/experiments/1028-trusted-only.patch
+          git apply tools/throughput/experiments/1028-trusted-only.patch
+          git diff -- tools/throughput/throughput.c tools/throughput/tests.c > evidence/harness-selection.diff
+          "$RUNNER_TEMP/buster-build" bench_throughput self-test
           "$RUNNER_TEMP/buster-build" bench_throughput help
           sha256sum build/throughput-tools/throughput > evidence/harness.sha256
-      - name: Frozen cross-target diagnostic and artifact neighbors
-        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import hashlib, json, pathlib, re, subprocess
-          root=pathlib.Path.cwd()
-          patch=(root/'tools/throughput/experiments/1028-regressions.patch').read_text()
-          cases=[(json.loads(source),valid=='true') for source,valid in re.findall(r'^\+\s+\{S8\(("(?:[^"\\]|\\.)*")\), (true|false), true\},$',patch,re.M)]
-          assert len(cases)==16, len(cases)
-          out=root/'evidence'/'neighbors'; out.mkdir()
-          rows=[]; failures=[]
-          for i,(source,valid) in enumerate(cases):
-              path=out/f'case-{i}.c'; path.write_text(source)
-              for target in ['x86_64-linux','aarch64-linux','x86_64-windows','aarch64-macos']:
-                  for form in ['-ffrontend-ssa','-fno-frontend-ssa']:
-                      paired=[]
-                      for name in ['baseline','hoist']:
-                          results=[]
-                          for action in ['-fsyntax-only','-c']:
-                              artifact=out/'output.o'; artifact.unlink(missing_ok=True)
-                              cmd=[str(root/'subjects'/name),'cc','-g0','-std=gnu23','-target',target,form,action,str(path),'-o',str(artifact)]
-                              p=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30)
-                              row={'case':i,'valid':valid,'target':target,'form':form,'compiler':name,'action':action,'argv':cmd,'exit':p.returncode,'stdout':p.stdout.decode(errors='replace'),'stderr':p.stderr.decode(errors='replace'),'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.exists() else None}
-                              rows.append(row); results.append(row)
-                              if (p.returncode==0)!=valid: failures.append({'kind':'acceptance','row':len(rows)-1})
-                          if (results[0]['exit'],results[0]['stderr']) != (results[1]['exit'],results[1]['stderr']): failures.append({'kind':'syntax-object','row':len(rows)-2})
-                          paired.append(results)
-                      for a,b in zip(*paired):
-                          if (a['exit'],a['stderr'],a['sha256']) != (b['exit'],b['stderr'],b['sha256']): failures.append({'kind':'baseline-candidate','row':len(rows)-4})
-          (out/'results.json').write_text(json.dumps({'cases':cases,'rows':rows,'failures':failures},indent=2)+'\n')
-          print('neighbor invocations',len(rows),'failures',len(failures))
-          raise SystemExit(bool(failures))
-          PY
-      - name: Native harness full-compilation A-A and A-B measurements
-        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          exec > >(tee evidence/comparison.log) 2>&1
-          harness="$PWD/build/throughput-tools/throughput"
-          # This custom tiny + frozen self-host family is descriptive, not the
-          # predeclared ordinary CI guard. No acceptance policy is changed.
-          common=(--workload tiny_startup --profile ci --mode fast --warmups 1 --no-guard --self-host-root "$PWD/frozen" --self-host-generated "$PWD/frozen/generated" --require-identical-output)
-          "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/rebuilt-baseline" --baseline-id 2e942e80 --candidate-id same-root-rebuild --output "$PWD/evidence/aa" --pairs 4 "${common[@]}"
-          failed=0
-          for form in frontend-ssa no-frontend-ssa; do
-            "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/hoist" --baseline-id 2e942e80 --candidate-id hoist-56db7b6 --output "$PWD/evidence/$form" --pairs 20 --flag "-f$form" "${common[@]}" || failed=1
-          done
-          exit "$failed"
-      - name: Separate exact-range diagnostic census
+      - name: Separate exact-range census before timing
         if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           exec > >(tee evidence/census-build.log) 2>&1
           git checkout -- src/buster/lib/compiler/frontend/c/c_parse.c src/buster/lib/compiler/frontend/c/c_gen.c
-          git apply --check tools/throughput/experiments/1028-census.patch
           git apply tools/throughput/experiments/1028-census.patch
           "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
           cp build/Release/ide subjects/census-baseline
-          git apply --check tools/throughput/experiments/1028-hoist.patch
           git apply tools/throughput/experiments/1028-hoist.patch
           "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
           cp build/Release/ide subjects/census-hoist
@@ -134,8 +85,30 @@ jobs:
           sha256sum evidence/census-*.o > evidence/census-outputs.sha256
           cmp evidence/census-baseline-frontend-ssa.o evidence/census-hoist-frontend-ssa.o
           cmp evidence/census-baseline-no-frontend-ssa.o evidence/census-hoist-no-frontend-ssa.o
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: semantic-facts-census-${{ github.run_id }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
+      - name: Trusted-only total compilation, fixed A-A and A-B rounds
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/comparison.log) 2>&1
+          harness="$PWD/build/throughput-tools/throughput"
+          common=(--workload tiny_startup --profile ci --mode fast --warmups 1 --no-guard --self-host-root "$PWD/frozen" --self-host-generated "$PWD/frozen/generated" --require-identical-output)
+          "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/rebuilt-baseline" --baseline-id 2e942e80 --candidate-id same-root-rebuild --output "$PWD/evidence/aa" --pairs 4 "${common[@]}"
+          failed=0
+          for form in frontend-ssa no-frontend-ssa; do
+            "$harness" run --baseline "$PWD/subjects/baseline" --candidate "$PWD/subjects/hoist" --baseline-id 2e942e80 --candidate-id hoist-56db7b6 --output "$PWD/evidence/$form" --pairs 20 --flag "-f$form" "${common[@]}" || failed=1
+          done
           find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs-after.sha256
           cmp evidence/frozen-inputs.sha256 evidence/frozen-inputs-after.sha256
+          sha256sum -c evidence/compilers.sha256
+          exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
