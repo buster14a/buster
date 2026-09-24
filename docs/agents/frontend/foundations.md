@@ -65,6 +65,10 @@ incoming values, forwarding through single-predecessor chains. Trivial
 parameters and unused parameter cycles are removed. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
+Condition lowering resolves a literal left operand of `||` or `&&` before
+allocating a block for its right operand. A short-circuited arm must not
+become a disconnected source block that joins a value defined only on another
+path; selected MIR enforces dominance in unreachable code too.
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The

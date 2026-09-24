@@ -401,6 +401,9 @@ selected-function and scheduled-function counts and the effective allocator.
 Normal compilation keeps its existing validation certificates and fast paths.
 The [native differential runner](../differential-testing.md) consumes this
 explicit opt-in evidence and compares executable observations independently.
+When selected or scheduled MIR fails verification, the refusal names the
+`MachineVerifyError` and its block, machine instruction, and operand. Without a
+failing canonical instruction its opcode is `unknown`, not an IR enum default.
 
 With `-v`, aggregate `CODEGEN` and fallback reason/opcode/stage counters are also
 printed after codegen errors, including strict fallback rejection. The optional
