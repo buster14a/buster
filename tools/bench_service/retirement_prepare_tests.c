@@ -239,24 +239,44 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
     {
         char digest[SHA256_HEX_CAPACITY];
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
-                      string_from_pointer(profile), digest) == BQ_NOT_FOUND && !digest[0]);
+                      string_from_pointer(profile), digest, NULL) == BQ_NOT_FOUND && !digest[0]);
         BQ_PREP_CHECK(bq_retirement_preparation_record(&queue, &job, prepared, BQ_OK, 2) &&
                       bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
-                          string_from_pointer(profile), digest) == BQ_OK && strlen(digest) == 64);
+                          string_from_pointer(profile), digest, NULL) == BQ_OK && strlen(digest) == 64);
+        BqRetirementPreparation imported = {0};
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest, &imported) == BQ_OK &&
+                      !strcmp(imported.inventory_sha256, prepared->inventory_sha256) &&
+                      !strcmp(imported.subjects[0].materialized_identity_sha256,
+                              prepared->subjects[0].materialized_identity_sha256) &&
+                      !strcmp(imported.subjects[1].materialized_identity_sha256,
+                              prepared->subjects[1].materialized_identity_sha256) &&
+                      !strcmp(imported.subjects[0].manifest_sha256, prepared->subjects[0].manifest_sha256) &&
+                      imported.source_reservation_bytes == prepared->source_reservation_bytes);
+        char altered_digest[SHA256_HEX_CAPACITY];
+        memcpy(altered_digest, digest, sizeof(altered_digest));
+        altered_digest[0] = altered_digest[0] == 'a' ? 'b' : 'a';
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), altered_digest, &imported) == BQ_RECIPE_MISMATCH &&
+                      !imported.inventory_sha256[0]);
+        char invalid_digest[SHA256_HEX_CAPACITY] = "invalid";
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), invalid_digest, &imported) == BQ_RECIPE_MISMATCH &&
+                      !imported.inventory_sha256[0]);
         BqJob other = job;
         other.token += 1;
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &other, installed, workspaces,
-                      string_from_pointer(profile), digest) == BQ_CORRUPT && !digest[0]);
+                      string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
         other = job;
         other.digest[0] = other.digest[0] == 'a' ? 'b' : 'a';
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &other, installed, workspaces,
-                      string_from_pointer(profile), digest) == BQ_RECIPE_MISMATCH && !digest[0]);
+                      string_from_pointer(profile), digest, NULL) == BQ_RECIPE_MISMATCH && !digest[0]);
         char wrong_profile[512];
         memcpy(wrong_profile, profile, strlen(profile) + 1);
         char* pin = strstr(wrong_profile, "inventory-sha256=");
         if (pin) pin[17] = pin[17] == 'a' ? 'b' : 'a';
         BQ_PREP_CHECK(pin && bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
-                      string_from_pointer(wrong_profile), digest) == BQ_RECIPE_MISMATCH && !digest[0]);
+                      string_from_pointer(wrong_profile), digest, NULL) == BQ_RECIPE_MISMATCH && !digest[0]);
         char copied_path[128];
         int length = snprintf(copied_path, sizeof(copied_path), "%s/base/source/src", attempt);
         int copied = length > 0 && (u32)length < sizeof(copied_path) ?
@@ -265,15 +285,18 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
          * preflight. Failure must not damage the immutable preparation record. */
         char original_digest[SHA256_HEX_CAPACITY];
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
-                      string_from_pointer(profile), original_digest) == BQ_OK);
+                      string_from_pointer(profile), original_digest, NULL) == BQ_OK);
         BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 && mkdirat(copied, "unlisted", 0500) == 0 &&
                       fchmod(copied, 0500) == 0);
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
-                      string_from_pointer(profile), digest) == BQ_SOURCE_MISMATCH && !digest[0]);
+                      string_from_pointer(profile), digest, NULL) == BQ_SOURCE_MISMATCH && !digest[0]);
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), original_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                      !imported.inventory_sha256[0]);
         BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
                       unlinkat(copied, "unlisted", AT_REMOVEDIR) == 0 && fchmod(copied, 0500) == 0);
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
-                      string_from_pointer(profile), digest) == BQ_OK && !strcmp(digest, original_digest));
+                      string_from_pointer(profile), digest, NULL) == BQ_OK && !strcmp(digest, original_digest));
         BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
                       renameat(copied, "main.c", copied, "old.c") == 0);
         if (copied >= 0)
@@ -284,7 +307,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
                           fchmod(copied, 0500) == 0);
             if (replacement >= 0) close(replacement);
             BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
-                          string_from_pointer(profile), digest) == BQ_SOURCE_MISMATCH && !digest[0]);
+                          string_from_pointer(profile), digest, NULL) == BQ_SOURCE_MISMATCH && !digest[0]);
+            BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), original_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                          !imported.inventory_sha256[0]);
             close(copied);
         }
         int record = openat(queue.directory_fd, "preparation-1", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -294,7 +320,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
         BQ_PREP_CHECK(record >= 0 && pwrite(record, "X", 1, 0) == 1 && fchmod(record, 0400) == 0);
         if (record >= 0) close(record);
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
-                      string_from_pointer(profile), digest) == BQ_CORRUPT && !digest[0]);
+                      string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), original_digest, &imported) == BQ_CORRUPT &&
+                      !imported.inventory_sha256[0]);
     }
     if (root >= 0) close(root);
     bq_close(&queue);

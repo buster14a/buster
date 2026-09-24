@@ -554,7 +554,8 @@ bool bq_retirement_preparation_record(BqQueue* queue, BqJob const* job,
  * must still be the ones the preparation producer verified. This readback is
  * the service-owned A handoff, not a correctness or build-provenance verdict. */
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_ready_pinned(BqQueue* queue, BqJob const* job,
-    int installed, int workspaces, String8 profile, char record_sha256[SHA256_HEX_CAPACITY])
+    int installed, int workspaces, String8 profile, char record_sha256[SHA256_HEX_CAPACITY],
+    BqRetirementPreparation* verified)
 {
     BqRetirementPreparation expected = {0};
     char name[48], body[BQ_RETIREMENT_PREPARATION_RECORD_CAP];
@@ -562,6 +563,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_ready_pinned(BqQueue* queu
     u32 size = 0;
     char8 request_digest[SHA256_HEX_CAPACITY];
     if (record_sha256) record_sha256[0] = 0;
+    if (verified) *verified = (BqRetirementPreparation){0};
     bool valid = queue && job && record_sha256 && job->id && job->token &&
                  string_equal(bq_field(&job->request, 2), S8("native-retirement-performance-v1"));
     if (valid) bq_request_digest(&job->request, request_digest);
@@ -621,7 +623,29 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_ready_pinned(BqQueue* queu
         if (source >= 0 && close(source) != 0) match = false;
         if (!match) result = BQ_SOURCE_MISMATCH;
     }
-    if (result == BQ_OK) bq_digest(actual, size, (char8*)record_sha256);
+    if (result == BQ_OK)
+    {
+        bq_digest(actual, size, (char8*)record_sha256);
+        if (verified) *verified = expected;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_preparation_import_pinned(BqQueue* queue, BqJob const* job,
+    int installed, int workspaces, String8 profile, char const record_sha256[SHA256_HEX_CAPACITY],
+    BqRetirementPreparation* verified)
+{
+    if (verified) *verified = (BqRetirementPreparation){0};
+    bool valid = verified && record_sha256 && strnlen(record_sha256, SHA256_HEX_CAPACITY) == 64 &&
+                 bq_retirement_hex((String8){(char8*)record_sha256, 64}, 64);
+    char current_sha256[SHA256_HEX_CAPACITY] = {0};
+    BqRetirementPreparation current = {0};
+    BqError result = valid ? bq_retirement_preparation_ready_pinned(queue, job, installed, workspaces,
+                                                                      profile, current_sha256, &current) :
+                             BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK && memcmp(record_sha256, current_sha256, SHA256_HEX_CAPACITY))
+        result = BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK) *verified = current;
     return result;
 }
 
@@ -630,6 +654,16 @@ BqError bq_retirement_preparation_ready(BqQueue* queue, BqJob const* job, int in
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
     BqError result = bq_retirement_preparation_ready_pinned(queue, job, installed, workspaces,
-                                                              profile, record_sha256);
+                                                              profile, record_sha256, NULL);
+    return result;
+}
+
+BqError bq_retirement_preparation_import(BqQueue* queue, BqJob const* job, int installed, int workspaces,
+                                          char const record_sha256[SHA256_HEX_CAPACITY],
+                                          BqRetirementPreparation* verified)
+{
+    String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
+    BqError result = bq_retirement_preparation_import_pinned(queue, job, installed, workspaces,
+                                                               profile, record_sha256, verified);
     return result;
 }

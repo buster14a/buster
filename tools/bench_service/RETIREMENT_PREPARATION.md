@@ -71,10 +71,15 @@ unit validates the recipe and echoes the digest in the acknowledgement before
 the supervisor releases the lease. Smoke requires an empty value and retains
 its six-argument build-driver interface. On eventual retirement admission the
 fixed private build command receives the digest after the result root, before
-the phase descriptor. The build-side B importer still must independently bind
-that identity to the verified source inputs and matched build manifests before
-timing can become available; a digest relayed through the lease is not itself
-build provenance.
+the phase descriptor. The service-side `bq_retirement_preparation_import`
+accepts that authenticated digest and independently rereads the durable record,
+installed inventory and both materialized source trees. It returns the checked
+inventory, commit/tree, manifest, capacity and same-job source inode identities
+only when the record digest matches; failures clear the returned facts. The
+#923 integrator still must call this importer from the correctness producer,
+attach the matched trusted build manifest and independently recheck its binary
+outputs before timing. A digest relayed through the lease does not establish
+build provenance by itself.
 
 The closure walk opens a new directory description from each held root, so
 repeated verification does not consume the caller's directory cursor. The
@@ -123,9 +128,10 @@ build argv/environment, trusted compiler/linker/resource/SDK/sysroot and
 dependency identities, build logs, output binary bytes/digests and source/tree
 relations. Its timed compilers must come from those trusted Clang stages;
 self-built stages may supply correctness evidence only. The pre-timing
-correctness lane must consume the complete provenance and both verified input
-identities before declaring ready for timing. This child implementation does
-not assert build provenance merely because the source preparation succeeds.
+correctness lane must call `bq_retirement_preparation_import` with the digest
+from the authenticated lease, consume both verified source identities and the
+complete build provenance before declaring ready for timing. The importer
+does not assert build provenance merely because the source preparation succeeds.
 
 ## Focused fixture
 
