@@ -6491,6 +6491,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
     return result;
 }
 
+#include <buster/tests/compiler/codegen/quality_regions_test_internal.h>
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -6501,6 +6503,8 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
     BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_regions);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_region_placements);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_edges);
     BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_source);

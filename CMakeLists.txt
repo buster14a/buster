@@ -1149,6 +1149,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/compiler/llvm/bitcode_test.h
     src/buster/tests/compiler/codegen/machine_select_test.h
     src/buster/tests/compiler/codegen/machine_test.h
+    src/buster/tests/compiler/codegen/quality_regions_test_internal.h
     src/buster/tests/compiler/codegen/codegen_test.h
     src/buster/tests/compiler/codegen/aarch64_stride_test.h
     src/buster/tests/compiler/debug/debug_test.h

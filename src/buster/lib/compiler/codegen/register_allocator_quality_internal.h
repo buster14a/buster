@@ -33,6 +33,41 @@ BUSTER_F_DECL void machine_quality_heap_sift(MachineQualityInterval* heap, u32 c
 // returned by the preceding query. UINT32_MAX also reports exhaustion.
 BUSTER_F_DECL u32 machine_quality_region_next(MachineQualityTraffic const* traffic, u32 count, u32 previous_region);
 
+// Function-local sparse traffic, keyed by the pre-heap candidate slot. The
+// Inputs use the baseline's valid subjects and positive instruction weights. The
+// constructor falls back to dense storage unless its worst-case allocation is
+// smaller; offsets == 0 denotes that fallback. Rows initially have increasing
+// region IDs. Probing may heapify/permutate a row, never change its key/value set.
+typedef struct MachineEdit MachineEdit;
+typedef struct MachineQualityRegionTraffic MachineQualityRegionTraffic;
+struct MachineQualityRegionTraffic
+{
+    MachineQualityTraffic traffic;
+    u32 region;
+};
+
+typedef struct MachineQualitySparseRegions MachineQualitySparseRegions;
+struct MachineQualitySparseRegions
+{
+    MachineQualityRegionTraffic* entries;
+    u32* offsets;
+};
+
+BUSTER_F_DECL MachineQualitySparseRegions machine_quality_sparse_regions_build(Arena* arena, u64 const* spans, u32 region_count,
+    u32 candidate_count, u32 const* candidate_indices, MachineEdit const* edits, u32 edit_count,
+    u32 const* instruction_weights, u32 candidate_edit_limit);
+BUSTER_F_DECL void machine_quality_region_heap_sift(MachineQualityRegionTraffic* heap, u32 count, u32 root);
+BUSTER_F_DECL void machine_quality_region_heap_build(MachineQualityRegionTraffic* heap, u32 count);
+// Exhaustion returns {0, UINT32_MAX}. Popping only permutes the complete row,
+// including its inactive suffix, so rebuilding it starts the same enumeration.
+BUSTER_F_DECL MachineQualityRegionTraffic machine_quality_region_heap_pop(MachineQualityRegionTraffic* heap, u32* count);
+
+#if BUSTER_INCLUDE_TESTS
+typedef struct MachineFunction MachineFunction;
+typedef struct MachineStackPlacement MachineStackPlacement;
+BUSTER_F_DECL MachineStackPlacement machine_quality_placement_build_regions_test(Arena* arena, MachineFunction* function, bool dense);
+#endif
+
 // Private QUALITY work census. The existing allocation-instrumented compiler
 // supplies these counters to its source-metrics file; ordinary compilers have
 // neither storage nor recorder calls. Counts are cumulative on the calling OS
@@ -66,6 +101,14 @@ BUSTER_F_DECL u32 machine_quality_region_next(MachineQualityTraffic const* traff
     X(candidate_region_nonzero_cells) \
     X(candidate_region_updates) \
     X(candidate_region_clear_bytes) \
+    X(sparse_region_tables) \
+    X(sparse_region_entries) \
+    X(sparse_region_storage_bytes) \
+    X(sparse_region_construction_edits) \
+    X(sparse_region_order_fallbacks) \
+    X(sparse_region_heap_entries) \
+    X(sparse_region_heap_steps) \
+    X(sparse_region_queries) \
     X(region_table_zero_functions) \
     X(region_table_sparse_functions) \
     X(region_table_mixed_functions) \
