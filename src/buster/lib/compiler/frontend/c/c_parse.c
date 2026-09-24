@@ -2621,6 +2621,7 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_base(CPreprocessResult pre
             if (cast_type.value != C_ID_UNDERLYING_INVALID)
             {
                 cast_type = c_parse_pointer_chain(result, preprocess, cast_type, &type_index, cast_close);
+                cast_type = c_parse_array_suffixes(result, preprocess, cast_type, &type_index, cast_close);
                 if (type_index == cast_close)
                 {
                     type = cast_type;
@@ -2710,7 +2711,12 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
             type = C_TYPE_ID_INVALID;
             break;
         }
+        CType qualifiers = {.is_const = type_value->is_const, .is_volatile = type_value->is_volatile};
         type = type_value->element_type;
+        if (type.value < result->type_count && type_value->kind == C_TYPE_ARRAY && (qualifiers.is_const || qualifiers.is_volatile))
+        {
+            type = c_parse_add_qualified_type(result, type, qualifiers);
+        }
         index = close + 1;
         continue;
     }
@@ -2736,7 +2742,12 @@ BUSTER_GLOBAL_LOCAL CTypeId c_parse_direct_expression_postfix(Arena* arena, CPre
         type = C_TYPE_ID_INVALID;
         break;
     }
+    CType qualifiers = {.is_const = type_value->is_const, .is_volatile = type_value->is_volatile};
     type = c_parse_member_type(arena, result, type, c_token_spelling(preprocess.spelling_base, preprocess.tokens[index + 1]));
+    if (type.value < result->type_count && (qualifiers.is_const || qualifiers.is_volatile))
+    {
+        type = c_parse_add_qualified_type(result, type, qualifiers);
+    }
     index += 2;
     }
     return type;
@@ -3564,6 +3575,36 @@ BUSTER_C_INTERNAL bool c_parse_expression_place_shape(CParseResult* result, CPre
     return place;
 }
 
+// A type query retains the operand's qualifiers and does not evaluate it.
+// The place check is shared with address-of and asm output constraints; a
+// scalar type alone would also describe an enumerator, cast, call or rvalue.
+BUSTER_C_INTERNAL bool c_parse_update_operand_modifiable(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CTypeId type)
+{
+    bool valid = type.value < result->type_count && c_parse_expression_place_shape(result, preprocess, start, end);
+    if (valid)
+    {
+        CType value = result->types[type.value];
+        valid = !value.is_const && (c_parse_expression_real_kind(value.kind) || value.kind == C_TYPE_POINTER);
+    }
+    while (valid && start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+           c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
+    {
+        start += 1;
+        end -= 1;
+    }
+    if (valid && start + 1 == end && preprocess.tokens[start].kind == C_TOKEN_IDENTIFIER)
+    {
+        u32 use = c_parse_identifier_use_index(result, start);
+        CScopeId operand_scope = c_parse_scope_for_token(result, (CScopeId){.value = 0}, start);
+        CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, operand_scope, &preprocess.tokens[start]);
+        valid = entity.value < result->entity_count &&
+                (result->entities[entity.value].kind == C_ENTITY_OBJECT || result->entities[entity.value].kind == C_ENTITY_LOCAL ||
+                 result->entities[entity.value].kind == C_ENTITY_PARAMETER) && !result->entities[entity.value].is_constexpr;
+    }
+    return valid;
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -3857,10 +3898,11 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
             {
                 CTypeKind kind = result->types[last.value].kind;
                 if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
-                    (kind == C_TYPE_STRUCT || kind == C_TYPE_UNION || kind == C_TYPE_NULLPTR))
+                    (!c_parse_update_operand_modifiable(result, preprocess, task->start + 1, task->end, last) ||
+                     kind == C_TYPE_STRUCT || kind == C_TYPE_UNION || kind == C_TYPE_NULLPTR))
                 {
-                    machine->expression_constraint = S8("could not apply increment or decrement");
-                    machine->expression_constraint_token = task->end;
+                    machine->expression_constraint = S8("increment or decrement operand is not a modifiable place");
+                    machine->expression_constraint_token = task->start;
                 }
             }
             else if (c_token_is_punctuator(&preprocess.tokens[task->start], C_PUNCTUATOR_PLUS))
@@ -18367,6 +18409,38 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_expression_end(CParseResult* result, CP
     return cursor;
 }
 
+// A prefix update consumes one unary expression. In `++x + y`, the `+ y`
+// is outside the place; delimiter-indexed groups keep calls, subscripts and
+// compound literals intact without descending through source-dependent depth.
+BUSTER_C_INTERNAL u32 c_parse_update_prefix_operand_end(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end)
+{
+    u32 cursor = start;
+    bool previous_is_operand = false;
+    while (cursor < end)
+    {
+        CToken token = preprocess.tokens[cursor];
+        if (token.kind == C_TOKEN_PUNCTUATOR && c_punctuator_in_set(token.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+        {
+            u32 close = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+            cursor = close < end ? close + 1 : end;
+            previous_is_operand = true;
+            continue;
+        }
+        bool update = c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS);
+        bool separator = c_token_is_punctuator(&token, C_PUNCTUATOR_QUESTION) || c_token_is_punctuator(&token, C_PUNCTUATOR_COLON) ||
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA) ||
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                         c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
+        if (separator || (previous_is_operand && !update && c_parse_expression_operator_precedence(token))) break;
+        if (token.kind == C_TOKEN_IDENTIFIER || token.kind == C_TOKEN_PREPROCESSING_NUMBER || token.kind == C_TOKEN_CHARACTER_LITERAL ||
+            token.kind == C_TOKEN_STRING_LITERAL || (update && previous_is_operand)) previous_is_operand = true;
+        else if (c_token_is_punctuator(&token, C_PUNCTUATOR_DOT) || c_token_is_punctuator(&token, C_PUNCTUATOR_ARROW)) previous_is_operand = false;
+        cursor += 1;
+    }
+    return cursor;
+}
+
 BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end, u32 const* openers)
 {
     u32 cursor = end;
@@ -18376,7 +18450,8 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPr
         CToken token = preprocess.tokens[cursor - 1];
         bool subscript = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACKET);
         bool group = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_PARENTHESIS);
-        if ((subscript || group) && openers[cursor - 1 - start] >= start && openers[cursor - 1 - start] < cursor)
+        bool literal = c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE);
+        if ((subscript || group || literal) && openers[cursor - 1 - start] >= start && openers[cursor - 1 - start] < cursor)
         {
             cursor = openers[cursor - 1 - start];
             more = cursor > start && (subscript || c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1]));
@@ -18413,6 +18488,27 @@ BUSTER_C_INTERNAL u32 c_parse_constraint_postfix_start(CParseResult* result, CPr
         }
     }
     return cursor;
+}
+
+BUSTER_C_INTERNAL bool c_parse_update_after_cast(CParseResult* result, CPreprocessResult preprocess, CScopeId scope,
+                                                   u32 start, u32 update, u32 const* openers)
+{
+    bool cast = false;
+    if (update > start && c_token_is_punctuator(&preprocess.tokens[update - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+    {
+        u32 open = openers[update - 1 - start];
+        if (open >= start && open + 1 < update - 1)
+        {
+            u32 cursor = open + 1;
+            CTypeId type = c_parse_machineless_base_type(result, preprocess, scope, cursor, update - 1, &cursor);
+            if (type.value < result->type_count)
+            {
+                type = c_parse_pointer_chain(result, preprocess, type, &cursor, update - 1);
+                cast = type.value < result->type_count && cursor == update - 1;
+            }
+        }
+    }
+    return cast;
 }
 
 BUSTER_C_INTERNAL bool c_parse_incompatible_function_initializer(CTypeParseMachine* machine, CParseResult* result,
@@ -18514,7 +18610,8 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET))
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACKET) ||
+            c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
             u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index);
             if (close < end)
@@ -18742,11 +18839,22 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             continue;
         }
         CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
-        bool prefix = update && (!c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]) ||
-                                 c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index - 1], C_SYMBOL_WELL_KNOWN_RETURN));
+        bool control_prefix = false;
+        if (update && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
+        {
+            u32 open = openers[index - 1 - start];
+            control_prefix = open > start && open < index && c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[open - 1],
+                C_SYMBOL_WELL_KNOWN_BIT(IF) | C_SYMBOL_WELL_KNOWN_BIT(WHILE) | C_SYMBOL_WELL_KNOWN_BIT(FOR) |
+                C_SYMBOL_WELL_KNOWN_BIT(SWITCH));
+        }
+        bool prefix = update && (control_prefix || c_parse_update_after_cast(result, preprocess, scope, start, index, openers) ||
+                                 !c_parse_expression_token_ends_operand(preprocess.tokens[index - 1]) ||
+                                 c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[index - 1],
+                                     C_SYMBOL_WELL_KNOWN_BIT(RETURN) | C_SYMBOL_WELL_KNOWN_BIT(ELSE) | C_SYMBOL_WELL_KNOWN_BIT(DO) |
+                                     C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF)));
         u32 operand_start = prefix ? index + 1 : update ? c_parse_constraint_postfix_start(result, preprocess, scope, start, index, openers)
                                                       : c_parse_constraint_expression_start(result, preprocess, start, index, openers);
-        u32 operand_end = prefix ? c_parse_constraint_expression_end(result, preprocess, index + 1, end) : index;
+        u32 operand_end = prefix ? c_parse_update_prefix_operand_end(result, preprocess, index + 1, end) : index;
         CTypeId type_id = C_TYPE_ID_INVALID;
         u64 query_mark = machine->scratch_arena->position;
         bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, operand_end, &type_id);
@@ -18812,7 +18920,8 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                     }
                 }
             }
-            c_parse_lowering_constraint_consider(diagnostic, S8("assignment operand is not a modifiable place"), index,
+            c_parse_lowering_constraint_consider(diagnostic, update ? S8("increment or decrement operand is not a modifiable place")
+                                                                   : S8("assignment operand is not a modifiable place"), index,
                                                  location);
         }
         else if (assignment && operand_start + 1 == operand_end && preprocess.tokens[operand_start].kind == C_TOKEN_PREPROCESSING_NUMBER)
@@ -18821,7 +18930,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 string_format(result->arena, S8("unsupported C function-body statement or expression near '{S8}'"),
                               c_token_spelling(preprocess.spelling_base, preprocess.tokens[operand_start])), index, operand_start);
         }
-        else if (update && operand_start + 1 == operand_end && preprocess.tokens[operand_start].kind == C_TOKEN_PREPROCESSING_NUMBER)
+        else if (update && typed && !c_parse_update_operand_modifiable(result, preprocess, operand_start, operand_end, type_id))
         {
             c_parse_lowering_constraint_consider(diagnostic, S8("increment or decrement operand is not a modifiable place"), index, operand_start);
         }
@@ -19408,28 +19517,68 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
 {
     CParseInitializerDiagnostic diagnostic = {0};
     u64 mark = machine->scratch_arena->position;
-    for (u32 index = start; !diagnostic.message.length && index + 2 < end; index += 1)
+    u32* openers = 0;
+    for (u32 index = start; !diagnostic.message.length && index + 1 < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        if (token.kind != C_TOKEN_IDENTIFIER || (!c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF) &&
-            !c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token))) ||
-            !c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)) continue;
-        u32 close = c_parse_matching_delimiter_indexed(result, preprocess, index + 1);
-        if (close >= end) continue;
-        u32 cursor = index + 2;
-        if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
-            diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid sizeof operand"), .token = index};
-        else
+        bool sizeof_word = c_token_is_well_known(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_SIZEOF);
+        bool alignof_word = token.kind == C_TOKEN_IDENTIFIER && c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, token));
+        if (!sizeof_word && !alignof_word) continue;
+        bool grouped = c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_LEFT_PARENTHESIS);
+        u32 close = grouped ? c_parse_matching_delimiter_indexed(result, preprocess, index + 1) : end;
+        if (grouped && close >= end) continue;
+        u32 operand_start = grouped ? index + 2 : index + 1;
+        u32 operand_end = grouped ? close : c_parse_update_prefix_operand_end(result, preprocess, operand_start, end);
+        if (grouped && operand_start < close)
         {
-            CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
-            CTypeId type = c_parse_scalar_type_in_scope(machine, result, preprocess, operand_scope, cursor, close, &cursor);
-            if (type.value < result->type_count)
+            u32 cursor = operand_start;
+            if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_BRACE))
+                diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid sizeof operand"), .token = index};
+            else
             {
-                type = c_parse_pointer_chain(result, preprocess, type, &cursor, close);
-                c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                CScopeId operand_scope = c_parse_scope_for_token(result, scope, index);
+                CTypeId type = c_parse_scalar_type_in_scope(machine, result, preprocess, operand_scope, cursor, close, &cursor);
+                if (type.value < result->type_count)
+                {
+                    type = c_parse_pointer_chain(result, preprocess, type, &cursor, close);
+                    c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                }
             }
         }
-        index = close;
+        for (u32 update = operand_start; !diagnostic.message.length && update < operand_end; update += 1)
+        {
+            CToken current = preprocess.tokens[update];
+            if (!c_token_is_punctuator(&current, C_PUNCTUATOR_PLUS_PLUS) && !c_token_is_punctuator(&current, C_PUNCTUATOR_MINUS_MINUS)) continue;
+            if (!openers)
+            {
+                openers = arena_allocate(machine->scratch_arena, u32, end - start);
+                memset(openers, 0xff, sizeof(*openers) * (end - start));
+                for (u32 cursor = start; cursor < end; cursor += 1)
+                {
+                    CToken group = preprocess.tokens[cursor];
+                    if (group.kind == C_TOKEN_PUNCTUATOR && c_punctuator_in_set(group.punctuator, C_PUNCTUATOR_SET_DELIMITER_OPEN))
+                    {
+                        u32 matching = c_parse_matching_delimiter_indexed(result, preprocess, cursor);
+                        if (matching < end) openers[matching - start] = cursor;
+                    }
+                }
+            }
+            CScopeId update_scope = c_parse_scope_for_token(result, scope, update);
+            bool prefix = update == operand_start || c_parse_update_after_cast(result, preprocess, update_scope, start, update, openers) ||
+                          !c_parse_expression_token_ends_operand(preprocess.tokens[update - 1]) ||
+                          c_token_in_well_known_set(preprocess.spelling_base, preprocess.tokens[update - 1],
+                              C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF));
+            u32 place_start = prefix ? update + 1 : c_parse_constraint_postfix_start(result, preprocess, update_scope, start, update, openers);
+            u32 place_end = prefix ? c_parse_update_prefix_operand_end(result, preprocess, update + 1, operand_end) : update;
+            CTypeId type = C_TYPE_ID_INVALID;
+            u64 query_mark = machine->scratch_arena->position;
+            bool typed = place_start < place_end && c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result,
+                                                                                    update_scope, place_start, place_end, &type);
+            arena_set_position(machine->scratch_arena, query_mark);
+            if (typed && !c_parse_update_operand_modifiable(result, preprocess, place_start, place_end, type))
+                diagnostic = (CParseInitializerDiagnostic){.message = S8("increment or decrement operand is not a modifiable place"), .token = update};
+        }
+        if (grouped) index = close;
     }
     arena_set_position(machine->scratch_arena, mark);
     return diagnostic;
@@ -21806,6 +21955,28 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine* 
     }
     c_parse_validate_array_strides(machine, result, preprocess);
     c_parse_validate_alignment_redeclarations(machine, result, preprocess);
+    // Array bounds are parsed before the function-body and initializer walks.
+    // Recheck only bounds containing an update so `int a[sizeof (++42)]`
+    // cannot fold an invalid operand before either of those walks sees it.
+    for (u32 bound_index = 0; bound_index < result->array_bound_count && !result->diagnostic_count; bound_index += 1)
+    {
+        CArrayBound bound = result->array_bounds[bound_index];
+        bool update = false;
+        u32 end = BUSTER_MIN((u32)preprocess.token_count, bound.token_start + bound.token_count);
+        for (u32 token_index = bound.token_start; token_index < end && !update; token_index += 1)
+        {
+            CToken token = preprocess.tokens[token_index];
+            update = c_token_is_punctuator(&token, C_PUNCTUATOR_PLUS_PLUS) || c_token_is_punctuator(&token, C_PUNCTUATOR_MINUS_MINUS);
+        }
+        if (update)
+        {
+            CParseInitializerDiagnostic checked = c_parse_validate_sizeof_operands(machine, result, preprocess, (CScopeId){.value = 0},
+                                                                                     bound.token_start, end);
+            if (checked.message.length)
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[checked.token]),
+                                   C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, checked.message);
+        }
+    }
     result->expression_scalar_types = 0;
 }
 

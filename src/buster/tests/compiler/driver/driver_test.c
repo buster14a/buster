@@ -67,6 +67,133 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_elf_section_find(ByteSlice image, 
     return false;
 }
 
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_coff_section_characteristics(ByteSlice object, String8 name, u32* characteristics)
+{
+    u16 section_count = 0;
+    bool result = false;
+    if (object.pointer && characteristics && name.length <= 8 && object.length >= 20)
+    {
+        memcpy(&section_count, object.pointer + 2, sizeof(section_count));
+        if ((u64)section_count * 40 <= object.length - 20)
+        {
+            for (u16 index = 0; index < section_count && !result; index += 1)
+            {
+                u64 section = 20 + (u64)index * 40;
+                if (memcmp(object.pointer + section, name.pointer, name.length) == 0 &&
+                    (name.length == 8 || object.pointer[section + name.length] == 0))
+                {
+                    memcpy(characteristics, object.pointer + section + 36, sizeof(*characteristics));
+                    result = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pe_rva_to_offset(ByteSlice image, u64 section_table, u16 section_count, u32 rva, u64* offset)
+{
+    bool result = false;
+    if (offset && section_table <= image.length && (u64)section_count * 40 <= image.length - section_table)
+    {
+        for (u16 index = 0; index < section_count && !result; index += 1)
+        {
+            u64 section = section_table + (u64)index * 40;
+            u32 virtual_address = 0;
+            u32 raw_size = 0;
+            u32 raw_offset = 0;
+            memcpy(&virtual_address, image.pointer + section + 12, sizeof(virtual_address));
+            memcpy(&raw_size, image.pointer + section + 16, sizeof(raw_size));
+            memcpy(&raw_offset, image.pointer + section + 20, sizeof(raw_offset));
+            if (rva >= virtual_address)
+            {
+                u64 delta = (u64)rva - virtual_address;
+                if (delta < raw_size && raw_offset <= image.length && delta <= image.length - raw_offset)
+                {
+                    *offset = raw_offset + delta;
+                    result = true;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_test_pe_export_rva(ByteSlice image, String8 name, u32* rva)
+{
+    bool result = false;
+    if (image.pointer && rva && image.length >= 64 && image.pointer[0] == 'M' && image.pointer[1] == 'Z')
+    {
+        u32 pe_offset = 0;
+        memcpy(&pe_offset, image.pointer + 60, sizeof(pe_offset));
+        if (pe_offset <= image.length && 24 <= image.length - pe_offset && image.pointer[pe_offset] == 'P' && image.pointer[pe_offset + 1] == 'E' &&
+            !image.pointer[pe_offset + 2] && !image.pointer[pe_offset + 3])
+        {
+            u16 section_count = 0;
+            u16 optional_size = 0;
+            memcpy(&section_count, image.pointer + pe_offset + 6, sizeof(section_count));
+            memcpy(&optional_size, image.pointer + pe_offset + 20, sizeof(optional_size));
+            u64 optional = (u64)pe_offset + 24;
+            if (optional <= image.length && optional_size <= image.length - optional && optional_size >= 120)
+            {
+                u16 magic = 0;
+                u32 export_rva = 0;
+                memcpy(&magic, image.pointer + optional, sizeof(magic));
+                memcpy(&export_rva, image.pointer + optional + 112, sizeof(export_rva));
+                u64 section_table = optional + optional_size;
+                u64 export_offset = 0;
+                if (magic == 0x20b && export_rva &&
+                    compiler_driver_test_pe_rva_to_offset(image, section_table, section_count, export_rva, &export_offset) &&
+                    export_offset <= image.length && 40 <= image.length - export_offset)
+                {
+                    u32 function_count = 0;
+                    u32 name_count = 0;
+                    u32 functions_rva = 0;
+                    u32 names_rva = 0;
+                    u32 ordinals_rva = 0;
+                    memcpy(&function_count, image.pointer + export_offset + 20, sizeof(function_count));
+                    memcpy(&name_count, image.pointer + export_offset + 24, sizeof(name_count));
+                    memcpy(&functions_rva, image.pointer + export_offset + 28, sizeof(functions_rva));
+                    memcpy(&names_rva, image.pointer + export_offset + 32, sizeof(names_rva));
+                    memcpy(&ordinals_rva, image.pointer + export_offset + 36, sizeof(ordinals_rva));
+                    u64 functions_offset = 0;
+                    u64 names_offset = 0;
+                    u64 ordinals_offset = 0;
+                    if (function_count && name_count &&
+                        compiler_driver_test_pe_rva_to_offset(image, section_table, section_count, functions_rva, &functions_offset) &&
+                        compiler_driver_test_pe_rva_to_offset(image, section_table, section_count, names_rva, &names_offset) &&
+                        compiler_driver_test_pe_rva_to_offset(image, section_table, section_count, ordinals_rva, &ordinals_offset) &&
+                        functions_offset <= image.length && (u64)function_count * 4 <= image.length - functions_offset &&
+                        names_offset <= image.length && (u64)name_count * 4 <= image.length - names_offset &&
+                        ordinals_offset <= image.length && (u64)name_count * 2 <= image.length - ordinals_offset)
+                    {
+                        for (u32 index = 0; index < name_count && !result; index += 1)
+                        {
+                            u32 exported_name_rva = 0;
+                            u16 ordinal = 0;
+                            u64 exported_name_offset = 0;
+                            memcpy(&exported_name_rva, image.pointer + names_offset + (u64)index * 4, sizeof(exported_name_rva));
+                            memcpy(&ordinal, image.pointer + ordinals_offset + (u64)index * 2, sizeof(ordinal));
+                            if (ordinal < function_count && compiler_driver_test_pe_rva_to_offset(image, section_table, section_count,
+                                                                                                  exported_name_rva, &exported_name_offset) &&
+                                exported_name_offset <= image.length && name.length < image.length - exported_name_offset &&
+                                memcmp(image.pointer + exported_name_offset, name.pointer, name.length) == 0 &&
+                                !image.pointer[exported_name_offset + name.length])
+                            {
+                                memcpy(rva, image.pointer + functions_offset + (u64)ordinal * 4, sizeof(*rva));
+                                result = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL ByteSlice compiler_driver_test_elf_section(ByteSlice image, String8 name)
 {
     u64 offset = 0;
@@ -1861,6 +1988,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(
         }
     }
     BUSTER_TEST(arguments, os_file_delete(input));
+    arena_set_position(arena, position);
+    return result;
+}
+
+// An aligned C global must survive the frontend/codegen/object boundary into
+// the COFF section flags. An unrepresentable request must fail before the
+// production driver publishes over an existing output file.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_coff_section_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 input = buster_test_temporary_path(arena, S8("buster-coff-alignment-input"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("buster-coff-alignment-output"), S8(".obj"));
+    String8 command[] = {S8("-target"), S8("x86_64-pc-windows"), S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), output, input};
+    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+    BUSTER_TEST(arguments, invocation.error == COMPILER_DRIVER_ERROR_NONE);
+    String8 source = S8("_Alignas(64) int section_alignment_probe = 7;\nvoid entry(void) {}\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, compiled.diagnostic);
+    ByteSlice bytes = file_read(arena, output, (FileReadOptions){0});
+    u32 characteristics = 0;
+    BUSTER_TEST(arguments, compiler_driver_test_coff_section_characteristics(bytes, S8(".data"), &characteristics));
+    BUSTER_TEST(arguments, (characteristics & 0x00f00000) == 0x00700000);
+#if BUSTER_WINDOWS && BUSTER_CPU_ARCH_X86_64
+    // Keep a prior .data contribution ahead of the aligned global, then ask
+    // Microsoft's linker to place both into a DLL. Its exported RVA proves the
+    // alignment field affects final placement, not just serialized metadata.
+    String8 predecessor_input = buster_test_temporary_path(arena, S8("buster-coff-alignment-predecessor"), S8(".c"));
+    String8 predecessor_output = buster_test_temporary_path(arena, S8("buster-coff-alignment-predecessor"), S8(".obj"));
+    String8 linked_output = buster_test_temporary_path(arena, S8("buster-coff-alignment-linked"), S8(".dll"));
+    BUSTER_TEST(arguments, file_write(predecessor_input, BUSTER_SLICE_TO_BYTE_SLICE(S8("int preceding_coff_data = 13;\n"))));
+    String8 predecessor_command[] = {
+        S8("-target"), S8("x86_64-pc-windows"), S8("-nostdinc"), S8("-g0"), S8("-c"),
+        S8("-o"), predecessor_output, predecessor_input,
+    };
+    CompilerDriverResult predecessor = compiler_driver_execute_invocation(
+        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(predecessor_command)));
+    BUSTER_TEST_RAW(arguments, predecessor.error == COMPILER_DRIVER_ERROR_NONE && predecessor.has_object, predecessor.diagnostic);
+    if (predecessor.error == COMPILER_DRIVER_ERROR_NONE && predecessor.has_object)
+    {
+        String8 linked_output_argument = string_format(arena, S8("/out:{S8}"), linked_output);
+        String8 link_arguments[] = {
+            S8("link.exe"), S8("/nologo"), S8("/dll"), S8("/noentry"), S8("/nodefaultlib"), S8("/incremental:no"),
+            S8("/export:preceding_coff_data,DATA"), S8("/export:section_alignment_probe,DATA"), linked_output_argument,
+            predecessor_output, output,
+        };
+        ProcessSpawnResult link_spawn = os_process_spawn(
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(link_arguments), (SliceString8){0}, (SliceString8){0},
+            (ProcessSpawnOptions){
+                .use_process_environment = 1,
+                .search_path = 1,
+                .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+            });
+        BUSTER_TEST(arguments, link_spawn.handle != 0);
+        if (link_spawn.handle)
+        {
+            ProcessWaitResult linked = os_process_wait_deadline(arena, link_spawn, 60000000);
+            BUSTER_TEST(arguments, !linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS);
+            if (!linked.timed_out && linked.result == PROCESS_RESULT_SUCCESS)
+            {
+                ByteSlice image = file_read(arena, linked_output, (FileReadOptions){0});
+                u32 predecessor_rva = 0;
+                u32 probe_rva = 0;
+                BUSTER_TEST(arguments, compiler_driver_test_pe_export_rva(image, S8("preceding_coff_data"), &predecessor_rva));
+                BUSTER_TEST(arguments, compiler_driver_test_pe_export_rva(image, S8("section_alignment_probe"), &probe_rva));
+                BUSTER_TEST(arguments, predecessor_rva < probe_rva);
+                BUSTER_TEST(arguments, (probe_rva & 63) == 0);
+            }
+        }
+    }
+    (void)os_file_delete(predecessor_input);
+    (void)os_file_delete(predecessor_output);
+    (void)os_file_delete(linked_output);
+#endif
+    BUSTER_TEST(arguments, os_file_delete(output));
+
+    source = S8("_Alignas(16384) int section_alignment_probe = 9;\nvoid entry(void) {}\n");
+    BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+    String8 sentinel_text = S8("existing COFF object must survive unsupported alignment");
+    ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(sentinel_text);
+    BUSTER_TEST(arguments, file_write(output, sentinel));
+    CompilerDriverResult rejected = compiler_driver_execute_invocation(arena, invocation);
+    BUSTER_TEST_RAW(arguments, rejected.error == COMPILER_DRIVER_ERROR_OBJECT, rejected.diagnostic);
+    BUSTER_TEST(arguments, rejected.object_error == OBJECT_ERROR_UNSUPPORTED_ALIGNMENT);
+    BUSTER_STRING_TEST(arguments, rejected.diagnostic, S8("COFF section alignment exceeds the 8192-byte format limit"));
+    ByteSlice after = file_read(arena, output, (FileReadOptions){0});
+    BUSTER_TEST(arguments, after.pointer && after.length == sentinel.length && memcmp(after.pointer, sentinel.pointer, sentinel.length) == 0);
+    BUSTER_TEST(arguments, os_file_delete(input));
+    BUSTER_TEST(arguments, os_file_delete(output));
     arena_set_position(arena, position);
     return result;
 }
@@ -8197,6 +8415,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_declarator_trailing_tokens);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_type_specifiers);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wide_hexadecimal_output);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_coff_section_alignment);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);

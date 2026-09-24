@@ -1,0 +1,77 @@
+{
+  "audit": "2026-09-23T145513Z",
+  "issue": "https://github.com/buster14a/buster/issues/531",
+  "analyzed_main": {
+    "commit": "194bd65b2d6c2668d3ccecd940af846927b8e487",
+    "tree": "2c1f1b8f6cca5d52539a739d952af819afe89a9b",
+    "blobs": {
+      "src/buster/lib/compiler/frontend/c/c_gen.c": "60bf69ed970fc43d84fa3f7198aac5d1410b0eb9",
+      "src/buster/lib/compiler/frontend/c/c_parse.c": "b5c6a8e4cd76ab6ba81ba6fa44432176b11a6b2c",
+      "src/buster/lib/compiler/ir/ir.c": "33c8214a851629d1a9e4d1ebcb3453f2351449e3",
+      "src/buster/lib/compiler/ir/ir_construction.h": "5b95ddc7a055e87bfca21717c3cbada673e2e04c",
+      "src/buster/lib/arena.h": "ce411d7a7b70fddb27b4ae386d600e22b9f842ae",
+      "src/buster/lib/os.h": "33a9666215173a399b6e16a393fa3bb383350aca",
+      "src/buster/lib/compiler/driver/driver.c": "3eb3efe928370bfffecb54ad043e7bc3b439f335",
+      "src/buster/apps/ide/ide.c": "3fd8496eef640a3ee5da98df6fe8441773cfd1d7",
+      "tests/c_abi_cfuncs.c": "c2b215fc2a06ba31fb5755a2aabf558f63afca81"
+    }
+  },
+  "host": {
+    "name": "david@benchpress (direct SSH; not an admitted throughput-service lease)",
+    "cpu": "AMD Ryzen 7 9700X 8-Core Processor, 16 logical CPUs",
+    "kernel": "Linux 6.18.50-2-lts",
+    "compiler": "clang version 22.1.8",
+    "cpufreq": "amd-pstate-epp, governor powersave, energy_performance_preference balance_performance; perf stat cycles/task-clock ~5.16 GHz during stage1",
+    "load_average_before_runs": "0.25 0.57 0.40"
+  },
+  "build": {
+    "configuration": "Release, unity build, BUSTER_INCLUDE_TESTS=ON, BUSTER_DEBUG_INFO=ON, BUSTER_FRAME_POINTERS=ON, BUSTER_BENCH_ALLOCATIONS=OFF, BUSTER_SANITIZE=OFF, CMAKE_C_COMPILER=/usr/bin/clang",
+    "command": "./build.sh build --config Release -t ide",
+    "ide_baseline_sha256": "4a2ac5adf7b3521981f72467d7522b7843bbfe5baaf73a13438f8c591f4f5498",
+    "ide_census_sha256": "fc10775dca80bb988c43773fe8bc0bcd921f484fc81282742d0f6062dbb7b972",
+    "ide_census_source": "pinned tree + census-probe.patch applied in the disposable measurement checkout only; the checkout was restored to tree 2c1f1b8f afterwards"
+  },
+  "inputs": {
+    "stage1": {
+      "path": "src/buster/apps/ide/ide.c",
+      "sha256": "bb8d3a0982cfb6bb8031c66e24ba44f96f4c6e7bed6fc533b6f0e405fd7bcb0a",
+      "flags": "-Isrc -Ibuild/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c"
+    },
+    "cfuncs": {
+      "path": "tests/c_abi_cfuncs.c",
+      "sha256": "67f52ef96fceb60b7fd164d2bf16c3c7b8b2adab3a8641d578ff058902bb2902",
+      "flags": "-Itests -c"
+    },
+    "tiny": {"path": "gen_populations.py -> tiny.c", "sha256": "02e3780d2d18b4c2dd03ee781f3683454bbdc2a064a112ba507796bb10b940a6", "flags": "-c"},
+    "many_small": {"path": "gen_populations.py -> many_small.c (6000 functions)", "sha256": "53e1f82f154dc0fd909a2800646ca94f9142a7a643905fa6b3a4fa459e6b9e2a", "flags": "-c"},
+    "few_large": {"path": "gen_populations.py -> few_large.c (4 functions x 6000 statements)", "sha256": "68098662308d5fc3592b9c6d9b1356b0fb058fcfe77343c0bb8b0995ebb02a13", "flags": "-c"},
+    "generator_sha256": "95aea83d3a0d7e1e4ec674f823856b48d81c952632f8f9c582e62eab991a34cb"
+  },
+  "output_identity": "for every input, the object written by ide-census is byte-identical (cmp) to the object written by ide-baseline",
+  "census_columns": {
+    "F": ["declaration_index", "name", "body_token_count", "prepare_ns", "body_ns", "finish_ns", "publish_ns", "total_ns", "instruction_count", "value_count", "block_count", "types_appended", "symbols_appended", "globals_appended", "functions_appended", "tu_arena_bytes", "lowering_scratch_bytes", "temporary_arena_delta_bytes", "direct_ssa_enabled", "status"],
+    "P": ["source_path", "lowering_total_ns", "preamble_ns", "body_loop_ns", "epilogue_ns", "tu_arena_preamble_bytes", "tu_arena_loop_bytes", "tu_arena_epilogue_bytes", "types_before_loop", "types_after", "symbols_before_loop", "symbols_after", "globals_before_loop", "globals_after", "functions_before_loop", "functions_after", "declaration_count", "lowered_function_count", "rejected_function_count", "scratch_high_water_bytes"]
+  },
+  "wall_time_baseline_perf_stat": {
+    "stage1 -c -g": "1.549858722 +- 0.008865269 s elapsed (r=5), task-clock 1513.11 ms +-0.42%, cycles:u 7801478025, instructions:u 21558595135",
+    "stage1 -c -g (second series)": "1.534179990 +- 0.003273035 s elapsed (r=3, census binary)",
+    "stage1 link -lm -g (Sept 11 shape)": "1.547766005 +- 0.009024784 s elapsed (r=5)",
+    "stage1 -c no -g": "1.535903264 +- 0.002297478 s elapsed (r=5)",
+    "cfuncs -c": "0.026172426 +- 0.000109822 s elapsed (r=5)",
+    "tiny -c": "0.014008797 +- 0.000228609 s elapsed (r=5)",
+    "many_small -c": "0.171259918 +- 0.000175894 s elapsed (r=5)",
+    "few_large -c": "0.319149234 +- 0.007126922 s elapsed (r=5)"
+  },
+  "census_lowering_totals_stage1_repeats_ms": [
+    {"total": 398.9, "preamble": 60.3, "loop": 338.4},
+    {"total": 390.4, "preamble": 59.3, "loop": 331.1},
+    {"total": 390.7, "preamble": 59.3, "loop": 331.3},
+    {"total": 390.9, "preamble": 58.7, "loop": 332.1},
+    {"total": 394.1, "preamble": 59.0, "loop": 335.0, "note": "no -g"}
+  ],
+  "unrun": [
+    "any parallel execution of function-body lowering (no prototype exists)",
+    "1/2/4/8-lane comparisons through the admitted throughput service",
+    "thread-safety, sanitizer, Debug, mode-matrix and self-host gates for a candidate (no candidate exists)"
+  ]
+}

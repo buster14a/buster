@@ -28,6 +28,8 @@ typedef enum ObjectError
     OBJECT_ERROR_EXECUTABLE_MEMORY,
     // Requested debug information cannot be represented by the target format.
     OBJECT_ERROR_DEBUG_INFO,
+    // A section's requested alignment cannot be represented by its object format.
+    OBJECT_ERROR_UNSUPPORTED_ALIGNMENT,
     OBJECT_ERROR_COUNT,
 } ObjectError;
 
