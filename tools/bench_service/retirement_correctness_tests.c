@@ -427,6 +427,17 @@ static bool copy_frozen_artifact(int directory, char const* source, char const* 
     return ok;
 }
 
+static int frozen_runtime_log(int directory, char const* name, char const* contents)
+{
+    int output = openat(directory, name, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    size_t bytes = strlen(contents);
+    bool ok = output >= 0 && write(output, contents, bytes) == (ssize_t)bytes &&
+              fchmod(output, 0400) == 0;
+    if (output >= 0 && close(output) != 0) ok = false;
+    int result = ok ? openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    return result;
+}
+
 static void test_frozen_artifact_readback(char const* executable)
 {
     char root[] = "/tmp/bq-retirement-artifact-XXXXXX";
@@ -437,6 +448,20 @@ static void test_frozen_artifact_readback(char const* executable)
           symlinkat("base", directory, "linked") == 0);
     if (directory >= 0)
     {
+        char const* oracle_output = "independent-oracle-output\n";
+        char oracle_sha256[65];
+        Sha256 oracle_hash;
+        sha256_init(&oracle_hash);
+        sha256_add(&oracle_hash, oracle_output, strlen(oracle_output));
+        sha256_finish_hex(&oracle_hash, oracle_sha256);
+        int base_log = frozen_runtime_log(directory, "base-output", oracle_output);
+        int candidate_log = frozen_runtime_log(directory, "candidate-output", oracle_output);
+        int wrong_log = frozen_runtime_log(directory, "wrong-output", "wrong-output\n");
+        int empty_log = frozen_runtime_log(directory, "empty-output", "");
+        char empty_digest[65];
+        CHECK(base_log >= 3 && candidate_log >= 3 && wrong_log >= 3 && empty_log >= 3 &&
+              bq_retirement_runtime_read(empty_log, empty_digest) &&
+              !strcmp(empty_digest, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
 #if defined(__APPLE__)
 #if defined(__aarch64__) || defined(__arm64__)
         unsigned host_target = 2, other_machine = 8;
@@ -449,10 +474,11 @@ static void test_frozen_artifact_readback(char const* executable)
         unsigned host_target = 11, other_machine = 5;
 #endif
         BqRetirementArtifactLocation locations[2] = {{directory, "base"}, {directory, "candidate"}};
-        for (unsigned fault = 0; fault < 6; fault += 1)
+        for (unsigned fault = 0; fault < 10; fault += 1)
         {
             BqCorrectnessFixture fixture;
             fixture_init(&fixture);
+            memcpy(fixture.trusted[1].independent_oracle_sha256, oracle_sha256, 65);
             unsigned target = fault == 5 ? other_machine : host_target;
             fixture.prepared.native_target = target;
             for (unsigned i = 0; i < BQ_TEST_ROWS; i += 1)
@@ -466,19 +492,26 @@ static void test_frozen_artifact_readback(char const* executable)
                 observed.side[side].artifact_sha256[0] = 0;
                 observed.side[side].code_sha256[0] = 0;
                 observed.side[side].code_bytes = 0;
+                observed.side[side].runtime_output_sha256[0] = 0;
             }
             observed.code_eligible = 0;
             if (fault == 1) locations[1].name = "linked";
             if (fault == 2) locations[1].name = "../base";
             if (fault == 3) observed.side[0].code_sha256[0] = 'a';
             if (fault == 4) CHECK(fchmodat(directory, "candidate", 0600, 0) == 0);
-            bool accepted = bq_retirement_correctness_row_service(&fixture.gate, locations, &observed);
+            if (fault == 8) observed.side[0].runtime_output_sha256[0] = 'a';
+            if (fault == 9) CHECK(fchmodat(directory, "candidate-output", 0600, 0) == 0);
+            int runtime_outputs[2] = {base_log, fault == 6 ? wrong_log : fault == 7 ? -1 : candidate_log};
+            bool accepted = bq_retirement_correctness_row_service(&fixture.gate, locations,
+                                                                   runtime_outputs, &observed);
             CHECK(accepted == (fault == 0));
             if (!fault)
             {
                 CHECK(fixture.facts[1].side[0].code_bytes > 0 &&
                       fixture.facts[1].side[1].code_bytes > 0 &&
                       fixture.facts[1].code_eligible &&
+                      !strcmp(fixture.facts[1].side[0].runtime_output_sha256, oracle_sha256) &&
+                      !strcmp(fixture.facts[1].side[1].runtime_output_sha256, oracle_sha256) &&
                       strcmp(fixture.facts[1].side[0].artifact_sha256,
                              fixture.facts[1].side[0].code_sha256));
                 for (unsigned i = 2; i < BQ_TEST_ROWS; i += 1)
@@ -486,8 +519,9 @@ static void test_frozen_artifact_readback(char const* executable)
                     if (i == 3)
                     {
                         BqRetirementArtifactLocation empty[2] = {{directory, NULL}, {directory, NULL}};
+                        int absent_logs[2] = {-1, -1};
                         CHECK(bq_retirement_correctness_row_service(&fixture.gate, empty,
-                            &fixture.supplied[i]));
+                            absent_logs, &fixture.supplied[i]));
                     }
                     else CHECK(bq_retirement_correctness_row(&fixture.gate, &fixture.supplied[i]));
                 }
@@ -497,10 +531,17 @@ static void test_frozen_artifact_readback(char const* executable)
             else CHECK(fixture.gate.failed && !bq_retirement_correctness_ready(&fixture.gate));
             locations[1].name = "candidate";
             if (fault == 4) CHECK(fchmodat(directory, "candidate", 0400, 0) == 0);
+            if (fault == 9) CHECK(fchmodat(directory, "candidate-output", 0400, 0) == 0);
         }
+        CHECK(close(base_log) == 0 && close(candidate_log) == 0 &&
+              close(wrong_log) == 0 && close(empty_log) == 0);
         CHECK(unlinkat(directory, "linked", 0) == 0 &&
               unlinkat(directory, "base", 0) == 0 &&
-              unlinkat(directory, "candidate", 0) == 0);
+              unlinkat(directory, "candidate", 0) == 0 &&
+              unlinkat(directory, "base-output", 0) == 0 &&
+              unlinkat(directory, "candidate-output", 0) == 0 &&
+              unlinkat(directory, "wrong-output", 0) == 0 &&
+              unlinkat(directory, "empty-output", 0) == 0);
         CHECK(close(directory) == 0);
     }
     if (created) CHECK(rmdir(root) == 0);

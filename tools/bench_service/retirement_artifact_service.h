@@ -12,12 +12,15 @@ typedef struct BqRetirementArtifactLocation
     char const* name;
 } BqRetirementArtifactLocation;
 
-/* All fields except the artifact/code facts come from the service-owned
- * process and oracle observation. These facts must be empty on entry. The
- * readback supplies actual file and code-section digests, derives code
- * eligibility, and poisons the gate on any missing or changed artifact.
- * For an untimed control, both locations must be absent.
+/* Artifact/code and runtime-output digests must be empty on entry. Runtime
+ * outputs are read-only CLOEXEC descriptors of complete service-owned process
+ * logs, with stdout and stderr captured in the frozen oracle order. Pass -1
+ * for each inapplicable runtime. The service must bind each descriptor to
+ * that row's completed process before calling this function. The readback
+ * derives code eligibility and poisons the gate on failed or changed reads.
+ * For an untimed control, both artifact locations must be absent.
  */
 BUSTER_F_DECL bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
-    BqRetirementArtifactLocation locations[2], BqRetirementRowFact const* observed);
+    BqRetirementArtifactLocation locations[2], int runtime_outputs[2],
+    BqRetirementRowFact const* observed);
 #endif
