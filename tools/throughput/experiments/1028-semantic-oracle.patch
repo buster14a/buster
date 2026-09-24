@@ -1,0 +1,368 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 60bf69ed..cf641b1f 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -93,6 +93,61 @@
+ #include "c_internal.h"
+ #include <buster/lib/compiler/ir/ir_construction.h>
+ 
++// DIAGNOSTIC PATCH (#1028 semantic-reuse boundary experiment). Never part of
++// a production build.
++#include <stdio.h>
++#include <stdlib.h>
++BUSTER_GLOBAL_LOCAL FILE* c_ir_trace_file(void)
++{
++    static FILE* file;
++    static bool resolved;
++    if (!resolved)
++    {
++        resolved = true;
++        char const* path = getenv("BUSTER_SEMANTIC_TRACE");
++        if (path && *path) file = fopen(path, "a");
++    }
++    return file;
++}
++
++BUSTER_GLOBAL_LOCAL void c_ir_trace_type_signature(FILE* file, IrProgram* program, IrTypeId type)
++{
++    u32 depth = 0;
++    IrType* record = ir_type_from_id(&program->types, type);
++    while (record && depth < 16)
++    {
++        fprintf(file, "%s%u", depth ? ">" : "", (u32)record->kind);
++        if (record->kind == IR_TYPE_INTEGER || record->kind == IR_TYPE_FLOAT) fprintf(file, ":%u%s", record->bit_width, record->is_signed ? "s" : "u");
++        if (record->is_volatile) fprintf(file, "v");
++        if (record->is_atomic) fprintf(file, "a");
++        if (record->kind == IR_TYPE_POINTER || record->kind == IR_TYPE_ARRAY || record->kind == IR_TYPE_VECTOR)
++        {
++            if (record->kind != IR_TYPE_POINTER) fprintf(file, "[%llu]", (unsigned long long)record->element_count);
++            record = ir_type_from_id(&program->types, record->element_type);
++        }
++        else if (record->kind == IR_TYPE_STRUCT || record->kind == IR_TYPE_UNION || record->kind == IR_TYPE_ENUM || record->kind == IR_TYPE_FUNCTION)
++        {
++            IrTypeId base = record->id;
++            u32 hops = 0;
++            IrType* walk = record;
++            while (walk && walk->unqualified_type.value != IR_ID_UNDERLYING_INVALID && walk->unqualified_type.value != walk->id.value && hops < 8)
++            {
++                base = walk->unqualified_type;
++                walk = ir_type_from_id(&program->types, base);
++                hops += 1;
++            }
++            fprintf(file, "#%u", base.value);
++            record = 0;
++        }
++        else
++        {
++            record = 0;
++        }
++        depth += 1;
++    }
++    if (type.value == IR_ID_UNDERLYING_INVALID) fprintf(file, "-");
++}
++
+ BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
+ 
+ // Preprocess file indices are registered as IR sources in table order, so a
+@@ -1799,6 +1854,7 @@ BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId enti
+ typedef struct CIrDirectSsa CIrDirectSsa;
+ typedef struct CIntegerIrBuilder CIntegerIrBuilder;
+ typedef struct CIrConstantEntityIndex CIrConstantEntityIndex;
++BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_traced(CIntegerIrBuilder* builder, u32 start, u32 end, char const* site);
+ 
+ // Constant-expression identifier fallback uses the oldest entity with an
+ // exact spelling.  The parse name buckets retain that ordering, but following
+@@ -12882,7 +12938,7 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
+         bool viable = true;
+         for (u32 argument_index = 0; argument_index < signature.parameter_count; argument_index += 1)
+         {
+-            IrTypeId argument_type = c_ir_predict_expression_type(builder, argument_starts[argument_index], argument_ends[argument_index]);
++            IrTypeId argument_type = c_ir_predict_expression_type_traced(builder, argument_starts[argument_index], argument_ends[argument_index], "call_rank");
+             u32 conversion_rank = c_ir_implicit_conversion_rank(builder, argument_type, signature.parameter_types[argument_index]);
+             if (conversion_rank == UINT32_MAX || rank > UINT32_MAX - conversion_rank)
+             {
+@@ -16765,7 +16821,7 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
+             valid = false;
+             break;
+         }
+-        IrTypeId controller_type = c_ir_predict_expression_type(builder, content_start, controller_end);
++        IrTypeId controller_type = c_ir_predict_expression_type_traced(builder, content_start, controller_end, "generic_control");
+         if (controller_type.value == IR_ID_UNDERLYING_INVALID)
+         {
+             builder->failure_token_index = content_start;
+@@ -16907,7 +16963,7 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
+         }
+         selected->selected_start = match_start;
+         selected->selected_end = match_end;
+-        selected->type = c_ir_predict_expression_type(builder, match_start, match_end);
++        selected->type = c_ir_predict_expression_type_traced(builder, match_start, match_end, "generic_selected");
+         if (selected->type.value == IR_ID_UNDERLYING_INVALID)
+         {
+             builder->failure_token_index = match_start;
+@@ -20796,7 +20852,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
+                         if (callee_start < callee_end &&
+                             c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_STAR))
+                         {
+-                            IrTypeId operand_type = c_ir_predict_expression_type(builder, callee_start + 1, callee_end);
++                            IrTypeId operand_type = c_ir_predict_expression_type_traced(builder, callee_start + 1, callee_end, "callee_deref");
+                             IrType* operand = ir_type_from_id(&builder->program->types, operand_type);
+                             IrType* pointee = operand && operand->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, operand->element_type) : 0;
+                             if (!pointee || pointee->kind == IR_TYPE_FUNCTION)
+@@ -27945,7 +28001,7 @@ c_ir_expression_core_loop:
+                 }
+                 IrTypeId expression_type = c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
+                                                ? IR_TYPE_ID_INVALID
+-                                               : c_ir_predict_expression_type(builder, operand_start, operand_end);
++                                               : c_ir_predict_expression_type_traced(builder, operand_start, operand_end, "sizeof");
+                 IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
+                 if (!expression || !expression->layout.resolved)
+                 {
+@@ -31605,6 +31661,23 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type(CIntegerIrBuilder* build
+     return result.result_type;
+ }
+ 
++// DIAGNOSTIC PATCH (#1028 semantic-reuse boundary experiment): trace each root
++// type prediction with its call site and whether the s32 fallback answered.
++BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_traced(CIntegerIrBuilder* builder, u32 start, u32 end, char const* site)
++{
++    CIrQueryFrame result = {0};
++    bool success = c_ir_query_execute(builder, (CIrQueryFrame){.start = start, .end = end, .kind = C_IR_QUERY_FRAME_TYPE_PREDICTION}, &result) && result.success;
++    IrTypeId type = success ? result.result_type : builder->s32_type;
++    FILE* trace = c_ir_trace_file();
++    if (trace)
++    {
++        fprintf(trace, "LP %s %u %u success=%u sig=", site, start, end, success);
++        c_ir_trace_type_signature(trace, builder->program, type);
++        fprintf(trace, "\n");
++    }
++    return type;
++}
++
+ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* builder)
+ {
+     CIrLowerMachine* machine = &builder->lower_machine;
+@@ -31691,8 +31764,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
+             }
+             return;
+         }
+-        IrTypeId true_type = c_ir_predict_expression_type(builder, question + 1, colon);
+-        IrTypeId false_type = c_ir_predict_expression_type(builder, colon + 1, expression_end);
++        IrTypeId true_type = c_ir_predict_expression_type_traced(builder, question + 1, colon, "cond_true");
++        IrTypeId false_type = c_ir_predict_expression_type_traced(builder, colon + 1, expression_end, "cond_false");
+         IrType* true_type_value = ir_type_from_id(&builder->program->types, true_type);
+         IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
+         IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
+@@ -32213,8 +32286,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
+                                       &nested_expression_end);
+             if (nested_conditional)
+             {
+-                IrTypeId true_type = c_ir_predict_expression_type(builder, conditional_question + 1, conditional_colon);
+-                IrTypeId false_type = c_ir_predict_expression_type(builder, conditional_colon + 1, conditional_end);
++                IrTypeId true_type = c_ir_predict_expression_type_traced(builder, conditional_question + 1, conditional_colon, "cond_nested_true");
++                IrTypeId false_type = c_ir_predict_expression_type_traced(builder, conditional_colon + 1, conditional_end, "cond_nested_false");
+                 IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, conditional_question + 1, conditional_colon,
+                                                                     conditional_colon + 1, conditional_end);
+                 IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[conditional_start]);
+@@ -40854,7 +40927,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
+             }
+         }
+     }
+-    IrTypeId expression_type = c_ir_predict_expression_type(builder, start, end);
++    IrTypeId expression_type = c_ir_predict_expression_type_traced(builder, start, end, "init_aggregate");
+     return c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, expression_type));
+ }
+ 
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index b5c6a8e4..3f2c1373 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -4165,6 +4165,93 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
+     c_type_parse_frame_complete(machine, last, end, true);
+ }
+ 
++// DIAGNOSTIC PATCH (#1028 semantic-reuse boundary experiment): trace every
++// root expression-type query and recompute each cache hit with publication
++// bypassed. Never part of a production build.
++#include <stdio.h>
++#include <stdlib.h>
++BUSTER_GLOBAL_LOCAL FILE* c_semantic_trace_file(void)
++{
++    static FILE* file;
++    static bool resolved;
++    if (!resolved)
++    {
++        resolved = true;
++        char const* path = getenv("BUSTER_SEMANTIC_TRACE");
++        if (path && *path) file = fopen(path, "a");
++    }
++    return file;
++}
++
++// Compact structural signature: kind and qualifiers per level, element chain
++// through pointers/arrays; aggregates/enums/functions by their unqualified
++// record id so a fresh copy of the same record compares equal.
++BUSTER_GLOBAL_LOCAL void c_semantic_trace_type_signature(FILE* file, CParseResult* result, CTypeId type)
++{
++    u32 depth = 0;
++    while (type.value < result->type_count && depth < 16)
++    {
++        CType* record = result->types + type.value;
++        fprintf(file, "%s%u%s%s%s%s", depth ? ">" : "", (u32)record->kind, record->is_const ? "c" : "", record->is_volatile ? "v" : "",
++                record->is_restrict ? "r" : "", record->is_atomic ? "a" : "");
++        if (record->kind == C_TYPE_POINTER || record->kind == C_TYPE_ARRAY || record->kind == C_TYPE_VECTOR)
++        {
++            if (record->kind == C_TYPE_ARRAY) fprintf(file, "[b%u]", record->array_bound);
++            type = record->element_type;
++        }
++        else if (record->kind == C_TYPE_STRUCT || record->kind == C_TYPE_UNION || record->kind == C_TYPE_ENUM || record->kind == C_TYPE_FUNCTION)
++        {
++            CTypeId base = type;
++            u32 hops = 0;
++            while (base.value < result->type_count && result->types[base.value].has_unqualified_type && hops < 8)
++            {
++                base = result->types[base.value].unqualified_type;
++                hops += 1;
++            }
++            fprintf(file, "#%u", base.value);
++            type = C_TYPE_ID_INVALID;
++        }
++        else
++        {
++            type = C_TYPE_ID_INVALID;
++        }
++        depth += 1;
++    }
++    if (type.value != C_ID_UNDERLYING_INVALID) fprintf(file, ">?");
++}
++
++BUSTER_GLOBAL_LOCAL bool c_parse_expression_type_query_compute(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess,
++                                                               CParseResult* result, CScopeId scope, u32 start, u32 end, CTypeId* type_out,
++                                                               u32* diagnostics_added)
++{
++    u32 frame_start = machine->frame_count;
++    CParseResult checkpoint = *result;
++    u32 mutation_mark = machine->mutation_count;
++    machine->mutation_type_limit = checkpoint.type_count;
++    machine->result_valid = false;
++    bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
++                                              .result = result,
++                                              .preprocess = preprocess,
++                                              .arena = arena,
++                                              .scope = scope,
++                                              .start = start,
++                                              .end = end,
++                                              .kind = C_TYPE_PARSE_FRAME_SIZEOF,
++                                          });
++    if (pushed)
++    {
++        c_type_parse_machine_run(machine, frame_start);
++    }
++    bool valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
++                                          machine->failed && start < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[start]) : (CSourceLocation){0});
++    if (valid)
++    {
++        *type_out = machine->result_type;
++    }
++    *diagnostics_added = result->diagnostic_count - checkpoint.diagnostic_count;
++    return valid;
++}
++
+ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
+                                                        CScopeId scope, u32 start, u32 end, CTypeId* type_out)
+ {
+@@ -4176,6 +4263,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
+         (machine->validate_expression_constraints ? C_PARSE_EXPRESSION_QUERY_CHECKED : 0u) |
+         (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
+         (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
++    FILE* trace = c_semantic_trace_file();
+     bool valid;
+     if (query && query->end == end && query->scope.value == scope.value &&
+         (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
+@@ -4183,35 +4271,63 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
+     {
+         *type_out = query->type;
+         valid = true;
++        if (trace)
++        {
++            // Oracle: recompute this hit with the cache bypassed, in the current
++            // machine state, and compare. The recomputation's type-table growth
++            // is kept (diagnostic binary only); its constraint is restored so the
++            // caller observes the production hit path, and any diagnostic it
++            // emits is deliberately left in place and counted.
++            CTypeId cached = query->type;
++            CParseExpressionQuery* saved = machine->expression_queries;
++            String8 constraint_before = machine->expression_constraint;
++            u32 constraint_token_before = machine->expression_constraint_token;
++            CTypeId recomputed = C_TYPE_ID_INVALID;
++            u32 diagnostics_added = 0;
++            machine->expression_queries = 0;
++            bool recomputed_valid = c_parse_expression_type_query_compute(machine, arena, preprocess, result, scope, start, end, &recomputed, &diagnostics_added);
++            machine->expression_queries = saved;
++            bool same_id = recomputed_valid && recomputed.value == cached.value;
++            bool compatible = recomputed_valid && recomputed.value < result->type_count && (same_id ||
++                (result->types[recomputed.value].kind == result->types[cached.value].kind &&
++                 result->types[recomputed.value].is_const == result->types[cached.value].is_const &&
++                 result->types[recomputed.value].is_volatile == result->types[cached.value].is_volatile &&
++                 c_parse_types_compatible(machine->scratch_arena, result, preprocess, recomputed, cached)));
++            fprintf(trace, "SQ HIT %u %u %u %x %x valid=1 type=%u rtype=%u sig=", start, end, scope.value, flags, query->flags, cached.value, recomputed.value);
++            c_semantic_trace_type_signature(trace, result, cached);
++            fprintf(trace, " rsig=");
++            c_semantic_trace_type_signature(trace, result, recomputed);
++            fprintf(trace, " rvalid=%u same_id=%u compatible=%u rdiag=%u rconstraint=%u\n", recomputed_valid, same_id, compatible, diagnostics_added,
++                    (u32)(machine->expression_constraint.length != 0 && machine->expression_constraint.pointer != constraint_before.pointer));
++            machine->expression_constraint = constraint_before;
++            machine->expression_constraint_token = constraint_token_before;
++        }
+     }
+     else
+     {
+-        u32 frame_start = machine->frame_count;
+-        CParseResult checkpoint = *result;
+-        u32 mutation_mark = machine->mutation_count;
+-        machine->mutation_type_limit = checkpoint.type_count;
+-        machine->result_valid = false;
+-        bool pushed = c_type_parse_frame_push(machine, (CTypeParseFrame){
+-                                                  .result = result,
+-                                                  .preprocess = preprocess,
+-                                                  .arena = arena,
+-                                                  .scope = scope,
+-                                                  .start = start,
+-                                                  .end = end,
+-                                                  .kind = C_TYPE_PARSE_FRAME_SIZEOF,
+-                                              });
+-        if (pushed)
+-        {
+-            c_type_parse_machine_run(machine, frame_start);
+-        }
+-        valid = c_type_parse_root_finish(machine, result, checkpoint, mutation_mark,
+-                                              machine->failed && start < preprocess.token_count ? c_preprocess_token_location(&preprocess, preprocess.tokens[start]) : (CSourceLocation){0});
+-        if (valid)
++        char const* reason = !machine->expression_queries ? "NOCACHE"
++                             : !query ? (machine->enum_constant_members_active ? "MISS_ENUM" : machine->frame_count ? "MISS_NESTED" : "MISS_RANGE")
++                             : !query->flags ? "MISS_EMPTY"
++                             : query->end != end ? "MISS_END"
++                             : query->scope.value != scope.value ? "MISS_SCOPE"
++                             : (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) != (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) ? "MISS_FLAGS"
++                             : (query->flags & flags) != flags ? "MISS_UNCHECKED"
++                             : "MISS_STALE";
++        CTypeId entry_type = query && query->flags && query->type.value < result->type_count ? query->type : C_TYPE_ID_INVALID;
++        u32 entry_flags = query ? query->flags : 0;
++        u32 diagnostics_added = 0;
++        valid = c_parse_expression_type_query_compute(machine, arena, preprocess, result, scope, start, end, type_out, &diagnostics_added);
++        bool published = query && valid && !machine->expression_constraint.length && !diagnostics_added;
++        if (published)
++            *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out, .flags = flags};
++        if (trace)
+         {
+-            *type_out = machine->result_type;
++            fprintf(trace, "SQ %s %u %u %u %x %x valid=%u type=%u sig=", reason, start, end, scope.value, flags, entry_flags, valid, valid ? type_out->value : C_ID_UNDERLYING_INVALID);
++            c_semantic_trace_type_signature(trace, result, valid ? *type_out : C_TYPE_ID_INVALID);
++            fprintf(trace, " esig=");
++            c_semantic_trace_type_signature(trace, result, entry_type);
++            fprintf(trace, " published=%u constraint=%u diag=%u\n", published, (u32)(machine->expression_constraint.length != 0), diagnostics_added);
+         }
+-        if (query && valid && !machine->expression_constraint.length && result->diagnostic_count == checkpoint.diagnostic_count)
+-            *query = (CParseExpressionQuery){.end = end, .scope = scope, .type = *type_out, .flags = flags};
+     }
+     return valid;
+ }

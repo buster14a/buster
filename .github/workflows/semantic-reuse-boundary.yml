@@ -1,0 +1,160 @@
+name: Semantic reuse boundary census (temporary)
+on:
+  push:
+    branches: [devin/1028-semantic-reuse-boundary-744a948f]
+permissions:
+  contents: read
+concurrency:
+  group: semantic-reuse-boundary-1028
+  cancel-in-progress: false
+jobs:
+  census:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 8
+      - run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Baseline and oracle builds from frozen source
+        id: subjects
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence subjects frozen/src frozen/generated
+          exec > >(tee evidence/builds.log) 2>&1
+          git rev-parse HEAD 'HEAD^{tree}'
+          clang --version
+          uname -a
+          lscpu | head -20
+          git diff --exit-code 744a948f41291b4238d1755b1507678799f1206d -- src build.c CMakeLists.txt cmake
+          git archive 744a948f41291b4238d1755b1507678799f1206d:src | tar -xf - -C frozen/src
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/baseline
+          cp -a build/generated/. frozen/generated/
+          git apply --check tools/throughput/experiments/1028-semantic-oracle.patch
+          git apply tools/throughput/experiments/1028-semantic-oracle.patch
+          git diff > evidence/oracle.diff
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          cp build/Release/ide subjects/oracle
+          git checkout -- src
+          sha256sum subjects/* > evidence/compilers.sha256
+          find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs.sha256
+      - name: Unity self-source census
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/unity.log) 2>&1
+          mkdir -p evidence/unity
+          common=(cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g0 -c src/buster/apps/ide/ide.c)
+          for form in frontend-ssa no-frontend-ssa; do
+            (cd frozen && ../subjects/baseline "${common[@]}" -f$form -o ../evidence/unity/baseline-$form.o) > evidence/unity/baseline-$form.stdout 2> evidence/unity/baseline-$form.stderr; echo "baseline $form exit=$?" | tee -a evidence/unity/exits.txt
+            (cd frozen && ../subjects/oracle "${common[@]}" -f$form -o ../evidence/unity/oracle-notrace-$form.o) > evidence/unity/oracle-notrace-$form.stdout 2> evidence/unity/oracle-notrace-$form.stderr; echo "oracle-notrace $form exit=$?" | tee -a evidence/unity/exits.txt
+            (cd frozen && BUSTER_SEMANTIC_TRACE="$PWD/../evidence/unity/trace-$form.txt" ../subjects/oracle "${common[@]}" -f$form -o ../evidence/unity/oracle-trace-$form.o) > evidence/unity/oracle-trace-$form.stdout 2> evidence/unity/oracle-trace-$form.stderr; echo "oracle-trace $form exit=$?" | tee -a evidence/unity/exits.txt
+            cmp evidence/unity/baseline-$form.o evidence/unity/oracle-notrace-$form.o && echo "notrace object identical ($form)"
+            cmp evidence/unity/baseline-$form.o evidence/unity/oracle-trace-$form.o && echo "trace object identical ($form)" || echo "trace object DIFFERS ($form): recomputation grows the type table; see analysis"
+            cmp evidence/unity/baseline-$form.stderr evidence/unity/oracle-trace-$form.stderr && echo "trace stderr identical ($form)"
+          done
+          sha256sum evidence/unity/*.o > evidence/unity/objects.sha256
+          wc -l evidence/unity/trace-*.txt
+          python3 tools/throughput/experiments/1028_semantic_oracle_analyze.py evidence/unity/trace-frontend-ssa.txt evidence/unity/trace-no-frontend-ssa.txt > evidence/unity/analysis.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open("evidence/unity/analysis.json"))
+          print(json.dumps(report["totals"], indent=1))
+          for entry in report["files"]:
+              print(entry["file"])
+              print(" hit mismatches:", entry["stats"].get("hit_mismatch", 0), "of", entry["stats"].get("sq_HIT", 0), "hits")
+              print(" nocache:", entry["nocache"])
+              print(" flag misses:", entry["flag_miss"])
+              print(" sites:", entry["prediction_sites"])
+              print(" join:", entry["boundary_join"])
+              print(" join kind pairs:", entry["boundary_join_kind_pairs"])
+          PY
+          gzip -9 evidence/unity/trace-*.txt
+      - name: Tracked fixture census and acceptance parity
+        if: ${{ !cancelled() && steps.subjects.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/fixtures.log) 2>&1
+          mkdir -p evidence/fixtures/traces
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          root = pathlib.Path.cwd()
+          out = root / "evidence" / "fixtures"
+          rows = []
+          failures = []
+          fixtures = sorted(root.glob("tests/*.c"))
+          for fixture in fixtures:
+              for action in ["-fsyntax-only", "-c"]:
+                  results = {}
+                  for name in ["baseline", "oracle"]:
+                      artifact = out / f"{name}.o"
+                      artifact.unlink(missing_ok=True)
+                      env = dict(os.environ)
+                      if name == "oracle":
+                          env["BUSTER_SEMANTIC_TRACE"] = str(out / "traces" / f"{fixture.stem}{action}.txt")
+                      cmd = [str(root / "subjects" / name), "cc", "-g0", action, str(fixture), "-o", str(artifact)]
+                      try:
+                          p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120, env=env)
+                          row = {"fixture": fixture.name, "action": action, "compiler": name, "exit": p.returncode,
+                                 "stderr": p.stderr.decode(errors="replace"), "stdout": p.stdout.decode(errors="replace"),
+                                 "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest() if artifact.exists() else None}
+                      except subprocess.TimeoutExpired:
+                          row = {"fixture": fixture.name, "action": action, "compiler": name, "exit": "timeout", "stderr": "", "stdout": "", "sha256": None}
+                      rows.append(row)
+                      results[name] = row
+                  a, b = results["baseline"], results["oracle"]
+                  if (a["exit"], a["stderr"]) != (b["exit"], b["stderr"]):
+                      failures.append({"kind": "acceptance-or-diagnostic", "fixture": fixture.name, "action": action, "baseline": a["exit"], "oracle": b["exit"]})
+                  elif action == "-c" and a["sha256"] != b["sha256"]:
+                      failures.append({"kind": "object-bytes", "fixture": fixture.name, "action": action})
+          (out / "results.json").write_text(json.dumps({"rows": rows, "failures": failures}, indent=1) + "\n")
+          accepted = sum(1 for r in rows if r["compiler"] == "baseline" and r["exit"] == 0)
+          print("fixtures", len(fixtures), "invocations", len(rows), "baseline accepted", accepted, "failures", len(failures))
+          for f in failures[:40]:
+              print(f)
+          PY
+          python3 tools/throughput/experiments/1028_semantic_oracle_analyze.py evidence/fixtures/traces/*.txt > evidence/fixtures/analysis.json
+          python3 - <<'PY'
+          import json
+          report = json.load(open("evidence/fixtures/analysis.json"))
+          print(json.dumps(report["totals"], indent=1))
+          mismatches = [(e["file"], e["hit_mismatch_samples"]) for e in report["files"] if e["stats"].get("hit_mismatch")]
+          print("files with hit mismatches:", len(mismatches))
+          for name, samples in mismatches[:20]:
+              print(name)
+              for s in samples[:5]:
+                  print("  ", s)
+          differ = [(e["file"], e["flag_miss_differ_samples"]) for e in report["files"] if e["flag_miss_differ_samples"]]
+          print("files where a flags-only miss had a different answer:", len(differ))
+          for name, samples in differ[:20]:
+              print(name)
+              for s in samples[:5]:
+                  print("  ", s)
+          pairs = {}
+          for e in report["files"]:
+              for k, v in e["boundary_join_kind_pairs"].items():
+                  pairs[k] = pairs.get(k, 0) + v
+          print("boundary join kind pairs (site lp_kind semantic_kind mode):")
+          for k, v in sorted(pairs.items(), key=lambda i: -i[1])[:40]:
+              print("  ", v, k)
+          PY
+          tar -czf evidence/fixtures/traces.tar.gz -C evidence/fixtures traces && rm -rf evidence/fixtures/traces
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: semantic-reuse-boundary-${{ github.run_id }}
+          path: |
+            evidence
+            build/CMakeCache.txt
+          retention-days: 14
+          if-no-files-found: error
