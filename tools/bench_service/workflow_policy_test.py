@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -19,6 +20,9 @@ ACTIONLINT = ROOT / ".github" / "actionlint.yaml"
 BENCHMARKING = ROOT / "docs" / "agents" / "benchmarking.md"
 DEPLOYMENT = SERVICE / "deploy" / "VALIDATE_BUSTER_V1.md"
 ADMISSION_INSTALLER = SERVICE / "deploy" / "configure_github_admission.sh"
+BENCHMARK_RULESET = ROOT / ".github" / "rulesets" / "benchmark-main.json"
+MAIN_QUEUE_RULESET = ROOT / ".github" / "main-merge-queue.ruleset.json"
+MAIN_QUEUE_GATE = ROOT / "tools" / "merge_queue_admission.py"
 
 SOURCE_REQUIREMENTS = {
     "exclusive_admission.c": (
@@ -87,19 +91,92 @@ def main() -> int:
         errors.append("missing configure_github_admission.sh")
     else:
         installer = ADMISSION_INSTALLER.read_text(encoding="utf-8")
-        disable_command = 'gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body false --repo "$repo"'
-        disable_count = installer.count(disable_command)
+        variable_read = installer.find(
+            '"repos/$repo/actions/variables/BENCH_SERVICE_DISPATCH_ENABLED"')
+        variable_guard = installer.find('variable.get("value") != "false"')
         mutation_positions = [
             position
             for marker in ("gh api --method PUT", "gh api --method POST")
             if (position := installer.find(marker)) >= 0
         ]
-        if disable_count != 1:
-            errors.append("admission installer must disable dispatch exactly once")
+        if "gh variable set BENCH_SERVICE_DISPATCH_ENABLED" in installer:
+            errors.append("admission installer must leave the dispatch variable unchanged")
         elif not mutation_positions:
             errors.append("admission installer is missing repository policy mutations")
-        elif installer.find(disable_command) > min(mutation_positions):
-            errors.append("admission installer must disable dispatch before its first policy mutation")
+        elif not 0 <= variable_read < variable_guard < min(mutation_positions):
+            errors.append("admission installer must verify disabled dispatch before policy mutation")
+        elif 'variable.get("name") != "BENCH_SERVICE_DISPATCH_ENABLED"' not in installer:
+            errors.append("admission installer must check the dispatch variable identity")
+        elif not 0 <= installer.find("verify_github_queue.py") < min(mutation_positions):
+            errors.append("admission installer must verify the main queue before policy mutation")
+        for marker in (
+            "orgs/$owner/actions/runner-groups",
+            "selected_workflows",
+            "repo-runners.json",
+            "repos/$repo/actions/policies",
+            "policy_matches",
+            '"reviewers": []',
+        ):
+            if marker not in installer:
+                errors.append(f"admission installer is missing control: {marker}")
+        policy_readback = installer.find('"repos/$repo/actions/policies/$policy_id"')
+        first_mutation = min(mutation_positions) if mutation_positions else -1
+        reviewer_removal = installer.find('"reviewers": []')
+        if not (0 <= policy_readback < first_mutation < reviewer_removal):
+            errors.append("existing admin actor policy must be verified before changing admission")
+        if "--input \"$policy\"" in installer:
+            errors.append("admission installer must never replace the existing Actions policy")
+        for marker in (
+            '"allowed_actors": [{"id": 5, "type": "RepositoryRole"}]',
+            '"allowed_events": ["workflow_dispatch"]',
+            '"include": [".github/workflows/9700x-service-dispatch.yml"]',
+            '"enforcement": "active"',
+        ):
+            if marker not in installer:
+                errors.append(f"admission installer does not verify the existing policy: {marker}")
+        if MAIN_QUEUE_GATE.is_file():
+            gate_id = re.search(
+                r"(?m)^RULESET_ID = ([1-9][0-9]*)$",
+                MAIN_QUEUE_GATE.read_text(encoding="utf-8"),
+            )
+            installer_id = re.search(r"(?m)^main_ruleset_id=([1-9][0-9]*)$", installer)
+            if not gate_id or not installer_id or gate_id.group(1) != installer_id.group(1):
+                errors.append("admission installer and merge-queue gate must bind the same ruleset ID")
+        else:
+            errors.append("missing main merge-queue admission gate")
+
+    if not BENCHMARK_RULESET.is_file() or not MAIN_QUEUE_RULESET.is_file():
+        errors.append("missing benchmark or main queue ruleset")
+    else:
+        benchmark = json.loads(BENCHMARK_RULESET.read_text(encoding="utf-8"))
+        queue = json.loads(MAIN_QUEUE_RULESET.read_text(encoding="utf-8"))
+        benchmark_checks = [
+            rule for rule in benchmark["rules"] if rule["type"] == "required_status_checks"
+        ]
+        queue_checks = [
+            rule for rule in queue["rules"] if rule["type"] == "required_status_checks"
+        ]
+        if len(benchmark_checks) != 1 or len(queue_checks) != 1:
+            errors.append("benchmark and main queue must each define one status-check rule")
+        else:
+            benchmark_params = benchmark_checks[0]["parameters"]
+            queue_params = queue_checks[0]["parameters"]
+            if benchmark_params["strict_required_status_checks_policy"] is not False:
+                errors.append("benchmark checks must preserve non-strict merge-queue admission")
+            if queue_params["strict_required_status_checks_policy"] is not False:
+                errors.append("main queue checks must remain non-strict")
+            benchmark_contexts = {
+                check["context"] for check in benchmark_params["required_status_checks"]
+            }
+            queue_contexts = {check["context"] for check in queue_params["required_status_checks"]}
+            if not benchmark_contexts <= queue_contexts:
+                errors.append("benchmark checks must be covered by the main queue")
+        if benchmark["bypass_actors"] or queue["bypass_actors"]:
+            errors.append("benchmark and main queue rulesets must not allow bypass")
+        if any(rule["type"] == "pull_request" for rule in benchmark["rules"]):
+            errors.append("benchmark ruleset must not add blanket pull-request reviews")
+        if benchmark["conditions"]["ref_name"] != {"include": ["refs/heads/main"], "exclude": []}:
+            errors.append("benchmark ruleset must apply only to main")
 
     if not POLICY.is_file():
         errors.append("missing bench-service-policy.yml")
@@ -169,7 +246,9 @@ def main() -> int:
         "environment: benchmark-9700x",
         "github.ref == 'refs/heads/main'",
         "vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true'",
-        "runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
+        "runs-on:",
+        "group: buster-9700x-service-dispatch",
+        "labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
         "group: buster-9700x-service-dispatch",
         "/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway submit",
         "/usr/bin/sudo -n -u buster-bench -- /usr/local/libexec/buster-bench-service gateway result",

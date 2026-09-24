@@ -9,6 +9,7 @@ on:
       - '.github/workflows/driver-test-attribution.yml'
       - 'src/buster/tests/test.c'
       - 'src/buster/tests/test.h'
+      - 'src/buster/tests/compiler/driver/driver_test.c'
 
 permissions:
   contents: read
@@ -22,7 +23,9 @@ jobs:
   attribution:
     if: >-
       ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
-          (github.event_name == 'workflow_dispatch' || github.head_ref == 'diagnostics/708-driver-fixture-timing') }}
+          (github.event_name == 'workflow_dispatch' ||
+           github.head_ref == 'diagnostics/708-driver-fixture-timing' ||
+           github.head_ref == 'diagnostics/949-driver-operations') }}
     name: Windows x86-64 fixture attribution
     runs-on: windows-2025
     timeout-minutes: 300

@@ -268,13 +268,19 @@ from verified writer output and regenerates against current main; enqueue the
 replacement head after its checks pass. No manual generated-file repair is needed.
 
 The main merge queue was enabled and read back on 2026-09-22 after #945 landed.
-All eight documented checks are required from GitHub Actions, with one build and
-one merge at a time, ALLGREEN, merge commits, and no bypass. Live acceptance is
-tracked in #867 and remains distinct from activation. Keep
+All eight documented checks are required from GitHub Actions. The repository
+contract permits up to 20 speculative combined-head builds while allowing only
+one validated candidate to merge at a time. `ALLGREEN` requires every queued
+group's checks, and `MERGE` retains merge commits. The initial activation had
+one build slot and no bypass; the administrator must read back the current live
+settings before relying on them. Live acceptance is tracked in #867 and remains
+distinct from activation. Keep
 `strict_required_status_checks_policy: false`: a conflict-free branch does not
 need a manual update just because main advanced. Use the queue to validate the
 new combined tree; never reuse the original PR-head green as that evidence. The required-check audit,
 fork and cancellation policy, activation/read-back steps, remaining live
 acceptance tests, and emergency restrictions are in
-[serialized main integration](../merge-queue-admission.md). No manual success
-status or temporary bypass is authorized by that guide.
+[serialized main integration](../merge-queue-admission.md). Land the repository
+build-limit policy through the old trusted-base queue contract before raising
+the live build limit; the exact rollout and read-back are documented there.
+No manual success status or temporary bypass is authorized by that guide.

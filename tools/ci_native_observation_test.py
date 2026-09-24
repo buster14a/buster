@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import ci_native_observation as observation
+import check_action_pins as action_pins
 
 
 @contextmanager
@@ -551,13 +553,15 @@ class NativeObservationTest(unittest.TestCase):
             self.skipTest("repository workflow is not present in the standalone test fixture")
         workflow = workflow_path.read_text(encoding="utf-8")
         self.assertIn(
-            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows' || 'modes differential' }}",
+            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || 'modes differential' }}",
             workflow,
         )
         self.assertIn(
-            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows pack' || 'modes differential pack' }}",
+            "BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || 'modes differential pack' }}",
             workflow,
         )
+        self.assertIn("steps.msvc_reference.outcome == 'success' && '1'", workflow)
+        self.assertIn("id: msvc_reference", workflow)
         self.assertIn("tools/ci_native_observation.py init", workflow)
         self.assertIn("tools/ci_native_observation.py finalize", workflow)
         self.assertIn(
@@ -571,7 +575,47 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIn("${{ runner.temp }}/native-ci-upload/", workflow)
         native = workflow[workflow.index("  native:"):workflow.index("  mobile:")]
         self.assertNotRegex(native, r"(?m)^\s*continue-on-error:")
+        primary_upload = native.split("      - name: Retain native logs\n", 1)[1].split(
+            "      - name:", 1)[0]
+        self.assertIn("uses: ./.github/actions/native-artifact-upload", primary_upload)
 
+
+
+    def test_native_log_upload_action_retries_once_and_fails_closed(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        action_path = repository_root / ".github" / "actions" / "native-artifact-upload" / "action.yml"
+        action = action_path.read_text(encoding="utf-8")
+        steps = re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - name:|\Z)", action)
+        expected = [
+            "Retain native logs",
+            "Back off before retrying native log upload",
+            "Retain native logs (retry)",
+            "Record recovered native log upload",
+            "Record failed native log upload",
+        ]
+        self.assertEqual([name for name, _ in steps], expected)
+        step_map = dict(steps)
+        primary = step_map["Retain native logs"]
+        backoff = step_map["Back off before retrying native log upload"]
+        retry = step_map["Retain native logs (retry)"]
+        recovered = step_map["Record recovered native log upload"]
+        failed = step_map["Record failed native log upload"]
+        pin = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+        self.assertEqual(action.count("uses: " + pin), 2)
+        self.assertEqual(action.count("continue-on-error: true"), 1)
+        self.assertIn("id: native_upload", primary)
+        self.assertIn("continue-on-error: true", primary)
+        self.assertNotIn("overwrite: true", primary)
+        self.assertIn("steps.native_upload.outcome == 'failure'", backoff)
+        self.assertIn("sleep 15", backoff)
+        self.assertIn("id: native_upload_retry", retry)
+        self.assertIn("steps.native_upload.outcome == 'failure'", retry)
+        self.assertNotIn("continue-on-error", retry)
+        self.assertIn("overwrite: true", retry)
+        self.assertIn("steps.native_upload_retry.outcome == 'success'", recovered)
+        self.assertIn("steps.native_upload_retry.outcome == 'failure'", failed)
+        self.assertIn("evidence was not retained", failed)
+        self.assertEqual(action_pins.check_text(action, action_path), [])
 
 if __name__ == "__main__":
     unittest.main()

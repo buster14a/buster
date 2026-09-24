@@ -50,14 +50,25 @@
   see [analyzer sharding](../clang-analyze-shards.md). The separate
   `Linux x86-64 bootstrap evidence` check is required as well when the stronger
   repeated self-host audit is mandatory; `CI complete` does not aggregate it.
+  The aggregate's independent desktop inventory waits up to 24 seconds if the
+  Actions API still reports a required job unfinished after the matrix need
+  completes. It checks every job and required step again on each probe and
+  fails closed after the deadline. A completed job with missing steps, including
+  a partial-rerun carry-forward, is rejected immediately; run a fresh full CI
+  attempt rather than treating a copied success label as execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
-  and explicit dispatches without duplicate feature-push runs. Both matrices
-  disable fail-fast, and a combination failure does not hide Unix mode tests.
+  and explicit dispatches without duplicate feature-push runs. Buster CI keeps
+  full matrix diagnostics for pull requests, main/tag pushes and manual runs.
+  On `merge_group`, desktop and mobile enable matrix fail-fast; the native
+  matrix retains `fail-fast: false` under the frozen CI test contract. The trusted
+  controller cancels exact-head merge-group runs after a failed Buster CI job
+  or required check from another workflow.
   See `docs/ci-workflow-audit.md` for cache trust boundaries, diagnostics,
   cancellation, coverage details, and reproduction. Every job stays inert
   until its repository variable is set, and skips itself outright on Forgejo.
   For cancelled current-PR validation, see [bounded CI recovery](../ci-cancellation-recovery.md)
-  and its offline checks: `python3 tests/ci_recovery_test.py`.
+  and its offline checks: `python3 tests/ci_recovery_test.py` and
+  `python3 .github/scripts/test_merge_queue_fail_fast.py`.
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and
@@ -71,6 +82,13 @@
   durable GitHub-side credentials, verbose broker logs, or untrusted-PR
   triggers to the broker; see
   `docs/ci-github-hosted-runners.md`.
+
+- The workflow-tools aggregate regression executes the actual `CI complete`
+  shell body for all 633 shard outcomes. Git Bash on Windows has a 120-second
+  subprocess budget; Unix retains 30 seconds. A completed run must still report
+  exactly 633 cases and fail for every missing, failed, skipped, or cancelled
+  shard. The test file is in the reviewed native-retirement support ledger;
+  change its exact byte/hash row through a policy transition.
 
 - Test implementations are not registered as modules; add new test pairs under
   `src/buster/tests/`, add
@@ -115,6 +133,18 @@
   status propagation are covered by `python3 ios/hosted_signing_budget_test.py`
   in the mobile lifecycle workflow; actual Apple signing and simulator tests
   remain a distinct native CI gate.
+- For an invocation-owned hosted ARM64 device, a true first `bootstatus -b`
+  helper timeout gets one 120-second continuation on the same UDID before the
+  existing single replacement. `BUSTER_IOS_BOOT_CONTINUATION_SECONDS` can
+  override that positive budget for a controlled diagnostic run. A caller that
+  shortens the first 180-second readiness deadline opts into continuation by
+  setting this override; otherwise its original single-replacement budget is
+  preserved. The replacement
+  still gets only one readiness check; native exit 124 and borrowed, explicit,
+  local, and self-hosted devices do not enter continuation or replacement.
+  Only a successful `bootstatus -b` permits app execution. Each failed boot
+  phase retains its own UDID/runtime/source context and bounded host probes;
+  command and capture timings and missing capture receipts remain distinct.
 - For an invocation-owned GitHub-hosted macOS arm64 simulator, a true
   shutdown-helper timeout is first reconciled against one bounded exact-UDID
   state probe. If a successful payload still leaves that device non-Shutdown,

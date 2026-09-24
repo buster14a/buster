@@ -201,6 +201,15 @@ before publication. A schema change that the old implementation cannot
 understand must land as a backwards-compatible bootstrap first, then as a
 separate policy transition after that bootstrap is trusted.
 
+For #935, the first bootstrap admits exactly the existing support declaration
+digest and the digest of the proposed aggregate-test ledger update in the
+materializer, full-census validator, and performance binding. It classifies the
+support ledger as reviewed policy while leaving that ledger and the frozen test
+bytes intact. Once trusted, a separate policy transition may change the test,
+its exact byte/hash ledger row, and the benchmark-service profile pins. Old
+census/performance evidence remains bound to its original declaration digest;
+the matching manifest and exact declaration bytes are checked together.
+
 ### Solo-maintainer authorization
 
 `authorization_mode: solo-maintainer` is explicit owner authorization of one
@@ -299,6 +308,14 @@ post-candidate changes, and the bot-authored evidence status. It loads the
 verifier from the trusted checkout, never the candidate. Missing, stale, or
 invalid attestation retains the generated-ownership failure; merge conflicts
 remain blocking. Offline checks without live status evidence stay conservative.
+
+On `merge_group`, the synthetic queue SHA is not treated as the published PR
+head. When its tree contains generated changes, preflight delegates to the
+trusted merge-group verifier. That path checks current `main` as the first
+parent, the exact attested PR head as the second parent, the conflict-free
+combined tree, the latest successful writer attempt, and equality with the
+writer's final tree. Wrong parents, altered trees, stale or failed publication,
+and generated-only candidates remain blocked.
 
 Install this compatibility bootstrap on main before relying on the exception.
 Landing it advances main, so existing attested heads need fresh trusted

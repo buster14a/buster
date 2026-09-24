@@ -365,7 +365,7 @@ class ZigCacheWorkflowTests(unittest.TestCase):
         workflow_tools = desktop.split(
             "- name: Workflow tool regression tests", 1
         )[1].split("- name: Bootstrap wrapper regression tests", 1)[0]
-        self.assertIn("tools/ci_zig_cache_test.py -v", workflow_tools)
+        self.assertIn("run_suite tools/ci_zig_cache_test.py zig-cache-policy-test.log", workflow_tools)
 
         bootstrap = desktop.split(
             "- name: Bootstrap wrapper regression tests", 1

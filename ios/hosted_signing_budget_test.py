@@ -166,6 +166,7 @@ class HostedSigningBudgetTest(unittest.TestCase):
 
 
 SHUTDOWN_TEST_UDID = "00000000-0000-0000-0000-000000000739"
+REPLACEMENT_TEST_UDID = "00000000-0000-0000-0000-000000000740"
 SHUTDOWN_FAKE_TOOL = r'''#!/usr/bin/env bash
 set -euo pipefail
 
@@ -247,11 +248,48 @@ case "$tool" in
                 fi
                 ;;
             create)
-                printf '%s\n' "$BUSTER_SHUTDOWN_TEST_UDID"
+                create_count=0
+                if [[ -f $state/create-count ]]; then
+                    read -r create_count <"$state/create-count"
+                fi
+                create_count=$((create_count + 1))
+                printf '%s\n' "$create_count" >"$state/create-count"
+                if [[ $create_count -eq 1 ]]; then
+                    printf '%s\n' "$BUSTER_SHUTDOWN_TEST_UDID"
+                else
+                    printf '%s\n' "$BUSTER_BOOT_TEST_REPLACEMENT_UDID"
+                fi
                 ;;
             delete|boot|install)
                 ;;
             bootstatus)
+                boot_count=0
+                if [[ -f $state/bootstatus-count ]]; then
+                    read -r boot_count <"$state/bootstatus-count"
+                fi
+                boot_count=$((boot_count + 1))
+                printf '%s\n' "$boot_count" >"$state/bootstatus-count"
+                case ${BUSTER_BOOT_TEST_MODE:-success} in
+                    first-timeout|continuation-native-124)
+                        if [[ $boot_count -eq 1 ]]; then
+                            printf 'readiness still migrating\n'
+                            sleep 60
+                        elif [[ ${BUSTER_BOOT_TEST_MODE:-} == continuation-native-124 ]]; then
+                            exit 124
+                        fi
+                        ;;
+                    first-device-timeout)
+                        if [[ ${1:-} == "$BUSTER_SHUTDOWN_TEST_UDID" ]]; then
+                            printf 'readiness still migrating\n'
+                            sleep 60
+                        fi
+                        ;;
+                    always-timeout)
+                        printf 'readiness still migrating\n'
+                        sleep 60
+                        ;;
+                    *) ;;
+                esac
                 printf 'Device booted\n'
                 ;;
             launch)
@@ -657,6 +695,172 @@ class ShutdownPostconditionTest(unittest.TestCase):
                 self.assertNotIn(
                     "simctl list devices -j", result["commands"]
                 )
+
+
+class BootReadinessContinuationTest(unittest.TestCase):
+    """Exercise the real launcher with an invocation-owned fake simulator."""
+
+    def invoke(
+        self, mode: str, *, continuation: bool = True,
+        hosted: bool = True, explicit: bool = False, empty_capture: bool = False,
+    ) -> dict[str, object]:
+        with tempfile.TemporaryDirectory(prefix="buster-ios-readiness-") as temporary:
+            state = Path(temporary)
+            fake_bin = state / "bin"
+            fake_bin.mkdir()
+            tool = fake_bin / "fake-tool"
+            tool.write_text(SHUTDOWN_FAKE_TOOL, encoding="utf-8")
+            tool.chmod(0o755)
+            for name in ("codesign", "xcodebuild", "xcrun"):
+                (fake_bin / name).symlink_to(tool)
+            if empty_capture:
+                python = fake_bin / "python3"
+                python.write_text(
+                    '#!/usr/bin/env bash\n'
+                    'if [[ ${1:-} == -c && ${2:-} == *"remaining = 65536"* ]]; then\n'
+                    '    path=${@: -1}\n'
+                    '    if [[ $path == *.bootstatus.log ]]; then\n'
+                    '        : >"$path"\n'
+                    '        : >"${path}.capture-status.log"\n'
+                    '        cat >/dev/null\n'
+                    '        exit 0\n'
+                    '    fi\n'
+                    'fi\n'
+                    'exec "$BUSTER_BOOT_TEST_REAL_PYTHON" "$@"\n',
+                    encoding="utf-8",
+                )
+                python.chmod(0o755)
+            apps = []
+            for label in ("Debug", "Release"):
+                app = state / label / "ide.app"
+                app.mkdir(parents=True)
+                apps.extend((label, str(app)))
+            console = state / "console.log"
+            commands = state / "xcrun.log"
+            commands.write_text("", encoding="utf-8")
+            env = {
+                name: value for name, value in os.environ.items()
+                if not name.startswith(("BUSTER_IOS_", "BUSTER_BOOT_TEST_", "BUSTER_SHUTDOWN_TEST_", "GITHUB_", "RUNNER_"))
+            }
+            env.update({
+                "PATH": str(fake_bin) + os.pathsep + env.get("PATH", ""),
+                "RUNNER_TEMP": str(state),
+                "BUSTER_IOS_ARCH": "arm64",
+                "BUSTER_IOS_CONSOLE_LOG": str(console),
+                "BUSTER_IOS_BOOT_TIMEOUT_SECONDS": "1",
+                "BUSTER_IOS_CODESIGN_TIMEOUT_SECONDS": "2",
+                "BUSTER_IOS_INSTALL_TIMEOUT_SECONDS": "2",
+                "BUSTER_IOS_LAUNCH_TIMEOUT_SECONDS": "3",
+                "BUSTER_IOS_SHUTDOWN_TIMEOUT_SECONDS": "2",
+                "BUSTER_IOS_MONITOR_COMMAND_TIMEOUT_SECONDS": "1",
+                "BUSTER_SHUTDOWN_TEST_STATE": str(state),
+                "BUSTER_SHUTDOWN_TEST_LOG": str(commands),
+                "BUSTER_SHUTDOWN_TEST_UDID": SHUTDOWN_TEST_UDID,
+                "BUSTER_SHUTDOWN_TEST_SHUTDOWN_MODE": "success",
+                "BUSTER_BOOT_TEST_REPLACEMENT_UDID": REPLACEMENT_TEST_UDID,
+                "BUSTER_BOOT_TEST_MODE": mode,
+            })
+            if empty_capture:
+                env["BUSTER_BOOT_TEST_REAL_PYTHON"] = shutil.which("python3") or "python3"
+            if continuation:
+                env["BUSTER_IOS_BOOT_CONTINUATION_SECONDS"] = "1"
+            if hosted:
+                env.update({
+                    "GITHUB_ACTIONS": "true",
+                    "RUNNER_ENVIRONMENT": "github-hosted",
+                    "RUNNER_OS": "macOS",
+                    "RUNNER_ARCH": "ARM64",
+                })
+            else:
+                env["GITHUB_ACTIONS"] = "false"
+            if explicit:
+                env["BUSTER_IOS_SIMULATOR_UDID"] = SHUTDOWN_TEST_UDID
+            result = subprocess.run(
+                ["bash", str(ROOT / "ios/launch_simulator.sh"), "--batch", *apps],
+                cwd=ROOT, env=env, text=True, capture_output=True, timeout=35, check=False,
+            )
+            evidence = {
+                path.name.removeprefix("console.log."): path.read_text(encoding="utf-8")
+                for path in state.glob("console*") if path.is_file()
+            }
+            return {
+                "status": result.returncode,
+                "output": result.stdout + result.stderr,
+                "commands": commands.read_text(encoding="utf-8").splitlines(),
+                "evidence": evidence,
+            }
+
+    def test_first_timeout_continues_on_same_device_and_runs_both_apps(self) -> None:
+        result = self.invoke("first-timeout")
+        self.assertEqual(result["status"], 0, result["output"])
+        commands = result["commands"]
+        evidence = result["evidence"]
+        self.assertEqual(sum(line.startswith("simctl create ") for line in commands), 1)
+        self.assertEqual(commands.count(f"simctl bootstatus {SHUTDOWN_TEST_UDID} -b"), 2)
+        self.assertEqual(commands.count(f"simctl shutdown {SHUTDOWN_TEST_UDID}"), 1)
+        self.assertNotIn(f"simctl delete {SHUTDOWN_TEST_UDID}", commands)
+        self.assertIn("outcome=success-after-continuation", result["output"])
+        self.assertIn("BUSTER_IOS_BOOT_DISPOSITION=continued-original-boot-success", result["output"])
+        self.assertIn("outcome=timeout", evidence["boot.attempt-1.bootstatus.status.log"])
+        self.assertIn("capture_receipt=complete", evidence["boot.attempt-1.bootstatus.status.log"])
+        self.assertIn(f"SIMULATOR_UDID={SHUTDOWN_TEST_UDID}", evidence["boot.attempt-1.bootstatus.lifecycle-context.log"])
+        self.assertIn("SIMULATOR_RUNTIME=com.apple.CoreSimulator.SimRuntime.iOS-26-5", evidence["boot.attempt-1.bootstatus.lifecycle-context.log"])
+        for label in ("Debug", "Release"):
+            self.assertTrue(any(line.startswith(f"simctl install {SHUTDOWN_TEST_UDID} ") and f"/{label}/" in line for line in commands))
+            self.assertIn("BUSTER_IOS_RESULT: SUCCESS", evidence[f"console.{label}.log"])
+
+    def test_both_devices_timeout_without_running_apps(self) -> None:
+        result = self.invoke("always-timeout")
+        self.assertEqual(result["status"], 1, result["output"])
+        commands = result["commands"]
+        evidence = result["evidence"]
+        self.assertEqual(commands.count(f"simctl bootstatus {SHUTDOWN_TEST_UDID} -b"), 2)
+        self.assertEqual(commands.count(f"simctl bootstatus {REPLACEMENT_TEST_UDID} -b"), 1)
+        self.assertEqual(sum(line.startswith("simctl create ") for line in commands), 2)
+        self.assertNotIn("simctl install", "\n".join(commands))
+        self.assertIn("BUSTER_IOS_BOOT_DISPOSITION=unrecovered-failure", result["output"])
+        self.assertIn(f"SIMULATOR_UDID={REPLACEMENT_TEST_UDID}", evidence["boot.attempt-2.bootstatus.lifecycle-context.log"])
+        self.assertIn("capture_receipt=complete", evidence["boot.attempt-2.bootstatus.status.log"])
+
+    def test_native_124_on_continuation_does_not_replace(self) -> None:
+        result = self.invoke("continuation-native-124")
+        self.assertEqual(result["status"], 124, result["output"])
+        commands = result["commands"]
+        self.assertEqual(commands.count(f"simctl bootstatus {SHUTDOWN_TEST_UDID} -b"), 2)
+        self.assertEqual(sum(line.startswith("simctl create ") for line in commands), 1)
+        self.assertNotIn("simctl install", "\n".join(commands))
+        self.assertIn(
+            "outcome=command-failure status=124 native_status=124",
+            result["evidence"]["boot.attempt-1.bootstatus-continue.status.log"],
+        )
+
+    def test_shortened_deadline_without_opt_in_keeps_single_replacement(self) -> None:
+        result = self.invoke("first-timeout", continuation=False)
+        self.assertEqual(result["status"], 0, result["output"])
+        commands = result["commands"]
+        self.assertEqual(commands.count(f"simctl bootstatus {SHUTDOWN_TEST_UDID} -b"), 1)
+        self.assertEqual(commands.count(f"simctl bootstatus {REPLACEMENT_TEST_UDID} -b"), 1)
+        self.assertNotIn("BUSTER_IOS_BOOT_CONTINUATION", result["output"])
+        self.assertIn("BUSTER_IOS_BOOT_DISPOSITION=recovered-infrastructure-failure", result["output"])
+
+    def test_explicit_and_local_devices_do_not_continue_or_replace(self) -> None:
+        for name, overrides in (("explicit", {"explicit": True}), ("local", {"hosted": False})):
+            with self.subTest(case=name):
+                result = self.invoke("always-timeout", **overrides)
+                self.assertEqual(result["status"], 124, result["output"])
+                commands = result["commands"]
+                self.assertEqual(commands.count(f"simctl bootstatus {SHUTDOWN_TEST_UDID} -b"), 1)
+                self.assertNotIn("BUSTER_IOS_BOOT_CONTINUATION", result["output"])
+                self.assertNotIn("simctl install", "\n".join(commands))
+
+    def test_empty_capture_receipt_is_reported_and_cannot_run_apps(self) -> None:
+        result = self.invoke("always-timeout", explicit=True, empty_capture=True)
+        self.assertEqual(result["status"], 124, result["output"])
+        phase = result["evidence"]["boot.attempt-1.bootstatus.status.log"]
+        self.assertIn("capture_status=0", phase)
+        self.assertIn("capture_receipt=incomplete", phase)
+        self.assertIn("BUSTER_IOS_CAPTURE incomplete=1 reason=missing-or-empty-receipt", phase)
+        self.assertNotIn("simctl install", "\n".join(result["commands"]))
 
 
 if __name__ == "__main__":
