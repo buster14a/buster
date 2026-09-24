@@ -181,17 +181,28 @@ json.dump(
 PY
 gh api --method PUT -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/environments/benchmark-9700x" --input "$tmp/environment.json" >"$tmp/live-environment.json"
-python3 - "$tmp/live-environment.json" <<'PY'
+
+# Verify fresh GET responses after installation, including the exact branch
+# restriction and disabled variable. A successful PUT response is not a receipt.
+benchmark_id="$(python3 - "$tmp/benchmark.json" <<'PY'
 import json
 import sys
 
-environment = json.load(open(sys.argv[1]))
-rules = environment.get("protection_rules", [])
-if any(rule.get("type") == "required_reviewers" for rule in rules):
-    sys.exit("environment still requires a reviewer")
-if environment.get("deployment_branch_policy") != {
-    "protected_branches": False, "custom_branch_policies": True
-}:
-    sys.exit("environment deployment branch policy changed")
+value = json.load(open(sys.argv[1])).get("id")
+if type(value) is not int or value <= 0:
+    sys.exit("installed benchmark ruleset ID missing")
+print(value)
 PY
-printf 'Existing admin-only Actions policy and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED remains false\n'
+)"
+gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/rulesets/$benchmark_id" >"$tmp/installed-benchmark.json"
+gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/environments/benchmark-9700x" >"$tmp/installed-environment.json"
+gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/environments/benchmark-9700x/deployment-branch-policies?per_page=100" >"$tmp/installed-branches.json"
+gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/actions/variables/BENCH_SERVICE_DISPATCH_ENABLED" >"$tmp/installed-variable.json"
+python3 "$root/tools/bench_service/deploy/verify_github_admission.py" \
+  "$ruleset" "$tmp/installed-benchmark.json" "$tmp/installed-environment.json" \
+  "$tmp/installed-branches.json" "$tmp/installed-variable.json"
+printf 'Existing admin-only Actions policy and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'

@@ -53,6 +53,12 @@ installer clear required reviewers from `benchmark-9700x`. The environment
 remains restricted to the one exact `main` deployment branch. Thus normal
 use is one admin dispatch, with no separate deployment approval. If any
 readback fails, the variable remains `false`; investigate before retrying.
+After installation, the read-only verifier fetches the benchmark ruleset,
+environment, deployment branch policies and repository variable again. It
+checks the reviewed ruleset without bypass actors, no required environment
+reviewer, the one exact `main` branch, and literal `false` dispatch state.
+Keep those responses and the installer log as administrator receipts; they do
+not replace the physical host checks.
 
 The actor restriction governs **who starts the workflow**, not who edits its
 definition or the installed gateway. Admins must control changes to the
