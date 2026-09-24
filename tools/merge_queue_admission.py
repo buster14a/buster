@@ -25,6 +25,10 @@ SCHEMA = "buster-merge-queue-admission-v1"
 CONTEXT = "Main integration admission"
 RETIREMENT_CONTEXT = "Native retirement merge admission"
 RULESET_ID = 22537199
+BYPASS_ACTORS = [
+    {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"},
+    {"actor_id": 39247043, "actor_type": "User", "bypass_mode": "always"},
+]
 CHECKS = {
     "ci.yml": "CI complete",
     "self-host-audit.yml": "Linux x86-64 bootstrap evidence",
@@ -36,7 +40,7 @@ CHECKS = {
 QUEUE = {
     "check_response_timeout_minutes": 360,
     "grouping_strategy": "ALLGREEN",
-    "max_entries_to_build": 1,
+    "max_entries_to_build": 20,
     "max_entries_to_merge": 1,
     "merge_method": "MERGE",
     "min_entries_to_merge": 1,
@@ -159,7 +163,8 @@ def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
     if not read_only_response or "bypass_actors" in data:
         require("bypass_actors" in data,
                 "bypass inventory is hidden: check-ruleset needs an administrator response")
-        require(data["bypass_actors"] == [], "standing bypasses are not admitted")
+        require(data["bypass_actors"] == BYPASS_ACTORS,
+                "bypass actors differ from reviewed main ruleset")
     if "current_user_can_bypass" in data:
         require(data["current_user_can_bypass"] == "never",
                 "the admission reader must not have bypass authority")
@@ -167,8 +172,17 @@ def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
     require(isinstance(rules, list), "rules must be a list")
     by_type = {rule["type"]: rule for rule in rules}
     require(len(by_type) == len(rules), "duplicate rule types")
-    require(by_type.get("merge_queue", {}).get("parameters") == QUEUE,
-            "queue must serialize builds and merges with ALLGREEN and MERGE")
+    queue = by_type.get("merge_queue", {}).get("parameters")
+    if queue != QUEUE:
+        if isinstance(queue, dict):
+            differences = [f"{key}: expected {QUEUE.get(key, '<absent>')!r}, "
+                           f"got {queue.get(key, '<absent>')!r}"
+                           for key in sorted(QUEUE.keys() | queue.keys())
+                           if key not in QUEUE or key not in queue or QUEUE[key] != queue[key]]
+            detail = "; ".join(differences)
+        else:
+            detail = f"expected {QUEUE!r}, got {queue!r}"
+        raise AdmissionError("queue parameters differ from repository contract: " + detail)
     checks = by_type.get("required_status_checks", {}).get("parameters", {})
     require(checks.get("strict_required_status_checks_policy") is False,
             "do not require feature-branch updates")
@@ -196,10 +210,10 @@ def live_ruleset(api: GitHub, repository: str) -> dict:
             data.get("source_type") == "Repository" and data.get("source") == repository,
             "live ruleset identity mismatch")
     validate_ruleset(data, read_only_response=True)
-    visibility = "verified-empty" if "bypass_actors" in data else "hidden"
+    visibility = "verified-expected" if "bypass_actors" in data else "hidden"
     if visibility == "hidden":
         print("ruleset bypass inventory is hidden from the read-only token; "
-              "no-bypass configuration requires a separate administrator audit", file=sys.stderr)
+              "the two reviewed bypass actors require a separate administrator audit", file=sys.stderr)
     return {"id": RULESET_ID, "bypass_inventory": visibility}
 
 

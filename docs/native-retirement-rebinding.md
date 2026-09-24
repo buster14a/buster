@@ -192,6 +192,15 @@ before publication. A schema change that the old implementation cannot
 understand must land as a backwards-compatible bootstrap first, then as a
 separate policy transition after that bootstrap is trusted.
 
+For #935, the first bootstrap admits exactly the existing support declaration
+digest and the digest of the proposed aggregate-test ledger update in the
+materializer, full-census validator, and performance binding. It classifies the
+support ledger as reviewed policy while leaving that ledger and the frozen test
+bytes intact. Once trusted, a separate policy transition may change the test,
+its exact byte/hash ledger row, and the benchmark-service profile pins. Old
+census/performance evidence remains bound to its original declaration digest;
+the matching manifest and exact declaration bytes are checked together.
+
 ### Solo-maintainer authorization
 
 `authorization_mode: solo-maintainer` is explicit owner authorization of one

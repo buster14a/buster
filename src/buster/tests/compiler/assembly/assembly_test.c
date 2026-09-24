@@ -5273,6 +5273,60 @@ UnitTestResult assembly_tests(UnitTestArguments* arguments)
                                memcmp(x86_high_byte_extend.bytes.pointer, expected_x86_high_byte_extend,
                                       sizeof(expected_x86_high_byte_extend)) == 0);
 
+    // docs/x86-64-source-move-extend-oracle.s provides two independently
+    // assembled spellings of this byte stream and its relocation fields.
+    u8 const expected_extend_layout[] = {
+        0x44, 0x0f, 0xb6, 0x45, 0x00,
+        0x4f, 0x0f, 0xbf, 0x4c, 0x94, 0x7f,
+        0x4f, 0x0f, 0xbf, 0x8c, 0x94, 0x80, 0x00, 0x00, 0x00,
+        0x4d, 0x63, 0x9d, 0x00, 0x00, 0x00, 0x00,
+        0x48, 0x0f, 0xbe, 0x05, 0x00, 0x00, 0x00, 0x00,
+    };
+    String8 const extend_layout_sources[] = {
+        S8("movzx r8d, byte ptr [rbp]\n"
+           "movsx r9, word ptr [r12+r10*4+127]\n"
+           "movsx r9, word ptr [r12+r10*4+128]\n"
+           "movsxd r11, dword ptr [r13+external_disp]\n"
+           "movsx rax, byte ptr [rip+external_rip]\n"),
+        S8("movzbl (%rbp), %r8d\n"
+           "movswq 127(%r12,%r10,4), %r9\n"
+           "movswq 128(%r12,%r10,4), %r9\n"
+           "movslq external_disp(%r13), %r11\n"
+           "movsbq external_rip(%rip), %rax\n"),
+    };
+    for (u32 syntax_index = 0; syntax_index < BUSTER_ARRAY_LENGTH(extend_layout_sources); syntax_index += 1)
+    {
+        AssemblyEncodeResult layout = assembly_encode(
+            arguments->arena, extend_layout_sources[syntax_index],
+            (AssemblyEncodeOptions){.target = x86_target,
+                                    .syntax = syntax_index ? ASSEMBLY_SYNTAX_ATT : ASSEMBLY_SYNTAX_INTEL});
+        BUSTER_TEST(arguments, layout.diagnostic_count == 0 &&
+                                   assembly_test_bytes_equal(layout.bytes, expected_extend_layout, sizeof(expected_extend_layout)));
+        BUSTER_TEST(arguments, layout.relocation_count == 2 &&
+                                   layout.relocations[0].offset == 23 && layout.relocations[0].addend == 0 &&
+                                   layout.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
+                                   layout.relocations[1].offset == 31 && layout.relocations[1].addend == -4 &&
+                                   layout.relocations[1].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
+                                   layout.relocations[0].symbol < layout.symbol_count &&
+                                   layout.relocations[1].symbol < layout.symbol_count &&
+                                   string_equal(layout.symbols[layout.relocations[0].symbol].name, S8("external_disp")) &&
+                                   string_equal(layout.symbols[layout.relocations[1].symbol].name, S8("external_rip")));
+    }
+    AssemblyEncodeResult invalid_extend_after_valid = assembly_encode(
+        arguments->arena, S8("movsxd r11, dword ptr [r13+external_disp]\n"
+                             "movzx r8d, ah\n"
+                             "movsx rax, byte ptr [r13+2147483648]\n"),
+        (AssemblyEncodeOptions){.target = x86_target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+    u8 const expected_extend_before_failure[] = {0x4d, 0x63, 0x9d, 0, 0, 0, 0};
+    BUSTER_TEST(arguments, invalid_extend_after_valid.diagnostic_count == 2 &&
+                               assembly_test_bytes_equal(invalid_extend_after_valid.bytes, expected_extend_before_failure,
+                                                         sizeof(expected_extend_before_failure)) &&
+                               invalid_extend_after_valid.relocation_count == 1 &&
+                               invalid_extend_after_valid.relocations[0].offset == 3 &&
+                               invalid_extend_after_valid.relocations[0].kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED &&
+                               invalid_extend_after_valid.symbol_count == 1 &&
+                               string_equal(invalid_extend_after_valid.symbols[0].name, S8("external_disp")));
+
     u8 expected_x86_rotate[] = {
         0xd0, 0xc0,
         0x66, 0xd3, 0xc8,

@@ -272,6 +272,9 @@ mode selection, pair counts and statistical thresholds are unchanged.
 
 Use the same Clang-built compiler for both inputs first to validate A/A
 collection. Then compare frozen baseline/candidate compilers on an idle runner.
+For dedicated 9700X calibration, also retain the
+[same-source cross-build controls](DEDICATED.md#same-source-cross-build-controls)
+so build-root sensitivity is visible beside immutable-binary A/A noise.
 The existing tiny-startup case retains the small-output control. For the
 many-function scaling series, `--profile ci --scale 2`, `4`, `8` and `16`
 produce 1,024, 2,048, 4,096 and 8,192 definitions respectively. Every run still

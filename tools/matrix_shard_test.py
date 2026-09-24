@@ -293,7 +293,7 @@ class WorkflowSetupTests(unittest.TestCase):
 
     def test_workflow_tools_keep_platform_budget_and_all_suites(self):
         block = self.steps["Workflow tool regression tests"]
-        self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 5 || 2 }}", block)
+        self.assertIn("timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}", block)
         self.assertIn("matrix.shard == 'release'", block)
         self.assertIn("set -euo pipefail", block)
         self.assertNotIn("continue-on-error:", block)
@@ -305,9 +305,35 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/native_producer_profile_test.py", "tools/ci_configure_evidence_test.py",
             "tools/ci_matrix_phases_test.py", "tools/ci_native_observation_test.py",
         }
-        suites = re.findall(r'"\$BUSTER_CI_PYTHON" ([^ ]+) -v', block)
+        suites = re.findall(r'^          run_suite ([^ ]+) [^ ]+\.log$', block, re.M)
         self.assertEqual(set(suites), expected)
         self.assertEqual(len(suites), len(expected))
+        self.assertIn('if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee', block)
+        self.assertIn('return "$status"', block)
+        self.assertIn('WORKFLOW_TOOLS_END result=success', block)
+
+    def test_workflow_tools_record_all_suites_and_stop_on_failure(self):
+        expected = re.findall(r'^          run_suite ([^ ]+) ([^ ]+\.log)$',
+                              self.steps["Workflow tool regression tests"], re.M)
+        for suite, _ in expected:
+            path = self.root / suite
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("import os, sys\nprint('SUITE fixture')\n"
+                            "sys.exit(int(os.environ['FIXTURE_EXIT']) if __file__.endswith('ci_admission_test.py') else 0)\n",
+                            encoding="utf-8")
+        for code in (0, 7):
+            with self.subTest(exit_code=code):
+                shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
+                self.environment["FIXTURE_EXIT"] = str(code)
+                result = self.run_step("Workflow tool regression tests")
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                completed = expected if code == 0 else expected[:2]
+                self.assertEqual(re.findall(r'SUITE_START path=([^ ]+)', result.stdout),
+                                 [suite for suite, _ in completed])
+                for suite, log in completed:
+                    self.assertIn(f"SUITE_END path={suite} result=", result.stdout)
+                    self.assertIn("SUITE fixture", (self.root / "buster-ci" / log).read_text())
+                self.assertEqual("WORKFLOW_TOOLS_END result=success" in result.stdout, code == 0)
 
     def test_checks_zig_setup_creates_its_own_log_directory_and_propagates_failure(self):
         tools = self.root / "tools"
@@ -443,6 +469,43 @@ class CompletionGateTests(unittest.TestCase):
         with mock.patch.object(github_ci_time, "api_get", side_effect=[dict(run, run_attempt=2)]):
             with self.assertRaises(ValueError):
                 github_ci_time.require_jobs(args)
+
+    def test_api_gate_waits_for_unfinished_job_but_rejects_missing_final_steps(self):
+        completed = self.sample()
+        pending = copy.deepcopy(completed)
+        windows = next(job for job in pending if job["name"] == "Windows x86-64 checks")
+        windows.update(status="in_progress", conclusion=None, steps=[])
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
+
+        def api_get(_repository, path, _token):
+            if path == "actions/runs/123":
+                return run
+            api_get.probes += 1
+            return {"total_count": len(completed), "jobs": pending if not api_get.settles or api_get.probes == 1 else completed}
+
+        api_get.probes = 0
+        api_get.settles = True
+        with mock.patch.object(github_ci_time, "api_get", side_effect=api_get), \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            self.assertTrue(github_ci_time.require_jobs(args)["success"])
+            sleep.assert_called_once_with(github_ci_time.REQUIRED_JOB_SETTLE_SECONDS)
+
+        api_get.probes = 0
+        api_get.settles = False
+        with mock.patch.object(github_ci_time, "api_get", side_effect=api_get), \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            self.assertFalse(github_ci_time.require_jobs(args)["success"])
+            self.assertEqual(api_get.probes, github_ci_time.REQUIRED_JOB_SETTLE_PROBES)
+            self.assertEqual(sleep.call_count, github_ci_time.REQUIRED_JOB_SETTLE_PROBES - 1)
+
+        # A finished job without its required steps is not an unfinished API
+        # observation. No previous green attempt may supply those steps.
+        windows.update(status="completed", conclusion="success")
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, {"total_count": len(pending), "jobs": pending}]), \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            self.assertFalse(github_ci_time.require_jobs(args)["success"])
+            sleep.assert_not_called()
 
     def test_workflow_expands_exact_cross_product_and_keeps_gate_wiring(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

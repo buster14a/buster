@@ -580,42 +580,101 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/native-artifact-upload", primary_upload)
 
 
+    def test_mobile_log_upload_reuses_bounded_action_for_all_matrix_entries(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        workflow = (repository_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        mobile = workflow.split("\n  mobile:", 1)[1].split("\n  uefi:", 1)[0]
+        entries = re.findall(
+            r"(?m)^          - name: ([^\n]+)\n            runner: ([^\n]+)\n"
+            r"            os: ([^\n]+)\n            arch: ([^\n]+)$",
+            mobile,
+        )
+        self.assertEqual(entries, [
+            ("Android x86-64", "ubuntu-26.04", "android", "x86_64"),
+            ("iOS x86-64", "macos-26-intel", "ios", "x86_64"),
+            ("iOS AArch64", "macos-26", "ios", "aarch64"),
+        ])
+        steps = dict(re.findall(
+            r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)",
+            mobile,
+        ))
+        summary = steps["Mobile result and reproduction"]
+        upload = steps["Retain mobile logs"]
+        self.assertIn("if: ${{ always() && steps.checkout.outcome == 'success' }}", summary)
+        self.assertIn("if: ${{ !cancelled() }}", upload)
+        self.assertIn("uses: ./.github/actions/native-artifact-upload", upload)
+        self.assertIn("label: mobile", upload)
+        self.assertIn("label_title: Mobile", upload)
+        self.assertIn("name: mobile-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}", upload)
+        self.assertIn("path: ${{ runner.temp }}/buster-ci/", upload)
+        self.assertIn("compression-level: 6", upload)
+        self.assertIn("if-no-files-found: ignore", upload)
+        self.assertIn("retention-days: 7", upload)
+        self.assertNotIn("uses: actions/upload-artifact@", upload)
+        self.assertLess(
+            mobile.index("      - name: Mobile result and reproduction"),
+            mobile.index("      - name: Retain mobile logs"),
+        )
+        self.assertIn("needs: [lint, test, native, mobile, uefi, analyzer]", workflow)
 
-    def test_native_log_upload_action_retries_once_and_fails_closed(self):
+    def test_log_upload_action_retries_once_and_fails_closed(self):
         repository_root = Path(__file__).resolve().parents[1]
         action_path = repository_root / ".github" / "actions" / "native-artifact-upload" / "action.yml"
         action = action_path.read_text(encoding="utf-8")
         steps = re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - name:|\Z)", action)
         expected = [
-            "Retain native logs",
-            "Back off before retrying native log upload",
-            "Retain native logs (retry)",
-            "Record recovered native log upload",
-            "Record failed native log upload",
+            "Retain ${{ inputs.label }} logs",
+            "Back off before retrying ${{ inputs.label }} log upload",
+            "Retain ${{ inputs.label }} logs (retry)",
+            "Record recovered ${{ inputs.label }} log upload",
+            "Record failed ${{ inputs.label }} log upload",
         ]
         self.assertEqual([name for name, _ in steps], expected)
         step_map = dict(steps)
-        primary = step_map["Retain native logs"]
-        backoff = step_map["Back off before retrying native log upload"]
-        retry = step_map["Retain native logs (retry)"]
-        recovered = step_map["Record recovered native log upload"]
-        failed = step_map["Record failed native log upload"]
+        primary = step_map[expected[0]]
+        backoff = step_map[expected[1]]
+        retry = step_map[expected[2]]
+        recovered = step_map[expected[3]]
+        failed = step_map[expected[4]]
+        label_input = action.split("  label:\n", 1)[1].split("\n  name:", 1)[0]
+        self.assertRegex(label_input, r"(?m)^    default: native$")
+        title_input = action.split("  label_title:\n", 1)[1].split("\n  name:", 1)[0]
+        self.assertRegex(title_input, r"(?m)^    default: Native$")
         pin = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
         self.assertEqual(action.count("uses: " + pin), 2)
         self.assertEqual(action.count("continue-on-error: true"), 1)
-        self.assertIn("id: native_upload", primary)
+        self.assertIn("if: ${{ !cancelled() }}", primary)
+        self.assertIn("id: artifact_upload", primary)
         self.assertIn("continue-on-error: true", primary)
         self.assertNotIn("overwrite: true", primary)
-        self.assertIn("steps.native_upload.outcome == 'failure'", backoff)
+        failure_condition = "steps.artifact_upload.outcome == 'failure'"
+        self.assertIn(failure_condition, backoff)
         self.assertIn("sleep 15", backoff)
-        self.assertIn("id: native_upload_retry", retry)
-        self.assertIn("steps.native_upload.outcome == 'failure'", retry)
+        self.assertEqual(backoff.count("sleep 15"), 1)
+        self.assertIn("id: artifact_upload_retry", retry)
+        self.assertIn(failure_condition, retry)
+        for guarded_step in (backoff, retry, recovered):
+            self.assertIn("!cancelled()", guarded_step)
         self.assertNotIn("continue-on-error", retry)
         self.assertIn("overwrite: true", retry)
-        self.assertIn("steps.native_upload_retry.outcome == 'success'", recovered)
-        self.assertIn("steps.native_upload_retry.outcome == 'failure'", failed)
+        self.assertIn("steps.artifact_upload_retry.outcome == 'success'", recovered)
+        self.assertIn("Retry succeeded;", recovered)
+        self.assertIn("GITHUB_STEP_SUMMARY", recovered)
+        self.assertIn(failure_condition, failed)
+        self.assertIn("steps.artifact_upload_retry.outcome == 'failure'", failed)
+        self.assertIn("always() && !cancelled()", failed)
         self.assertIn("evidence was not retained", failed)
         self.assertEqual(action_pins.check_text(action, action_path), [])
+
+        primary_inputs = dict(re.findall(r"(?m)^        ([a-z-]+): (.+)$",
+                                        primary.split("      with:\n", 1)[1]))
+        retry_inputs = dict(re.findall(r"(?m)^        ([a-z-]+): (.+)$",
+                                      retry.split("      with:\n", 1)[1]))
+        self.assertEqual(
+            primary_inputs,
+            {key: value for key, value in retry_inputs.items() if key != "overwrite"},
+        )
+        self.assertEqual(retry_inputs["overwrite"], "true")
 
 if __name__ == "__main__":
     unittest.main()

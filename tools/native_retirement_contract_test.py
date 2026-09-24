@@ -369,8 +369,15 @@ class ContractTests(unittest.TestCase):
                     "support_contract_sha256": contract.FULL_SUPPORT_CONTRACT_SHA256, "inputs": "559",
                     "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "411"}
         inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
-        self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
-                         (contract.FULL_CENSUS_PROFILE, contract.FULL_SUBJECT_COUNT))
+        for digest in (contract.FULL_SUPPORT_CONTRACT_SHA256,
+                       contract.NEXT_SUPPORT_CONTRACT_SHA256):
+            with self.subTest(digest=digest):
+                manifest["support_contract_sha256"] = digest
+                self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),
+                                 (contract.FULL_CENSUS_PROFILE, contract.FULL_SUBJECT_COUNT))
+        manifest["support_contract_sha256"] = "0" * 64
+        with self.assertRaises(AssertionError):
+            contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT)
 
     def test_checked_in_production_gap_ledger_is_canonical_and_authenticated(self):
         ledger_path = Path(__file__).resolve().parents[1] / "docs/native-retirement-supported-gaps-v1.tsv"

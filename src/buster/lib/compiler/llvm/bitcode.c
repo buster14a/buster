@@ -63,7 +63,7 @@ enum
     LLVM_BC_CST_AGGREGATE = 7,
     LLVM_BC_CST_STRING = 8,
     LLVM_BC_CST_CE_CAST = 11,
-    LLVM_BC_CST_CE_GEP = 32,
+    LLVM_BC_CST_CE_GEP_OLD = 12,
 
     LLVM_BC_FUNC_DECLAREBLOCKS = 1,
     LLVM_BC_FUNC_BINOP = 2,
@@ -1914,6 +1914,148 @@ static u32 llvm_bc_float_constant(LlvmBcContext* context, IrType* type, u64 bits
     return llvm_bc_add_constant(context, context->ir_type_ids[type->id.value], LLVM_BC_CST_FLOAT, &bits, 1);
 }
 
+static u32 llvm_bc_address_constant(LlvmBcContext* context, IrSymbolId symbol_id, s64 addend, IrSymbolId owner)
+{
+    u32 result = LLVM_BC_INVALID_ID;
+    IrSymbol* symbol = llvm_bc_ir_symbol(context, symbol_id);
+    u32 target = symbol ? context->symbol_value_ids[symbol_id.value] : LLVM_BC_INVALID_ID;
+    bool tls_target = symbol && (symbol->is_thread_local ||
+                                 (target < context->global_count && context->globals[target].is_thread_local));
+    if (!symbol || tls_target || target == LLVM_BC_INVALID_ID ||
+        (symbol->kind != IR_SYMBOL_DATA && symbol->kind != IR_SYMBOL_FUNCTION))
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
+                     llvm_bc_s8("LLVM bitcode initializer requires a resolved non-TLS data or function symbol"), 0, 0, 0, owner);
+    }
+    else if (!addend)
+    {
+        result = target;
+    }
+    else
+    {
+        u64 pointer_size = context->program->data_layout.pointer.size;
+        if ((pointer_size != 4 && pointer_size != 8) ||
+            (pointer_size == 4 && (addend < INT32_MIN || addend > INT32_MAX)))
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
+                         llvm_bc_s8("LLVM bitcode initializer addend exceeds the target pointer index width"), 0, 0, 0, owner);
+        }
+        else
+        {
+            u32 index_type = pointer_size == 4 ? context->i32_type_id : context->i64_type_id;
+            u32 offset = llvm_bc_integer_constant_for_type_id(context, index_type, (u32)(pointer_size * 8), (u64)addend);
+            // GEP over i8 expresses a signed byte displacement without claiming
+            // inbounds: a canonical addend may point before its named symbol.
+            // The unflagged GEP record is understood by LLVM 18 and newer;
+            // the newer flags-bearing record is not understood by LLVM 18.
+            u64 operands[5] = {context->i8_type_id, context->pointer_type_id, target, index_type, offset};
+            result = llvm_bc_add_constant(context, context->pointer_type_id, LLVM_BC_CST_CE_GEP_OLD, operands, 5);
+        }
+    }
+    return result;
+}
+
+static u32 llvm_bc_byte_string_constant(LlvmBcContext* context, u8 const* bytes, u64 length, u32 type_id)
+{
+    u64* operands = arena_allocate(context->arena, u64, length ? length : 1);
+    for (u64 index = 0; index < length; index += 1)
+    {
+        operands[index] = bytes[index];
+    }
+    return llvm_bc_add_constant(context, type_id, LLVM_BC_CST_STRING, operands, (u32)length);
+}
+
+static u32 llvm_bc_relocated_bytes_constant(LlvmBcContext* context, LlvmBcGlobal* record)
+{
+    u32 result = LLVM_BC_INVALID_ID;
+    IrGlobal* global = record->global;
+    IrSymbolId owner = global->symbol;
+    u64 pointer_size = context->program->data_layout.pointer.size;
+    u32 count = global->relocation_count;
+    IrType* canonical_type = llvm_bc_ir_type(context, record->canonical_type);
+    if (!count || !global->relocations || !global->bytes.pointer || global->bytes.length > UINT32_MAX ||
+        !canonical_type || global->bytes.length != canonical_type->layout.size ||
+        (pointer_size != 4 && pointer_size != 8) || count > (UINT32_MAX - 2) / 2)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid LLVM bitcode relocation-bearing byte initializer"),
+                     0, 0, 0, owner);
+    }
+    else
+    {
+        // Canonical relocations need not be ordered. Sort a copy, leaving the
+        // source module untouched and making the storage shape deterministic.
+        IrGlobalRelocation* ordered = arena_allocate(context->arena, IrGlobalRelocation, count);
+        for (u32 index = 0; index < count; index += 1)
+        {
+            IrGlobalRelocation relocation = global->relocations[index];
+            u32 position = index;
+            while (position && ordered[position - 1].offset > relocation.offset)
+            {
+                ordered[position] = ordered[position - 1];
+                position -= 1;
+            }
+            ordered[position] = relocation;
+        }
+        u64 cursor = 0;
+        for (u32 index = 0; index < count && !llvm_bc_failed(context); index += 1)
+        {
+            IrGlobalRelocation* relocation = ordered + index;
+            if (relocation->offset < cursor || relocation->offset > global->bytes.length ||
+                pointer_size > global->bytes.length - relocation->offset)
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("LLVM bitcode global relocation range overlaps or exceeds storage"),
+                             0, 0, 0, owner);
+            }
+            else if (relocation->is_label_address)
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
+                             llvm_bc_s8("LLVM bitcode label-address global relocation is unsupported"), 0, 0, 0, owner);
+            }
+            else
+            {
+                cursor = relocation->offset + pointer_size;
+            }
+        }
+        if (!llvm_bc_failed(context))
+        {
+            u32 capacity = count * 2 + 1;
+            u64* types = arena_allocate(context->arena, u64, (u64)capacity + 1);
+            u64* values = arena_allocate(context->arena, u64, capacity);
+            u32 segments = 0;
+            cursor = 0;
+            types[0] = 1; // packed: byte runs and pointer slots have exact canonical offsets
+            for (u32 index = 0; index < count && !llvm_bc_failed(context); index += 1)
+            {
+                IrGlobalRelocation* relocation = ordered + index;
+                if (relocation->offset != cursor)
+                {
+                    u64 length = relocation->offset - cursor;
+                    u32 type = llvm_bc_array_type(context, length, context->i8_type_id);
+                    types[++segments] = type;
+                    values[segments - 1] = llvm_bc_byte_string_constant(context, global->bytes.pointer + cursor, length, type);
+                }
+                types[++segments] = context->pointer_type_id;
+                values[segments - 1] = llvm_bc_address_constant(context, relocation->symbol, relocation->addend, owner);
+                cursor = relocation->offset + pointer_size;
+            }
+            if (cursor < global->bytes.length && !llvm_bc_failed(context))
+            {
+                u64 length = global->bytes.length - cursor;
+                u32 type = llvm_bc_array_type(context, length, context->i8_type_id);
+                types[++segments] = type;
+                values[segments - 1] = llvm_bc_byte_string_constant(context, global->bytes.pointer + cursor, length, type);
+            }
+            if (!llvm_bc_failed(context))
+            {
+                u32 storage_type = llvm_bc_add_type_record(context, LLVM_BC_TYPE_STRUCT_ANON, types, segments + 1);
+                record->storage_type_id = storage_type;
+                result = llvm_bc_add_constant(context, storage_type, LLVM_BC_CST_AGGREGATE, values, segments);
+            }
+        }
+    }
+    return result;
+}
+
 static u32 llvm_bc_value_type_id(LlvmBcContext* context, IrFunction* function, IrValueId value_id)
 {
     if (!function || value_id.value >= function->value_count)
@@ -2057,10 +2199,10 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
                          record->symbol ? record->symbol->id : IR_SYMBOL_ID_INVALID);
             return false;
         }
-        if (global->relocation_count)
+        if (global->relocation_count && global->initializer_kind != IR_GLOBAL_INITIALIZER_BYTES)
         {
             llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
-                         llvm_bc_s8("LLVM bitcode byte initializers with embedded relocations are unsupported"), 0, 0, 0, global->symbol);
+                         llvm_bc_s8("LLVM bitcode relocations require a byte initializer"), 0, 0, 0, global->symbol);
             return false;
         }
         switch (global->initializer_kind)
@@ -2076,6 +2218,17 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
             break;
         case IR_GLOBAL_INITIALIZER_BYTES:
         {
+            // A packed relocation-bearing storage type has alignment one.
+            // Keep the canonical object's alignment on its global record.
+            if (!record->alignment)
+            {
+                record->alignment = type->layout.alignment;
+            }
+            if (global->relocation_count)
+            {
+                record->initializer_value_id = llvm_bc_relocated_bytes_constant(context, record);
+                break;
+            }
             if ((global->bytes.length && !global->bytes.pointer) || global->bytes.length > UINT32_MAX)
             {
                 llvm_bc_fail(context, LLVM_BITCODE_ERROR_IR_VALIDATION, llvm_bc_s8("invalid LLVM bitcode global byte initializer"), 0, 0, 0,
@@ -2083,24 +2236,19 @@ static bool llvm_bc_prepare_global_initializers(LlvmBcContext* context)
                 return false;
             }
             record->storage_type_id = llvm_bc_array_type(context, global->bytes.length, context->i8_type_id);
-            u64* operands = arena_allocate(context->arena, u64, global->bytes.length ? global->bytes.length : 1);
-            for (u64 byte = 0; byte < global->bytes.length; byte += 1)
-            {
-                operands[byte] = global->bytes.pointer[byte];
-            }
-            record->initializer_value_id = llvm_bc_add_constant(context, record->storage_type_id, LLVM_BC_CST_STRING, operands,
-                                                                (u32)global->bytes.length);
+            record->initializer_value_id = llvm_bc_byte_string_constant(context, global->bytes.pointer, global->bytes.length,
+                                                                         record->storage_type_id);
             break;
         }
         case IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS:
-            if (global->initializer_addend || global->initializer_symbol.value >= context->program->symbols.count ||
-                context->symbol_value_ids[global->initializer_symbol.value] == LLVM_BC_INVALID_ID || type->kind != IR_TYPE_POINTER)
+            if (type->kind != IR_TYPE_POINTER)
             {
                 llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_GLOBAL_INITIALIZER,
-                             llvm_bc_s8("LLVM bitcode symbol-address initializers require a resolved zero-addend pointer"), 0, 0, 0, global->symbol);
+                             llvm_bc_s8("LLVM bitcode symbol-address initializer requires pointer storage"), 0, 0, 0, global->symbol);
                 return false;
             }
-            record->initializer_value_id = context->symbol_value_ids[global->initializer_symbol.value];
+            record->initializer_value_id = llvm_bc_address_constant(context, global->initializer_symbol, global->initializer_addend,
+                                                                     global->symbol);
             break;
         case IR_GLOBAL_INITIALIZER_NONE:
         case IR_GLOBAL_INITIALIZER_COUNT:

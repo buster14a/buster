@@ -3870,6 +3870,48 @@ UnitTestResult x86_64_metadata_tests(UnitTestArguments* arguments)
                            exact.byte_count == checked.byte_count && memcmp(checked_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0 &&
                            memcmp(exact_bytes, expected, BUSTER_ARRAY_LENGTH(expected)) == 0;
         BUSTER_TEST(arguments, movsxd_rexw);
+
+        // A missing base displacement has a zero placeholder but needs a
+        // full disp32 in the selected source form and in exact emission.
+        BusterX86MetadataPhysicalOperand symbolic_operands[2] = {
+            x86_64_metadata_test_physical_reg(BUSTER_X86_METADATA_PHYSICAL_CLASS_GPR, 11, 64),
+            x86_64_metadata_test_physical_mem_base(13, 32, 0),
+        };
+        symbolic_operands[1].memory.has_symbol = true;
+        symbolic_operands[1].memory.symbol = S8("external_disp");
+        BusterX86MetadataPhysicalQuery source_query = x86_64_metadata_test_physical_query(
+            S8("MOVSXD"), symbolic_operands, BUSTER_ARRAY_LENGTH(symbolic_operands), (BusterX86MetadataPhysicalAttributes){0},
+            wildcard_features, BUSTER_ARRAY_LENGTH(wildcard_features));
+        source_query.source_semantics = true;
+        BusterX86MetadataSelectResult selected = buster_x86_metadata_select_form(source_query);
+        u8 source_checked_bytes[16] = {0};
+        u8 source_exact_bytes[16] = {0};
+        BusterX86MetadataRelocation source_checked_fixups[1] = {0};
+        BusterX86MetadataRelocation source_exact_fixups[1] = {0};
+        BusterX86MetadataEmitResult source_checked = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
+            .physical = source_query, .output = source_checked_bytes, .output_capacity = sizeof(source_checked_bytes),
+            .relocations = source_checked_fixups, .relocation_capacity = BUSTER_ARRAY_LENGTH(source_checked_fixups)});
+        BusterX86MetadataEmitResult source_exact = buster_x86_metadata_emit_form((BusterX86MetadataEmitQuery){
+            .physical = source_query, .form_id = selected.form_id,
+            .output = source_exact_bytes, .output_capacity = sizeof(source_exact_bytes),
+            .relocations = source_exact_fixups, .relocation_capacity = BUSTER_ARRAY_LENGTH(source_exact_fixups)});
+        u8 const symbolic_bytes[] = {0x4d, 0x63, 0x9d, 0, 0, 0, 0};
+        BUSTER_TEST(arguments, selected.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   selected.selected_byte_count == sizeof(symbolic_bytes) &&
+                                   source_checked.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   source_exact.status == BUSTER_X86_METADATA_ENCODE_SUCCESS &&
+                                   source_checked.form_id == selected.form_id && source_exact.form_id == selected.form_id &&
+                                   source_checked.byte_count == sizeof(symbolic_bytes) &&
+                                   source_exact.byte_count == sizeof(symbolic_bytes) &&
+                                   memcmp(source_checked_bytes, source_exact_bytes, sizeof(symbolic_bytes)) == 0 &&
+                                   memcmp(source_checked_bytes, symbolic_bytes, sizeof(symbolic_bytes)) == 0 &&
+                                   source_checked.relocation_count == 1 && source_exact.relocation_count == 1 &&
+                                   source_checked_fixups[0].offset == 3 && source_exact_fixups[0].offset == 3 &&
+                                   source_checked_fixups[0].width == 4 && source_exact_fixups[0].width == 4 &&
+                                   source_checked_fixups[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED &&
+                                   source_exact_fixups[0].kind == BUSTER_X86_METADATA_RELOCATION_ABSOLUTE32_SIGN_EXTENDED &&
+                                   string_equal(source_checked_fixups[0].symbol, S8("external_disp")) &&
+                                   string_equal(source_exact_fixups[0].symbol, S8("external_disp")));
     }
 
     {

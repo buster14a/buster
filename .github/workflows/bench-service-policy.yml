@@ -35,11 +35,16 @@ jobs:
         with:
           persist-credentials: false
       - name: Prove exclusive fixed-gateway dispatch
-        run: python3 -B tools/bench_service/workflow_policy_test.py
+        run: |
+          python3 -B tools/bench_service/workflow_policy_test.py
+          python3 -B tools/bench_service/deploy/verify_github_actor_policy_test.py
+          python3 -B tools/bench_service/deploy/verify_github_admission_test.py
+          python3 -B tools/bench_service/deploy/verify_github_queue_test.py
       - name: Replay Zen 5 qualification formats
         run: |
           python3 -B tools/zen5_host_qualification.py --self-test
           python3 -B tools/zen5_aa_noise.py --self-test
+          python3 -B tools/zen5_build_control.py --self-test
       - name: Exercise atomic exclusive admission
         shell: bash
         run: |
