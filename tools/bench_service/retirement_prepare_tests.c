@@ -5,6 +5,8 @@
 #define main bq_service_cli_main
 #include "main.c"
 #undef main
+#include "retirement_correctness.c"
+#include "retirement_correctness_service.c"
 #include <stdlib.h>
 
 BUSTER_GLOBAL_LOCAL u32 bq_retirement_tests;
@@ -193,6 +195,104 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_binary(int directory, char const* name, ch
     return ok;
 }
 
+/* A real service readback joins the B gate here. The remaining one-row #508
+ * declaration is synthetic and cannot authorize a timing campaign. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_correctness_join(BqQueue* queue, BqJob const* job,
+    int installed, int workspaces, String8 profile, char const* preparation_digest,
+    char const* record_digest, BqRetirementBinaries const* observed)
+{
+    BqRetirementPrepared prepared = {.rows = 1, .object_rows = 1, .native_target = 1};
+    memcpy(prepared.preparation_sha256, preparation_digest, SHA256_HEX_CAPACITY);
+    memset(prepared.support_sha256, '1', 64);
+    memset(prepared.census_sha256, 'b', 64);
+    for (u32 side = 0; side < 2; side += 1)
+    {
+        memcpy(prepared.source_sha256[side], observed->source_sha256[side], SHA256_HEX_CAPACITY);
+        memcpy(prepared.binary_sha256[side], observed->binary_sha256[side], SHA256_HEX_CAPACITY);
+    }
+    BqRetirementTrustedRow row = {.row = 0, .census_row = 0, .target = 1,
+                                  .stage = BQ_RETIREMENT_STAGE_OBJECT, .classification = 1,
+                                  .compiler_eligible = 1};
+    memset(row.identity_sha256, '1', 64);
+    memset(row.source_sha256, '2', 64);
+    memset(row.configuration_sha256, '3', 64);
+    memset(row.compiler_command_sha256[0], '4', 64);
+    memset(row.compiler_command_sha256[1], '5', 64);
+    BqRetirementRequiredCheck required[BQ_RETIREMENT_CHECK_COUNT - 1u] = {0};
+    BqRetirementCheckResult checked[BQ_RETIREMENT_CHECK_COUNT - 1u] = {0};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(required); i += 1)
+    {
+        required[i].kind = i + 1;
+        required[i].rows = 1;
+        memset(required[i].command_sha256, (int)('a' + i), 64);
+        memset(required[i].configuration_sha256, (int)('1' + i), 64);
+        memset(required[i].receipt_sha256, (int)('a' + i), 64);
+    }
+    BqRetirementRowFact fact = {0};
+    u32 identities[3] = {0};
+    u8 census[1] = {0};
+    BqRetirementHeldBinaries held = {0};
+    BqRetirementCorrectness gate = {0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_OK &&
+                  held.owned == 1 && held.descriptors[0] >= 3 && held.descriptors[1] >= 3 &&
+                  !strcmp(gate.prepared.binary_sha256[0], observed->binary_sha256[0]) &&
+                  !bq_retirement_correctness_ready(&gate));
+    int live = held.descriptors[0];
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_RECIPE_MISMATCH &&
+                  held.descriptors[0] == live && fcntl(live, F_GETFD) >= 0);
+    bq_retirement_binaries_release(&held);
+
+    char wrong_record[SHA256_HEX_CAPACITY];
+    memcpy(wrong_record, record_digest, SHA256_HEX_CAPACITY);
+    wrong_record[0] = wrong_record[0] == '0' ? '1' : '0';
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, wrong_record, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_CORRUPT &&
+                  gate.failed && !held.owned);
+
+    char saved = prepared.binary_sha256[0][0];
+    prepared.binary_sha256[0][0] = saved == '0' ? '1' : '0';
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_SOURCE_MISMATCH &&
+                  gate.failed && !held.owned && held.descriptors[0] == -1 && held.descriptors[1] == -1);
+    prepared.binary_sha256[0][0] = saved;
+    saved = prepared.source_sha256[1][0];
+    prepared.source_sha256[1][0] = saved == '0' ? '1' : '0';
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_SOURCE_MISMATCH &&
+                  gate.failed && !held.owned);
+    prepared.source_sha256[1][0] = saved;
+    prepared.support_sha256[0] = '2';
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_SOURCE_MISMATCH &&
+                  gate.failed && !held.owned);
+    prepared.support_sha256[0] = '1';
+    prepared.census_sha256[0] = 0;
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_RECIPE_MISMATCH &&
+                  gate.failed && !held.owned);
+}
+
 /* The miniature frozen files exercise the service's output record/importer,
  * not the trusted Clang build or complete toolchain provenance. */
 BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const* job,
@@ -223,6 +323,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
                   !strcmp(imported.source_sha256[1], prepared->subjects[1].manifest_sha256) &&
                   strcmp(imported.binary_sha256[0], imported.binary_sha256[1]) &&
                   strlen(imported.binary_identity_sha256[0]) == 64);
+    bq_prep_test_correctness_join(queue, job, installed, workspaces, pinned,
+                                  preparation_digest, record_digest, &imported);
     char wrong[SHA256_HEX_CAPACITY];
     memcpy(wrong, record_digest, sizeof(wrong));
     wrong[0] = wrong[0] == 'a' ? 'b' : 'a';
