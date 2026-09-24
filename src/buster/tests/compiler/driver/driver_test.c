@@ -10202,13 +10202,12 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             String8 direct_call_host_source_path =
                 buster_test_temporary_path(pic_model_arena, S8("buster-c-pie-direct-call-host"), S8(".c"));
             String8 direct_call_source = S8(
-                "extern int buster_pie_import(int value);\n"
+                "extern int abs(int value);\n"
                 "__attribute__((noinline)) static int buster_pie_local_increment(int value) { return value + 1; }\n"
-                "int buster_pie_call_import(int value) { return buster_pie_import(buster_pie_local_increment(value)); }\n");
+                "int buster_pie_call_import(int value) { return abs(buster_pie_local_increment(value)); }\n");
             String8 direct_call_host_source = S8(
                 "int buster_pie_call_import(int value);\n"
-                "int buster_pie_import(int value) { return value + 2; }\n"
-                "int main(void) { return buster_pie_call_import(40) != 43; }\n");
+                "int main(void) { return buster_pie_call_import(-40) != 41; }\n");
             bool direct_call_fixtures_written =
                 file_write(direct_call_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_source)) &&
                 file_write(direct_call_host_source_path, BUSTER_SLICE_TO_BYTE_SLICE(direct_call_host_source));
@@ -10244,7 +10243,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                         continue;
                     }
                     String8 name = direct_call_object.object.symbols[relocation->symbol].name;
-                    if (string_equal(name, S8("buster_pie_import")))
+                    if (string_equal(name, S8("abs")))
                     {
                         import_relocation_count += 1;
                         import_plt32 = import_plt32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32;
