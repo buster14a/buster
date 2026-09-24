@@ -123,6 +123,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_traffic(UnitTestArgument
     MachineQualityTraffic zeros[] = {0, 0, 0};
     BUSTER_TEST(arguments, machine_quality_region_next(0, 0, UINT32_MAX) == UINT32_MAX);
     BUSTER_TEST(arguments, machine_quality_region_next(zeros, BUSTER_ARRAY_LENGTH(zeros), UINT32_MAX) == UINT32_MAX);
+
+    // The sparse row order must reproduce the dense query sequence exactly.
+    // Deterministic generated rows cover empty, single, dense, sparse,
+    // tie-heavy, zero-bearing, unsorted and duplicate-region rows, all
+    // written over dirty storage.
+    {
+        enum
+        {
+            ROW_REGION_LIMIT = 48,
+            ROW_ENTRY_LIMIT = 96,
+        };
+        MachineQualityRegionTraffic row[ROW_ENTRY_LIMIT];
+        MachineQualityTraffic dense[ROW_REGION_LIMIT];
+        u64 state = UINT64_C(0x9e3779b97f4a7c15);
+        for (u32 trial = 0; trial < 512; trial += 1)
+        {
+            u32 shape = trial % 8;
+            u32 region_count = 1 + (u32)(trial % ROW_REGION_LIMIT);
+            u32 entry_count = shape == 0 ? 0 : shape == 1 ? 1 : shape == 2 ? region_count : shape == 3 ? 1 + region_count / 8 : 1 + (u32)(trial % ROW_ENTRY_LIMIT);
+            for (u32 index = 0; index < ROW_ENTRY_LIMIT; index += 1)
+            {
+                row[index] = (MachineQualityRegionTraffic){.traffic = UINT64_MAX, .region = UINT32_MAX, .reserved = UINT32_MAX};
+            }
+            for (u32 region = 0; region < region_count; region += 1)
+            {
+                dense[region] = 0;
+            }
+            for (u32 index = 0; index < entry_count; index += 1)
+            {
+                state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                u32 random = (u32)(state >> 33);
+                u32 region = shape <= 2 ? index % region_count : shape == 3 ? (index * 8) % region_count : random % region_count;
+                if (shape == 4 && index)
+                {
+                    region = row[index - 1].region + (random % 3 == 0 ? 0 : 1) < region_count ? row[index - 1].region + (random % 3 == 0 ? 0 : 1)
+                                                                                               : row[index - 1].region;
+                }
+                MachineQualityTraffic traffic = shape == 5 ? (MachineQualityTraffic)(1 + random % 2)
+                                              : shape == 6 ? (MachineQualityTraffic)(random % 4)
+                                                           : (MachineQualityTraffic)(random % 4096) << (random % 32);
+                row[index] = (MachineQualityRegionTraffic){.traffic = traffic, .region = region};
+                dense[region] += traffic;
+            }
+            u32 ordered = machine_quality_region_row_build(row, entry_count);
+            u32 previous = UINT32_MAX;
+            u32 matched = 0;
+            for (;;)
+            {
+                previous = machine_quality_region_next(dense, region_count, previous);
+                if (previous == UINT32_MAX)
+                {
+                    break;
+                }
+                BUSTER_TEST_RAW(arguments, matched < ordered && row[matched].region == previous && row[matched].traffic == dense[previous],
+                                string_format(arguments->arena, S8("QUALITY sparse region order trial {u32} rank {u32}"), trial, matched));
+                matched += 1;
+            }
+            BUSTER_TEST(arguments, matched == ordered);
+        }
+        BUSTER_TEST(arguments, machine_quality_region_row_build(0, 0) == 0);
+        MachineQualityRegionTraffic ties[] = {
+            {.traffic = 3, .region = 4}, {.traffic = 7, .region = 1}, {.traffic = 3, .region = 0},
+            {.traffic = 0, .region = 2}, {.traffic = 4, .region = 0}, {.traffic = 7, .region = 3},
+        };
+        u32 tie_regions[] = {0, 1, 3, 4};
+        u32 tie_count = machine_quality_region_row_build(ties, BUSTER_ARRAY_LENGTH(ties));
+        BUSTER_TEST(arguments, tie_count == BUSTER_ARRAY_LENGTH(tie_regions));
+        for (u32 index = 0; index < tie_count && index < BUSTER_ARRAY_LENGTH(tie_regions); index += 1)
+        {
+            BUSTER_TEST(arguments, ties[index].region == tie_regions[index]);
+        }
+    }
     return result;
 }
 // Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
@@ -10144,12 +10216,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, census.candidate_region_cells == census.candidates * census.merged_regions);
                 BUSTER_TEST(arguments, census.candidate_region_nonzero_cells > 0 &&
                                        census.candidate_region_nonzero_cells <= census.candidate_region_cells);
-                BUSTER_TEST(arguments, census.candidate_region_clear_bytes == census.candidate_region_cells * sizeof(MachineQualityTraffic));
+                BUSTER_TEST(arguments, census.candidate_region_clear_bytes == census.candidates * 2 * sizeof(u32));
                 BUSTER_TEST(arguments, census.initial_value_clear_bytes == census.global_values * (sizeof(MachineQualityTraffic) + 2 * sizeof(u32)));
                 BUSTER_TEST(arguments, census.region_table_zero_functions + census.region_table_sparse_functions +
                                        census.region_table_mixed_functions + census.region_table_dense_functions == 1);
                 BUSTER_TEST(arguments, census.heap_restore_bytes == census.heap_snapshot_bytes * census.attempts);
-                BUSTER_TEST(arguments, census.region_selection_cells == census.region_selection_passes * census.merged_regions);
+                BUSTER_TEST(arguments, census.region_selection_cells == census.selected_regions);
                 BUSTER_TEST(arguments, census.selected_regions <= census.region_selection_passes);
                 BUSTER_TEST(arguments, census.placement_probes <= census.attempts);
                 BUSTER_TEST(arguments, census.accepted_placements == 1);

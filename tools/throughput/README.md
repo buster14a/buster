@@ -741,7 +741,7 @@ preprocessing/debug-specific case or default corpus expansion is added here.
 ### QUALITY scratch/work census
 
 The existing `BUSTER_BENCH_ALLOCATIONS=ON` diagnostic compiler also emits
-`quality_census.version=1` and `quality_census.*` integer fields in each
+`quality_census.version=2` and `quality_census.*` integer fields in each
 `-fsource-metrics` file. The native runner already retains these files beside
 its artifacts during the separate `--allocation-baseline` / `--allocation-candidate`
 replays and requires their object bytes to match the uninstrumented subjects.
