@@ -25,40 +25,40 @@ organization registration token; keep tokens off this repository. The workflow
 selects both the group and labels. GitHub's group restrictions protect the
 public repository even if another workflow later copies the labels.
 
-## 2. Install and read back repository admission
+## 2. Read back repository admission
 
-From a trusted checkout of protected `main`, with repository Administration
-write access and organization runner-group read access, first read back
-`BENCH_SERVICE_DISPATCH_ENABLED=false`. Create it explicitly with value
-`false` if it is absent. Do not rerun the installer during an enabled dispatch
-window. With dispatch staged disabled, run:
+From a trusted checkout of protected `main`, with access to read repository
+policies, collaborator permission and organization runner groups, first read
+back `BENCH_SERVICE_DISPATCH_ENABLED=false`. Create it explicitly with value
+`false` if it is absent. Do not run the preflight during an enabled dispatch
+window. With dispatch staged disabled, run the read-only preflight:
 
 ```sh
 bash tools/bench_service/deploy/configure_github_admission.sh buster14a/buster
 ```
 
-The installer requires the repository variable to be exactly `false` without
-changing it, then verifies the exact main
-merge-queue ruleset `22537199`, verifies the runner group and rejects a
-repository-scoped benchmark runner. It reads and verifies the **existing**
-repository Actions policy for the exact workflow, requester list, and manual
-event; it never creates or replaces that policy. It then installs the additional
-benchmark branch ruleset. The existing Actions policy targets only the fixed
-workflow through `workflow_dispatch`. The reviewed requester list is
+The preflight requires the repository variable to be exactly `false` without
+changing it, then verifies the exact main merge-queue ruleset `22537199`, the
+absence of the superseded benchmark branch ruleset, the runner group, and the
+absence of a repository-scoped benchmark runner. It reads
+and verifies the **existing** repository Actions policy for the exact workflow,
+requester list, and manual event; it does not create or replace that policy.
+The existing Actions policy targets only the fixed workflow through
+`workflow_dispatch`. The reviewed requester list is
 `Repository admin` (role 5), `davidgmbb` (user 39247043), ChatGPT Codex
 Connector (app 1144995), Claude (app 1236702), and Devin.ai Integration
 (app 811515). These actors can start the workflow, but they do not thereby
 release its protected environment job. Do not add another requester. The
-additional branch ruleset retains deletion/force-push protection and
-`CI complete` plus `Benchmark service workflow policy`, without imposing
-one approval on every PR. The original main merge queue keeps all eight
-checks, 20 concurrent builds, one merge and `ALLGREEN`. Its two reviewed
+existing main merge queue keeps all eight checks, including `CI complete` and
+`Benchmark service workflow policy`, 20 concurrent builds, one merge and
+`ALLGREEN`. Its two reviewed
 standing bypass actors are Repository admin (role 5) and `davidgmbb` (user
-39247043), both in `always` mode. Audit the exact list; a bypass can skip
-normal main protection and must not be mistaken for an admission result.
+39247043), both in `always` mode. Audit the exact list; their bypass can skip
+normal main protection. This is administrator authority under the reviewed
+contract, not a workflow admission result or a connector permission.
 
-The installer verifies that `davidgmbb` still has repository `admin`
-permission, then configures that user as the sole required reviewer for
+The preflight verifies that `davidgmbb` still has repository `admin`
+permission and is the sole required reviewer for
 `benchmark-9700x` with self-review prevention. The environment remains
 restricted to the one exact `main` deployment branch. Connector requests
 wait for that administrator's approval before the runner is assigned a job;
@@ -67,14 +67,12 @@ readback fails, leave dispatch disabled and investigate before retrying.
 GitHub currently allows repository administrators to bypass environment
 protection; using that control is also an explicit administrator release and
 must be recorded as such. It does not count as the required review receipt.
-After installation, the read-only verifier fetches the benchmark ruleset,
-environment, deployment branch policies and repository variable again. It
-checks the reviewed ruleset without bypass actors, the administrator reviewer
-and self-review prevention, the one exact `main` branch, and literal `false`
-dispatch state. The installer separately rereads the requester policy and
-administrator permission after configuration.
-Keep those responses and the installer log as administrator receipts; they do
-not replace the physical host checks.
+The preflight fetches the environment, deployment branch policies and
+repository variable again. It checks the administrator reviewer and
+self-review prevention, the one exact `main` branch, and literal `false`
+dispatch state. It separately rereads the requester policy and administrator
+permission. Keep those responses and the preflight log as administrator
+receipts; they do not replace the physical host checks.
 
 The actor restriction governs **who starts the workflow**, not who edits its
 definition or the installed gateway. Admins must control changes to the
@@ -123,6 +121,6 @@ service recovery:
 gh variable set BENCH_SERVICE_DISPATCH_ENABLED --body false --repo buster14a/buster
 ```
 
-After changing the workflow, ruleset payload, Actions policy, installer,
-installed gateway, recipe, or profile, verify the reviewed installation and
+After changing the workflow, main ruleset, Actions policy, preflight,
+installed gateway, recipe, or profile, verify the reviewed admission and
 host again before re-enabling dispatch.
