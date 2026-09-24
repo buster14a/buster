@@ -137,6 +137,7 @@ ROW_ELIGIBILITY_FIELDS = [
 ]
 SUPPORT_DECLARATION_PATH = "docs/native-retirement-support-v1.tsv"
 SUPPORT_DECLARATION_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
+NEXT_SUPPORT_DECLARATION_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
 SUPPORT_DECLARATION_FIELDS = ["path", "role", "compile_obligation", "bytes", "sha256"]
 INPUT_FIELDS = ["path", "role", "compile_obligation", "bytes", "buster_hash_64",
                 "sha256", "fixture_recipe", "fixture_flags"]
@@ -1641,11 +1642,13 @@ def _check_support_output(root, binding, row_data, native_target=None):
     support_declaration = _support_file(support, "support_declaration")
     if support_declaration["path"] != SUPPORT_DECLARATION_PATH:
         _fail("#508 support declaration path is not the frozen declaration")
-    if support_declaration["sha256"] != SUPPORT_DECLARATION_SHA256:
+    support_sha256 = support_declaration["sha256"]
+    if support_sha256 not in (SUPPORT_DECLARATION_SHA256,
+                             NEXT_SUPPORT_DECLARATION_SHA256):
         _fail("#508 support declaration digest is not the approved immutable input")
     declaration_data = _evidence_bytes(root, support_declaration,
                                        "support.files.support_declaration")
-    if hashlib.sha256(declaration_data).hexdigest() != SUPPORT_DECLARATION_SHA256:
+    if hashlib.sha256(declaration_data).hexdigest() != support_sha256:
         _fail("#508 support declaration bytes changed")
     declaration = _tsv(declaration_data, SUPPORT_DECLARATION_FIELDS,
                        "support_declaration")
@@ -1682,7 +1685,7 @@ def _check_support_output(root, binding, row_data, native_target=None):
         _fail("#508 manifest is not an executed, SHA-256 census")
     if manifest["support_contract"] != SUPPORT_DECLARATION_PATH:
         _fail("#508 manifest does not identify the frozen support declaration")
-    if manifest["support_contract_sha256"] != SUPPORT_DECLARATION_SHA256:
+    if manifest["support_contract_sha256"] != support_sha256:
         _fail("#508 manifest support declaration digest differs")
     if manifest["environment"] != "explicit-replacement-in-environment.tsv":
         _fail("#508 manifest lacks the explicit replacement environment")

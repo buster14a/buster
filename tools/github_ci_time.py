@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import statistics
 import sys
+import time
 import urllib.parse
 import urllib.request
 
@@ -34,6 +35,8 @@ COMBINATION_SHARDS = ("release", "checks")
 COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS for shard in COMBINATION_SHARDS)
 LEGACY_COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+REQUIRED_JOB_SETTLE_PROBES = 13
+REQUIRED_JOB_SETTLE_SECONDS = 2
 RUN_FIELDS = ("id", "head_sha", "head_branch", "event", "path", "status", "conclusion",
               "run_attempt", "created_at", "run_started_at", "html_url")
 JOB_FIELDS = ("id", "name", "run_attempt", "status", "conclusion", "created_at", "started_at", "completed_at", "labels")
@@ -258,6 +261,18 @@ def latest_run_jobs(jobs, run_id, run_attempt, head_sha):
     return list(latest.values())
 
 
+def unfinished_required_jobs(jobs):
+    """Allow bounded API settlement only while a required job is unfinished."""
+    unfinished = False
+    for job in jobs:
+        if job.get("name") == "CI complete":
+            if job.get("status") in ("queued", "pending", "waiting"):
+                unfinished = True
+        elif job.get("conclusion") is None:
+            unfinished = True
+    return unfinished
+
+
 def require_jobs(args):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository or ""):
         raise ValueError("Repository must have owner/name form")
@@ -271,25 +286,28 @@ def require_jobs(args):
     head_sha = run.get("head_sha")
     if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
         raise ValueError("The API run has no exact source identity")
-    jobs = []
-    total = None
-    page = 1
-    while total is None or len(jobs) < total:
-        batch = api_get(args.repository, f"actions/runs/{args.run_id}/jobs?filter=all&per_page=100&page={page}", token)
-        count = batch.get("total_count")
-        if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 1000 or (total is not None and count != total):
-            raise ValueError("Missing, changing or excessive job inventory")
-        total = count
-        chunk = batch.get("jobs")
-        if not isinstance(chunk, list) or not chunk or len(jobs) + len(chunk) > total:
-            raise ValueError("Incomplete job pagination; refusing a partial gate")
-        jobs.extend(chunk)
-        page += 1
-    # filter=latest is an API execution filter, not a proof that successful
-    # non-rerun jobs were retained. Reconstruct the logical latest result from
-    # all attempts of this immutable run and reject duplicate attempt records.
-    jobs = latest_run_jobs(jobs, args.run_id, args.run_attempt, head_sha)
-    errors = validate_required_jobs(jobs, args.run_id, args.run_attempt, head_sha)
+    for probe in range(REQUIRED_JOB_SETTLE_PROBES):
+        jobs = []
+        total = None
+        page = 1
+        while total is None or len(jobs) < total:
+            batch = api_get(args.repository, f"actions/runs/{args.run_id}/jobs?filter=all&per_page=100&page={page}", token)
+            count = batch.get("total_count")
+            if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 1000 or (total is not None and count != total):
+                raise ValueError("Missing, changing or excessive job inventory")
+            total = count
+            chunk = batch.get("jobs")
+            if not isinstance(chunk, list) or not chunk or len(jobs) + len(chunk) > total:
+                raise ValueError("Incomplete job pagination; refusing a partial gate")
+            jobs.extend(chunk)
+            page += 1
+        # filter=latest is an API execution filter, not proof that successful
+        # non-rerun jobs were retained. Reject newer incomplete step evidence.
+        jobs = latest_run_jobs(jobs, args.run_id, args.run_attempt, head_sha)
+        errors = validate_required_jobs(jobs, args.run_id, args.run_attempt, head_sha)
+        if not errors or not unfinished_required_jobs(jobs) or probe + 1 == REQUIRED_JOB_SETTLE_PROBES:
+            break
+        time.sleep(REQUIRED_JOB_SETTLE_SECONDS)
     return {"schema": 1, "run_id": args.run_id, "run_attempt": args.run_attempt,
             "run_head_sha": head_sha, "checkout_sha": os.getenv("GITHUB_SHA", "unknown"),
             "success": not errors, "errors": errors,

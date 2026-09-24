@@ -51,6 +51,7 @@ TRUST_IMPLEMENTATION_PATHS = frozenset((
     "tools/native_retirement_sdks.py",
 ))
 POLICY_SCHEMA_PATHS = frozenset((
+    "docs/native-retirement-support-v1.tsv",
     "docs/native-retirement-dependencies-legacy-v1.json",
     "docs/native-retirement-dependencies-v1.json",
     "docs/native-retirement-sdks-v1.json",

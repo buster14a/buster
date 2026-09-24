@@ -77,27 +77,42 @@ as a successful artifact.
 
 The implemented lowering covers the canonical scalar, pointer, aggregate,
 memory, atomic, call, cast, arithmetic, comparison, branch, switch, return,
-and unreachable forms used by the current C frontend. Canonical
-scalar integer leading-zero count, trailing-zero count, and population count
-emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and `llvm.ctpop.iN`
-declarations for widths 1 through 64. The first two pass `is_zero_poison =
-true`: canonical zero inputs are undefined, as with the native builtins;
-population count of zero remains zero. Wider integer-count operations produce
-an explicit diagnostic. Repeated operations reuse declarations, with stable
-type, constant, and value IDs. The canonical regression covers each width
-from 1 through 64, rejection at 128, and mixed-width declarations in one
-module, with independent LLVM compilation at widths 1, 8, 16, 32, and 64.
-The C fixture executes 32/64-bit builtins against a separately compiled
-caller at LLVM consumer `-O0` and
-`-O2`, including guarded zero for count-leading/trailing and unguarded zero
-for population count.
+and unreachable forms used by the current C frontend. Scoped dynamic stack
+allocation maps canonical stack saves and restores to LLVM's `llvm.stacksave`
+and `llvm.stackrestore` intrinsics, preserving the block position of each
+operation and the lifetime of outer allocations.
 
-Canonical operations that do not yet have an LLVM record mapping, including stack
-save/restore, instruction-cache clearing, slice/reverse helpers, variadic
-intrinsics, inline assembly, SIMD, label addresses, indirect branches, and
-debug traps, are deliberate diagnostics.
+Canonical scalar integer leading-zero count, trailing-zero count, and
+population count emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and
+`llvm.ctpop.iN` declarations for widths 1 through 64. The first two pass
+`is_zero_poison = true`: canonical zero inputs are undefined, as with the native
+builtins; population count of zero remains zero. Wider integer-count operations
+produce an explicit diagnostic. Repeated operations reuse declarations, with
+stable type, constant, and value IDs. The canonical regression covers each
+width from 1 through 64, rejection at 128, and mixed-width declarations in one
+module, with independent LLVM compilation at widths 1, 8, 16, 32, and 64. The C
+fixture executes 32/64-bit builtins against a separately compiled caller at
+LLVM consumer `-O0` and `-O2`, including guarded zero for count-leading/trailing
+and unguarded zero for population count.
+
+Canonical operations that do not yet have an LLVM record mapping, including
+instruction-cache clearing, slice/reverse helpers, variadic intrinsics, inline
+assembly, SIMD, label addresses, indirect branches, and debug traps, are
+deliberate diagnostics.
 
 Aggregate storage preserves canonical field offsets, packing, and tail padding.
+Global pointer initializers may reference data or function symbols with a
+signed byte addend. Relocation-bearing byte initializers use packed LLVM
+constant storage with pointer slots and exact byte runs, so pointer tables,
+packed records, array elements, and forward/external references retain their
+canonical size and offsets. The writer does not claim an addend is in bounds;
+the source and canonical IR must supply a valid address for its use. TLS symbol
+references, label addresses, unsupported pointer index widths and malformed
+or overlapping relocation ranges remain explicit errors. This is LLVM
+constant emission, not native object relocation processing.
+Mach-O linking may reject unaligned pointer fixups even when the bitcode
+preserves their byte offsets; pointer slots in linkable Mach-O data need
+target-supported alignment.
 Aggregate function parameters and results follow the x86-64 System V or Win64
 C calling convention, including indirect calls, register exhaustion, by-value
 stack arguments, and hidden result pointers. LLVM parameter attributes describe
@@ -113,3 +128,16 @@ signature for an unimplemented target ABI.
 Source-level debug metadata and LLVM optimization pipelines are outside the
 current emitter. Add new mappings only with deterministic byte-level tests and
 validation through an LLVM consumer that can parse the generated module.
+
+## Stack scope validation
+
+`llvm_bitcode_tests` checks two saves, dynamic allocations and void restores
+in one canonical function, including a saved token passed through a block
+parameter. It compares repeated output byte for byte and rejects a malformed
+restore without publishing bytes. The C fixture runs nested and repeated VLAs,
+continue, break, outward goto, early return, and a live outer allocation;
+the independently compiled observer reads only live elements. The 1024-iteration
+16 KiB case exposes an omitted loop restore by exhausting a typical stack.
+The test module also checks that a later unsupported operation cannot replace
+an existing output. When Clang is available, the fixture is consumed and run
+at both `-O0` and `-O2` for both frontend modes.

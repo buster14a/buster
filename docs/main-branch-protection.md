@@ -1,8 +1,9 @@
 # Main admission policy
 
-Settings rechecked 2026-09-20 UTC against main `d63af3bf` for #556.
-The active repository ruleset 22537199 explicitly includes `refs/heads/main`,
-excludes nothing, and has no bypass actors. The adjacent JSON files preserve
+Settings rechecked 2026-09-24 UTC for #880. The active repository ruleset
+22537199 explicitly includes `refs/heads/main`, excludes nothing, and has
+exactly two `always` bypass actors: Repository admin (role 5) and `davidgmbb`
+(user 39247043). The adjacent JSON files preserve
 the earlier before/after settings and effective branch-rules response; they contain no
 credentials. Repository rules, rather than legacy branch protection, enforce it.
 
@@ -83,7 +84,8 @@ broaden private-runner access.
 
 ## Emergency procedure
 
-There is no standing bypass. An emergency requires an explicitly authorized
+The two reviewed bypass actors do not make missing or failed checks pass.
+An emergency requires an explicitly authorized
 administrator to record the reason and exact temporary settings change, retain
 before/after evidence, and restore and verify the admission policy immediately
 afterward. This document grants no permission to weaken protection. Prefer a
