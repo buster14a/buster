@@ -64,7 +64,7 @@ class GitHub:
             self.request("actions/runs/" + str(run_id) + "/cancel", method="POST")
             cancelled = True
         except urllib.error.HTTPError as error:
-            if error.code not in (409, 422):
+            if error.code != 409:
                 raise
             cancelled = False
         return cancelled
