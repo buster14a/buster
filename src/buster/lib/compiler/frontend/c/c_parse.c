@@ -11742,12 +11742,16 @@ BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, 
             entity = c_parse_lookup_typedef_name(result, c_token_spelling(preprocess.spelling_base, token), true);
         }
         bool is_typedef = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+        // GCC and Clang accept __float128 as a builtin type word, although
+        // this frontend does not model it yet. Preserve its prior unsupported
+        // type behavior instead of reporting it as an unknown identifier.
+        bool is_unmodeled_builtin_type = string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__float128"));
         // A one-word identifier segment in a function declarator is the
         // legacy identifier-list form, not a parameter declaration with a
         // missing type specifier. Keep it out of the unknown-type diagnostic;
         // typed parameters with a misspelled specifier contain another token.
         bool is_old_style_identifier = parameter && token_index == parameter_start && parameter_end == parameter_start + 1;
-        unknown = !is_typedef && !is_old_style_identifier;
+        unknown = !is_typedef && !is_unmodeled_builtin_type && !is_old_style_identifier;
         if (unknown)
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, token);
