@@ -46,10 +46,16 @@ requester list, and manual event; it does not create or replace that policy.
 The existing Actions policy targets only the fixed workflow through
 `workflow_dispatch`. The reviewed requester list is
 `Repository admin` (role 5), `davidgmbb` (user 39247043), ChatGPT Codex
-Connector (app 1144995), Claude (app 1236702), and Devin.ai Integration
-(app 811515). These actors can start the workflow, but they do not thereby
-release its protected environment job. Do not add another requester. The
-existing main merge queue keeps all eight checks, including `CI complete` and
+Connector (installation 158946652, app 1144995), Claude (installation
+159756060, app 1236702), and Devin.ai Integration (installation 161964061,
+app 811515). GitHub's live Actions policy identifies the three integrations
+by installation ID and `IntegrationInstallation` type; the reviewed fixture
+pins those exact installed actors. Read back `orgs/buster14a/installations`
+to verify each installation-to-app mapping. Reinstallation changes this
+identity and requires a new policy review. These actors can start the workflow,
+but they do not thereby release its protected environment job. Do not add
+another requester. The existing main merge queue keeps all eight checks,
+including `CI complete` and
 `Benchmark service workflow policy`, 20 concurrent builds, one merge and
 `ALLGREEN`. Its two reviewed
 standing bypass actors are Repository admin (role 5) and `davidgmbb` (user
@@ -71,8 +77,9 @@ The preflight fetches the environment, deployment branch policies and
 repository variable again. It checks the administrator reviewer and
 self-review prevention, the one exact `main` branch, and literal `false`
 dispatch state. It separately rereads the requester policy and administrator
-permission. Keep those responses and the preflight log as administrator
-receipts; they do not replace the physical host checks.
+permission. Keep those responses, the organization installation mapping and
+the preflight log as administrator receipts; they do not replace the physical
+host checks.
 
 The actor restriction governs **who starts the workflow**, not who edits its
 definition or the installed gateway. Admins must control changes to the

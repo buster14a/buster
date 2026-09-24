@@ -35,7 +35,8 @@ unchanged. Explicitly set it to `false` before checking if it is absent;
 do not run it during an enabled window.
 Keep its log and separately retrieved, timestamped
 JSON responses for the live `main` ruleset 22537199, the existing requester
-Actions policy, organization runner group, `benchmark-9700x` environment,
+Actions policy, organization installation-to-app mapping, organization runner
+group, `benchmark-9700x` environment,
 deployment branch policies and `BENCH_SERVICE_DISPATCH_ENABLED`. Its read-back
 verifier must pass with `value=false`, and no superseded benchmark branch
 ruleset may be present. The main queue must retain eight Actions-bound checks,
