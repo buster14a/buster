@@ -11,12 +11,12 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
-      PROBE_OUT: ${{ runner.temp }}/frontend-common-evidence
+      PROBE_OUT: /tmp/buster-frontend-common-evidence
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          fetch-depth: 3
+          fetch-depth: 8
       - name: Freeze the exact production source
         shell: bash
         run: |
