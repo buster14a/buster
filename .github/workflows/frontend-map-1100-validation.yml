@@ -1,0 +1,168 @@
+name: Frontend map 1100 candidate validation
+on:
+  push:
+    branches: [astra/frontend-map-lifetime-transport-20260924]
+    paths: [.github/workflows/frontend-map-1100-validation.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.publish.outputs.candidate }}
+      tree: ${{ steps.publish.outputs.tree }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Apply only the hash-pinned product patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os, pathlib
+          text = pathlib.Path('.github/transport/frontend-map-1100.patch.b64').read_text().strip()
+          patch = gzip.decompress(base64.b64decode(text, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'a38a3eae894f6ba027a764135a79cfa983961407ecdd39f6c7e0bc69bb73bd25'
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'candidate.patch').write_bytes(patch)
+          PY
+          git worktree add --detach "$RUNNER_TEMP/product" 744a948f41291b4238d1755b1507678799f1206d
+          cd "$RUNNER_TEMP/product"
+          test "$(git rev-parse HEAD^{tree})" = 0a0e0d59e68f151c48dcf39ed209326b6a895f07
+          git apply --check "$RUNNER_TEMP/candidate.patch"
+          git apply "$RUNNER_TEMP/candidate.patch"
+          git diff --check
+          python3 tools/new_audit.py --check
+          git add docs/agents/frontend/foundations.md docs/performance-audits/2026-09-24T125308Z.md src/buster/lib/compiler/frontend/c/c_source.c src/buster/lib/compiler/frontend/c/c_source_internal.h src/buster/tests/compiler/frontend/c/c_test.c
+          test "$(git diff --cached --name-only | wc -l)" -eq 5
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'frontend: preserve unchanged source-map key publication (#1100)'
+          git diff HEAD^ HEAD --stat
+          git rev-parse HEAD HEAD^{tree} HEAD^ | tee "$RUNNER_TEMP/product-identity.txt"
+          git diff HEAD^ HEAD --binary --full-index > "$RUNNER_TEMP/product.patch"
+      - name: Publish new isolated product branch without force
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/product"
+          branch=astra/1100-source-map-lifetime
+          set +e
+          git ls-remote --exit-code --heads origin "refs/heads/$branch" > "$RUNNER_TEMP/existing-branch.txt"
+          status=$?
+          set -e
+          test "$status" -eq 2
+          git -c 'credential.helper=!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f' push origin "HEAD:refs/heads/$branch"
+          printf 'candidate=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: frontend-map-1100-product-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/product-identity.txt
+            ${{ runner.temp }}/product.patch
+          retention-days: 7
+  correctness:
+    needs: publish
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [release, sanitized]
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 1
+      BUSTER_MATRIX_THREADS: 1
+      BUSTER_TEST_FIXTURE_TIMING: c_frontend_tests
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.publish.outputs.candidate }}
+          persist-credentials: false
+      - name: Build exact candidate
+        id: build
+        shell: bash
+        env:
+          KIND: ${{ matrix.kind }}
+          CANDIDATE: ${{ needs.publish.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          mkdir -p "$RUNNER_TEMP/evidence"
+          {
+            git rev-parse HEAD HEAD^{tree}
+            clang --version
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/build-driver"
+            flags=(--no-sanitize --no-fuzz --no-lto)
+            config=Release
+            if [[ "$KIND" == sanitized ]]; then flags=(--sanitize --no-fuzz --no-lto); config=Debug; fi
+            "$RUNNER_TEMP/build-driver" generate --cc clang --ci --linker DEFAULT "${flags[@]}" -- -DBUSTER_UNITY_BUILD=OFF
+            "$RUNNER_TEMP/build-driver" build --config "$config" -t ide
+            printf '%s\n' "$config" > "$RUNNER_TEMP/config"
+          } 2>&1 | tee "$RUNNER_TEMP/evidence/build.log"
+      - name: Registered candidate suite
+        id: suite
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/build-driver" build --config "$(cat "$RUNNER_TEMP/config")" -t test_all 2>&1 | tee "$RUNNER_TEMP/evidence/test-all.log"
+      - name: Ordinary candidate Release self-host fixed point
+        id: selfhost
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.kind == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/build-driver" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/evidence/self-host.log"
+      - name: Allocation oracle negative control
+        id: negative
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.kind == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/buster/lib/compiler/frontend/c/c_source.c')
+          text = p.read_text()
+          old = 'if (map->count != recovery->map.count)'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, 'if (true) /* #1100 negative control only */'))
+          PY
+          git diff --binary --full-index > "$RUNNER_TEMP/evidence/negative-control.patch"
+          "$RUNNER_TEMP/build-driver" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/evidence/negative-build.log"
+          set +e
+          "$RUNNER_TEMP/build-driver" build --config Release -t test_all > "$RUNNER_TEMP/evidence/negative-test-all.log" 2>&1
+          status=$?
+          set -e
+          printf 'NEGATIVE_CONTROL status=%s\n' "$status" | tee "$RUNNER_TEMP/evidence/negative-status.txt"
+          test "$status" -ne 0
+          grep -E 'failed at .*c_test_source_map_publication' "$RUNNER_TEMP/evidence/negative-test-all.log" | head -n 12 || true
+          grep -Eq 'failed at .*c_test_source_map_publication' "$RUNNER_TEMP/evidence/negative-test-all.log"
+          git restore src/buster/lib/compiler/frontend/c/c_source.c
+          git diff --exit-code
+      - name: Retain all outcomes without converting failures into success
+        if: ${{ always() }}
+        shell: bash
+        env:
+          BUILD: ${{ steps.build.outcome }}
+          SUITE: ${{ steps.suite.outcome }}
+          SELFHOST: ${{ steps.selfhost.outcome }}
+          NEGATIVE: ${{ steps.negative.outcome }}
+          CANDIDATE: ${{ needs.publish.outputs.candidate }}
+          TREE: ${{ needs.publish.outputs.tree }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          printf 'candidate=%s\ntree=%s\nbuild=%s\nsuite=%s\nself_host=%s\nnegative_control=%s\n' "$CANDIDATE" "$TREE" "$BUILD" "$SUITE" "$SELFHOST" "$NEGATIVE" | tee "$RUNNER_TEMP/evidence/outcomes.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: frontend-map-1100-${{ matrix.kind }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7
