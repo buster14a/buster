@@ -1,0 +1,39 @@
+name: Semantic policy screen
+on:
+  push:
+    branches: [codex/semantic-policy-probe-20260924]
+    paths: [.github/workflows/semantic-policy-screen.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  screen:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use exact hosted baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run watch 35998590519 --repo buster14a/buster --exit-status --interval 20
+          gh run download 35998590519 --repo buster14a/buster --name semantic-baseline-35998590519 --dir "$RUNNER_TEMP/semantic-baseline"
+          chmod +x "$RUNNER_TEMP/semantic-baseline/ide-baseline"
+          mkdir -p "$RUNNER_TEMP/semantic-screen"
+          cp "$RUNNER_TEMP/semantic-baseline/binary-sha256.txt" "$RUNNER_TEMP/semantic-screen/baseline-binary-sha256.txt"
+          sha256sum "$RUNNER_TEMP/semantic-baseline/ide-baseline"
+          clang --version > "$RUNNER_TEMP/semantic-screen/clang.txt"
+          gcc --version > "$RUNNER_TEMP/semantic-screen/gcc.txt"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/semantic-screen/revisions.txt"
+          python3 tools/semantic_policy_screen.py "$RUNNER_TEMP/semantic-baseline/ide-baseline" "$RUNNER_TEMP/semantic-screen" | tee "$RUNNER_TEMP/semantic-screen/summary.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: semantic-screen-${{ github.run_id }}
+          path: ${{ runner.temp }}/semantic-screen
+          if-no-files-found: error
+          retention-days: 7
