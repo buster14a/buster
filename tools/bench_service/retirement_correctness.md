@@ -6,9 +6,10 @@ does not change the blocked recipe descriptor. The importer and the production
 caller have not yet been wired to this child branch.
 
 `retirement_correctness_service.{h,c}` provides the private service entry
-point for the first A→B join. It imports the same-attempt preparation and
-binary record using service-held installed/workspace descriptors and the
-authenticated record digests, opens both verified frozen binaries, checks
+point for the first A→B join. Its public entry now imports the same-attempt
+preparation, matched-build receipts and binary record using service-held
+installed/workspace descriptors and authenticated record digests. It opens
+both verified frozen binaries, checks
 the independently supplied B declaration's preparation, source and binary
 digests against that readback, and checks its support declaration against the
 compiled profile pin. Only then does it call `bq_retirement_correctness_begin`.
@@ -17,9 +18,10 @@ call; an already live holder is left alone. A successful holder stays open
 through all correctness work and subsequent dependent launches and must be
 released by the caller. The #923 integrator must compile this private module
 after the A and B implementations and call the public entry point from the
-actual service producer. The current dedicated fixture uses the real A
-materializer/readback with a one-row synthetic B declaration; it does not
-provide a trusted build, full population, oracle receipt or timed invocation.
+actual service producer. Its pinned test seam also checks the B row join after
+four real miniature host-compiled process stages and readback; the one-row B
+declaration remains synthetic. Neither fixture provides a trusted Clang build,
+full population, oracle receipt or timed invocation.
 
 ## Trusted inputs
 

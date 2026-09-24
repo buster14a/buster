@@ -173,22 +173,47 @@ previously held descriptor still reads the original inode; it does not
 execute a compiler or assert Clang provenance.
 
 That record intentionally has **no toolchain, command, environment, cwd or
-build-log attestation**. The integration owner must still bind the complete
-reviewed toolchain/SDK/resource/sysroot/dependency closure and exact successful
-build argv/environment/cwd/logs to the genuine serial, matched, uninstrumented
-Clang stages in the configured root. The service must authenticate that build
-manifest and the immutable frozen executables at B's pre-timing launch, keep
-the launched file identities stable through use, and connect its verified
-source and binary digests to `BqRetirementPrepared`. Merely placing an
-untrusted or self-built binary in the private directory never proves Clang
-provenance. The compiled recipe remains blocked until that integration and
-the complete correctness/oracle path pass.
+build-log attestation**. `retirement_matched_build.{h,c}` now defines the
+private service-side sequence around it. `begin` imports the exact A record,
+checks the compiled profile's `build-driver-sha256` against the installed fixed
+driver, and validates the workspace descriptor/path identity. `stage` returns
+four exact commands: baseline generate/build, then candidate generate/build,
+using the same `matched-build` configured pathname, fixed Release/Clang flags,
+single-job Ninja build and explicit environment. The #923 trusted stage runner
+must execute each returned command with its fixed containment and separate
+candidate identity, capture an actual wait status and provide a service-owned
+immutable log descriptor. `complete` stores each command/exit/log as an
+immutable queue log plus receipt, reimports A, freezes `Release/ide` by
+descriptor after each successful build, and publishes the existing binary
+record and one final build record only after all four stages succeed. Any
+failure poisons the session and leaves its prior stage receipts attributable.
+Four logs are individually capped at 16 MiB; each frozen binary at 512 MiB.
+
+`bq_retirement_matched_build_import` rederives the commands, rereads each
+immutable log and stage receipt, checks the exact final build record digest,
+and reimports A and both binary outputs. The public
+`bq_retirement_correctness_begin_service` requires that authenticated build
+record digest and workspace root before opening B's binary holder or gate.
+This is a private handoff, not an executable retirement recipe: the blocked
+profile has no `build-driver-sha256`, the #923 runner has not been wired to
+these four commands and the complete reviewed Clang/linker/resource/SDK/
+sysroot/dependency closure has not been pinned or independently verified.
+The actual runner must keep the fixed installed driver path and tool closure
+stable across each stage, enforce the candidate UID/sandbox and log bound,
+then pass the final record digest through the authenticated lease. The
+correctness/oracle lane and dependent first timed launch must consume these
+verified facts. A test fixture compiles two real miniature executables through
+the same pathname with the local host compiler and proves that a failed
+generate leaves no binary record and cannot open B. It does not prove trusted
+Clang provenance or exercise a timed child. The compiled recipe stays blocked.
 
 ## Focused fixture
 
 Compile and run `retirement_prepare_tests.c` alongside
 `tools/throughput/shared.c` with the ordinary service `-Isrc`,
-`BUSTER_SINGLE_THREADED=1`, C11 and warnings-as-errors flags. The fixture
+`BUSTER_SINGLE_THREADED=1`, C11 and warnings-as-errors flags from the repository
+root; it also compiles `retirement_matched_build_fixture.c` with the local `cc`.
+The fixture
 checks the pinned inventory, mismatched pin, invalid source request, impossible
 entry bound, unavailable storage query, source mutation, missing file, duplicate
 manifest entry, unlisted file/directory/symlink, byte-equal inode replacement,

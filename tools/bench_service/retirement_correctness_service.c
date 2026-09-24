@@ -48,18 +48,46 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_correctness_begin_service_pinned(BqQue
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL BqError bq_retirement_correctness_begin_service_built_pinned(
+    BqQueue* queue, BqJob const* job, int installed, int workspaces, String8 workspace_root,
+    String8 profile, char const* fixed_driver,
+    char const preparation_sha256[SHA256_HEX_CAPACITY], char const record_sha256[SHA256_HEX_CAPACITY],
+    char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementPrepared const* prepared,
+    BqRetirementTrustedRow const* rows, BqRetirementRequiredCheck const* checks, u32 check_count,
+    BqRetirementCheckResult* check_facts, BqRetirementRowFact* facts,
+    u32* identity_workspace, u32 identity_slots, u8* census_workspace, u32 census_slots,
+    BqRetirementHeldBinaries* held, BqRetirementCorrectness* gate)
+{
+    bool fresh = gate && !gate->check_count && !gate->failed && !gate->finished;
+    BqRetirementMatchedBuild build = {0};
+    BqError result = fresh && held && !held->owned ?
+        bq_retirement_matched_build_import_pinned(queue, job, installed, workspaces, workspace_root,
+            profile, fixed_driver, preparation_sha256, record_sha256, build_record_sha256,
+            &build) : BQ_RECIPE_MISMATCH;
+    if (result == BQ_OK)
+        result = bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces, profile,
+            preparation_sha256, record_sha256, prepared, rows, checks, check_count,
+            check_facts, facts, identity_workspace, identity_slots, census_workspace, census_slots,
+            held, gate);
+    else if (fresh) gate->failed = 1;
+    return result;
+}
+
 BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job,
-    int installed, int workspaces, char const preparation_sha256[SHA256_HEX_CAPACITY],
-    char const record_sha256[SHA256_HEX_CAPACITY], BqRetirementPrepared const* prepared,
+    int installed, int workspaces, String8 workspace_root,
+    char const preparation_sha256[SHA256_HEX_CAPACITY],
+    char const record_sha256[SHA256_HEX_CAPACITY],
+    char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementPrepared const* prepared,
     BqRetirementTrustedRow const* rows, BqRetirementRequiredCheck const* checks, u32 check_count,
     BqRetirementCheckResult* check_facts, BqRetirementRowFact* facts,
     u32* identity_workspace, u32 identity_slots, u8* census_workspace, u32 census_slots,
     BqRetirementHeldBinaries* held, BqRetirementCorrectness* gate)
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
-    BqError result = bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces, profile,
-                      preparation_sha256, record_sha256, prepared, rows, checks, check_count,
-                      check_facts, facts, identity_workspace, identity_slots, census_workspace, census_slots,
-                      held, gate);
+    BqError result = bq_retirement_correctness_begin_service_built_pinned(queue, job,
+        installed, workspaces, workspace_root, profile, BQ_RETIREMENT_BUILD_DRIVER,
+        preparation_sha256, record_sha256, build_record_sha256, prepared, rows, checks, check_count,
+        check_facts, facts, identity_workspace, identity_slots, census_workspace, census_slots,
+        held, gate);
     return result;
 }
