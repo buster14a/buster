@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Recover one interrupted PR validation, without running PR code.
+"""Control CI recovery and merge-queue fail-fast without running candidate code.
 
-recover() owns eligibility and the single rerun request. GitHub owns bounded
-REST pagination. Only the default-branch workflow executes this with a token.
+recover() owns eligibility and the single PR rerun request. watch() observes
+one merge-group Buster CI run and cancels exact-head merge-group runs after the
+first failed job. Only the trusted default-branch workflow executes mutations.
 """
 
 import json
 import os
 from pathlib import Path
+import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -16,6 +20,9 @@ MAX_ATTEMPTS = 2
 MAX_PAGES = 10
 WORKFLOW_PATH = ".github/workflows/ci.yml"
 OPT_OUT_LABEL = "ci-no-retry"
+WATCH_PROBES = 1200
+WATCH_SECONDS = 15
+ACTIVE_RUN_STATUSES = frozenset(("queued", "pending", "waiting", "requested", "in_progress"))
 
 
 class SkipRecovery(Exception):
@@ -51,6 +58,16 @@ class GitHub:
         else:
             raise SkipRecovery("Pagination limit reached; inspect manually.")
         return result
+
+    def cancel(self, run_id):
+        try:
+            self.request("actions/runs/" + str(run_id) + "/cancel", method="POST")
+            cancelled = True
+        except urllib.error.HTTPError as error:
+            if error.code not in (409, 422):
+                raise
+            cancelled = False
+        return cancelled
 
 
 def check_run(run, event_run, repository):
@@ -120,18 +137,86 @@ def recover(api, event):
             str(len(cancelled)) + " cancelled jobs; successful jobs are retained.")
 
 
+
+def check_watch_run(run, event_run, repository):
+    if (run.get("id") != event_run.get("id") or
+            run.get("head_sha") != event_run.get("head_sha") or
+            run.get("workflow_id") != event_run.get("workflow_id") or
+            run.get("head_repository", {}).get("full_name") != repository.get("full_name") or
+            run.get("path") != WORKFLOW_PATH or
+            run.get("event") != "merge_group" or
+            run.get("run_attempt") != event_run.get("run_attempt")):
+        raise SkipRecovery("Merge-group watch identity changed; refusing cancellation.")
+
+
+def cancel_merge_group_runs(api, head_sha):
+    runs = api.all("actions/runs", "workflow_runs", event="merge_group", head_sha=head_sha)
+    cancelled = []
+    for run in runs:
+        if run.get("head_sha") != head_sha or run.get("event") != "merge_group":
+            raise ValueError("Merge-group run query returned a mismatched source.")
+        if run.get("status") in ACTIVE_RUN_STATUSES and api.cancel(run["id"]):
+            cancelled.append(run["id"])
+    return cancelled
+
+
+def watch(api, event, sleep_fn=time.sleep, max_probes=WATCH_PROBES):
+    repository = event["repository"]
+    original = event["workflow_run"]
+    if event.get("action") != "in_progress":
+        raise SkipRecovery("Watcher accepts only the in-progress workflow_run delivery.")
+    if original.get("event") != "merge_group":
+        raise SkipRecovery("Watcher accepts only merge-group Buster CI runs.")
+    run_path = "actions/runs/" + str(original["id"])
+    for probe in range(max_probes):
+        run = api.request(run_path)
+        check_watch_run(run, original, repository)
+        jobs = api.all(run_path + "/jobs", "jobs", filter="latest")
+        failed = []
+        for job in jobs:
+            status = job.get("status")
+            conclusion = job.get("conclusion")
+            if status == "completed":
+                if conclusion is None:
+                    raise ValueError("Completed CI job has no conclusion.")
+                if conclusion != "success":
+                    failed.append(job.get("name", "unnamed"))
+            elif conclusion is not None:
+                raise ValueError("Incomplete CI job already has a conclusion.")
+        if failed or (run.get("status") == "completed" and run.get("conclusion") != "success"):
+            cancelled = cancel_merge_group_runs(api, run["head_sha"])
+            reason = ", ".join(sorted(failed)) if failed else "workflow conclusion " + str(run.get("conclusion"))
+            return ("Merge-group fail-fast observed " + reason + "; requested cancellation of " +
+                    str(len(cancelled)) + " exact-head run(s): " +
+                    ", ".join(str(run_id) for run_id in cancelled))
+        if run.get("status") == "completed":
+            return "Merge-group Buster CI completed successfully; no cancellation requested."
+        if probe + 1 < max_probes:
+            sleep_fn(WATCH_SECONDS)
+    raise TimeoutError("Merge-group fail-fast watcher exceeded its bounded polling window.")
+
+
 def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
     if event["repository"]["full_name"] != os.environ["GITHUB_REPOSITORY"]:
         raise ValueError("Event repository mismatch")
+    mode = sys.argv[1] if len(sys.argv) > 1 else "recover"
     try:
-        message = recover(api, event)
+        if mode == "watch":
+            message = watch(api, event)
+            title = "Merge-group CI fail-fast"
+        elif mode == "recover":
+            message = recover(api, event)
+            title = "Cancelled CI recovery"
+        else:
+            raise ValueError("Expected recover or watch mode")
     except SkipRecovery as skipped:
-        message = "No retry: " + str(skipped)
+        message = "No action: " + str(skipped)
+        title = "CI lifecycle controller"
     print(message)
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
-        summary.write("## Cancelled CI recovery\n\n" + message + "\n")
+        summary.write("## " + title + "\n\n" + message + "\n")
 
 
 if __name__ == "__main__":
