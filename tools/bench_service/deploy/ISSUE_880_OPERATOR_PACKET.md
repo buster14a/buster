@@ -27,14 +27,16 @@ administrator authorization:
 bash tools/bench_service/deploy/configure_github_admission.sh buster14a/buster
 ```
 
-The installer first disables dispatch. Do not run it as a read-only probe
-during an enabled window. Keep its log and separately retrieved, timestamped
+The installer first reads back disabled dispatch and leaves the variable
+unchanged. Explicitly set it to `false` before installation if it is absent;
+do not run the installer as a read-only probe or during an enabled window.
+Keep its log and separately retrieved, timestamped
 JSON responses for the live `main` ruleset 22537199, the existing admin-only
 Actions policy, organization runner group, `Benchmark dispatch main protection`
 ruleset, `benchmark-9700x` environment, deployment branch policies and
 `BENCH_SERVICE_DISPATCH_ENABLED`. Its post-install read-back verifier must pass
 with `value=false`. The main queue must retain eight Actions-bound checks,
-non-strict status checks, one-build/one-merge `ALLGREEN` and no bypass. The
+non-strict status checks, 20-build/one-merge `ALLGREEN` and no bypass. The
 benchmark ruleset must protect the exact `main` branch with no bypass, without
 a blanket pull-request review requirement; the environment must have no
 required reviewer and must allow only the exact `main` deployment branch.
