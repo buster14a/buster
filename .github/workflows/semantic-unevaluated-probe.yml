@@ -1,0 +1,58 @@
+name: Temporary unevaluated semantic probe
+on:
+  push:
+    branches: [codex/semantic-unevaluated-20260924-astra]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Pin source and provision standard build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/semantic-evidence"
+          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/semantic-evidence/revision.txt"
+          git diff --exit-code 2e942e80a87666409cf29d3e24a68d322b9e71fd -- src build.c CMakeLists.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y mold ninja-build cmake
+          clang --version
+          gcc --version
+          gcc -dumpmachine
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/semantic-build"
+          "$RUNNER_TEMP/semantic-build" generate --cc clang
+          "$RUNNER_TEMP/semantic-build" build --config Release -t ide
+      - name: Baseline self-host fixed point
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/semantic-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/semantic-evidence/self-host.log"
+      - name: Bounded independent semantic family
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/semantic-unevaluated-probe.py build/Release/ide "$RUNNER_TEMP/semantic-evidence"
+      - name: Retain exact source and results
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/semantic-evidence/source"
+          cp src/buster/lib/compiler/frontend/c/c_gen.c src/buster/lib/compiler/frontend/c/c_parse.c src/buster/tests/compiler/frontend/c/c_test.c "$RUNNER_TEMP/semantic-evidence/source/"
+          grep -nE 'sizeof.*vla|vla.*sizeof|c_ir_sizeof_operand_type_attempt|c_ir_prepare_control_expressions_step' src/buster/lib/compiler/frontend/c/c_gen.c | tee "$RUNNER_TEMP/semantic-evidence/source-index.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: semantic-unevaluated-evidence
+          path: ${{ runner.temp }}/semantic-evidence
+          retention-days: 30
+          if-no-files-found: error
