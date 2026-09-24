@@ -11275,6 +11275,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_named_call_arity_without_ir(UnitTestAr
     return result;
 }
 
+// The label-provenance walk runs only for a body that takes a label address
+// or branches through a computed goto. A body with a label and the `&&`
+// operator is the common shape it must skip; every spelling the walk itself
+// recognizes as a label address, including a cast through a keyword type or
+// a typedef, still admits it, and the diagnostics those bodies produce are
+// unchanged. The seam asks the production gate; the walk has no counter. The
+// sizeof/alignof operand cases were rejected before this gate: the walk's cast
+// test took `sizeof(int)` for a cast and reported a label escaping through the
+// return, which GCC and Clang accept.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_label_values_gate(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        String8 function;
+        bool needed;
+        bool invalid;
+        String8 message;
+    } cases[] = {
+        {S8("int f(int a, int b) { if (a && b) goto done; a += b; done: return a && b; }"), S8("f"), false, false, {0}},
+        {S8("int g(int); int f(int a, int b) { retry: if (g(a) && (b) && g(a && b)) goto retry; return (a) && b; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a) { char c = 'x'; again: if (c == 'x' && a) goto again; return (c) && a; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a, int b) { struct s { int x; } v = {a}; l: return (v.x) && b && (int)a; }"), S8("f"), false, false, {0}},
+        {S8("typedef int T; int f(int a) { l: return sizeof(T) && a; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a) { l: return sizeof(int) && a; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a) { l: return _Alignof(int) && a; }"), S8("f"), false, false, {0}},
+        {S8("int f(int a, int b) { return a && b; }"), S8("f"), false, false, {0}},
+        {S8("int f(void) { void *p = &&done; goto *p; done: return 0; }"), S8("f"), true, false, {0}},
+        {S8("int f(void) { void *p = (void *)&&done; goto *p; done: return 0; }"), S8("f"), true, false, {0}},
+        {S8("int f(void) { typedef void *P; P p = (P)&&done; goto *p; done: return 0; }"), S8("f"), true, false, {0}},
+        {S8("int f(void) { typedef void *P; P p = 0; p = (const P)&&done; goto *p; done: return 0; }"), S8("f"), true, false, {0}},
+        {S8("int f(void *p) { goto *p; }"), S8("f"), true, true, S8("in function 'f': computed goto requires a function-local void pointer label value")},
+        {S8("int f(int a) { l: return a && &&l; }"), S8("f"), true, true, S8("in function 'f': a label address may not escape through a function return")},
+        {S8("void *saved; int f(void) { saved = &&target; target: return 0; }"), S8("f"), true, true,
+         S8("in function 'f': a label address may not be stored in static storage")},
+        {S8("void *f(void) { a: return &&a; }"), S8("f"), true, true, S8("in function 'f': a label address may not escape through a function return")},
+        {S8("void h(void *); void f(void) { a: h(&&a); }"), S8("f"), true, true, S8("in function 'f': a label address may not escape through a function call")},
+        {S8("struct pair { void *target; }; int f(int i) { struct pair t[2] = { { &&z }, { &&o } }; goto *t[i].target; z: return 1; o: return 2; }"),
+         S8("f"), true, true, S8("in function 'f': dynamic indexing of label-containing aggregate elements is unsupported")},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, cases[index].source,
+                                                (CPreprocessOptions){.target = target_native,
+                                                                     .data_layout = target_data_layout(target_native),
+                                                                     .dialect = C_PREPROCESS_DIALECT_GNU23});
+        CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+        CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+        BUSTER_TEST_RAW(arguments, tokens.diagnostic_count == 0 && syntax.diagnostic_count == 0, cases[index].source);
+        BUSTER_TEST_RAW(arguments, analysis.analysis_complete, cases[index].source);
+        BUSTER_TEST_RAW(arguments, (analysis.diagnostic_count != 0) == cases[index].invalid, cases[index].source);
+        if (cases[index].message.length && analysis.diagnostic_count)
+        {
+            BUSTER_STRING_TEST(arguments, analysis.diagnostics[0].message, cases[index].message);
+        }
+        CDeclaration const* function = 0;
+        for (u32 declaration = 0; declaration < analysis.declaration_count; declaration += 1)
+        {
+            CDeclaration const* candidate = analysis.declarations + declaration;
+            if (candidate->kind == C_DECLARATION_FUNCTION && candidate->is_definition && string_equal(candidate->name, cases[index].function))
+            {
+                function = candidate;
+            }
+        }
+        BUSTER_TEST_RAW(arguments, function != 0, cases[index].source);
+        if (function)
+        {
+            BUSTER_TEST_RAW(arguments, c_test_parse_label_values_needed(&analysis, tokens, function) == cases[index].needed, cases[index].source);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // Member names live in their aggregate's namespace. They must not bind to
 // an unrelated ordinary function during the named-call arity prepass; the
 // type-driven member-call path remains responsible for their diagnostics.
@@ -20896,6 +20972,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
+    BUSTER_TEST_FIXTURE(arguments, c_test_label_values_gate);
     BUSTER_TEST_FIXTURE(arguments, c_test_member_call_arity_ownership);
     BUSTER_TEST_FIXTURE(arguments, c_test_function_body_sizeof_expression);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_control_flow);
