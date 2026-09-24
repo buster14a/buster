@@ -5,7 +5,7 @@ on:
     branches: [astra/pp-reuse-probe-20260924]
     paths:
       - .github/workflows/pp-reuse-probe.yml
-      - docs/performance-audits/evidence/2026-09-24-pp-reuse/probe.py
+      - docs/performance-audits/evidence/2026-09-24-pp-reuse/**
 
 permissions:
   contents: read
@@ -19,8 +19,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Source census and counterexamples, not performance measurement
-        run: python3 docs/performance-audits/evidence/2026-09-24-pp-reuse/probe.py
+      - name: Source counts, independent compatibility, registered regression and fixed points
+        run: python3 docs/performance-audits/evidence/2026-09-24-pp-reuse/probe_v2.py
       - name: Retain exact commands, diagnostics and observations
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -29,3 +29,30 @@ jobs:
           path: ${{ runner.temp }}/pp-reuse
           if-no-files-found: error
           retention-days: 7
+
+  publish:
+    needs: probe
+    if: ${{ github.repository == 'buster14a/buster' && github.ref == 'refs/heads/astra/pp-reuse-probe-20260924' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+      - name: Publish only the exact tested source patch to this experiment branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/astra/pp-reuse-probe-20260924
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git apply --recount --check docs/performance-audits/evidence/2026-09-24-pp-reuse/change.patch
+          git apply --recount docs/performance-audits/evidence/2026-09-24-pp-reuse/change.patch
+          git diff --check
+          expected=$'src/buster/lib/compiler/frontend/c/c_source.c\nsrc/buster/tests/compiler/frontend/c/macro_conditional_test.c'
+          test "$(git diff --name-only)" = "$expected"
+          git add -- src/buster/lib/compiler/frontend/c/c_source.c src/buster/tests/compiler/frontend/c/macro_conditional_test.c
+          test "$(git diff --cached --name-only)" = "$expected"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(pp): retain definition-owned argument expansion demand (#1091)'
+          git push origin HEAD:refs/heads/astra/pp-reuse-probe-20260924
