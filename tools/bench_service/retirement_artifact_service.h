@@ -20,8 +20,17 @@ typedef struct BqRetirementArtifactStart
     int directory;
     char name[BQ_RETIREMENT_OUTPUT_NAME_CAP];
     uint64_t directory_device, directory_inode;
-    unsigned armed;
+    pid_t process;
+    char command_sha256[65];
+    unsigned armed, process_state;
 } BqRetirementArtifactStart;
+
+enum
+{
+    BQ_RETIREMENT_ARTIFACT_RUNNING = 1,
+    BQ_RETIREMENT_ARTIFACT_REAPED = 2,
+    BQ_RETIREMENT_ARTIFACT_FAILED = 3
+};
 
 enum
 {
@@ -57,13 +66,20 @@ typedef struct BqRetirementRowCommands
 
 /* Supply a zeroed start and call before each process. Artifact start records
  * an absent fixed output name under a held service-owned directory without
- * other-user write access. Runtime start creates a fresh empty log; pass its
+ * other-user write access. Launch and poll the compiler before readback.
+ * Runtime start creates a fresh empty log; pass its
  * writer to the private launcher. Poll through the worker deadline, then
  * freeze with finish after observing exit zero. The caller owns and closes
  * the returned read descriptor. Abort after any live child has been cancelled
  * and reaped; the partial file remains as failure evidence. */
 BUSTER_F_DECL bool bq_retirement_artifact_start(BqRetirementArtifactLocation location,
     BqRetirementArtifactStart* start);
+/* The runner owns deadlines and cancellation. Poll returns 0 while running,
+ * 1 after exit zero, or -1 for a failed wait, signal or nonzero exit. */
+BUSTER_F_DECL bool bq_retirement_artifact_launch(BqRetirementArtifactStart* start,
+    BqRetirementProcessCommand const* command);
+BUSTER_F_DECL int bq_retirement_artifact_poll(BqRetirementArtifactStart* start);
+BUSTER_F_DECL void bq_retirement_artifact_abort(BqRetirementArtifactStart* start);
 BUSTER_F_DECL bool bq_retirement_runtime_start(BqRetirementArtifactLocation location,
     BqRetirementRuntimeStart* start);
 /* Launch the validated command with stdout/stderr on the fresh writer.
@@ -81,9 +97,9 @@ BUSTER_F_DECL void bq_retirement_runtime_abort(BqRetirementRuntimeStart* start);
  * Pass the prelaunch artifact start for each compiler output and the finished
  * runtime start with its read-only CLOEXEC descriptor for each applicable
  * execution. Use -1 and a zeroed start for inapplicable runtimes. The service
- * must bind each compiler process and wait status to its start. Runtime
- * launch and poll bind the log to an executed plan and its wait status. The
- * runner owns deadlines and stdout/stderr ordering. Readback consumes the
+ * launch and poll bind each compiler and runtime plan to an observed child
+ * wait result. The runner owns deadlines and stdout/stderr ordering. Readback
+ * consumes the
  * starts, derives code eligibility and poisons the gate on failed or changed
  * reads. Untimed controls require absent locations and zeroed starts.
  */

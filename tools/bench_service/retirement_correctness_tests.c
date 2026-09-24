@@ -441,6 +441,21 @@ static int frozen_runtime_log(int directory, char const* name, char const* conte
     return result;
 }
 
+static int wait_artifact_output(BqRetirementArtifactStart* start)
+{
+    int result = 0;
+    for (unsigned attempt = 0; !result && attempt < 10000; attempt += 1)
+    {
+        result = bq_retirement_artifact_poll(start);
+        if (!result)
+        {
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
+    }
+    return result;
+}
+
 static int wait_runtime_output(BqRetirementRuntimeStart* start)
 {
     int result = 0;
@@ -524,8 +539,10 @@ static void test_frozen_artifact_readback(char const* executable)
         unsigned host_target = 11, other_machine = 5;
 #endif
         BqRetirementArtifactLocation locations[2] = {{directory, "base"}, {directory, "candidate"}};
-        char* const base_compiler[] = {"/trusted/base-ide", "-c", "input.c", NULL};
-        char* const candidate_compiler[] = {"/trusted/candidate-ide", "-c", "input.c", NULL};
+        char* const base_compiler[] = {(char*)process_executable,
+            "--retirement-copy-self", "base", NULL};
+        char* const candidate_compiler[] = {(char*)process_executable,
+            "--retirement-copy-self", "candidate", NULL};
         char* const changed_compiler[] = {"/trusted/candidate-ide", "-O2", "input.c", NULL};
         char* const runtime_arguments[] = {(char*)process_executable,
             "--retirement-oracle-output", NULL};
@@ -534,9 +551,9 @@ static void test_frozen_artifact_readback(char const* executable)
         char* const environment[] = {"HOME=/nonexistent", "LC_ALL=C", NULL};
         char* const unordered_environment[] = {"LC_ALL=C", "HOME=/nonexistent", NULL};
         BqRetirementRowCommands commands[2] = {
-            {{base_compiler, environment, "/source/base", 3, 2},
+            {{base_compiler, environment, root, 3, 2},
              {runtime_arguments, environment, root, 2, 2}},
-            {{candidate_compiler, environment, "/source/candidate", 3, 2},
+            {{candidate_compiler, environment, root, 3, 2},
              {runtime_arguments, environment, root, 2, 2}}
         };
         BqRetirementRuntimeStart unlaunched = {0};
@@ -564,7 +581,20 @@ static void test_frozen_artifact_readback(char const* executable)
         CHECK(!bq_retirement_runtime_finish(&failed, &failed_reader) &&
               bq_retirement_runtime_absent(&failed));
         CHECK(unlinkat(directory, "failed-output", 0) == 0);
-        for (unsigned fault = 0; fault < 19; fault += 1)
+        BqRetirementArtifactStart failed_compiler = {0};
+        BqRetirementArtifactLocation failed_artifact = {directory, "failed-artifact"};
+        char* const failed_compiler_arguments[] = {(char*)process_executable,
+            "--retirement-oracle-fail", NULL};
+        BqRetirementProcessCommand failed_compiler_command = {
+            failed_compiler_arguments, environment, root, 2, 2
+        };
+        CHECK(bq_retirement_artifact_start(failed_artifact, &failed_compiler) &&
+              bq_retirement_artifact_launch(&failed_compiler, &failed_compiler_command));
+        CHECK(wait_artifact_output(&failed_compiler) == -1 &&
+              failed_compiler.process_state == BQ_RETIREMENT_ARTIFACT_FAILED);
+        bq_retirement_artifact_abort(&failed_compiler);
+        CHECK(bq_retirement_output_absent(&failed_compiler));
+        for (unsigned fault = 0; fault < 21; fault += 1)
         {
             BqRetirementArtifactStart starts[2] = {0};
             BqRetirementRuntimeStart runtime_starts[2] = {0};
@@ -575,10 +605,19 @@ static void test_frozen_artifact_readback(char const* executable)
                 directory, fault == 1 ? "linked" : "candidate"
             };
             CHECK(bq_retirement_artifact_start(locations[0], &starts[0]) &&
-                  bq_retirement_artifact_start(candidate_start, &starts[1]) &&
-                  copy_frozen_artifact(directory, executable, "base") &&
-                  copy_frozen_artifact(directory, executable, "candidate") &&
-                  symlinkat("base", directory, "linked") == 0);
+                  bq_retirement_artifact_start(candidate_start, &starts[1]));
+            for (unsigned side = 0; side < 2; side += 1)
+            {
+                if (fault == 20 && side == 1)
+                    CHECK(copy_frozen_artifact(directory, executable, "candidate"));
+                else
+                {
+                    CHECK(bq_retirement_artifact_launch(&starts[side],
+                        &commands[side].compiler));
+                    CHECK(wait_artifact_output(&starts[side]) == 1);
+                }
+            }
+            CHECK(symlinkat("base", directory, "linked") == 0);
             int runtime_outputs[2] = {-1, -1};
             for (unsigned side = 0; side < 2; side += 1)
             {
@@ -601,7 +640,7 @@ static void test_frozen_artifact_readback(char const* executable)
                     fixture.trusted[1].runtime_command_sha256[side]));
             }
             CHECK(!strcmp(fixture.trusted[1].compiler_command_sha256[0],
-                "141cd1a79c9ab405a08180ed376086cf66fa20354a866cd039c887dedb354b69"));
+                starts[0].command_sha256));
             unsigned target = fault == 5 ? other_machine : host_target;
             fixture.prepared.native_target = target;
             for (unsigned i = 0; i < BQ_TEST_ROWS; i += 1)
@@ -634,6 +673,7 @@ static void test_frozen_artifact_readback(char const* executable)
             if (fault == 15) starts[1].directory_inode ^= 1;
             if (fault == 16) runtime_starts[1].file_inode ^= 1;
             if (fault == 18) runtime_starts[1].command_sha256[0] ^= 1;
+            if (fault == 19) starts[1].command_sha256[0] ^= 1;
             if (fault == 17)
             {
                 CHECK(renameat(directory, "candidate-output", directory, "displaced-output") == 0);
@@ -680,7 +720,7 @@ static void test_frozen_artifact_readback(char const* executable)
             if (fault == 9) CHECK(fchmodat(directory, "candidate-output", 0400, 0) == 0);
             commands[1].compiler.arguments = candidate_compiler;
             commands[1].compiler.environment = environment;
-            commands[1].compiler.directory = "/source/candidate";
+            commands[1].compiler.directory = root;
             commands[1].runtime.arguments = runtime_arguments;
             CHECK(bq_retirement_output_absent(&starts[0]) &&
                   bq_retirement_output_absent(&starts[1]) &&
@@ -733,6 +773,12 @@ int main(int argc, char** argv)
     if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-output"))
         result = fputs("independent-oracle-output\n", stdout) < 0 || fflush(stdout) != 0;
     else if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-fail")) result = 7;
+    else if (argc == 3 && !strcmp(argv[1], "--retirement-copy-self"))
+    {
+        int directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        result = directory >= 0 && copy_frozen_artifact(directory, argv[0], argv[2]) ? 0 : 6;
+        if (directory >= 0 && close(directory) != 0) result = 6;
+    }
     else
     {
         test_valid();
