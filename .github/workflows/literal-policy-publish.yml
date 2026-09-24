@@ -8,10 +8,12 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
       contents: write
       actions: read
+    env:
+      BUSTER_TEST_JOBS: '3'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -55,17 +57,50 @@ jobs:
           test "$(git diff HEAD^ HEAD --name-only | wc -l)" -eq 2
           test "$(git hash-object src/buster/lib/compiler/frontend/c/c_gen.c)" = dc538a4963dd0364a37600e9c3ada636050f67e2
           test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = b71ef9556e38f6518d93b088f026505c153f49e5
-          chmod +x "$RUNNER_TEMP/literal-prior/ide-candidate"
           cp "$RUNNER_TEMP/literal-prior/revisions.txt" "$RUNNER_TEMP/literal-final/revisions.txt"
           lscpu > "$RUNNER_TEMP/literal-final/host.txt"
           clang --version > "$RUNNER_TEMP/literal-final/clang.txt"
           gcc --version > "$RUNNER_TEMP/literal-final/gcc.txt"
-      - name: Replay the corrected independent reference and object matrix
+      - name: Build this exact revision on its execution host
+        id: build
         shell: bash
         run: |
           set -euo pipefail
-          python3 "$RUNNER_TEMP/literal-final/literal_policy_verify.py" "$RUNNER_TEMP/literal-prior/ide-candidate" "$RUNNER_TEMP/literal-final/results" | tee "$RUNNER_TEMP/literal-final/reference.log"
+          sudo apt-get update
+          sudo apt-get install -y mold
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/literal-build"
+          "$RUNNER_TEMP/literal-build" generate --cc clang --ci 2>&1 | tee "$RUNNER_TEMP/literal-final/generate.log"
+          "$RUNNER_TEMP/literal-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/literal-final/build.log"
+          sha256sum build/Release/ide > "$RUNNER_TEMP/literal-final/binary-sha256.txt"
+      - name: Replay the corrected independent reference and object matrix
+        id: references
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/literal-final/literal_policy_verify.py" build/Release/ide "$RUNNER_TEMP/literal-final/results" | tee "$RUNNER_TEMP/literal-final/reference.log"
+      - name: Recheck full registered Release suite on this host
+        id: tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/literal-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/literal-final/test-all.log"
+      - name: Recheck self-host fixed point on this host
+        id: selfhost
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/literal-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/literal-final/self-host.log"
+      - name: Recheck existing mode matrix on this host
+        id: modes
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/literal-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/literal-final/modes.log"
       - name: Non-force publication to this session's feature branch only
+        if: ${{ !cancelled() && steps.references.outcome == 'success' && steps.tests.outcome == 'success' && steps.selfhost.outcome == 'success' && steps.modes.outcome == 'success' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
