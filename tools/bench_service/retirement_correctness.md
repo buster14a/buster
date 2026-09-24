@@ -41,6 +41,17 @@ and hold/recheck them through later timed launches. This join does not prove
 that the compiler created the named file or that an independent semantic oracle
 passed; those still require service-owned process/receipt and #509 execution.
 
+For native link/self-host rows, the same wrapper requires completed, read-only,
+service-owned stdout/stderr log descriptors from both runtime processes. It
+hashes their exact bytes, including an empty output, checks CLOEXEC, ownership,
+single-link status, access mode, size and stable metadata, and rejects
+caller-filled output digests. The existing gate compares these observed hashes
+to the independently imported oracle digest. Object-only, foreign-target and
+untimed rows require absent runtime descriptors. The runner must bind each
+descriptor to the matching completed process and capture both streams in the
+oracle's declared order; this wrapper cannot authenticate a caller-selected
+descriptor or create an independent oracle.
+
 ## Trusted inputs
 
 The service must first verify the complete #1018 preparation and independently
@@ -118,4 +129,6 @@ cc -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror -fwrapv \
 The focused fixture now copies its actual compiled executable into frozen
 service files for the link-row readback. It rejects symlink/path substitution,
 predeclared code facts, writable output and mismatched machine identity. The
-other synthetic rows remain structural tests, not a full-corpus pass.
+fixture also reads frozen output logs and rejects wrong bytes, missing
+descriptors, caller-filled digests and mutable logs. The other synthetic rows
+remain structural tests, not a full-corpus pass.
