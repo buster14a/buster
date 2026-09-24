@@ -1,0 +1,64 @@
+name: Frontend map lifetime source and baseline
+on:
+  push:
+    branches: [astra/frontend-map-lifetime-transport-20260924]
+    paths: [.github/workflows/frontend-map-lifetime-source.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 744a948f41291b4238d1755b1507678799f1206d
+          persist-credentials: false
+      - name: Freeze source for connected authoring
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 744a948f41291b4238d1755b1507678799f1206d
+          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/frontend-base-identity.txt"
+          git archive --format=tar HEAD | gzip -1 > "$RUNNER_TEMP/frontend-base.tar.gz"
+          sha256sum "$RUNNER_TEMP/frontend-base.tar.gz" | tee "$RUNNER_TEMP/frontend-base-sha256.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-map-lifetime-base-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/frontend-base.tar.gz
+            ${{ runner.temp }}/frontend-base-identity.txt
+            ${{ runner.temp }}/frontend-base-sha256.txt
+          retention-days: 7
+  baseline:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 1
+      BUSTER_MATRIX_THREADS: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 744a948f41291b4238d1755b1507678799f1206d
+          persist-credentials: false
+      - name: Baseline ordinary Release self-host gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 744a948f41291b4238d1755b1507678799f1206d
+          {
+            git rev-parse HEAD HEAD^{tree}
+            clang --version
+            clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/frontend-build"
+            "$RUNNER_TEMP/frontend-build" generate --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF
+            "$RUNNER_TEMP/frontend-build" test_self_host --config Release
+          } 2>&1 | tee "$RUNNER_TEMP/frontend-baseline.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: frontend-map-lifetime-baseline-${{ github.run_id }}
+          path: ${{ runner.temp }}/frontend-baseline.log
+          retention-days: 7
