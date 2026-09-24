@@ -1558,6 +1558,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
         String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
                                 S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
         String8 frontend_forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        String8 promotion_forms[] = {S8("-fcanonical-local-promotion"), S8("-fno-canonical-local-promotion")};
         String8 dialect_flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialect_flags); dialect += 1)
         {
@@ -1565,33 +1566,37 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArgu
             {
                 for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontend_forms); form += 1)
                 {
-                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                    String8 output = buster_test_temporary_path(temporary.arena, S8("volatile-split-bit-fields-run"), S8(".exe"));
-                    String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], allocators[allocator], frontend_forms[form],
-                                        S8("-fverify-codegen"), S8("-o"), output, source_path};
-                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
-                                                                                             (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                    invocation.reject_machine_fallback = allocator != 0;
-                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
-                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
-                                    string_format(temporary.arena,
-                                                  S8("volatile split bit-fields {S8} {S8} {S8}: {S8}"),
-                                                  dialect_flags[dialect], allocators[allocator], frontend_forms[form], compiled.diagnostic));
-                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    for (u32 promotion = 0; promotion < BUSTER_ARRAY_LENGTH(promotion_forms); promotion += 1)
                     {
-                        String8 run[] = {output};
-                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                                                                   (ProcessSpawnOptions){.use_process_environment = true});
-                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                        String8 output = buster_test_temporary_path(temporary.arena, S8("volatile-split-bit-fields-run"), S8(".exe"));
+                        String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], allocators[allocator], frontend_forms[form],
+                                            promotion_forms[promotion], S8("-fverify-codegen"), S8("-o"), output, source_path};
+                        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                                                                                                 (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                        invocation.reject_machine_fallback = allocator != 0;
+                        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                                        string_format(temporary.arena,
+                                                      S8("volatile split bit-fields {S8} {S8} {S8} {S8}: {S8}"),
+                                                      dialect_flags[dialect], allocators[allocator], frontend_forms[form], promotion_forms[promotion],
+                                                      compiled.diagnostic));
+                        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                         {
-                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
-                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
-                                            string_format(temporary.arena,
-                                                          S8("volatile split bit-fields runtime status={u32} timed_out={u32}"),
-                                                          execution.platform_status, (u32)execution.timed_out));
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                       (ProcessSpawnOptions){.use_process_environment = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                                string_format(temporary.arena,
+                                                              S8("volatile split bit-fields runtime status={u32} timed_out={u32}"),
+                                                              execution.platform_status, (u32)execution.timed_out));
+                            }
                         }
+                        scratch_end(temporary);
                     }
-                    scratch_end(temporary);
                 }
             }
         }
