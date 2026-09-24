@@ -4,9 +4,9 @@
  * again after parsing, then commits both sides to the correctness gate.
  * Runtime output is hashed from the completed service-owned process log and
  * compared with an independently established oracle by the gate. Process
- * plans are hashed with the measurement lane's canonical serializer. Runtime
- * launch and poll bind each log to the exact executed plan and wait result.
- * Compiler launches and independent oracle production remain runner work.
+ * plans are hashed with the measurement lane's canonical serializer. Compiler
+ * and runtime launch/poll bind plans to actual child waits; the runner still
+ * owns job deadlines, verified output production and the independent oracle.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "retirement_artifact_service.h"
@@ -113,7 +113,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_output_started(BqRetirementArtifactLocati
 BUSTER_GLOBAL_LOCAL bool bq_retirement_output_absent(BqRetirementArtifactStart const* start)
 {
     return start && !start->directory && !start->name[0] &&
-        !start->directory_device && !start->directory_inode && !start->armed;
+        !start->directory_device && !start->directory_inode && !start->process &&
+        !start->command_sha256[0] && !start->armed && !start->process_state;
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_absent(BqRetirementRuntimeStart const* start)
@@ -295,6 +296,74 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_command_hash(BqRetirementProcessCommand c
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL pid_t bq_retirement_execute(BqRetirementProcessCommand const* command,
+    int writer)
+{
+    pid_t child = fork();
+    if (child == 0)
+    {
+        if (writer >= 3 &&
+            (dup2(writer, STDOUT_FILENO) < 0 ||
+             dup2(writer, STDERR_FILENO) < 0)) _exit(126);
+        if (writer >= 3) close(writer);
+        if (chdir(command->directory) != 0) _exit(126);
+        execve(command->arguments[0], command->arguments, command->environment);
+        _exit(127);
+    }
+    return child;
+}
+
+bool bq_retirement_artifact_launch(BqRetirementArtifactStart* start,
+    BqRetirementProcessCommand const* command)
+{
+    struct stat existing = {0};
+    char digest[65] = {0};
+    BqRetirementArtifactLocation location = {0};
+    if (start) location = (BqRetirementArtifactLocation){start->directory, start->name};
+    bool ok = start && command && start->armed == 1 && !start->process &&
+        !start->process_state && bq_retirement_command_hash(command, digest) &&
+        command->arguments[0][0] == '/' && bq_retirement_output_started(location, start) &&
+        fstatat(start->directory, start->name, &existing, AT_SYMLINK_NOFOLLOW) < 0 &&
+        errno == ENOENT;
+    pid_t child = ok ? bq_retirement_execute(command, -1) : -1;
+    ok = ok && child > 0;
+    if (ok)
+    {
+        start->process = child;
+        memcpy(start->command_sha256, digest, sizeof(digest));
+        start->process_state = BQ_RETIREMENT_ARTIFACT_RUNNING;
+    }
+    return ok;
+}
+
+int bq_retirement_artifact_poll(BqRetirementArtifactStart* start)
+{
+    int result = -1;
+    if (start && start->process_state == BQ_RETIREMENT_ARTIFACT_RUNNING &&
+        start->process > 0)
+    {
+        int status = 0;
+        pid_t waited = waitpid(start->process, &status, WNOHANG);
+        if (waited == 0 || (waited < 0 && errno == EINTR)) result = 0;
+        else
+        {
+            bool passed = waited == start->process && WIFEXITED(status) &&
+                WEXITSTATUS(status) == 0;
+            start->process = 0;
+            start->process_state = passed ? BQ_RETIREMENT_ARTIFACT_REAPED :
+                BQ_RETIREMENT_ARTIFACT_FAILED;
+            result = passed ? 1 : -1;
+        }
+    }
+    return result;
+}
+
+void bq_retirement_artifact_abort(BqRetirementArtifactStart* start)
+{
+    if (start && start->process_state != BQ_RETIREMENT_ARTIFACT_RUNNING)
+        *start = (BqRetirementArtifactStart){0};
+}
+
 /* The worker owns the deadline and kills the whole job on cancellation. This
  * private child remains registered until poll observes its actual wait status. */
 bool bq_retirement_runtime_launch(BqRetirementRuntimeStart* start,
@@ -314,16 +383,7 @@ bool bq_retirement_runtime_launch(BqRetirementRuntimeStart* start,
         fstat(start->writer, &file) == 0 && S_ISREG(file.st_mode) &&
         start->file_device == (uint64_t)file.st_dev &&
         start->file_inode == (uint64_t)file.st_ino && file.st_nlink == 1;
-    pid_t child = ok ? fork() : -1;
-    if (child == 0)
-    {
-        if (dup2(start->writer, STDOUT_FILENO) < 0 ||
-            dup2(start->writer, STDERR_FILENO) < 0 ||
-            chdir(command->directory) != 0) _exit(126);
-        close(start->writer);
-        execve(command->arguments[0], command->arguments, command->environment);
-        _exit(127);
-    }
+    pid_t child = ok ? bq_retirement_execute(command, start->writer) : -1;
     ok = ok && child > 0;
     if (ok)
     {
@@ -385,6 +445,9 @@ bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
             {
                 TpRetirementArtifact facts = {0};
                 ok = bq_retirement_output_started(artifacts[side], &starts[side]) &&
+                     starts[side].process_state == BQ_RETIREMENT_ARTIFACT_REAPED &&
+                     !starts[side].process &&
+                     !strcmp(starts[side].command_sha256, output->compiler_command_sha256) &&
                      bq_retirement_artifact_read(artifacts[side], format, machine,
                          trusted->stage != BQ_RETIREMENT_STAGE_OBJECT, &facts) &&
                      bq_retirement_output_started(artifacts[side], &starts[side]);
@@ -417,7 +480,8 @@ bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
     if (starts && runtime_starts)
         for (unsigned side = 0; side < 2; side += 1)
         {
-            starts[side] = (BqRetirementArtifactStart){0};
+            if (starts[side].process_state != BQ_RETIREMENT_ARTIFACT_RUNNING)
+                bq_retirement_artifact_abort(&starts[side]);
             if (runtime_starts[side].state != BQ_RETIREMENT_RUNTIME_RUNNING)
                 bq_retirement_runtime_abort(&runtime_starts[side]);
         }

@@ -27,12 +27,14 @@ full population, oracle receipt or timed invocation.
 around each service-owned compiler process and before `row`. Before launch,
 `bq_retirement_artifact_start` records that the fixed output name is absent
 inside the held service-owned directory without other-user write access. The
-wrapper later requires that same name and directory identity, consumes the
-start, and opens each frozen, read-only, single-link file by a single-component
-name under the same service directory. It streams the bytes through a descriptor,
-parses the actual object or executable with the existing independent
-ELF/COFF/PE/Mach-O reader, and checks
-name, inode, mode, size and timestamps again before using the parsed file and
+private launcher rechecks absence, executes the exact argv/cwd/environment
+plan, and nonblocking poll observes that child's wait result. Only after exit
+zero does the wrapper require the same name and directory identity, consume
+the start, and open each frozen, read-only, single-link file by a
+single-component name under the same service directory. It streams bytes
+through a descriptor, parses the actual object or executable with the existing
+independent ELF/COFF/PE/Mach-O reader, and checks name, inode, mode, size and
+timestamps again before using the parsed file and
 code-section digests. `bq_retirement_correctness_row_service` derives
 `code_eligible` from the observed baseline section size and passes the readback
 to the existing gate. Format, machine and object/executable status derive from
@@ -41,9 +43,9 @@ performance contract's `TARGETS` order); mismatches fail. It also rejects
 supplied artifact/code values and artifact names for untimed controls. The
 producer must derive both output names from the frozen command plan and freeze
 files under the service UID before readback, then hold and recheck them through
-later timed launches. This join does not prove that the compiler created the
-named file or that an independent semantic oracle passed; those still require
-service-owned process/receipt and #509 execution.
+later timed launches. The recorded child wait does not alone prove that the
+compiler created the named file or that an independent semantic oracle passed;
+those still require service-owned output/receipt and #509 execution.
 
 For native link/self-host rows, the same wrapper requires completed, read-only,
 service-owned stdout/stderr log descriptors from both runtime processes. It
@@ -54,21 +56,21 @@ that child and records its actual wait result; a nonzero exit or signal prevents
 freezing. The worker supplies the deadline and whole-job cancellation. At row
 readback the wrapper checks the frozen log's original inode and the launched
 command digest before accepting its output bytes. It hashes the exact
-bytes, including an empty output, checks CLOEXEC, ownership, single-link status, access mode, size and stable metadata, and rejects
-caller-filled output digests. The existing gate compares these observed hashes
+bytes, including an empty output, checks CLOEXEC, ownership, single-link
+status, access mode, size and stable metadata, and rejects caller-filled
+output digests. The existing gate compares these observed hashes
 to the independently imported oracle digest. Object-only, foreign-target and
 untimed rows require absent runtime descriptors. The runner must capture both
-streams in the oracle's declared order, attest compiler processes and obtain
-the independent oracle from the admitted path. Runtime
-launch and poll alone do not qualify a correctness row or a timed invocation.
+streams in the oracle's declared order and obtain the independent oracle
+from the admitted path. Runtime launch and poll alone do not qualify a correctness row or a timed invocation.
 
 The row wrapper also derives both compiler command hashes and applicable
 runtime command hashes from exact argv, cwd and explicit sorted environment
 through the same bounded canonical serializer used by the timed measurement
 lane. It requires those digest slots empty on entry and rejects supplied
-commands for untimed or inapplicable processes. The service runner must execute
-these exact plans and bind actual wait statuses to each side; a matching plan
-alone cannot attest which process ran or whether it passed semantics.
+commands for untimed or inapplicable processes. The private launch and poll helpers execute the exact plans and capture
+actual child wait results for each side. The service runner still owns
+deadlines, cancellation, complete semantic receipts and the independent oracle.
 
 ## Trusted inputs
 
@@ -144,13 +146,13 @@ cc -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror -fwrapv \
 /tmp/retirement-correctness-test
 ```
 
-The focused fixture records vacant output names before copying its actual
-compiled executable into frozen service files for the link-row readback. It
-launches two actual runtime children with exact explicit plans, polls their
-wait results and freezes their service-owned logs. A nonzero child exit and
-an unlaunched log fail before readback. It rejects preexisting outputs,
-symlink/path and finished-log substitution, mismatched start identities, predeclared code facts, writable output and
-mismatched machine identity. The fixture also reads frozen output logs and rejects
-wrong bytes, missing descriptors, caller-filled digests, mutable logs and changed
-argv/cwd/environment.
+The focused fixture records vacant output names before two actual compiler
+children copy the compiled executable into frozen service files for link-row
+readback. It polls their waits, launches two runtime children with exact
+explicit plans and freezes their service-owned logs after observed exits.
+Unlaunched compiler artifacts or logs, nonzero exits and changed command
+identities fail. The fixture also rejects preexisting outputs, symlink/path
+and finished-log substitution, mismatched starts, predeclared code facts,
+writable outputs, wrong bytes, missing descriptors, caller-filled digests,
+mutable logs and changed argv/cwd/environment.
 The other synthetic rows remain structural tests, not a full-corpus pass.
