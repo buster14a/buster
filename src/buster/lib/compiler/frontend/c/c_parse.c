@@ -18515,12 +18515,166 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_function_initializer(CTypeParseMachi
                                                                     CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
                                                                     u32 start, u32 end);
 
+BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, CParseResult* result, CTypeId type_id, bool decay)
+{
+    String8 name = {0};
+    CType type = {0};
+    u32 pointer_depth = 0;
+    bool valid = type_id.value < result->type_count;
+    if (valid)
+    {
+        type = result->types[type_id.value];
+        if (decay && (type.kind == C_TYPE_ARRAY || type.kind == C_TYPE_FUNCTION))
+        {
+            if (type.kind == C_TYPE_ARRAY) type_id = type.element_type;
+            pointer_depth += 1;
+            valid = type_id.value < result->type_count;
+        }
+    }
+    bool done = false;
+    while (valid && !done)
+    {
+        type = result->types[type_id.value];
+        if (type.kind == C_TYPE_POINTER && type.element_type.value < result->type_count)
+        {
+            type_id = type.element_type;
+            pointer_depth += 1;
+        }
+        else
+        {
+            done = true;
+        }
+    }
+    if (valid)
+    {
+        type = result->types[type_id.value];
+        switch (type.kind)
+        {
+        case C_TYPE_VOID: name = S8("void"); break;
+        case C_TYPE_BOOL: name = S8("_Bool"); break;
+        case C_TYPE_CHAR: name = S8("char"); break;
+        case C_TYPE_SIGNED_CHAR: name = S8("signed char"); break;
+        case C_TYPE_UNSIGNED_CHAR: name = S8("unsigned char"); break;
+        case C_TYPE_SHORT: name = S8("short"); break;
+        case C_TYPE_UNSIGNED_SHORT: name = S8("unsigned short"); break;
+        case C_TYPE_INT: name = S8("int"); break;
+        case C_TYPE_UNSIGNED_INT: name = S8("unsigned int"); break;
+        case C_TYPE_LONG: name = S8("long"); break;
+        case C_TYPE_UNSIGNED_LONG: name = S8("unsigned long"); break;
+        case C_TYPE_LONG_LONG: name = S8("long long"); break;
+        case C_TYPE_UNSIGNED_LONG_LONG: name = S8("unsigned long long"); break;
+        case C_TYPE_INT128: name = S8("__int128"); break;
+        case C_TYPE_UNSIGNED_INT128: name = S8("unsigned __int128"); break;
+        case C_TYPE_FLOAT16: name = S8("_Float16"); break;
+        case C_TYPE_BFLOAT16: name = S8("__bf16"); break;
+        case C_TYPE_FLOAT: name = S8("float"); break;
+        case C_TYPE_DOUBLE: name = S8("double"); break;
+        case C_TYPE_LONG_DOUBLE: name = S8("long double"); break;
+        case C_TYPE_FLOAT16_COMPLEX: name = S8("_Float16 _Complex"); break;
+        case C_TYPE_FLOAT_COMPLEX: name = S8("float _Complex"); break;
+        case C_TYPE_DOUBLE_COMPLEX: name = S8("double _Complex"); break;
+        case C_TYPE_LONG_DOUBLE_COMPLEX: name = S8("long double _Complex"); break;
+        case C_TYPE_ARRAY: name = S8("array"); break;
+        case C_TYPE_FUNCTION: name = S8("function"); break;
+        case C_TYPE_STRUCT: name = type.tag.length ? string_format(arena, S8("struct {S8}"), type.tag) : S8("struct"); break;
+        case C_TYPE_UNION: name = type.tag.length ? string_format(arena, S8("union {S8}"), type.tag) : S8("union"); break;
+        case C_TYPE_ENUM: name = type.tag.length ? string_format(arena, S8("enum {S8}"), type.tag) : S8("enum"); break;
+        case C_TYPE_VA_LIST: name = S8("va_list"); break;
+        case C_TYPE_NULLPTR: name = S8("nullptr_t"); break;
+        case C_TYPE_VECTOR: name = S8("vector"); break;
+        case C_TYPE_INVALID:
+        case C_TYPE_POINTER:
+        case C_TYPE_COUNT: name = S8("unknown type"); break;
+        }
+        if (type.is_const) name = string_format(arena, S8("const {S8}"), name);
+        if (type.is_volatile) name = string_format(arena, S8("volatile {S8}"), name);
+        if (type.is_restrict) name = string_format(arena, S8("restrict {S8}"), name);
+        if (type.is_atomic) name = string_format(arena, S8("_Atomic {S8}"), name);
+        if (type.kind == C_TYPE_FUNCTION && pointer_depth)
+        {
+            name = pointer_depth == 1 ? S8("function pointer") : S8("pointer to function pointer");
+        }
+        else if (pointer_depth)
+        {
+            u64 length = name.length + (u64)pointer_depth + 1;
+            u8* bytes = arena_allocate(arena, u8, length);
+            memcpy(bytes, name.pointer, (size_t)name.length);
+            bytes[name.length] = ' ';
+            memset(bytes + name.length + 1, '*', pointer_depth);
+            name = (String8){.pointer = bytes, .length = length};
+        }
+    }
+    if (!name.length) name = S8("unknown type");
+    return name;
+}
+
+BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachine* machine, CParseResult* result,
+                                                                  CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
+                                                                  CTypeId source, u32 start, u32 end)
+{
+    String8 message = {0};
+    if (destination.value < result->type_count && source.value < result->type_count)
+    {
+        CType target = result->types[destination.value];
+        CType from = result->types[source.value];
+        message = c_parse_scalar_conversion_message(preprocess.target, target.kind, from.kind, machine->runtime_expression_constraints);
+        bool source_pointer = from.kind == C_TYPE_POINTER || from.kind == C_TYPE_ARRAY || from.kind == C_TYPE_FUNCTION;
+        bool target_pointer = target.kind == C_TYPE_POINTER;
+        bool target_integer = c_parse_expression_integer_kind(target.kind);
+        bool source_integer = c_parse_expression_integer_kind(from.kind);
+        if (!message.length && source_pointer && target_integer && target.kind != C_TYPE_BOOL)
+        {
+            String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, source, true);
+            String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, destination, false);
+            message = string_format(result->arena, S8("cannot convert from '{S8}' to '{S8}'"), source_name, target_name);
+        }
+        else if (!message.length && target_pointer && source_integer &&
+                 !c_parse_range_is_null_pointer_constant(machine->scratch_arena, preprocess, result, scope, source, start, end))
+        {
+            String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, source, true);
+            String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, destination, false);
+            message = string_format(result->arena, S8("cannot convert from '{S8}' to '{S8}'"), source_name, target_name);
+        }
+        else if (!message.length && target_pointer && source_pointer)
+        {
+            CTypeId target_pointee = target.element_type;
+            CTypeId source_pointee = from.kind == C_TYPE_POINTER || from.kind == C_TYPE_ARRAY ? from.element_type : source;
+            if (target_pointee.value < result->type_count && source_pointee.value < result->type_count)
+            {
+                CType target_element = result->types[target_pointee.value];
+                CType source_element = result->types[source_pointee.value];
+                bool drops_qualifier = (source_element.is_const && !target_element.is_const) ||
+                                       (source_element.is_volatile && !target_element.is_volatile) ||
+                                       (source_element.is_restrict && !target_element.is_restrict) ||
+                                       (source_element.is_atomic && !target_element.is_atomic);
+                bool object_void_compatible = (target_element.kind == C_TYPE_VOID && source_element.kind != C_TYPE_FUNCTION) ||
+                                              (source_element.kind == C_TYPE_VOID && target_element.kind != C_TYPE_FUNCTION);
+                bool compatible = object_void_compatible ||
+                                  c_parse_types_compatible(machine->scratch_arena, result, preprocess,
+                                      c_parse_unqualified_type(result, target_pointee), c_parse_unqualified_type(result, source_pointee));
+                if (!compatible || drops_qualifier)
+                {
+                    String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, source, true);
+                    String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, destination, false);
+                    bool function_pointers = target_element.kind == C_TYPE_FUNCTION && source_element.kind == C_TYPE_FUNCTION;
+                    message = string_format(result->arena,
+                        function_pointers ? S8("cannot convert from '{S8}' to '{S8}': incompatible function pointer type")
+                                          : S8("cannot convert from '{S8}' to '{S8}': incompatible pointer types"),
+                        source_name, target_name);
+                }
+            }
+        }
+    }
+    return message;
+}
+
 BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* machine, CParseResult* result,
                                                               CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
-                                                              u32 start, u32 end)
+                                                              u32 start, u32 end, String8* message_out)
 {
     CTypeId source = C_TYPE_ID_INVALID;
     bool incompatible = false;
+    if (message_out) *message_out = (String8){0};
     if (destination.value < result->type_count &&
         c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source) && source.value < result->type_count)
     {
@@ -18529,7 +18683,12 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
         bool target_aggregate = target.kind == C_TYPE_STRUCT || target.kind == C_TYPE_UNION;
         bool source_aggregate = from.kind == C_TYPE_STRUCT || from.kind == C_TYPE_UNION;
         incompatible = target_aggregate != source_aggregate && !target.is_transparent_union;
-        incompatible |= c_parse_scalar_conversion_message(preprocess.target, target.kind, from.kind, machine->runtime_expression_constraints).length != 0;
+        String8 conversion = c_parse_assignment_conversion_message(machine, result, preprocess, scope, destination, source, start, end);
+        if (conversion.length)
+        {
+            incompatible = true;
+            if (message_out) *message_out = conversion;
+        }
         if (target_aggregate && source_aggregate)
             incompatible |= !c_parse_types_compatible(machine->scratch_arena, result, preprocess, c_parse_unqualified_type(result, destination), c_parse_unqualified_type(result, source));
         if (target.is_transparent_union && !source_aggregate)
@@ -18799,9 +18958,13 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                                 if (parameter_index < value.parameter_count)
                                 {
                                     CTypeId parameter = result->parameters[value.parameter_start + parameter_index].type;
-                                    if (c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, parameter, argument_start, argument_end))
+                                    String8 conversion_message = {0};
+                                    if (c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, parameter, argument_start, argument_end,
+                                                                             &conversion_message))
                                     {
-                                        c_parse_lowering_constraint_consider(diagnostic, S8("argument is incompatible with the parameter type"), index, argument_end);
+                                        c_parse_lowering_constraint_consider(diagnostic,
+                                            conversion_message.length ? conversion_message : S8("argument is incompatible with the parameter type"),
+                                            index, argument_end);
                                     }
                                     if (c_parse_incompatible_function_initializer(machine, result, preprocess, scope, parameter, argument_start, argument_end))
                                     {
@@ -18883,10 +19046,13 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, index + 1,
                 c_parse_constraint_expression_end(result, preprocess, index + 1, end), &source, diagnostic);
         }
+        String8 assignment_conversion_message = {0};
         if (assignment && typed && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, type_id,
-                index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end)))
+                index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end), &assignment_conversion_message))
         {
-            c_parse_lowering_constraint_consider(diagnostic, S8("assignment value is incompatible with the destination type"), index, index + 1);
+            c_parse_lowering_constraint_consider(diagnostic,
+                assignment_conversion_message.length ? assignment_conversion_message : S8("assignment value is incompatible with the destination type"),
+                index, index + 1);
         }
         bool call_result = false;
         u32 call_open = UINT32_MAX;
@@ -19015,12 +19181,24 @@ BUSTER_C_INTERNAL void c_parse_validate_return_statements(CTypeParseMachine* mac
                     CTypeKind source_kind = result->types[source.value].kind;
                     bool source_aggregate = source_kind == C_TYPE_STRUCT || source_kind == C_TYPE_UNION;
                     bool target_aggregate = return_kind == C_TYPE_STRUCT || return_kind == C_TYPE_UNION;
-                    if (source_aggregate != target_aggregate || c_parse_scalar_conversion_message(preprocess.target, return_kind, source_kind, true).length ||
-                        (source_aggregate && target_aggregate && !c_parse_types_compatible(machine->scratch_arena, result, preprocess, c_parse_unqualified_type(result, return_id), c_parse_unqualified_type(result, source))))
+                    String8 conversion_message = c_parse_assignment_conversion_message(machine, result, preprocess, scope, return_id, source,
+                                                                                        index + 1, value_end);
+                    bool incompatible_aggregate = source_aggregate && target_aggregate &&
+                        !c_parse_types_compatible(machine->scratch_arena, result, preprocess,
+                                                  c_parse_unqualified_type(result, return_id), c_parse_unqualified_type(result, source));
+                    if (source_aggregate != target_aggregate)
                     {
                         c_parse_lowering_constraint_consider(diagnostic, return_kind == C_TYPE_NULLPTR
                             ? S8("only a value of type nullptr_t may be converted to nullptr_t")
                             : S8("return value is incompatible with the function return type"), index, value_end);
+                    }
+                    else if (conversion_message.length)
+                    {
+                        c_parse_lowering_constraint_consider(diagnostic, conversion_message, index, value_end);
+                    }
+                    else if (incompatible_aggregate)
+                    {
+                        c_parse_lowering_constraint_consider(diagnostic, S8("return value is incompatible with the function return type"), index, value_end);
                     }
                 }
             }
@@ -19239,8 +19417,11 @@ BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachi
     if (start < end)
     {
         c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source, &checked);
-        if (!checked.message.length && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end))
-            c_parse_lowering_constraint_consider(&checked, S8("initializer has an incompatible type"), start, end);
+        String8 conversion_message = {0};
+        if (!checked.message.length && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end,
+                                                                            &conversion_message))
+            c_parse_lowering_constraint_consider(&checked,
+                conversion_message.length ? conversion_message : S8("initializer has an incompatible type"), start, end);
     }
     if (checked.message.length) c_parse_initializer_fail(diagnostic, checked.message, checked.location_token_index, destination);
     return !checked.message.length;
@@ -19701,44 +19882,57 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
         {
             CScopeId scope = {.value = 0};
             CParseInitializerDiagnostic shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
-            if (!shape.message.length) shape = c_parse_validate_static_scalar(machine, result, preprocess, scope, declaration.type, start, end, declaration.is_constexpr);
-            if (!shape.message.length) shape = c_parse_validate_compound_literals(machine, result, preprocess, scope, start, end, true, 0);
-            if (!shape.message.length) shape = c_parse_validate_sizeof_operands(machine, result, preprocess, scope, start, end);
-            for (u32 cursor = start; declaration.is_constexpr && !shape.message.length && cursor < end; cursor += 1)
+            String8 conversion_message = {0};
+            bool braced = start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE);
+            bool incompatible = !shape.message.length && !braced &&
+                c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, declaration.type, start, end, &conversion_message);
+            if (incompatible)
             {
-                if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_AMPERSAND) &&
-                    (cursor == start || !c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1])))
-                    shape = (CParseInitializerDiagnostic){.message = S8("constexpr initializer is not a permitted constant expression"), .token = cursor};
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                   conversion_message.length ? conversion_message : S8("initializer has an incompatible type"));
             }
-            CParseLoweringConstraintDiagnostic generic = {0};
-            CDeclaration initializer = {.body_start = start, .body_token_count = end - start, .scope = scope};
-            c_parse_validate_generic_duplicates(machine, arena, result, preprocess, &initializer, 0, &generic);
-            u32 storage = UINT32_MAX;
-            bool thread_local_address = false;
-            u32 call = c_parse_static_initializer_call(machine, result, preprocess, scope, start, end, &storage, &thread_local_address);
-            if (call < preprocess.token_count && string_starts_with_sequence(shape.message, S8("cannot fold '")) &&
-                string_ends_with_sequence(shape.message, S8("in a static initializer"))) shape.message = (String8){0};
-            if (generic.message.length && string_starts_with_sequence(shape.message, S8("cannot fold '_Generic'"))) shape.message = (String8){0};
-            if (shape.message.length)
+            else
             {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[shape.token]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                   string_format(arena, S8("C IR lowering: {S8}"), shape.message));
-            }
-            else if (generic.message.length)
-            {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[generic.location_token_index]), generic.kind,
-                                   string_format(arena, S8("C IR lowering: {S8}"), generic.message));
-            }
-            else if (thread_local_address && storage < preprocess.token_count)
-            {
-                c_parse_diagnostic(result, declaration.location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                   S8("C IR lowering: a static initializer may not take the address of a thread-local object"));
-            }
-            else if (call < preprocess.token_count)
-            {
-                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[call]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
-                                   string_format(arena, S8("C IR lowering: cannot fold the call to '{S8}' in a static initializer"),
-                                                 c_token_spelling(preprocess.spelling_base, preprocess.tokens[call])));
+                if (!shape.message.length)
+                    shape = c_parse_validate_static_scalar(machine, result, preprocess, scope, declaration.type, start, end, declaration.is_constexpr);
+                if (!shape.message.length) shape = c_parse_validate_compound_literals(machine, result, preprocess, scope, start, end, true, 0);
+                if (!shape.message.length) shape = c_parse_validate_sizeof_operands(machine, result, preprocess, scope, start, end);
+                for (u32 cursor = start; declaration.is_constexpr && !shape.message.length && cursor < end; cursor += 1)
+                {
+                    if (c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_AMPERSAND) &&
+                        (cursor == start || !c_parse_expression_token_ends_operand(preprocess.tokens[cursor - 1])))
+                        shape = (CParseInitializerDiagnostic){.message = S8("constexpr initializer is not a permitted constant expression"), .token = cursor};
+                }
+                CParseLoweringConstraintDiagnostic generic = {0};
+                CDeclaration initializer = {.body_start = start, .body_token_count = end - start, .scope = scope};
+                c_parse_validate_generic_duplicates(machine, arena, result, preprocess, &initializer, 0, &generic);
+                u32 storage = UINT32_MAX;
+                bool thread_local_address = false;
+                u32 call = c_parse_static_initializer_call(machine, result, preprocess, scope, start, end, &storage, &thread_local_address);
+                if (call < preprocess.token_count && string_starts_with_sequence(shape.message, S8("cannot fold '")) &&
+                    string_ends_with_sequence(shape.message, S8("in a static initializer"))) shape.message = (String8){0};
+                if (generic.message.length && string_starts_with_sequence(shape.message, S8("cannot fold '_Generic'"))) shape.message = (String8){0};
+                if (shape.message.length)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[shape.token]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       string_format(arena, S8("C IR lowering: {S8}"), shape.message));
+                }
+                else if (generic.message.length)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[generic.location_token_index]), generic.kind,
+                                       string_format(arena, S8("C IR lowering: {S8}"), generic.message));
+                }
+                else if (thread_local_address && storage < preprocess.token_count)
+                {
+                    c_parse_diagnostic(result, declaration.location, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       S8("C IR lowering: a static initializer may not take the address of a thread-local object"));
+                }
+                else if (call < preprocess.token_count)
+                {
+                    c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[call]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
+                                       string_format(arena, S8("C IR lowering: cannot fold the call to '{S8}' in a static initializer"),
+                                                     c_token_spelling(preprocess.spelling_base, preprocess.tokens[call])));
+                }
             }
         }
     }
@@ -19914,7 +20108,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             CParseInitializerDiagnostic shape = c_parse_validate_initializer_shape(machine, result, preprocess, entity->scope, entity->type,
                                                                                   shape_start, shape_end);
             if (entity->type.value < result->type_count && result->types[entity->type.value].kind == C_TYPE_NULLPTR &&
-                c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type, shape_start, shape_end))
+                c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type, shape_start, shape_end, 0))
                 c_parse_lowering_constraint_consider(diagnostic, S8("only a value of type nullptr_t may be converted to nullptr_t"), start, shape_end);
             if (!entity->is_static_storage)
             {
@@ -19947,31 +20141,47 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             u32 initializer_end = 0;
             if (c_ir_declaration_initializer_range(preprocess, local, &initializer_start, &initializer_end))
             {
-                CParseInitializerDiagnostic scalar = c_parse_validate_static_scalar(machine, result, preprocess, entity->scope, entity->type,
-                                                                                    initializer_start, initializer_end, entity->is_constexpr);
-                if (!scalar.message.length) scalar = c_parse_validate_compound_literals(machine, result, preprocess, entity->scope, initializer_start, initializer_end, true, 0);
-                if (scalar.message.length)
+                String8 conversion_message = {0};
+                bool braced = initializer_start < initializer_end &&
+                              c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE);
+                bool incompatible = !braced && c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
+                                                                                     initializer_start, initializer_end, &conversion_message);
+                if (incompatible)
                 {
                     c_parse_lowering_constraint_consider(diagnostic,
-                        string_format(result->arena, S8("could not lower static initializer for local '{S8}': {S8}"), entity->name, scalar.message),
-                        start, scalar.token);
+                        conversion_message.length ? conversion_message : S8("initializer has an incompatible type"),
+                        start, initializer_start);
                 }
-                u32 storage = UINT32_MAX;
-                bool thread_local_address = false;
-                u32 call = c_parse_static_initializer_call(machine, result, preprocess, entity->scope, initializer_start, initializer_end,
-                                                          &storage, &thread_local_address);
-                if (call < preprocess.token_count || storage < preprocess.token_count)
+                else
                 {
-                    CDeclaration function = result->declarations[declaration_index];
-                    u32 function_name = function.syntax_declaration ? function.syntax_declaration->function_name_token : location;
-                    String8 message = string_format(result->arena, S8("could not lower static initializer for local '{S8}'"), entity->name);
-                    if (call < preprocess.token_count && c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[call])) == C_SYMBOL_BUILTIN_NONE)
+                    CParseInitializerDiagnostic scalar = c_parse_validate_static_scalar(machine, result, preprocess, entity->scope, entity->type,
+                                                                                        initializer_start, initializer_end, entity->is_constexpr);
+                    if (!scalar.message.length)
+                        scalar = c_parse_validate_compound_literals(machine, result, preprocess, entity->scope, initializer_start, initializer_end, true, 0);
+                    if (scalar.message.length)
                     {
-                        message = string_format(result->arena, S8("could not lower static initializer for local '{S8}': cannot fold the call to '{S8}' in a static initializer"),
-                            entity->name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[call]));
-                        function_name = call;
+                        c_parse_lowering_constraint_consider(diagnostic,
+                            string_format(result->arena, S8("could not lower static initializer for local '{S8}': {S8}"), entity->name, scalar.message),
+                            start, scalar.token);
                     }
-                    c_parse_lowering_constraint_consider(diagnostic, message, start, function_name);
+                    u32 storage = UINT32_MAX;
+                    bool thread_local_address = false;
+                    u32 call = c_parse_static_initializer_call(machine, result, preprocess, entity->scope, initializer_start, initializer_end,
+                                                              &storage, &thread_local_address);
+                    if (call < preprocess.token_count || storage < preprocess.token_count)
+                    {
+                        CDeclaration function = result->declarations[declaration_index];
+                        u32 function_name = function.syntax_declaration ? function.syntax_declaration->function_name_token : location;
+                        String8 message = string_format(result->arena, S8("could not lower static initializer for local '{S8}'"), entity->name);
+                        if (call < preprocess.token_count && c_symbol_builtin_from_spelling(c_token_spelling(preprocess.spelling_base, preprocess.tokens[call])) == C_SYMBOL_BUILTIN_NONE)
+                        {
+                            message = string_format(result->arena,
+                                S8("could not lower static initializer for local '{S8}': cannot fold the call to '{S8}' in a static initializer"),
+                                entity->name, c_token_spelling(preprocess.spelling_base, preprocess.tokens[call]));
+                            function_name = call;
+                        }
+                        c_parse_lowering_constraint_consider(diagnostic, message, start, function_name);
+                    }
                 }
             }
         }
@@ -20005,8 +20215,11 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                         CTypeId initializer_type = C_TYPE_ID_INVALID;
                         c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, entity->scope,
                             cursor + 1, value_end, &initializer_type, diagnostic);
-                        if (c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type, cursor + 1, value_end))
-                            c_parse_lowering_constraint_consider(diagnostic, S8("initializer has an incompatible type"), cursor, value_end);
+                        String8 conversion_message = {0};
+                        if (c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
+                                                                  cursor + 1, value_end, &conversion_message))
+                            c_parse_lowering_constraint_consider(diagnostic,
+                                conversion_message.length ? conversion_message : S8("initializer has an incompatible type"), cursor, value_end);
                     }
                     break;
                 }

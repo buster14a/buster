@@ -1614,7 +1614,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         String8 source;
         bool valid;
         bool gnu;
+        String8 expected_diagnostic;
     } cases[] = {
+        {S8("int g(void) { int x; x = \"t\"; return x; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
+        {S8("int f(int); int g(void) { return f(\"u\"); }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
+        {S8("int g(int n) { char *p = n; return p != 0; }\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
+        {S8("int g(void) { return \"s\"; }\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
+        {S8("int g(char *c) { int *q = c; return *q; }\n"), false, false, S8("cannot convert from 'char *' to 'int *'")},
+        {S8("int g(void) { long l = g; return (int)l; }\n"), false, false, S8("cannot convert from 'function pointer' to 'long'")},
+        {S8("int x = \"s\";\n"), false, false, S8("cannot convert from 'char *' to 'int'")},
+        {S8("char *p = 5;\n"), false, false, S8("cannot convert from 'int' to 'char *'")},
+        {S8("int (*fp)(void) = 7;\n"), false, false, S8("cannot convert from 'int' to 'function pointer'")},
+        {S8("int old(void); int g(void) { char *z=0; void *v=(int *)0; int *p=0; _Bool b=p; int (*fp)(void)=0; char *a=(0); char *c=1-1; return old() + b + (v!=0) + (fp!=0) + (a==c); }\n"), true},
+        {S8("int g(void) { int *p=(int *)5; return p != 0; }\n"), true},
+        {S8("typedef union { void *p; char *c; } U __attribute__((transparent_union)); void consume(U); int g(int *p) { consume(p); return 0; }\n"), true, true},
         {S8("int f(int); int g(void) { return sizeof(f()); }\n"), false},
         {S8("int f(void); int g(void) { return sizeof(f(1)); }\n"), false},
         {S8("int f(int, ...); int g(void) { return sizeof(f()); }\n"), false},
@@ -1882,6 +1895,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
             BUSTER_STRING_TEST(arguments, syntax.warning, object.warning);
             BUSTER_TEST(arguments, syntax.diagnostic_count == object.diagnostic_count);
             BUSTER_TEST(arguments, syntax.analysis_diagnostic_count == object.analysis_diagnostic_count);
+            if (cases[index].expected_diagnostic.length)
+            {
+                BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_ANALYSIS && syntax.analysis_diagnostic_count != 0,
+                                string_format(arena, S8("source={S8}\nerror={u32}\ndiagnostic={S8}"),
+                                              cases[index].source, (u32)syntax.error, syntax.diagnostic));
+                BUSTER_TEST_RAW(arguments, string_first_sequence(syntax.diagnostic, cases[index].expected_diagnostic) != BUSTER_STRING_NO_MATCH,
+                                string_format(arena, S8("source={S8}\ndiagnostic={S8}\nexpected={S8}"),
+                                              cases[index].source, syntax.diagnostic, cases[index].expected_diagnostic));
+                BUSTER_TEST_RAW(arguments, string_first_sequence(syntax.diagnostic, S8("C IR lowering")) == BUSTER_STRING_NO_MATCH,
+                                string_format(arena, S8("source={S8}\ndiagnostic={S8}"), cases[index].source, syntax.diagnostic));
+            }
             for (u32 diagnostic = 0; diagnostic < BUSTER_MIN(syntax.diagnostic_count, object.diagnostic_count); diagnostic += 1)
             {
                 CompilerDiagnostic first = syntax.diagnostics[diagnostic];
@@ -1897,6 +1921,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
             }
             scratch_end(temporary);
         }
+    }
+    String8 unprototyped_source = S8("int old(); int g(void) { return old(\"x\"); }\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 input = buster_test_temporary_path(arena, S8("buster-unprototyped-conversion-control"), S8(".c"));
+        String8 output = buster_test_temporary_path(arena, S8("buster-unprototyped-conversion-control"), S8(".o"));
+        BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(unprototyped_source)));
+        String8 syntax_command[] = {S8("-g0"), S8("-std=c17"), forms[form], S8("-fsyntax-only"), input};
+        String8 object_command[] = {S8("-g0"), S8("-std=c17"), forms[form], S8("-c"), S8("-o"), output, input};
+        CompilerDriverResult syntax = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+        CompilerDriverResult object = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+        BUSTER_TEST_RAW(arguments, syntax.error == COMPILER_DRIVER_ERROR_NONE, syntax.diagnostic);
+        BUSTER_TEST(arguments, syntax.error == object.error);
+        BUSTER_STRING_TEST(arguments, syntax.diagnostic, object.diagnostic);
+        scratch_end(temporary);
     }
     return result;
 }
