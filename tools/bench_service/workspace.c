@@ -33,6 +33,7 @@
 #define BQ_CLEANUP_ENTRY_CAP 16384u
 #define BQ_CLEANUP_DEPTH_CAP 256u
 #include "retirement_prepare.h"
+#include "retirement_binaries.h"
 
 typedef struct BqDirectoryList
 {
@@ -1450,6 +1451,7 @@ BqError bq_workspace_reconcile(BqQueue* queue, String8 workspace_root, u64 id, u
 }
 
 #include "retirement_prepare.c"
+#include "retirement_binaries.c"
 
 #else
 bool bq_workspace_name(char result[64], u64 id, u64 token)
