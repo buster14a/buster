@@ -2,8 +2,8 @@
 """Read-only comparison of installed GitHub benchmark admission controls.
 
 The administrator captures four GET responses after installation. The installer
-separately checks the existing admin-only Actions policy and restricted runner
-group before mutation. This check does not authorize host provisioning or
+also checks the existing requester policy, administrator permission and
+restricted runner group. This check does not authorize host provisioning or
 workflow dispatch.
 """
 
@@ -45,8 +45,12 @@ def verify(policy, ruleset, environment, branches, variable):
              environment.get("deployment_branch_policy"), "deployment policy")
     rules = environment.get("protection_rules")
     require(isinstance(rules, list), "environment protection rules missing")
-    require(not any(rule.get("type") == "required_reviewers" for rule in rules),
-            "environment still requires a reviewer")
+    reviewers = [rule for rule in rules if rule.get("type") == "required_reviewers"]
+    require(len(reviewers) == 1, "environment must require one administrator reviewer")
+    require(reviewers[0].get("prevent_self_review") is True,
+            "environment must prevent self-review")
+    matching([{"type": "User", "reviewer": {"login": "davidgmbb", "id": 39247043}}],
+             reviewers[0].get("reviewers"), "environment reviewers")
     require(branches.get("total_count") == 1 and
             len(branches.get("branch_policies", [])) == 1,
             "environment must have exactly one deployment branch")

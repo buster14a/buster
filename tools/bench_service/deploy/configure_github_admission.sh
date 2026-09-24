@@ -5,6 +5,7 @@ repo="${1:-buster14a/buster}"
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
 ruleset="$root/.github/rulesets/benchmark-main.json"
 main_ruleset="$root/.github/main-merge-queue.ruleset.json"
+actor_policy="$root/.github/benchmark-actions-policy.json"
 api_version=2026-03-10
 
 if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
@@ -109,48 +110,38 @@ if [[ "$branch_policies" != present ]]; then
   exit 1
 fi
 
-# The administrator's existing Actions policy is a prerequisite. Never
-# create or modify it as a side effect of configuring benchmark admission.
-policy_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
+# The requester policy is a pre-existing administrator control. Apps can start
+# a run, but only an administrator may approve its protected-environment job.
+# Never create or change the requester policy as a side effect of installation.
+policy_id="$(python3 - "$actor_policy" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["id"])
+PY
+)"
+policy_matches="$(gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/actions/policies?has_parents=false&per_page=100" \
-  --jq '.policies[] | select(.source_type == "Repository") | .id')"
-policy_matches=0
-for policy_id in $policy_ids; do
-  gh api -H "X-GitHub-Api-Version: $api_version" \
-    "repos/$repo/actions/policies/$policy_id" >"$tmp/candidate-policy.json"
-  if python3 - "$tmp/candidate-policy.json" <<'PY'
+  --jq ".policies[] | select(.source_type == \"Repository\" and .id == $policy_id) | .id")"
+if [[ "$policy_matches" != "$policy_id" ]]; then
+  printf 'expected the one reviewed repository Actions policy for benchmark requests\n' >&2
+  exit 1
+fi
+gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/actions/policies/$policy_id" >"$tmp/actor-policy.json"
+python3 "$root/tools/bench_service/deploy/verify_github_actor_policy.py" \
+  "$actor_policy" "$tmp/actor-policy.json" "$repo"
+
+gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/reviewer-permission.json"
+python3 - "$tmp/reviewer-permission.json" <<'PY'
 import json
 import sys
 
-live = json.load(open(sys.argv[1]))
-expected = {
-    "enforcement": "active",
-    "conditions": {"workflow_path": {
-        "include": [".github/workflows/9700x-service-dispatch.yml"],
-        "exclude": [],
-    }},
-    "rules": [
-        {"type": "restrict_actions_actors", "parameters": {
-            "allowed_actors": [{"id": 5, "type": "RepositoryRole"}],
-        }},
-        {"type": "restrict_action_events", "parameters": {
-            "allowed_events": ["workflow_dispatch"],
-        }},
-    ],
-}
-if live.get("source_type") != "Repository" or live.get("target") != "actions":
-    sys.exit(1)
-if any(live.get(key) != expected[key] for key in ("enforcement", "conditions", "rules")):
-    sys.exit(1)
+permission = json.load(open(sys.argv[1], encoding="utf-8"))
+user = permission.get("user") or {}
+if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" or user.get("id") != 39247043:
+    sys.exit("required benchmark reviewer must still be the reviewed repository administrator")
 PY
-  then
-    policy_matches=$((policy_matches + 1))
-  fi
-done
-if [[ "$policy_matches" -ne 1 ]]; then
-  printf 'expected one existing active, admin-only, dispatch-only Actions policy for the fixed workflow\n' >&2
-  exit 1
-fi
 
 ruleset_ids="$(gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/rulesets?includes_parents=false" \
@@ -179,8 +170,8 @@ for key in ("name", "target", "enforcement", "bypass_actors", "conditions", "rul
         sys.exit(f"benchmark branch ruleset mismatch: {key}")
 PY
 
-# Only after the actor restriction, branch protection, and runner restriction
-# are read back may a dispatch run without an extra environment approval.
+# Connector requests must remain pending until the reviewed administrator
+# approves the environment job. Preserve the exact main branch restriction.
 python3 - >"$tmp/environment.json" <<'PY'
 import json
 import sys
@@ -189,7 +180,7 @@ json.dump(
     {
         "wait_timer": 0,
         "prevent_self_review": True,
-        "reviewers": [],
+        "reviewers": [{"type": "User", "id": 39247043}],
         "deployment_branch_policy": {
             "protected_branches": False,
             "custom_branch_policies": True,
@@ -221,7 +212,22 @@ gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/environments/benchmark-9700x/deployment-branch-policies?per_page=100" >"$tmp/installed-branches.json"
 gh api -H "X-GitHub-Api-Version: $api_version" \
   "repos/$repo/actions/variables/BENCH_SERVICE_DISPATCH_ENABLED" >"$tmp/installed-variable.json"
+gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/actions/policies/$policy_id" >"$tmp/installed-actor-policy.json"
+python3 "$root/tools/bench_service/deploy/verify_github_actor_policy.py" \
+  "$actor_policy" "$tmp/installed-actor-policy.json" "$repo"
+gh api -H "X-GitHub-Api-Version: $api_version" \
+  "repos/$repo/collaborators/davidgmbb/permission" >"$tmp/reviewer-permission.json"
+python3 - "$tmp/reviewer-permission.json" <<'PY'
+import json
+import sys
+
+permission = json.load(open(sys.argv[1], encoding="utf-8"))
+user = permission.get("user") or {}
+if permission.get("permission") != "admin" or user.get("login") != "davidgmbb" or user.get("id") != 39247043:
+    sys.exit("required benchmark reviewer lost repository administrator permission")
+PY
 python3 "$root/tools/bench_service/deploy/verify_github_admission.py" \
   "$ruleset" "$tmp/installed-benchmark.json" "$tmp/installed-environment.json" \
   "$tmp/installed-branches.json" "$tmp/installed-variable.json"
-printf 'Existing admin-only Actions policy and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'
+printf 'Connector requester policy, administrator reviewer and restricted runner group verified; BENCH_SERVICE_DISPATCH_ENABLED read back false\n'

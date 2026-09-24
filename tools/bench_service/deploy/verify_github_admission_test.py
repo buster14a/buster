@@ -27,7 +27,10 @@ class AdmissionReadbackTest(unittest.TestCase):
             "name": "benchmark-9700x",
             "deployment_branch_policy": {
                 "protected_branches": False, "custom_branch_policies": True},
-            "protection_rules": [],
+            "protection_rules": [{"type": "required_reviewers",
+                                  "prevent_self_review": True,
+                                  "reviewers": [{"type": "User", "reviewer": {
+                                      "login": "davidgmbb", "id": 39247043}}]}],
         }
         self.branches = {"total_count": 1, "branch_policies": [
             {"name": "main", "type": "branch"}]}
@@ -54,11 +57,27 @@ class AdmissionReadbackTest(unittest.TestCase):
             self.check()
 
     def test_environment_and_disabled_admission(self):
-        self.environment["protection_rules"].append({
-            "type": "required_reviewers", "reviewers": [{"type": "User"}]})
+        self.environment["protection_rules"].clear()
         with self.assertRaises(ValueError):
             self.check()
-        self.environment["protection_rules"].clear()
+        self.environment["protection_rules"] = [{"type": "required_reviewers",
+                                                  "prevent_self_review": True,
+                                                  "reviewers": [{"type": "User", "reviewer": {
+                                                      "login": "davidgmbb", "id": 39247043}}]}]
+        reviewer = self.environment["protection_rules"][0]
+        reviewer["prevent_self_review"] = False
+        with self.assertRaises(ValueError):
+            self.check()
+        reviewer["prevent_self_review"] = True
+        reviewer["reviewers"][0]["reviewer"]["login"] = "buster14a14a"
+        with self.assertRaises(ValueError):
+            self.check()
+        reviewer["reviewers"][0]["reviewer"]["login"] = "davidgmbb"
+        reviewer["reviewers"].append({"type": "User", "reviewer": {
+            "login": "buster14a14a", "id": 1}})
+        with self.assertRaises(ValueError):
+            self.check()
+        reviewer["reviewers"].pop()
         self.branches["branch_policies"].append({"name": "*", "type": "branch"})
         with self.assertRaises(ValueError):
             self.check()

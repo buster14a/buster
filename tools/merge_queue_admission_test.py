@@ -142,6 +142,7 @@ class RulesTests(unittest.TestCase):
 
     def test_desired_ruleset(self):
         gate.validate_ruleset(self.ruleset())
+        self.assertEqual(self.ruleset()["bypass_actors"], gate.BYPASS_ACTORS)
         self.assertEqual(gate.QUEUE["max_entries_to_build"], 20)
         self.assertEqual(self.ruleset()["rules"][-1]["parameters"], gate.QUEUE)
 
@@ -152,13 +153,18 @@ class RulesTests(unittest.TestCase):
             gate.validate_ruleset(data)
         self.assertNotIn("bypass_actors", data)
 
-    def test_visible_bypass_and_malformed_inventory_fail_in_both_modes(self):
-        for inventory in (None, {}, "", False, [{"actor_type": "OrganizationAdmin"}]):
+    def test_unreviewed_bypass_and_malformed_inventory_fail_in_both_modes(self):
+        for inventory in (None, {}, "", False, [],
+                          gate.BYPASS_ACTORS[:1], gate.BYPASS_ACTORS * 2,
+                          [{"actor_type": "OrganizationAdmin"}],
+                          [gate.BYPASS_ACTORS[1], gate.BYPASS_ACTORS[0]],
+                          [{**gate.BYPASS_ACTORS[0], "bypass_mode": "pull_requests_only"},
+                           gate.BYPASS_ACTORS[1]]):
             for read_only in (False, True):
                 with self.subTest(inventory=inventory, read_only=read_only):
                     data = self.ruleset()
                     data["bypass_actors"] = inventory
-                    with self.assertRaisesRegex(gate.AdmissionError, "standing bypasses"):
+                    with self.assertRaisesRegex(gate.AdmissionError, "bypass actors differ"):
                         gate.validate_ruleset(data, read_only_response=read_only)
 
     def test_reader_bypass_authority_is_rejected(self):
@@ -173,11 +179,11 @@ class RulesTests(unittest.TestCase):
         for hidden in (False, True):
             data = live_rules()
             if not hidden:
-                data["bypass_actors"] = []
+                data["bypass_actors"] = gate.BYPASS_ACTORS
             with patch.object(api, "get", return_value=data):
                 report = gate.live_ruleset(api, "buster14a/buster")
                 self.assertEqual(report["bypass_inventory"],
-                                 "hidden" if hidden else "verified-empty")
+                                 "hidden" if hidden else "verified-expected")
         for key, value in (("id", 1), ("id", str(gate.RULESET_ID)),
                            ("source_type", "Organization"), ("source", "other/repo")):
             data = live_rules()

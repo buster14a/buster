@@ -10,11 +10,14 @@ The smoke result has no #511/#512/#36 performance authority.
 
 Record the current main commit and tree, the merged #1017 and #1058 identities,
 the authenticated administrator and the installed Actions actor policy. Confirm
-it permits only the Repository admin role to dispatch the fixed workflow and
-does not grant a bot, LLM connector or team independent dispatch authority.
-The `benchmark-9700x` environment does not require a second approval; edits to
+it permits exactly Repository admin, `davidgmbb`, ChatGPT Codex Connector,
+Claude and Devin.ai Integration to request the fixed workflow through manual
+dispatch. Confirm `davidgmbb` has repository admin permission and is the sole
+required `benchmark-9700x` reviewer, with self-review prevention. Edits to
 the workflow, policy and installed gateway still require review under the
 repository trust policy.
+If an administrator uses GitHub's environment bypass control, record that
+separate release action; it is not a reviewer approval receipt.
 
 In a trusted checkout at the recorded main commit, inspect
 `GITHUB_ADMISSION.md`, the main and benchmark ruleset policies, installer and
@@ -31,15 +34,18 @@ The installer first reads back disabled dispatch and leaves the variable
 unchanged. Explicitly set it to `false` before installation if it is absent;
 do not run the installer as a read-only probe or during an enabled window.
 Keep its log and separately retrieved, timestamped
-JSON responses for the live `main` ruleset 22537199, the existing admin-only
+JSON responses for the live `main` ruleset 22537199, the existing requester
 Actions policy, organization runner group, `Benchmark dispatch main protection`
 ruleset, `benchmark-9700x` environment, deployment branch policies and
 `BENCH_SERVICE_DISPATCH_ENABLED`. Its post-install read-back verifier must pass
 with `value=false`. The main queue must retain eight Actions-bound checks,
-non-strict status checks, 20-build/one-merge `ALLGREEN` and no bypass. The
+non-strict status checks, 20-build/one-merge `ALLGREEN` and exactly the two
+reviewed standing bypass actors, Repository admin (role 5) and `davidgmbb`
+(user 39247043), both in `always` mode. The
 benchmark ruleset must protect the exact `main` branch with no bypass, without
-a blanket pull-request review requirement; the environment must have no
-required reviewer and must allow only the exact `main` deployment branch.
+a blanket pull-request review requirement; the environment must require
+`davidgmbb` to approve with self-review prevention and must allow only the
+exact `main` deployment branch.
 
 Record the runner registration, its actual runner group, allowed repository
 and workflow restrictions, effective labels, account and idle state from
@@ -74,8 +80,10 @@ configuration for this host; this repository does not install one.
 ## 3. Protected execution, once both receipts pass
 
 After the administrator and host operator sign off the actual receipts,
-explicitly enable admission. An administrator submits only via
-`.github/workflows/9700x-service-dispatch.yml` on protected `main`.
+explicitly enable admission. A reviewed requester starts only
+`.github/workflows/9700x-service-dispatch.yml` on protected `main`, and the
+administrator approves or rejects the pending environment job before the
+runner executes the fixed gateway.
 Predeclare distinct idempotency keys and record workflow run/job, request
 digest, principal, job/attempt, installed inventory and boot/lease identities.
 Do not replace the protected entrypoint with SSH or direct local submit.
