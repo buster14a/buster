@@ -4,12 +4,14 @@
  * again after parsing, then commits both sides to the correctness gate.
  * Runtime output is hashed from the completed service-owned process log and
  * compared with an independently established oracle by the gate. Process
- * status, command identity and oracle production remain the trusted service
- * runner's responsibility.
+ * plans are hashed with the measurement lane's canonical serializer. Binding
+ * those plans and logs to actual processes, collecting their wait statuses
+ * and producing the independent oracle remain the service runner's work.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "retirement_artifact_service.h"
 #include "../throughput/retirement_artifact.h"
+#include "../throughput/retirement_command.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -133,11 +135,26 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_read(int descriptor, char digest[
     return ok;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_retirement_command_absent(BqRetirementProcessCommand const* command)
+{
+    bool absent = !command->arguments && !command->environment && !command->directory &&
+                  !command->argument_count && !command->environment_count;
+    return absent;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_command_hash(BqRetirementProcessCommand const* command,
+    char digest[65])
+{
+    bool ok = tp_retirement_command_fields_hash(command->arguments, command->argument_count,
+        command->directory, command->environment, command->environment_count, digest);
+    return ok;
+}
+
 bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
     BqRetirementArtifactLocation locations[2], int runtime_outputs[2],
-    BqRetirementRowFact const* observed)
+    BqRetirementRowCommands const commands[2], BqRetirementRowFact const* observed)
 {
-    bool ok = gate && !gate->failed && !gate->finished && observed && locations && runtime_outputs &&
+    bool ok = gate && !gate->failed && !gate->finished && observed && locations && runtime_outputs && commands &&
         gate->checks_done == gate->check_count && gate->rows_done < gate->prepared.rows;
     BqRetirementRowFact row = {0};
     if (ok)
@@ -153,7 +170,11 @@ bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
         {
             BqRetirementObservedSide* output = &row.side[side];
             ok = !output->artifact_sha256[0] && !output->code_sha256[0] && !output->code_bytes &&
-                 !output->runtime_output_sha256[0];
+                 !output->runtime_output_sha256[0] && !output->compiler_command_sha256[0] &&
+                 !output->runtime_command_sha256[0];
+            if (ok) ok = trusted->compiler_eligible ?
+                bq_retirement_command_hash(&commands[side].compiler, output->compiler_command_sha256) :
+                bq_retirement_command_absent(&commands[side].compiler);
             if (ok && trusted->compiler_eligible)
             {
                 TpRetirementArtifact facts = {0};
@@ -170,6 +191,9 @@ bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
                 }
             }
             else if (ok) ok = locations[side].name == NULL;
+            if (ok) ok = runtime ?
+                bq_retirement_command_hash(&commands[side].runtime, output->runtime_command_sha256) :
+                bq_retirement_command_absent(&commands[side].runtime);
             if (ok) ok = runtime ? bq_retirement_runtime_read(runtime_outputs[side],
                                         output->runtime_output_sha256) : runtime_outputs[side] == -1;
         }

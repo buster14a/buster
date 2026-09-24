@@ -52,6 +52,14 @@ descriptor to the matching completed process and capture both streams in the
 oracle's declared order; this wrapper cannot authenticate a caller-selected
 descriptor or create an independent oracle.
 
+The row wrapper also derives both compiler command hashes and applicable
+runtime command hashes from exact argv, cwd and explicit sorted environment
+through the same bounded canonical serializer used by the timed measurement
+lane. It requires those digest slots empty on entry and rejects supplied
+commands for untimed or inapplicable processes. The service runner must execute
+these exact plans and bind actual wait statuses to each side; a matching plan
+alone cannot attest which process ran or whether it passed semantics.
+
 ## Trusted inputs
 
 The service must first verify the complete #1018 preparation and independently
@@ -127,8 +135,9 @@ cc -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror -fwrapv \
 ```
 
 The focused fixture now copies its actual compiled executable into frozen
-service files for the link-row readback. It rejects symlink/path substitution,
+service files for the link-row readback and captures the runtime output from
+two completed child processes. It rejects symlink/path substitution,
 predeclared code facts, writable output and mismatched machine identity. The
 fixture also reads frozen output logs and rejects wrong bytes, missing
-descriptors, caller-filled digests and mutable logs. The other synthetic rows
-remain structural tests, not a full-corpus pass.
+descriptors, caller-filled digests, mutable logs and changed argv/cwd/environment.
+The other synthetic rows remain structural tests, not a full-corpus pass.
