@@ -5,7 +5,7 @@ name: C growth diagnostic
 on:
   push:
     branches: [codex/c-growth-discovery-2e942e80-astra]
-    paths: [.github/workflows/c-growth-diagnostic.yml, tools/c_growth_experiment.py]
+    paths: [.github/workflows/c-growth-diagnostic.yml, tools/c_growth_experiment.py, tools/c_growth_followup.py]
 permissions:
   contents: read
 jobs:
@@ -17,18 +17,18 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-          fetch-depth: 8
-      - name: Bounded frontend census with matched Clang builds
+          fetch-depth: 16
+      - name: Independent dimensions, scalar replay, and frozen real-source census
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/c-growth-evidence"
-          python3 tools/c_growth_experiment.py 2>&1 | tee "$RUNNER_TEMP/c-growth-evidence/experiment.log"
+          mkdir -p "$RUNNER_TEMP/c-growth-followup"
+          python3 tools/c_growth_followup.py 2>&1 | tee "$RUNNER_TEMP/c-growth-followup/experiment.log"
       - name: Retain every completed and failed observation
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: c-growth-census-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/c-growth-evidence
+          name: c-growth-followup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/c-growth-followup
           if-no-files-found: error
           retention-days: 7
