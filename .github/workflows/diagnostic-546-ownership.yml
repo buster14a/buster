@@ -5,27 +5,47 @@ on:
 permissions:
   contents: read
 jobs:
-  source:
+  experiment:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 45
+    env:
+      BUSTER_TEST_JOBS: '2'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          path: recipe
           persist-credentials: false
-      - name: Retain exact source and audit identity
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          path: work
+          persist-credentials: false
+      - name: Install existing linker dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Compare bounded ownership prototypes
+        working-directory: work
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/ownership-546"
-          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/ownership-546/identity.txt"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/ownership-546/source.tar.gz"
-          sha256sum "$RUNNER_TEMP/ownership-546/source.tar.gz" >> "$RUNNER_TEMP/ownership-546/identity.txt"
-          python3 tools/new_audit.py --newest >> "$RUNNER_TEMP/ownership-546/identity.txt"
-          cat "$RUNNER_TEMP/ownership-546/identity.txt"
+          git -C ../recipe rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/ownership-546/recipe.txt"
+          bash ../recipe/.github/diagnostics/546/run.sh ../recipe/.github/diagnostics/546 "$RUNNER_TEMP/ownership-546"
+      - name: Summarize executed work
+        if: always()
+        shell: bash
+        run: |
+          if test -f "$RUNNER_TEMP/ownership-546/outcomes.tsv"; then
+            cat "$RUNNER_TEMP/ownership-546/outcomes.tsv" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          printf '\nOrdinary hosted diagnostic only. No 9700X performance acceptance or native-retirement policy change. Missing outcomes are NOT RUN.\n' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
-          name: ownership-546-source-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ownership-546-experiment-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ownership-546
-          retention-days: 7
-          if-no-files-found: error
+          retention-days: 14
+          if-no-files-found: warn
