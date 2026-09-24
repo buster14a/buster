@@ -5,10 +5,11 @@
 Adapter baseline: `f5ce6cdc10e0e9f49b8698a82944daf4688c0f2e` (after #927 and #933).
 On 2026-09-22, after #945 landed, ruleset `22537199` was updated and read back:
 eight required GitHub Actions checks, non-strict branch freshness, no bypass,
-and a single-build/single-merge ALLGREEN queue using merge commits. The saved
-response passes `check-ruleset` at main `6929d847fbab0014284f698cd235ddb570d60e9d`.
-`.github/main-merge-queue.ruleset.json` describes that configuration; verify live
-settings before relying on it. The checker has no write API.
+and an initial build limit of one with a merge limit of one, ALLGREEN, and
+merge commits. The saved response passed `check-ruleset` at main
+`6929d847fbab0014284f698cd235ddb570d60e9d`. The checked-in ruleset now
+describes the desired build limit of 20; verify live settings before relying
+on it. The checker has no write API.
 
 The trusted retirement gate and queue collector have landed. The adapter admits
 one synthetic merge commit only when its first parent is current main and its
@@ -20,13 +21,19 @@ fixtures do not establish GitHub's live synthetic-commit shape or queue behavior
 ## One admission owner, no branch-freshness requirement
 
 GitHub's native merge queue owns order, synthetic heads and rebuilding. Configure
-`max_entries_to_build: 1`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`max_entries_to_build: 20`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`min_entries_to_merge_wait_minutes: 0`, `check_response_timeout_minutes: 360`,
 `grouping_strategy: ALLGREEN`, and `merge_method: MERGE`. Retain
 `strict_required_status_checks_policy: false`. A clean feature branch does not
 need to be manually updated merely because main advanced. The queue, not the
 feature author, constructs and validates the combined candidate.
 
-Build concurrency and merge batch size are distinct controls; both are one.
+Build concurrency permits up to 20 queued candidates to run speculative
+combined-head validation concurrently; it does not authorize 20 merges. The
+merge limit of one serializes admission and merging, and GitHub rebuilds stale
+groups after main advances. `ALLGREEN` requires every queued group to satisfy
+its required checks. `MERGE` retains merge commits. Required checks still bind
+the exact group and the trusted retirement gate still owns sensitive trees.
 The 360-minute queue timeout exceeds the admission workflow's 310-minute job
 limit and its five-hour bounded wait. A timeout is a failure, not permission to
 merge. Cancellation only coalesces the same PR or merge-group ref; main-push
@@ -117,7 +124,7 @@ Immediately before admission, the collector repeats the six-result read and
 trusted-publication verification, requires the same evidence, rechecks live main and the queue ref, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
 preserves independent retirement admission, adds the exact-group gate, rejects visible bypasses/strict branch updates, and
-requires the single-build/single-merge policy. The success artifact records each
+requires the exact 20-build/one-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
 
@@ -151,7 +158,26 @@ main/group invalidates the current attempt. GitHub must build a fresh group and
 rerun required workflows. Content conflicts use #869's exact-path explanation;
 the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge.
 
-## Activation and acceptance
+## Build-limit rollout and acceptance
+
+### Changing the live build limit
+
+The merge-group workflow runs admission code from its trusted base, so a PR
+changing the repository queue contract must first pass the policy already on
+`main`. If live build concurrency has been raised ahead of the repository
+contract, temporarily restore the live `Build concurrency` field in ruleset
+`22537199` to `1` and read back all queue parameters. Merge the policy PR
+through the existing queue with all required checks; do not bypass admission.
+Resolve the exact resulting `main` commit before changing the live setting to
+`20`. Read the ruleset back and observe `Main integration admission` accept a
+new exact merge group. Between the PR merge and the live edit, the trusted
+policy expects `20` while GitHub still reports `1`, so new groups fail closed.
+Only the build limit changes; leave the merge limit, grouping strategy, merge
+method, timeout, checks, non-strict freshness and bypass settings untouched.
+The read-only collector cannot update rulesets; a repository administrator
+changes **Settings → Rulesets → main → Require merge queue → Build concurrency**.
+
+### Remaining acceptance
 
 Activation is complete. Retain evidence for the remaining live exercises below;
 do not close #867 based on settings or offline fixtures alone:
