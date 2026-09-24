@@ -67,7 +67,7 @@ for target, clang_target in [('x86_64-linux', 'x86_64-unknown-linux-gnu'), ('aar
         artifact = out / (target + '-' + compiler + '.o')
         flags = [ide, 'cc', '--target=' + target] if compiler == 'buster' else ['clang', '--target=' + clang_target]
         path = raw_layout if compiler == 'buster' else clang_layout
-        flags += ['-std=gnu17', '-nostdinc', '-ffreestanding', '-c', str(path), '-o', str(artifact)]
+        flags += ['-std=gnu17', '-nostdinc', '-c', str(path), '-o', str(artifact)]
         row = {'kind': 'target semantic/layout and object emission ONLY', 'name': target + '-' + compiler, 'compile': run(flags)}
         if row['compile']['exit'] == 0:
             row['object_sha256'] = hashlib.sha256(artifact.read_bytes()).hexdigest()
