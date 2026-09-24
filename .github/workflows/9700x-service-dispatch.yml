@@ -34,7 +34,9 @@ jobs:
   submit:
     if: ${{ github.ref == 'refs/heads/main' && vars.BENCH_SERVICE_DISPATCH_ENABLED == 'true' }}
     environment: benchmark-9700x
-    runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
     timeout-minutes: 120
     env:
       BQ_IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
