@@ -134,9 +134,9 @@ def main() -> int:
             actors = actor_policy["rules"][0]["parameters"]["allowed_actors"]
             if actors != [{"id": 5, "type": "RepositoryRole"},
                           {"id": 39247043, "type": "User"},
-                          {"id": 1144995, "type": "App"},
-                          {"id": 1236702, "type": "App"},
-                          {"id": 811515, "type": "App"}]:
+                          {"id": 158946652, "type": "IntegrationInstallation"},
+                          {"id": 159756060, "type": "IntegrationInstallation"},
+                          {"id": 161964061, "type": "IntegrationInstallation"}]:
                 errors.append("benchmark requester allowlist differs")
         else:
             errors.append("missing reviewed benchmark Actions requester policy")
