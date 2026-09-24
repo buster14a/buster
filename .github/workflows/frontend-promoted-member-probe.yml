@@ -1,6 +1,8 @@
-name: Frontend promoted-member work probe
+name: Frontend promoted-member audit record
 
-# Disposable, branch-only correctness diagnostic. No timing or dedicated host.
+# Final branch-only documentation step. The completed count probe remains at
+# a3088798553cb4382ba92d2f2c6ed10c6806d6ee / run 36000545470.
+# Remove this disposable workflow before opening the research PR.
 on:
   push:
     branches: [research/frontend-promoted-member-counts-20260924-a9f2]
@@ -9,69 +11,22 @@ permissions:
   contents: read
 
 jobs:
-  probe:
+  record:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
-      - name: Read the diagnostic script
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Freeze diagnostic script outside the source checkout
+      - name: Mint the audit with the repository-owned tool
         shell: bash
         run: |
           set -euo pipefail
-          cp tools/frontend_promoted_member_probe.py "$RUNNER_TEMP/frontend_probe.py"
-          mkdir -p "$RUNNER_TEMP/frontend-evidence"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/frontend-evidence/diagnostic-revision.txt"
-          cp "$RUNNER_TEMP/frontend_probe.py" "$RUNNER_TEMP/frontend-evidence/"
-      - name: Check out the immutable compiler baseline
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: 744a948f41291b4238d1755b1507678799f1206d
-          persist-credentials: false
-      - name: Record current source, guides, and newest audit
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 "$RUNNER_TEMP/frontend_probe.py" inspect --out "$RUNNER_TEMP/frontend-evidence"
-          clang --version | tee "$RUNNER_TEMP/frontend-evidence/clang.txt"
-      - name: Provide the ordinary hosted build prerequisites
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes mold ninja-build
-      - name: Build and freeze the unchanged compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/build-driver"
-          "$RUNNER_TEMP/build-driver" generate --cc clang 2>&1 | tee "$RUNNER_TEMP/frontend-evidence/generate.log"
-          "$RUNNER_TEMP/build-driver" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/frontend-evidence/base-build.log"
-          cp build/Release/ide "$RUNNER_TEMP/ide.base"
-          sha256sum "$RUNNER_TEMP/ide.base" > "$RUNNER_TEMP/frontend-evidence/base-binary.sha256"
-      - name: Add private query-local counters and rebuild in the same tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 "$RUNNER_TEMP/frontend_probe.py" instrument --out "$RUNNER_TEMP/frontend-evidence"
+          python3 tools/new_audit.py --self-test
+          audit=$(python3 tools/new_audit.py --platform "GitHub-hosted Linux x86_64; deterministic counts, no timings" "Promoted-member duplicate checks are quadratic; total-compile materiality unmeasured")
+          printf 'MINTED_AUDIT %s\n' "$audit"
+          cat "$audit"
+          python3 tools/new_audit.py --check
+          python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("tools/frontend_promoted_member_probe.py").read_text()); print("probe syntax: passed")'
           git diff --check
-          "$RUNNER_TEMP/build-driver" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/frontend-evidence/probe-build.log"
-          cp build/Release/ide "$RUNNER_TEMP/ide.probe"
-          sha256sum "$RUNNER_TEMP/ide.probe" > "$RUNNER_TEMP/frontend-evidence/probe-binary.sha256"
-          git status --porcelain > "$RUNNER_TEMP/frontend-evidence/instrumented-status.txt"
-      - name: Compile bounded families and compare identical-input objects
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 "$RUNNER_TEMP/frontend_probe.py" run --out "$RUNNER_TEMP/frontend-evidence" --base "$RUNNER_TEMP/ide.base" --probe "$RUNNER_TEMP/ide.probe" | tee "$RUNNER_TEMP/frontend-evidence/cases.log"
-      - name: Retain every result, including failures and unreached paths
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: frontend-promoted-member-work-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/frontend-evidence
-          if-no-files-found: error
-          retention-days: 30
