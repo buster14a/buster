@@ -13,17 +13,18 @@ out.mkdir(parents=True, exist_ok=True)
 text = pathlib.Path('src/buster/tests/compiler/frontend/c/c_test.c').read_text()
 fragment = text.split('String8 const c_test_integer_literal_policy_source = S8(', 1)[1].split('\n);', 1)[0]
 source = ''.join(ast.literal_eval(s) for s in re.findall(r'"(?:[^"\\]|\\.)*"', fragment))
-# Clang does not choose signed __int128 for these unsuffixed decimal literals.
-# Normalize only this documented policy choice, preserving unsigned suffixes,
-# explicit casts and every operator/context. Do not call this identical-source evidence.
-def clang_profile(s):
+# Reference compilers have different raw-decimal extension policies. Pin the
+# selected signed __int128 type explicitly in both references; preserve all
+# unsigned suffixes, explicit casts and operators. This is equivalent-artifact
+# evidence, not a claim that their default raw-literal policies match Buster.
+def reference_profile(s):
     return re.sub(r'\b(9223372036854775808|18446744073709551615)(?:LL|L)?(?![A-Za-z_0-9])',
                   lambda m: '((__int128)' + m.group(1) + 'ULL)', s)
 
 raw = out / 'literal-policy-raw.c'
-normalized = out / 'literal-policy-clang-profile.c'
+normalized = out / 'literal-policy-reference-profile.c'
 raw.write_text(source)
-normalized.write_text(clang_profile(source))
+normalized.write_text(reference_profile(source))
 rows = []
 
 def run(args):
@@ -33,7 +34,7 @@ def run(args):
 for compiler in ['buster', 'gcc', 'clang']:
     for dialect in ['gnu17', 'gnu2x']:
         for optimization in ['-O0', '-O2'] if compiler != 'buster' else ['-ffrontend-ssa', '-fno-frontend-ssa']:
-            path = normalized if compiler == 'clang' else raw
+            path = raw if compiler == 'buster' else normalized
             name = compiler + '-' + dialect + '-' + optimization[1:]
             artifact = out / name
             flags = [ide, 'cc'] if compiler == 'buster' else [compiler]
@@ -56,9 +57,9 @@ void *target_pointer;
 int literal_size(void) { return sizeof(9223372036854775808) != 16; }
 '''
 raw_layout = out / 'layout-raw.c'
-clang_layout = out / 'layout-clang-profile.c'
+clang_layout = out / 'layout-reference-profile.c'
 raw_layout.write_text(layout)
-clang_layout.write_text(clang_profile(layout))
+clang_layout.write_text(reference_profile(layout))
 for target, clang_target in [('x86_64-linux', 'x86_64-unknown-linux-gnu'), ('aarch64-linux', 'aarch64-unknown-linux-gnu'),
                              ('x86_64-windows', 'x86_64-pc-windows-msvc'), ('aarch64-windows', 'aarch64-pc-windows-msvc'),
                              ('x86_64-macos', 'x86_64-apple-macos11'), ('aarch64-macos', 'arm64-apple-macos11')]:
