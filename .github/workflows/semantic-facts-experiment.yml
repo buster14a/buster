@@ -1,0 +1,73 @@
+name: Semantic facts experiment (temporary)
+on:
+  push:
+    branches: [astra/1028-semantic-facts-2e942e80]
+permissions:
+  contents: read
+concurrency:
+  group: semantic-facts-1028-experiment
+  cancel-in-progress: false
+jobs:
+  source:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          persist-credentials: false
+      - run: |
+          mkdir -p "$RUNNER_TEMP/semantic-source"
+          git archive HEAD | gzip > "$RUNNER_TEMP/semantic-source/source.tar.gz"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/semantic-source/revision.txt"
+          sha256sum "$RUNNER_TEMP/semantic-source/source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: semantic-facts-pinned-source
+          path: ${{ runner.temp }}/semantic-source
+          retention-days: 7
+          if-no-files-found: error
+  baseline:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          persist-credentials: false
+      - name: Existing linker dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Build trusted baseline and reproduce fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          exec > >(tee evidence/baseline.log) 2>&1
+          git rev-parse HEAD 'HEAD^{tree}'
+          clang --version
+          cmake --version
+          ninja --version
+          uname -a
+          lscpu
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
+          sha256sum build/Release/ide
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release
+          "$RUNNER_TEMP/buster-build" build --config Release -t test_all -- -j2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: semantic-facts-baseline
+          path: |
+            evidence
+            build/CMakeCache.txt
+            build/compile_commands.json
+          retention-days: 14
+          if-no-files-found: error
