@@ -1,0 +1,157 @@
+name: QUALITY 125 matched cost and validation
+on:
+  push:
+    branches: [astra/125-region-census-20260924]
+    paths: [.github/workflows/quality-125-measure.yml]
+permissions:
+  contents: read
+concurrency:
+  group: quality-125-measure-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  BASE: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+  CANDIDATE: 6644f7a9dd9c9b360091c5c9d7a6eda75183f293
+  BUSTER_TEST_JOBS: '1'
+  CMAKE_BUILD_PARALLEL_LEVEL: '2'
+jobs:
+  cost:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Retain fixed experiment and pin all revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/quality-125-cost"
+          cp tools/quality_125_compare.py "$RUNNER_TEMP/quality-125-compare.py"
+          git rev-parse HEAD 'HEAD^{tree}' > "$RUNNER_TEMP/quality-125-cost/experiment.txt"
+          sha256sum "$RUNNER_TEMP/quality-125-compare.py" >> "$RUNNER_TEMP/quality-125-cost/experiment.txt"
+          git fetch --depth=1 origin "$BASE" "$CANDIDATE"
+          git checkout --detach "$CANDIDATE"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/quality-125-driver"
+          { clang --version; uname -a; lscpu; free -b; env | grep -E '^(BUSTER|CMAKE|CC|CFLAGS|LANG|LC_)' | sort; } > "$RUNNER_TEMP/quality-125-cost/host.txt"
+      - name: Uninstrumented registered complete allocator comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/quality-125-cost"
+          exec > >(tee "$evidence/allocator-build.log") 2>&1
+          "$RUNNER_TEMP/quality-125-driver" generate --config Release --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          "$RUNNER_TEMP/quality-125-driver" build --config Release -t ide -- -j2
+          cp build/compile_commands.json "$evidence/allocator-heap.commands.json"
+          sha256sum build/Release/ide > "$evidence/allocator-heap.sha256"
+          BUSTER_QUALITY_REGION_BENCH=1 "$RUNNER_TEMP/quality-125-driver" build --config Release -t test_all -- -j1 > "$evidence/allocator-heap.log" 2>&1
+          python3 "$RUNNER_TEMP/quality-125-compare.py" scan-overlay | tee "$evidence/scan-control.identity.txt"
+          git diff > "$evidence/scan-control.patch"
+          "$RUNNER_TEMP/quality-125-driver" build --config Release -t ide -- -j2
+          cp build/compile_commands.json "$evidence/allocator-scan.commands.json"
+          cmp "$evidence/allocator-heap.commands.json" "$evidence/allocator-scan.commands.json"
+          sha256sum build/Release/ide > "$evidence/allocator-scan.sha256"
+          BUSTER_QUALITY_REGION_BENCH=1 "$RUNNER_TEMP/quality-125-driver" build --config Release -t test_all -- -j1 > "$evidence/allocator-scan.log" 2>&1
+          git restore -- src/buster/lib/compiler/codegen/register_allocator_quality.c
+      - name: Build three matched ordinary compiler subjects serially at one configured root
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/quality-125-cost"
+          exec > >(tee "$evidence/compiler-build.log") 2>&1
+          git checkout --detach "$BASE"
+          "$RUNNER_TEMP/quality-125-driver" generate --config Release --cc clang --ci --linker DEFAULT -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          for label in base heap scan; do
+            if test "$label" = heap; then git checkout --detach "$CANDIDATE"; fi
+            if test "$label" = scan; then python3 "$RUNNER_TEMP/quality-125-compare.py" scan-overlay; fi
+            "$RUNNER_TEMP/quality-125-driver" build --config Release -t ide -- -j2
+            cp build/Release/ide "$evidence/compiler-$label"
+            cp build/compile_commands.json "$evidence/compiler-$label.commands.json"
+            cp build/CMakeCache.txt "$evidence/compiler-$label.cache.txt"
+            git rev-parse HEAD 'HEAD^{tree}' > "$evidence/compiler-$label.revision.txt"
+            git diff >> "$evidence/compiler-$label.revision.txt"
+            sha256sum "$evidence/compiler-$label" > "$evidence/compiler-$label.sha256"
+            grep -Fx 'BUSTER_BENCH_ALLOCATIONS:BOOL=OFF' build/CMakeCache.txt
+            grep -Fx 'BUSTER_INCLUDE_TESTS:BOOL=OFF' build/CMakeCache.txt
+          done
+          cmp "$evidence/compiler-base.commands.json" "$evidence/compiler-heap.commands.json"
+          cmp "$evidence/compiler-heap.commands.json" "$evidence/compiler-scan.commands.json"
+          cmp "$evidence/compiler-base.cache.txt" "$evidence/compiler-heap.cache.txt"
+          cmp "$evidence/compiler-heap.cache.txt" "$evidence/compiler-scan.cache.txt"
+          git restore -- src/buster/lib/compiler/codegen/register_allocator_quality.c
+          mkdir -p "$RUNNER_TEMP/quality-125-frozen"
+          git archive "$BASE" | tar -xf - -C "$RUNNER_TEMP/quality-125-frozen"
+          mkdir -p "$RUNNER_TEMP/quality-125-frozen/build"
+          cp -a build/generated "$RUNNER_TEMP/quality-125-frozen/build/generated"
+          cp "$evidence/compiler-base" "$evidence/compiler-base-control"
+          "$RUNNER_TEMP/quality-125-driver" bench_throughput self-test > "$evidence/harness-self-test.log" 2>&1
+      - name: Existing native harness complete compiler and memory screening
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/quality-125-cost"
+          for comparison in aa ab heap-scan; do
+            left=base; right=heap
+            if test "$comparison" = aa; then right=base-control; fi
+            if test "$comparison" = heap-scan; then left=heap; right=scan; fi
+            "$RUNNER_TEMP/quality-125-driver" bench_throughput run --baseline "$evidence/compiler-$left" --candidate "$evidence/compiler-$right" --baseline-id "$BASE-$left" --candidate-id "$CANDIDATE-$right" --output "$evidence/native-$comparison" --profile ci --mode quality --pairs 20 --warmups 2 --seed 20260924 --cpu auto --no-guard --require-identical-output > "$evidence/native-$comparison.log" 2>&1
+          done
+      - name: Complete frozen unity QUALITY compiler with A/A and simpler-control comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu=$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')
+          taskset -c "$cpu" python3 "$RUNNER_TEMP/quality-125-compare.py" compiler --root "$PWD" --evidence "$RUNNER_TEMP/quality-125-cost" --frozen "$RUNNER_TEMP/quality-125-frozen" > "$RUNNER_TEMP/quality-125-cost/unity.log" 2>&1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: quality-125-cost-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quality-125-cost
+          retention-days: 14
+          if-no-files-found: error
+  validation:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [sanitized, ordinary]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.CANDIDATE }}
+          persist-credentials: false
+      - name: Build exact candidate and run registered full suite
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/quality-125-validation-$VARIANT"
+          mkdir -p "$evidence"
+          exec > >(tee "$evidence/build-tests.log") 2>&1
+          git rev-parse HEAD 'HEAD^{tree}'
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/quality-125-driver"
+          flags=(); config=Release; allocations=OFF
+          if test "$VARIANT" = sanitized; then flags+=(--sanitize); config=Debug; allocations=ON; fi
+          "$RUNNER_TEMP/quality-125-driver" generate --config "$config" --cc clang --ci --linker DEFAULT "${flags[@]}" -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS="$allocations" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          "$RUNNER_TEMP/quality-125-driver" build --config "$config" -t ide -- -j2
+          cp build/compile_commands.json build/CMakeCache.txt "$evidence/"
+          sha256sum "build/$config/ide" > "$evidence/compiler.sha256"
+          "$RUNNER_TEMP/quality-125-driver" build --config "$config" -t test_all -- -j1
+      - name: Canonical self-host and complete execution mode matrix
+        if: ${{ success() && matrix.variant == 'ordinary' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/quality-125-validation-ordinary"
+          "$RUNNER_TEMP/quality-125-driver" test_self_host --config Release > "$evidence/self-host.log" 2>&1
+          "$RUNNER_TEMP/quality-125-driver" test_mode_matrix --config Release > "$evidence/modes.log" 2>&1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: quality-125-validation-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quality-125-validation-${{ matrix.variant }}
+          retention-days: 14
+          if-no-files-found: error
