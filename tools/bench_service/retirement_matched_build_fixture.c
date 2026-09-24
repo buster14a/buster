@@ -29,6 +29,13 @@ int main(int argc, char** argv)
             result = !no_leak ? 6 : strstr(argv[3], "job-30-attempt-40") ? 5 :
                      mkdir(argv[3], 0700) == 0 ? 0 : 1;
             puts(result ? "fixture generate failed" : "fixture generated");
+            if (!result && strstr(argv[3], "job-39-attempt-49"))
+            {
+                char flood[8192];
+                memset(flood, 'x', sizeof(flood));
+                for (unsigned i = 0; i < 2049; i += 1)
+                    if (fwrite(flood, 1, sizeof(flood), stdout) != sizeof(flood)) result = 1;
+            }
         }
         else if (!strcmp(argv[1], "build") && argc == 10 &&
                  !strcmp(argv[6], "-t") && !strcmp(argv[7], "ide") &&

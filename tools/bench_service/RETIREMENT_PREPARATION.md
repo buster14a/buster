@@ -228,7 +228,13 @@ command/exit/log as an immutable queue log plus receipt, reimports A, freezes
 `Release/ide` by descriptor after each successful build, and publishes the existing binary
 record and one final build record only after all four stages succeed. Any
 failure poisons the session and leaves its prior stage receipts attributable.
-Four logs are individually capped at 16 MiB; each frozen binary at 512 MiB.
+Each child writes stdout/stderr through a private pipe drained into a
+service-owned log. The capture stops writing at 16 MiB, continues draining so
+the child cannot block on a full pipe, and rejects the stage even if that child
+exits zero. A missing pipe EOF or failed log write also prevents publication.
+This bounds disk use during execution, not just during receipt readback. The
+worker still owns the whole-job deadline and descendant cleanup. Four logs are
+individually capped at 16 MiB; each frozen binary at 512 MiB.
 
 `bq_retirement_matched_build_import` rederives the commands, rereads each
 immutable log and stage receipt, checks the exact final build record digest,

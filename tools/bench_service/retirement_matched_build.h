@@ -46,17 +46,20 @@ enum
 {
     BQ_RETIREMENT_BUILD_RUNNING = 1,
     BQ_RETIREMENT_BUILD_REAPED = 2,
-    BQ_RETIREMENT_BUILD_WAIT_FAILED = 3
+    BQ_RETIREMENT_BUILD_WAIT_FAILED = 3,
+    BQ_RETIREMENT_BUILD_DRAINING = 4
 };
 
 typedef struct BqRetirementBuildProcess
 {
-    int directory, writer;
+    int directory, writer, reader;
     pid_t process;
     u64 directory_device, directory_inode, log_device, log_inode;
+    u64 log_bytes;
     char name[32], command_sha256[SHA256_HEX_CAPACITY];
     u32 stage, state;
     int exit_code;
+    bool log_overflow, capture_failed, log_eof;
 } BqRetirementBuildProcess;
 
 /* Production must supply the compiled fixed driver and sandboxed trusted
@@ -67,9 +70,10 @@ BUSTER_F_DECL BqError bq_retirement_matched_build_begin(BqQueue* queue, BqJob co
 BUSTER_F_DECL bool bq_retirement_matched_build_stage(BqRetirementMatchedBuild* build,
     BqRetirementBuildStage* stage);
 /* A fresh log is created exclusively in the held attempt directory. Poll
- * returns 0 while running, 1 for exit zero, -1 for a nonzero/signal/wait
- * failure. A reaped nonzero child can still supply durable failure evidence.
- * Abort retains a running child for the worker to cancel and reap. */
+ * drains bounded child output, returning 0 while running or draining, 1 for
+ * exit zero with complete capture, and -1 for a child/capture/wait failure.
+ * A reaped nonzero child can still supply durable failure evidence. Abort
+ * retains a running child for the worker to cancel and reap. */
 BUSTER_F_DECL bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     BqRetirementBuildProcess* process);
 BUSTER_F_DECL int bq_retirement_matched_build_poll(BqRetirementBuildProcess* process);

@@ -1,6 +1,6 @@
 /* Private #1018 build sequence: begin imports A; stage describes one fixed
- * invocation; launch/poll observe that child's wait and capture its output in
- * a fresh service-owned log. Complete stores that observed outcome, reimports
+ * invocation; launch/poll observe that child's wait and drain a bounded pipe
+ * into a fresh service-owned log. Complete stores that observed outcome, reimports
  * A and freezes the executable after each successful build. A failed stage
  * poisons the sequence. The worker still owns isolation and cancellation.
  */
@@ -257,7 +257,7 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     BqRetirementBuildStage stage = {0};
     struct stat directory_stat = {0}, log_stat = {0};
     bool fresh = process && !process->state && !process->process &&
-        !process->directory && !process->writer;
+        !process->directory && !process->writer && !process->reader;
     bool ok = fresh && bq_retirement_matched_build_stage(build, &stage);
     char digest[SHA256_HEX_CAPACITY] = {0}, name[32] = {0};
     if (ok) bq_retirement_build_command_sha(&stage, digest);
@@ -273,13 +273,26 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     int directory = ok ? bq_open_absolute_directory(string_from_pointer(build->attempt)) : -1;
     ok = ok && directory >= 3 && bq_owned_directory(directory, true, false) &&
          fstat(directory, &directory_stat) == 0;
+    int capture[2] = {-1, -1};
+    if (ok) ok = pipe(capture) == 0;
+    int read_flags = ok ? fcntl(capture[0], F_GETFL) : -1;
+    ok = ok && capture[0] >= 3 && capture[1] >= 3 && read_flags >= 0 &&
+         fcntl(capture[0], F_SETFL, read_flags | O_NONBLOCK) == 0 &&
+         fcntl(capture[0], F_SETFD, FD_CLOEXEC) == 0 &&
+         fcntl(capture[1], F_SETFD, FD_CLOEXEC) == 0;
     int writer = ok ? openat(directory, name,
         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     ok = ok && writer >= 3 && fstat(writer, &log_stat) == 0 &&
          S_ISREG(log_stat.st_mode) && log_stat.st_uid == geteuid() &&
          log_stat.st_nlink == 1 && log_stat.st_size == 0;
     pid_t child = ok ? fork() : -1;
-    if (child == 0) bq_retirement_build_exec_fd(executable, writer, directory, source, &stage);
+    if (child == 0)
+    {
+        close(capture[0]);
+        close(writer);
+        bq_retirement_build_exec_fd(executable, capture[1], directory, source, &stage);
+    }
+    if (capture[1] >= 0) close(capture[1]);
     if (executable >= 0) close(executable);
     if (source >= 0) close(source);
     ok = ok && child > 0;
@@ -288,6 +301,7 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
         *process = (BqRetirementBuildProcess){0};
         process->directory = directory;
         process->writer = writer;
+        process->reader = capture[0];
         process->process = child;
         process->directory_device = (u64)directory_stat.st_dev;
         process->directory_inode = (u64)directory_stat.st_ino;
@@ -300,40 +314,77 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     }
     else
     {
+        if (capture[0] >= 0) close(capture[0]);
         if (writer >= 0) close(writer);
         if (directory >= 0) close(directory);
     }
     return ok;
 }
 
+/* Keep child stdout/stderr in a bounded service-owned file. Even a successful
+ * exit cannot publish a stage after an overflow or a failed capture write. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_build_drain(BqRetirementBuildProcess* process)
+{
+    u8 bytes[16384];
+    for (u32 i = 0; i < 8 && !process->log_eof; i += 1)
+    {
+        ssize_t count = read(process->reader, bytes, sizeof(bytes));
+        if (count > 0)
+        {
+            u64 remaining = BQ_RETIREMENT_BUILD_LOG_CAP - process->log_bytes;
+            u32 kept = (u64)count < remaining ? (u32)count : (u32)remaining;
+            if (kept && !process->capture_failed &&
+                !bq_write_all(process->writer, bytes, kept)) process->capture_failed = true;
+            if (!process->capture_failed) process->log_bytes += kept;
+            if ((u32)count > kept) process->log_overflow = true;
+        }
+        else if (count == 0) process->log_eof = true;
+        else if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        else if (errno != EINTR) { process->capture_failed = true; break; }
+    }
+}
+
 int bq_retirement_matched_build_poll(BqRetirementBuildProcess* process)
 {
     int result = -1;
-    if (process && process->state == BQ_RETIREMENT_BUILD_RUNNING && process->process > 0)
+    if (process && (process->state == BQ_RETIREMENT_BUILD_RUNNING ||
+                    process->state == BQ_RETIREMENT_BUILD_DRAINING) && process->reader >= 3)
     {
+        bq_retirement_build_drain(process);
         int status = 0;
-        pid_t waited = waitpid(process->process, &status, WNOHANG);
-        if (waited == 0 || (waited < 0 && errno == EINTR)) result = 0;
-        else if (waited == process->process)
+        pid_t waited = process->state == BQ_RETIREMENT_BUILD_RUNNING && process->process > 0 ?
+                       waitpid(process->process, &status, WNOHANG) : 0;
+        if (waited == process->process && waited > 0)
         {
             process->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-            process->state = BQ_RETIREMENT_BUILD_REAPED;
+            process->state = BQ_RETIREMENT_BUILD_DRAINING;
             process->process = 0;
-            result = process->exit_code == 0 ? 1 : -1;
+            bq_retirement_build_drain(process);
         }
-        else
+        else if (waited < 0 && errno != EINTR)
         {
             process->state = BQ_RETIREMENT_BUILD_WAIT_FAILED;
             process->process = 0;
         }
+        if (process->state == BQ_RETIREMENT_BUILD_DRAINING && process->capture_failed)
+            process->state = BQ_RETIREMENT_BUILD_WAIT_FAILED;
+        if (process->state == BQ_RETIREMENT_BUILD_DRAINING && process->log_eof)
+        {
+            process->state = BQ_RETIREMENT_BUILD_REAPED;
+            result = process->exit_code == 0 && !process->log_overflow &&
+                     !process->capture_failed ? 1 : -1;
+        }
+        else if (process->state != BQ_RETIREMENT_BUILD_WAIT_FAILED) result = 0;
     }
     return result;
 }
 
 void bq_retirement_matched_build_abort(BqRetirementBuildProcess* process)
 {
-    if (process && process->state != BQ_RETIREMENT_BUILD_RUNNING)
+    if (process && process->state != BQ_RETIREMENT_BUILD_RUNNING &&
+        process->state != BQ_RETIREMENT_BUILD_DRAINING)
     {
+        if (process->reader >= 3) close(process->reader);
         if (process->writer >= 3) close(process->writer);
         if (process->directory >= 3) close(process->directory);
         *process = (BqRetirementBuildProcess){0};
@@ -657,6 +708,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue*
     char command_sha256[SHA256_HEX_CAPACITY] = {0};
     bool ok = process && process->state == BQ_RETIREMENT_BUILD_REAPED &&
         !process->process && process->writer >= 3 && process->directory >= 3 &&
+        process->log_eof && !process->log_overflow && !process->capture_failed &&
         build && !build->failed && process->stage == build->next &&
         bq_retirement_matched_build_stage(build, &stage);
     if (ok) bq_retirement_build_command_sha(&stage, command_sha256);
