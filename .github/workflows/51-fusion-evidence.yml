@@ -1,0 +1,138 @@
+name: 51 fusion comparative evidence
+on:
+  push:
+    branches: [astra/51-fusion-20260924-evidence]
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BASE: 5d1c314a8ee3c5f9fb713f6afb85ab1e795f44a0
+      HEAD: 30cee02c5bf4018b95de018099ec71d9c4cd308e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install existing Linux dependency
+        run: sudo apt-get update -qq && sudo apt-get install -y mold
+      - name: Build three trusted compilers in one configured root
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          exec > >(tee evidence/build.log) 2>&1
+          set -x
+          cp 51-fusion-evidence.py "$RUNNER_TEMP/51-transform.py"
+          git rev-parse HEAD HEAD^{tree} > evidence/experiment-source.txt
+          clang --version > evidence/clang.txt
+          cmake --version > evidence/cmake.txt
+          lscpu > evidence/cpu.txt
+          uname -a > evidence/kernel.txt
+          git checkout --detach "$BASE"
+          git rev-parse HEAD HEAD^{tree} > evidence/base-source.txt
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/51-build"
+          "$RUNNER_TEMP/51-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF
+          "$RUNNER_TEMP/51-build" build --config Release -t ide -- -j2
+          cp build/Release/ide evidence/base-ide
+          cp build/compile_commands.json evidence/base-compile-commands.json
+          touch src/buster/lib/compiler/frontend/c/c_source.c
+          "$RUNNER_TEMP/51-build" build --config Release -t ide -- -j2
+          cp build/Release/ide evidence/base-rebuilt-ide
+          sha256sum evidence/base-ide evidence/base-rebuilt-ide > evidence/rebuild-control.sha256
+          cmp evidence/base-ide evidence/base-rebuilt-ide
+          git checkout --detach "$HEAD"
+          python3 "$RUNNER_TEMP/51-transform.py" narrow
+          git diff --binary > evidence/narrow.patch
+          git diff --check
+          sha256sum src/buster/lib/compiler/frontend/c/c_source.c > evidence/narrow-source.sha256
+          "$RUNNER_TEMP/51-build" build --config Release -t ide -- -j2
+          cp build/Release/ide evidence/narrow-ide
+          cp build/compile_commands.json evidence/narrow-compile-commands.json
+          git restore src/buster/lib/compiler/frontend/c/c_source.c
+          "$RUNNER_TEMP/51-build" build --config Release -t ide -- -j2
+          cp build/Release/ide evidence/full-ide
+          cp build/compile_commands.json evidence/full-compile-commands.json
+          cp build/CMakeCache.txt evidence/CMakeCache.txt
+          git rev-parse HEAD HEAD^{tree} > evidence/full-source.txt
+          sha256sum evidence/*-ide > evidence/compilers.sha256
+          for variant in base narrow full; do size -A "evidence/$variant-ide" > "evidence/$variant-sections.txt"; done
+          mkdir -p evidence/frozen-root
+          git archive "$BASE" | tar -x -C evidence/frozen-root
+          cp -a build/generated evidence/frozen-generated
+          find evidence/frozen-generated -type f -print0 | sort -z | xargs -0 sha256sum > evidence/generated.sha256
+      - name: Unmodified native harness compilation comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/compile-comparisons.log) 2>&1
+          set -x
+          "$RUNNER_TEMP/51-build" bench_throughput self-test
+          for variant in base narrow full; do
+            "$RUNNER_TEMP/51-build" bench_throughput run --baseline "$PWD/evidence/base-ide" --candidate "$PWD/evidence/$variant-ide" --baseline-id "$BASE" --candidate-id "$HEAD-$variant" --output "evidence/compile-$variant" --profile ci --workload tiny_startup --workload macros --workload many_functions --mode fast --pairs 12 --warmups 2 --no-guard --require-identical-output
+          done
+      - name: Native-harness complete preprocessing comparisons
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/preprocess-comparisons.log) 2>&1
+          set -x
+          python3 "$RUNNER_TEMP/51-transform.py" preprocess
+          git diff --binary > evidence/preprocessing-harness.patch
+          git diff --check
+          for variant in base narrow full; do
+            "$RUNNER_TEMP/51-build" bench_throughput run --baseline "$PWD/evidence/base-ide" --candidate "$PWD/evidence/$variant-ide" --baseline-id "$BASE" --candidate-id "$HEAD-$variant" --output "evidence/preprocess-$variant" --artifact preprocess --profile ci --workload tiny_startup --workload macros --workload many_functions --mode fast --pairs 12 --warmups 2 --no-guard --require-identical-output
+          done
+          git restore tools/throughput/throughput.c
+      - name: Whole frozen unity preprocessing and independent runtime controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/oracles.log) 2>&1
+          set -x
+          for variant in base narrow full; do
+            "evidence/$variant-ide" cc -E -Ievidence/frozen-root/src -Ievidence/frozen-generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 evidence/frozen-root/src/buster/apps/ide/ide.c -o "evidence/$variant-unity.i"
+            for ssa in -ffrontend-ssa -fno-frontend-ssa; do
+              for mode in none mir-stack fast quality; do
+                out="evidence/oracle-$variant-$mode$ssa"
+                "evidence/$variant-ide" cc -g0 "$ssa" -fregister-allocator="$mode" tests/basic_c_macro_task_batches.c -o "$out"
+                "$out"
+              done
+            done
+          done
+          cmp evidence/base-unity.i evidence/narrow-unity.i
+          cmp evidence/base-unity.i evidence/full-unity.i
+          clang -std=c17 tests/basic_c_macro_task_batches.c -o evidence/clang-oracle
+          evidence/clang-oracle
+          sha256sum evidence/*unity.i tests/basic_c_macro_task_batches.c > evidence/oracles.sha256
+      - name: Separate allocation-instrumented frozen unity captures
+        if: ${{ !cancelled() && success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/census-build.log) 2>&1
+          set -x
+          git checkout --detach "$BASE"
+          "$RUNNER_TEMP/51-build" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_BENCH_ALLOCATIONS=ON
+          for variant in base full; do
+            if [[ "$variant" == full ]]; then git checkout --detach "$HEAD"; fi
+            "$RUNNER_TEMP/51-build" build --config Release -t ide -- -j2
+            cp build/Release/ide "evidence/$variant-census-ide"
+            BUSTER_ALLOCATION_CENSUS=1 "evidence/$variant-census-ide" cc -E -Ievidence/frozen-root/src -Ievidence/frozen-generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -fsource-metrics="evidence/$variant-census.metrics" evidence/frozen-root/src/buster/apps/ide/ide.c -o "evidence/$variant-census.i" > "evidence/$variant-census.stdout" 2> "evidence/$variant-census.stderr"
+            python3 tools/allocation_census.py --input "evidence/$variant-census.stderr" --output "evidence/$variant-allocation" --label "$variant frozen unity preprocessing; diagnostic only"
+          done
+          cmp evidence/base-census.i evidence/full-census.i
+          sha256sum evidence/*-census-ide evidence/*-census.i > evidence/census.sha256
+      - name: Record experiment boundary
+        if: always()
+        run: |
+          printf 'Hosted ordinary-task diagnostics only. No physical Zen 5 claim, dedicated-host admission, PMU claim, generated-program optimization, or #36 policy change. Raw samples use existing native collection and pairing; preprocessing uses the retained branch-only adapter. Allocation binaries are separate from every timing compiler.\n' > evidence/SCOPE.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 51-fusion-comparative-${{ github.run_id }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
