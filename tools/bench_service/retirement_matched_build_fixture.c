@@ -24,7 +24,10 @@ int main(int argc, char** argv)
         {
             /* Deliberate failing stage: the parent verifies that no binary
              * record or dependent timed child follows a failed generate. */
-            result = strstr(argv[3], "job-30-attempt-40") ? 5 : mkdir(argv[3], 0700) == 0 ? 0 : 1;
+            bool probe = strstr(argv[3], "driver-exec-probe") != NULL;
+            bool no_leak = !probe || (fcntl(90, F_GETFD) < 0 && errno == EBADF);
+            result = !no_leak ? 6 : strstr(argv[3], "job-30-attempt-40") ? 5 :
+                     mkdir(argv[3], 0700) == 0 ? 0 : 1;
             puts(result ? "fixture generate failed" : "fixture generated");
         }
         else if (!strcmp(argv[1], "build") && argc == 10 &&
