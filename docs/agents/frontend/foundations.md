@@ -253,6 +253,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   over the 32-bit key. The one temporary row buffer is rewound before origin
   recovery and publication; the original region array remains authoritative.
   Do not restore displacement-dependent insertion sorting for `#line` splits.
+  Publish lookup keys before C23 respelling so its origin queries can read the
+  existing prefix. `c_source_map_publish_appended` rebuilds keys afterwards only
+  if that append-only phase added regions; without an append, keep the original
+  keys and sentinel. Count equality is not a general mutation-cache contract.
+  Respelling may move the region array, but must not invalidate the published
+  key prefix while querying it. Neither publication rewinds the TU arena:
+  canonical lowering copies the map's pointers into `IrProgram.source_map`,
+  whose diagnostic, DWARF and CodeView consumers still borrow their storage.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be
