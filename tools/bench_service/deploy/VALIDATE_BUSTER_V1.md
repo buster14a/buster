@@ -176,10 +176,18 @@ Restrict the runner to the reviewed service workflow and a protected manual
 main dispatch. Provision and verify the environment's actual review/branch
 rules; an `environment:` name in YAML can create an unprotected environment.
 See [GitHub's environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
-Require immutable action SHAs, minimal permissions, read-only contents,
-`persist-credentials: false` for any checkout, and exactly
-`runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`.
-Do not expose those labels to a `pull_request` job.
+Require immutable action SHAs for any action use, minimal permissions, and
+`persist-credentials: false` for any checkout. The fixed dispatcher has no
+checkout, sets `permissions: {}`, and selects both the restricted group and
+labels exactly:
+
+```yaml
+runs-on:
+  group: buster-9700x-service-dispatch
+  labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+```
+
+Do not expose that group or those labels to a `pull_request` job.
 
 The reviewed workflow must not execute checked-out candidate code. All service,
 driver, harness, source and policy identities come from the installed inventory.

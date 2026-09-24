@@ -5552,6 +5552,9 @@ enum
 {
     OBJECT_COFF_SECTION_LINK_COMDAT = 0x00001000,
     OBJECT_COFF_SECTION_LINK_NRELOC_OVFL = 0x01000000,
+    OBJECT_COFF_SECTION_ALIGNMENT_SHIFT = 20,
+    OBJECT_COFF_SECTION_ALIGNMENT_MASK = 0x00f00000,
+    OBJECT_COFF_SECTION_MAX_ALIGNMENT = 8192,
     OBJECT_COFF_STORAGE_EXTERNAL = 2,
     OBJECT_COFF_STORAGE_STATIC = 3,
     OBJECT_COFF_STORAGE_WEAK_EXTERNAL = 105,
@@ -11558,6 +11561,27 @@ BUSTER_GLOBAL_LOCAL bool object_coff_bind_aarch64_tls_index(Arena* arena, Object
     return true;
 }
 
+BUSTER_GLOBAL_LOCAL bool object_coff_section_alignment_characteristics(ObjectSection* section, u32* characteristics)
+{
+    bool result = false;
+    if (section && characteristics && (u32)section->kind < OBJECT_SECTION_COUNT)
+    {
+        u32 alignment = section->alignment ? section->alignment : object_section_default_alignment(section->kind);
+        if (alignment && !(alignment & (alignment - 1)) && alignment <= OBJECT_COFF_SECTION_MAX_ALIGNMENT)
+        {
+            u32 code = 1;
+            while (alignment > 1)
+            {
+                alignment >>= 1;
+                code += 1;
+            }
+            *characteristics = code << OBJECT_COFF_SECTION_ALIGNMENT_SHIFT;
+            result = true;
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* object)
 {
     ObjectArtifact result = {
@@ -11758,6 +11782,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     {
         ObjectSection* source = object->sections + section;
         u64 offset = COFF_HEADER_SIZE + (u64)section * COFF_SECTION_SIZE;
+        u32 alignment_characteristics = 0;
+        if (!object_coff_section_alignment_characteristics(source, &alignment_characteristics))
+        {
+            buffer.error = OBJECT_ERROR_UNSUPPORTED_ALIGNMENT;
+        }
         if (source->name.length > 8)
         {
             // Names longer than the inline field live in the string table and
@@ -11774,19 +11803,20 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         object_write_u32_at(&buffer, offset + 24, relocation_counts[section] ? relocation_offsets[section] : 0);
         object_write_u16_at(&buffer, offset + 32,
                             relocation_counts[section] > UINT16_MAX ? UINT16_MAX : (u16)relocation_counts[section]);
-        // The initializer arrays take Clang's shape for the `.CRT$X*` group:
-        // read-only initialized data aligned to 8, which is the entry size,
-        // so a priority group never pads a null slot into the middle of the
-        // merged array the way a 16-byte alignment would.
-        u32 characteristics = source->kind == OBJECT_SECTION_TEXT             ? 0x60500020
-                              : source->kind == OBJECT_SECTION_READ_ONLY_DATA ? 0x40500040
+        // Alignment is a linker placement requirement. The raw file data
+        // above remains four-byte aligned; only these Characteristics bits
+        // carry the in-memory section alignment. Zero uses the per-kind
+        // default, while explicit stronger requirements are preserved.
+        u32 characteristics = source->kind == OBJECT_SECTION_TEXT             ? 0x60000020
+                              : source->kind == OBJECT_SECTION_READ_ONLY_DATA ? 0x40000040
                               : source->kind == OBJECT_SECTION_WINDOWS_PDATA || source->kind == OBJECT_SECTION_WINDOWS_XDATA
-                                  ? 0x40300040
+                                  ? 0x40000040
                               : source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY
-                                  ? 0x40400040
-                              : object_section_kind_is_debug(source->kind)     ? 0x42100040
-                              : object_section_kind_is_zero_fill(source->kind) ? 0xc0500080
-                                                                               : 0xc0500040;
+                                  ? 0x40000040
+                              : object_section_kind_is_debug(source->kind)     ? 0x42000040
+                              : object_section_kind_is_zero_fill(source->kind) ? 0xc0000080
+                                                                               : 0xc0000040;
+        characteristics = (characteristics & ~(u32)OBJECT_COFF_SECTION_ALIGNMENT_MASK) | alignment_characteristics;
         if (relocation_counts[section] > UINT16_MAX)
         {
             characteristics |= OBJECT_COFF_SECTION_LINK_NRELOC_OVFL;
@@ -12201,10 +12231,20 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
     for (u32 section = 0; section < object->section_count; section += 1)
     {
         ObjectSection* source = object->sections + section;
-        if ((source->data.length && !source->data.pointer) || (source->alignment && (source->alignment & (source->alignment - 1))) ||
+        if ((u32)source->kind >= OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
+            (source->alignment && (source->alignment & (source->alignment - 1))) ||
             (object_section_kind_is_zero_fill(source->kind) && source->data.length))
         {
             return result;
+        }
+        if (format == OBJECT_FORMAT_COFF)
+        {
+            u32 alignment_characteristics = 0;
+            if (!object_coff_section_alignment_characteristics(source, &alignment_characteristics))
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_ALIGNMENT;
+                return result;
+            }
         }
     }
     for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)

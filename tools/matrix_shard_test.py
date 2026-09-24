@@ -293,7 +293,7 @@ class WorkflowSetupTests(unittest.TestCase):
 
     def test_workflow_tools_keep_platform_budget_and_all_suites(self):
         block = self.steps["Workflow tool regression tests"]
-        self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 5 || 2 }}", block)
+        self.assertIn("timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}", block)
         self.assertIn("matrix.shard == 'release'", block)
         self.assertIn("set -euo pipefail", block)
         self.assertNotIn("continue-on-error:", block)
@@ -305,9 +305,35 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/native_producer_profile_test.py", "tools/ci_configure_evidence_test.py",
             "tools/ci_matrix_phases_test.py", "tools/ci_native_observation_test.py",
         }
-        suites = re.findall(r'"\$BUSTER_CI_PYTHON" ([^ ]+) -v', block)
+        suites = re.findall(r'^          run_suite ([^ ]+) [^ ]+\.log$', block, re.M)
         self.assertEqual(set(suites), expected)
         self.assertEqual(len(suites), len(expected))
+        self.assertIn('if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee', block)
+        self.assertIn('return "$status"', block)
+        self.assertIn('WORKFLOW_TOOLS_END result=success', block)
+
+    def test_workflow_tools_record_all_suites_and_stop_on_failure(self):
+        expected = re.findall(r'^          run_suite ([^ ]+) ([^ ]+\.log)$',
+                              self.steps["Workflow tool regression tests"], re.M)
+        for suite, _ in expected:
+            path = self.root / suite
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("import os, sys\nprint('SUITE fixture')\n"
+                            "sys.exit(int(os.environ['FIXTURE_EXIT']) if __file__.endswith('ci_admission_test.py') else 0)\n",
+                            encoding="utf-8")
+        for code in (0, 7):
+            with self.subTest(exit_code=code):
+                shutil.rmtree(self.root / "buster-ci", ignore_errors=True)
+                self.environment["FIXTURE_EXIT"] = str(code)
+                result = self.run_step("Workflow tool regression tests")
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                completed = expected if code == 0 else expected[:2]
+                self.assertEqual(re.findall(r'SUITE_START path=([^ ]+)', result.stdout),
+                                 [suite for suite, _ in completed])
+                for suite, log in completed:
+                    self.assertIn(f"SUITE_END path={suite} result=", result.stdout)
+                    self.assertIn("SUITE fixture", (self.root / "buster-ci" / log).read_text())
+                self.assertEqual("WORKFLOW_TOOLS_END result=success" in result.stdout, code == 0)
 
     def test_checks_zig_setup_creates_its_own_log_directory_and_propagates_failure(self):
         tools = self.root / "tools"
@@ -546,6 +572,23 @@ class CompletionGateTests(unittest.TestCase):
         sleep.assert_not_called()
         self.assertTrue(any("refresh budget expired before another exact-run snapshot" in error
                             for error in result["errors"]))
+
+    def test_completed_job_with_missing_steps_refreshes_exact_snapshot(self):
+        jobs = self.sample()
+        incomplete = copy.deepcopy(jobs)
+        target = next(job for job in incomplete if job["name"] == "Windows x86-64 checks")
+        target["steps"] = []
+        run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40}
+        args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
+        batch = {"total_count": len(jobs), "jobs": incomplete}
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch,
+                                                                          {"total_count": len(jobs), "jobs": jobs}]) as fetch, \
+                mock.patch.object(github_ci_time.time, "sleep") as sleep:
+            result = github_ci_time.require_jobs(args)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 2)
+        self.assertEqual(fetch.call_count, 3)
+        sleep.assert_called_once_with(1.0)
 
     def test_workflow_expands_exact_cross_product_and_keeps_gate_wiring(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

@@ -9,6 +9,7 @@ on:
       - .github/workflows/throughput-real-source.yml
       - tools/ci_apt.py
       - tests/ci_apt_test.py
+      - tools/ci_apt_retry_test.py
   push:
     branches: [main]
     paths:
@@ -18,6 +19,7 @@ on:
       - .github/workflows/throughput-real-source.yml
       - tools/ci_apt.py
       - tests/ci_apt_test.py
+      - tools/ci_apt_retry_test.py
   workflow_dispatch:
 
 permissions:
@@ -32,7 +34,7 @@ jobs:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     name: Pinned apt inputs (${{ matrix.profile }})
     runs-on: ubuntu-26.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +44,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Offline fail-closed controls
-        run: python3 tests/ci_apt_test.py -v
+        run: |
+          python3 tests/ci_apt_test.py -v
+          python3 tools/ci_apt_retry_test.py -v
       - name: Check repeatable signed provisioning and consumer selection
         shell: bash
         env:

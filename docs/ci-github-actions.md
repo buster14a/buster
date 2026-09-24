@@ -366,13 +366,35 @@ and one shutdown log under `BUSTER_IOS_CONSOLE_LOG`; the GitHub mobile job
 places these in `RUNNER_TEMP/buster-ci/`, inside its existing artifact. Each
 phase keeps the first 64 KiB of combined raw stdout/stderr while draining the
 remaining output, reports truncation, and records the exact shell-quoted
-command, helper status, native command status when available, elapsed time
-and unchanged deadline. Native exit 124 is an ordinary command failure;
+command, helper status, native command status when available, separate command
+and capture elapsed times, receipt completeness, overall elapsed time and the
+command deadline. An empty or missing capture receipt is explicitly incomplete
+and cannot turn a successful command into a passing phase. Native exit 124 is an ordinary command failure;
 helper exit 124 without a native completion record is a timeout. Status 137
 without that record remains ambiguous between timeout escalation and a signal.
-The first failed phase also retains bounded source SHA, Xcode/SDK, selected
-device and runtime context. Shutdown records the prior batch status and cannot
+Each failed boot phase retains a separate bounded source SHA, Xcode/SDK, selected
+device and runtime context, including the replacement device after exhaustion.
+The context includes statuses/timings for exact-device inventory, runtime,
+host memory and disk probes. A `Booted` inventory entry alone does not satisfy
+readiness. Shutdown records the prior batch status and cannot
 erase an earlier failure or turn otherwise successful tests green.
+
+On an invocation-owned GitHub-hosted ARM64 simulator, a first true readiness
+timeout is followed by one `bootstatus -b` continuation on that same device,
+bounded to 120 seconds by default. Only if that continuation itself times out
+does the existing exact-device replacement run. Its boot and readiness remain
+bounded by 180 seconds each and it cannot trigger another continuation or
+replacement. The default maximum command budgets across boot, continuation,
+replacement shutdown/delete/create, replacement boot/readiness and final
+shutdown sum to 1290 seconds; capture and diagnostics have their own finite
+deadlines in addition to that sum. This does not change local, borrowed,
+explicit or self-hosted devices, application-test retry policy, result-marker
+validation or mobile coverage requirements. The controlled override
+`BUSTER_IOS_BOOT_CONTINUATION_SECONDS` must be a positive integer and only
+affects the hosted owned continuation. A deliberately shortened first-readiness
+deadline keeps its original single-replacement path unless that override also
+opts into continuation. `ios/hosted_signing_budget_test.py` covers the real
+launcher with timeout, continuation, replacement and native failure fixtures.
 
 `bash tests/mobile_ci_scripts_test.sh` covers nonzero and hanging commands,
 bounded output, independent batch results and cleanup failure propagation.

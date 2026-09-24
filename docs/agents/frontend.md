@@ -38,6 +38,10 @@ open-addressed table stays at most half full, diagnoses invalid identity or
 arena exhaustion, and records probe counts only in tests. `c_once_tests` covers
 real aliases for all three suppression mechanisms plus an end-to-end fan-out
 and depth workload whose actual slot examinations must scale near-linearly.
+The end-to-end workload bounds probes against its own include operations;
+physical device/inode hashes vary between simulator app containers, so probe
+counts from two independently created file sets are not a stable ratio. The
+direct table workload retains its cross-size ratio check on fixed path keys.
 
 ## Builtin capability queries
 
