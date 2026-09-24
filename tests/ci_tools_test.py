@@ -600,6 +600,8 @@ class EvidencePackTests(unittest.TestCase):
         # Exactly one upload runs: the archive, or the original tree after a failed pack.
         self.assertIn("if: ${{ !cancelled() && steps.pack.outcome != 'success' }}", unpacked)
         artifact = "name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}\n"
+        self.assertIn("uses: ./.github/actions/native-artifact-upload\n", packed)
+        self.assertIn("uses: actions/upload-artifact@", unpacked)
         for block in (packed, unpacked):
             self.assertIn(artifact, block)
             self.assertIn("retention-days: 7\n", block)
@@ -616,6 +618,27 @@ class EvidencePackTests(unittest.TestCase):
         outcomes = {"modes": {"outcome": "success"}, "differential": {"outcome": "success"},
                     "pack": {"outcome": "failure"}}
         self.assertEqual(ci_summary.assess(outcomes, ["modes", "differential", "pack"]), ["pack"])
+
+    def test_native_artifact_action_retries_once_and_preserves_upload_failures(self):
+        action = (ROOT / ".github/actions/native-artifact-upload/action.yml").read_text()
+        steps = dict(re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - name:|\Z)", action))
+        primary = steps["Retain ${{ inputs.label }} logs"]
+        backoff = steps["Back off before retrying ${{ inputs.label }} log upload"]
+        retry = steps["Retain ${{ inputs.label }} logs (retry)"]
+        recovered = steps["Record recovered ${{ inputs.label }} log upload"]
+        failed = steps["Record failed ${{ inputs.label }} log upload"]
+
+        self.assertIn("id: artifact_upload\n", primary)
+        self.assertIn("continue-on-error: true\n", primary)
+        self.assertIn("if: ${{ !cancelled() }}\n", primary)
+        self.assertIn("steps.artifact_upload.outcome == 'failure'", backoff)
+        self.assertIn("sleep 15", backoff)
+        self.assertIn("steps.artifact_upload.outcome == 'failure'", retry)
+        self.assertIn("overwrite: true\n", retry)
+        self.assertNotIn("continue-on-error", retry)
+        self.assertIn("steps.artifact_upload_retry.outcome == 'success'", recovered)
+        self.assertIn("steps.artifact_upload_retry.outcome == 'failure'", failed)
+        self.assertIn("::error::", failed)
 
     @unittest.skipIf(os.name == "nt", "Native lanes run only on Unix")
     def test_actual_workflow_command_packs_runner_evidence(self):

@@ -97,6 +97,13 @@ class ActionPinsTest(unittest.TestCase):
         self.assertEqual(PINS.APPROVED["actions/upload-artifact"],
                          {UPLOAD_ARTIFACT_V4_SHA, UPLOAD_ARTIFACT_V7_SHA})
 
+    def test_native_artifact_action_uploads_are_pinned(self):
+        action_path = ROOT / ".github/actions/native-artifact-upload/action.yml"
+        action = action_path.read_text()
+        self.assertEqual(action.count(UPLOAD_ARTIFACT_V7_PIN), 2)
+        self.assertNotIn(UPLOAD_ARTIFACT_V4_PIN, action)
+        self.assertEqual(PINS.check_text(action, action_path), [])
+
     def test_actionlint_is_pinned(self):
         github = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn(ACTIONLINT_PIN, github)
