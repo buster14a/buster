@@ -1,0 +1,87 @@
+name: Literal policy oracle and publication
+on:
+  push:
+    branches: [codex/semantic-policy-probe-20260924]
+    paths: [.github/workflows/literal-policy-publish.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify the exact completed candidate evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/literal-final"
+          cp tools/literal_policy_verify.py "$RUNNER_TEMP/literal-final/literal_policy_verify.py"
+          gh run download 36000474476 --repo buster14a/buster --name literal-policy-36000474476 --dir "$RUNNER_TEMP/literal-prior"
+          gh api repos/buster14a/buster/actions/runs/36000474476/jobs > "$RUNNER_TEMP/literal-final/prior-jobs.json"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          prior = root / 'literal-prior'
+          data = json.loads((root / 'literal-final/prior-jobs.json').read_text())
+          job = data['jobs'][0]
+          assert job['head_sha'] == '0761cb88548033e723f22cf64814c09edfd64c79'
+          expected = ['Reconstruct the isolated candidate', 'Build candidate on the standard hosted runner', 'Full registered Release suite', 'Candidate self-host fixed point', 'Existing native execution-mode matrix']
+          steps = {s['name']: s['conclusion'] for s in job['steps']}
+          assert all(steps[n] == 'success' for n in expected), steps
+          rows = json.loads((prior / 'reference/literal-policy-results.json').read_text())
+          failures = [r for r in rows if r['compile']['exit'] != 0 or r.get('execute', {}).get('exit', 0) != 0]
+          assert len(failures) == 6
+          assert all(r['name'].endswith('-buster') and r['compile']['stdout'].strip() == 'cc: error: unsupported option: -ffreestanding' for r in failures)
+          assert (prior / 'revisions.txt').read_text().splitlines() == ['42361479c1733070851c147256aad1ad14982067', '944992c8a4e594cf9eaf4a2d856ac411e6583bf6', '2e942e80a87666409cf29d3e24a68d322b9e71fd', 'f976bfd7cdb8830a8a15d959ef36f0152f1b767d']
+          assert hashlib.sha256((prior / 'ide-candidate').read_bytes()).hexdigest() == '60e69eefae062a707fd3466386e93c997f52c24eb28c7e3b862943ec95993402'
+          old = (prior / 'literal_policy_verify.py').read_text()
+          fixed = (root / 'literal-final/literal_policy_verify.py').read_text()
+          assert old.count("'-ffreestanding', ") == 1
+          assert old.replace("'-ffreestanding', ", '') == fixed
+          PY
+          git bundle verify "$RUNNER_TEMP/literal-prior/candidate.bundle"
+          git fetch "$RUNNER_TEMP/literal-prior/candidate.bundle" HEAD
+          git checkout --detach 42361479c1733070851c147256aad1ad14982067
+          test "$(git rev-parse HEAD^{tree})" = 944992c8a4e594cf9eaf4a2d856ac411e6583bf6
+          test "$(git diff HEAD^ HEAD --name-only | wc -l)" -eq 2
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_gen.c)" = dc538a4963dd0364a37600e9c3ada636050f67e2
+          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = b71ef9556e38f6518d93b088f026505c153f49e5
+          chmod +x "$RUNNER_TEMP/literal-prior/ide-candidate"
+          cp "$RUNNER_TEMP/literal-prior/revisions.txt" "$RUNNER_TEMP/literal-final/revisions.txt"
+          lscpu > "$RUNNER_TEMP/literal-final/host.txt"
+          clang --version > "$RUNNER_TEMP/literal-final/clang.txt"
+          gcc --version > "$RUNNER_TEMP/literal-final/gcc.txt"
+      - name: Replay the corrected independent reference and object matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/literal-final/literal_policy_verify.py" "$RUNNER_TEMP/literal-prior/ide-candidate" "$RUNNER_TEMP/literal-final/results" | tee "$RUNNER_TEMP/literal-final/reference.log"
+      - name: Non-force publication to this session's feature branch only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=no)"
+          git diff HEAD^ HEAD --check
+          branch=codex/1089-literal-limit-policy
+          test "$(git ls-remote origin refs/heads/$branch | cut -f1)" = 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$branch"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/literal-final/published.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: literal-policy-final-${{ github.run_id }}
+          path: ${{ runner.temp }}/literal-final
+          if-no-files-found: error
+          retention-days: 14
