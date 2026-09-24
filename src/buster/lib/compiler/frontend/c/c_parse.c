@@ -11742,10 +11742,13 @@ BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, 
             entity = c_parse_lookup_typedef_name(result, c_token_spelling(preprocess.spelling_base, token), true);
         }
         bool is_typedef = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
-        // GCC and Clang accept __float128 as a builtin type word, although
-        // this frontend does not model it yet. Preserve its prior unsupported
-        // type behavior instead of reporting it as an unknown identifier.
-        bool is_unmodeled_builtin_type = string_equal(c_token_spelling(preprocess.spelling_base, token), S8("__float128"));
+        // GCC and Clang accept these floating-point spellings as builtin type
+        // words, although this frontend does not model them yet. Preserve
+        // their prior unsupported type behavior instead of reporting them as
+        // unknown identifiers.
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        bool is_unmodeled_builtin_type = string_equal(spelling, S8("__float128")) || string_equal(spelling, S8("_Float128")) ||
+                                        string_equal(spelling, S8("_Float64x")) || string_equal(spelling, S8("_Float128x"));
         // A one-word identifier segment in a function declarator is the
         // legacy identifier-list form, not a parameter declaration with a
         // missing type specifier. Keep it out of the unknown-type diagnostic;
@@ -11754,7 +11757,6 @@ BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, 
         unknown = !is_typedef && !is_unmodeled_builtin_type && !is_old_style_identifier;
         if (unknown)
         {
-            String8 spelling = c_token_spelling(preprocess.spelling_base, token);
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
                                string_format(result->arena, S8("unknown type name '{S8}'"), spelling));
         }

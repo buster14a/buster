@@ -20390,6 +20390,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_unknown_type_name_diagnostics(UnitTest
         S8("typedef int U; int shadow_object(void) { int U = 0; return U; }\n"),
         S8("int source; __typeof__(source) copy;\n"),
         S8("__float128 host_extension;\n"),
+        S8("_Float128 host_extension;\n"),
+        S8("_Float64x host_extension;\n"),
+        S8("_Float128x host_extension;\n"),
         S8("__attribute__((unused)) int attributed; __declspec(noinline) int decorated(void) { return 1; }\n"),
         S8("int legacy(old_style_argument); int unspecified();\n"),
     };
