@@ -8,6 +8,7 @@
 #include "retirement_correctness.c"
 #include "retirement_correctness_service.c"
 #include <stdlib.h>
+#include <time.h>
 
 BUSTER_GLOBAL_LOCAL u32 bq_retirement_tests;
 BUSTER_GLOBAL_LOCAL u32 bq_retirement_failures;
@@ -575,33 +576,28 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_compile_driver(char const* driver_path)
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_prep_test_run_stage(BqRetirementBuildStage const* stage,
-    int attempt, u32 number, int* log, int* exit_code)
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_run_stage(BqRetirementMatchedBuild* build,
+    BqRetirementBuildProcess* process, int* exit_code)
 {
-    char name[32];
-    int length = snprintf(name, sizeof(name), "build-log-%u", number);
-    int output = length > 0 && (u32)length < sizeof(name) ?
-        openat(attempt, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
-    pid_t child = output >= 0 ? fork() : -1;
-    if (child == 0)
+    bool ok = bq_retirement_matched_build_launch(build, process);
+    if (ok)
     {
-        if (chdir(stage->cwd) == 0 && dup2(output, STDOUT_FILENO) == STDOUT_FILENO &&
-            dup2(output, STDERR_FILENO) == STDERR_FILENO)
-        {
-            execve(stage->argv[0], (char* const*)stage->argv, (char* const*)stage->env);
-        }
-        _exit(127);
+        BQ_PREP_CHECK(process->state == BQ_RETIREMENT_BUILD_RUNNING && process->process > 0);
+        bq_retirement_matched_build_abort(process);
+        BQ_PREP_CHECK(process->state == BQ_RETIREMENT_BUILD_RUNNING && process->process > 0);
     }
-    int status = 0;
-    pid_t waited = -1;
-    do { if (child > 0) waited = waitpid(child, &status, 0); }
-    while (waited < 0 && errno == EINTR);
-    bool ok = waited == child && WIFEXITED(status) &&
-              fsync(output) == 0 && fchmod(output, 0400) == 0;
-    if (output >= 0 && close(output) != 0) ok = false;
-    *log = ok ? openat(attempt, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    *exit_code = ok ? WEXITSTATUS(status) : -1;
-    ok = ok && *log >= 0;
+    int result = ok ? 0 : -1;
+    while (result == 0)
+    {
+        result = bq_retirement_matched_build_poll(process);
+        if (!result)
+        {
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
+    }
+    *exit_code = process->state == BQ_RETIREMENT_BUILD_REAPED ? process->exit_code : -1;
+    ok = ok && process->state == BQ_RETIREMENT_BUILD_REAPED;
     return ok;
 }
 
@@ -672,7 +668,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
     int length = snprintf(profile, sizeof(profile), "%sbuild-driver-sha256=%.64s\n",
                           original_profile, driver_digest);
     BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(profile));
-    for (u32 trial = 0; trial < 4; trial += 1)
+    for (u32 trial = 0; trial < 9; trial += 1)
     {
         BqJob job = *original;
         job.id = 30 + trial;
@@ -731,8 +727,52 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             command.argc == 16 && !strcmp(command.argv[7], "clang") &&
             !strcmp(command.argv[3], build.build) && !strcmp(command.cwd, build.source[0]) &&
             !strcmp(command.env[0], checked.path));
+        if (trial == 6)
+        {
+            BqRetirementBuildProcess unlaunched = {0};
+            BQ_PREP_CHECK(bq_retirement_matched_build_poll(&unlaunched) == -1 &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &unlaunched, geteuid(), &build) ==
+                    BQ_WORKER_FAILED && build.failed && !build.next);
+        }
+        if (trial == 7)
+        {
+            BqRetirementBuildProcess live = {0};
+            BQ_PREP_CHECK(bq_retirement_matched_build_launch(&build, &live) &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &live, geteuid(), &build) ==
+                    BQ_WORKER_FAILED && build.failed && live.state == BQ_RETIREMENT_BUILD_RUNNING &&
+                    live.process > 0 && live.writer >= 3);
+            int observed = 0;
+            while (observed == 0)
+            {
+                observed = bq_retirement_matched_build_poll(&live);
+                if (!observed)
+                {
+                    struct timespec pause = {0, 1000000};
+                    nanosleep(&pause, NULL);
+                }
+            }
+            bq_retirement_matched_build_abort(&live);
+            BQ_PREP_CHECK(!live.state && !live.process && !live.writer);
+        }
+        if (trial == 8)
+        {
+            BqRetirementBuildProcess stolen = {0};
+            BQ_PREP_CHECK(bq_retirement_matched_build_launch(&build, &stolen));
+            int status = 0;
+            pid_t waited = -1;
+            do { if (stolen.process > 0) waited = waitpid(stolen.process, &status, 0); }
+            while (waited < 0 && errno == EINTR);
+            BQ_PREP_CHECK(waited > 0 && bq_retirement_matched_build_poll(&stolen) == -1 &&
+                stolen.state == BQ_RETIREMENT_BUILD_WAIT_FAILED && !stolen.process &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &stolen, geteuid(), &build) == BQ_WORKER_FAILED &&
+                build.failed && !stolen.state);
+        }
         for (u32 stage = 0; ok && stage < (trial ? 4u : 1u); stage += 1)
         {
+            if (trial >= 6) break;
             if (trial == 3 && stage == 2)
             {
                 BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 &&
@@ -747,30 +787,44 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             BqRetirementBuildStage current = {0};
             ok = ok && bq_retirement_matched_build_stage(&build, &current) &&
                  !strcmp(current.argv[3], command.argv[3]);
-            int log = -1, exit_code = -1;
-            if (ok) ok = bq_prep_test_run_stage(&current, attempt, stage, &log, &exit_code);
+            BqRetirementBuildProcess process = {0};
+            int exit_code = -1;
+            if (ok) ok = bq_prep_test_run_stage(&build, &process, &exit_code);
             BQ_PREP_CHECK(ok && (trial ? exit_code == 0 : exit_code == 5));
             if (ok)
             {
+                if (trial == 4) process.command_sha256[0] ^= 1;
+                if (trial == 5)
+                {
+                    int replacement = -1;
+                    BQ_PREP_CHECK(renameat(attempt, process.name, attempt, "held-build-log") == 0);
+                    replacement = openat(attempt, process.name,
+                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+                    BQ_PREP_CHECK(replacement >= 3 && fchmod(replacement, 0400) == 0);
+                    if (replacement >= 0) close(replacement);
+                }
                 uid_t candidate = trial == 2 ? geteuid() + 1 : geteuid();
                 BqError expected = !trial ? BQ_WORKER_FAILED :
+                                   trial == 4 || trial == 5 ? BQ_WORKER_FAILED :
                                    trial == 2 && stage == 3 ? BQ_SOURCE_MISMATCH : BQ_OK;
                 BQ_PREP_CHECK(bq_retirement_matched_build_complete_pinned(queue, &job,
-                    installed, workspaces, pinned, log, exit_code, candidate, &build) == expected);
+                    installed, workspaces, pinned, &process, candidate, &build) == expected &&
+                    !process.state && !process.process);
             }
-            if (log >= 0) close(log);
+            bq_retirement_matched_build_abort(&process);
+            if (trial == 4 || trial == 5) break;
         }
         BQ_PREP_CHECK(ok);
         if (trial != 1)
         {
             char record_name[48], bytes[16];
             u32 size = 0;
-            BQ_PREP_CHECK(build.failed && build.next == (trial == 3 ? 2u : trial ? 3u : 0u) &&
+            BQ_PREP_CHECK(build.failed && build.next == (trial == 3 ? 2u : trial == 2 ? 3u : 0u) &&
                 !build.binary_record_sha256[0] &&
                 !bq_retirement_matched_build_stage(&build, &command) &&
                 bq_record_name(record_name, "binaries", job.id) &&
                 bq_record_read(queue, record_name, (u8*)bytes, sizeof(bytes), &size) == BQ_NOT_FOUND &&
-                build.stage_receipt_sha256[0][0]);
+                (build.stage_receipt_sha256[0][0] != 0) == (trial < 4));
             BQ_PREP_CHECK(!build.build_record_sha256[0]);
             BqRetirementCorrectness gate = {0};
             BqRetirementHeldBinaries held = {0};
