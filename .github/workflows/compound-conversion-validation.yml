@@ -8,7 +8,7 @@ jobs:
   validate:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 35
+    timeout-minutes: 25
     permissions:
       contents: write
     env:
@@ -19,7 +19,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Prepare exact test-only and focused-fix revisions
+      - name: Prepare fixture-only refinement on owned staging branch
         id: prepare
         env:
           PUBLICATION_TOKEN: ${{ github.token }}
@@ -29,117 +29,72 @@ jobs:
           out="$RUNNER_TEMP/compound-validation"
           mkdir -p "$out"
           git rev-parse HEAD HEAD^{tree} > "$out/transport.txt"
-          gzip -dc tools/compound-tests.patch.gz > "$RUNNER_TEMP/compound-tests.patch"
-          cp tools/compound-fix.patch "$RUNNER_TEMP/compound-fix.patch"
-          cp tools/compound_conversion_probe.py "$RUNNER_TEMP/compound-probe.py"
+          cp tools/compound-normalization.patch "$RUNNER_TEMP/compound-normalization.patch"
           cp tools/compound_reduction_probe.py "$RUNNER_TEMP/compound-reduction.py"
-          echo 'c91d6d946da1ef70bb798a4384ae008399fcec2d118d02f818f73d9b44b7e4e6  /tmp/placeholder' | sed "s@/tmp/placeholder@$RUNNER_TEMP/compound-tests.patch@" | sha256sum -c -
-          git checkout --detach fdebfb8810ed4db8c69d3b176f89f835fb77259c
+          echo 'f97718b17de1fce6a2ce04529261925bf9a509cca6e2d6c0664c539fc82d98d9  /tmp/placeholder' | sed "s@/tmp/placeholder@$RUNNER_TEMP/compound-normalization.patch@" | sha256sum -c -
+          git checkout --detach 474be8f5afeca09f37628138bc04ab58c0c7086f
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git apply --check "$RUNNER_TEMP/compound-tests.patch"
-          git apply "$RUNNER_TEMP/compound-tests.patch"
+          git apply --check "$RUNNER_TEMP/compound-normalization.patch"
+          git apply "$RUNNER_TEMP/compound-normalization.patch"
           git diff --check
           git add src/buster/tests/compiler/frontend/c/c_test.c
-          git commit -m 'test: cover compound-assignment conversion stages (#1137)'
-          git rev-parse HEAD HEAD^{tree} > "$out/test-only.txt"
-          git apply --check "$RUNNER_TEMP/compound-fix.patch"
-          git apply "$RUNNER_TEMP/compound-fix.patch"
-          git diff --check
-          git add src/buster/lib/compiler/frontend/c/c_gen.c
-          git commit -m 'c: preserve non-atomic compound RHS types through arithmetic (#1137)'
+          git commit -m 'test: distinguish Boolean normalization from compound arithmetic (#1137)'
           git rev-parse HEAD HEAD^{tree} > "$out/candidate.txt"
           git diff fdebfb8810ed4db8c69d3b176f89f835fb77259c HEAD > "$out/source.patch"
           git diff --name-only fdebfb8810ed4db8c69d3b176f89f835fb77259c HEAD > "$out/changed-files.txt"
           python3 - <<'PY'
-          import base64, json, os, pathlib, subprocess, urllib.request
+          import base64, json, os, subprocess, urllib.request
           repo = 'buster14a/buster'
-          branch = 'codex/1137-compound-conversions'
+          branch = 'codex/1137-fixture-refinement'
           token = os.environ['PUBLICATION_TOKEN']
-          url = 'https://api.github.com/repos/' + repo + '/git/ref/heads/' + branch
-          req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json'})
+          req = urllib.request.Request('https://api.github.com/repos/' + repo + '/git/ref/heads/' + branch,
+              headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json'})
           with urllib.request.urlopen(req, timeout=30) as response:
               current = json.load(response)['object']['sha']
-          if current != 'fdebfb8810ed4db8c69d3b176f89f835fb77259c':
-              raise SystemExit('Source branch moved: refusing another writer')
+          if current != '474be8f5afeca09f37628138bc04ab58c0c7086f':
+              raise SystemExit('Staging branch moved: refusing another writer')
           paths = subprocess.check_output(['git', 'diff', '--name-only', current, 'HEAD'], text=True).splitlines()
-          if set(paths) != {'src/buster/lib/compiler/frontend/c/c_gen.c', 'src/buster/tests/compiler/frontend/c/c_test.c'}:
-              raise SystemExit('Unexpected publication scope')
+          if paths != ['src/buster/tests/compiler/frontend/c/c_test.c']:
+              raise SystemExit('Unexpected refinement scope')
           auth = base64.b64encode(('x-access-token:' + token).encode()).decode()
           print('::add-mask::' + auth)
           subprocess.run(['git', '-c', 'http.https://github.com/.extraheader=AUTHORIZATION: basic ' + auth,
-                          'push', 'https://github.com/' + repo + '.git', 'HEAD:refs/heads/' + branch], check=True)
+              'push', 'https://github.com/' + repo + '.git', 'HEAD:refs/heads/' + branch], check=True)
           PY
-      - name: Build and run test-only revision
-        id: baseline
+      - name: Build final candidate
+        id: build
         if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/compound-validation"
-          git checkout --detach "$(head -n 1 "$out/test-only.txt")"
           clang --version > "$out/clang.txt"
           gcc --version > "$out/gcc.txt"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/compound-build"
           "$RUNNER_TEMP/compound-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$out/configure.log"
-          "$RUNNER_TEMP/compound-build" build --config Release -t ide 2>&1 | tee "$out/baseline-build.log"
-          sha256sum build/Release/ide > "$out/baseline-compiler.sha256"
-          set +e
-          "$RUNNER_TEMP/compound-build" build --config Release -t test_all > "$out/baseline-tests.log" 2>&1
-          result=$?
-          set -e
-          echo "$result" > "$out/baseline-tests.status"
-          tail -n 30 "$out/baseline-tests.log"
-          PROBE_LABEL=baseline python3 "$RUNNER_TEMP/compound-reduction.py"
-      - name: Preserve before-fix canonical observations
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: compound-conversion-before-fix
-          path: ${{ runner.temp }}/compound-validation
-          retention-days: 30
-      - name: Build focused candidate
-        id: build
-        if: ${{ !cancelled() && steps.baseline.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          out="$RUNNER_TEMP/compound-validation"
-          git checkout --detach "$(head -n 1 "$out/candidate.txt")"
           "$RUNNER_TEMP/compound-build" build --config Release -t ide 2>&1 | tee "$out/candidate-build.log"
           sha256sum build/Release/ide > "$out/candidate-compiler.sha256"
-      - name: Candidate bounded independent family and reductions
+      - name: Final reduced independent references and all allocators
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
-        run: |
-          set -euo pipefail
-          python3 "$RUNNER_TEMP/compound-probe.py"
-          PROBE_LABEL=candidate python3 "$RUNNER_TEMP/compound-reduction.py"
-          python3 - <<'PY'
-          import json, os, pathlib
-          records = json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'compound-evidence'/'summary.json').read_text())
-          focused = [r for r in records if r['config'].startswith('buster_') and r['case'].endswith('_direct')]
-          assert len(focused) == 156
-          assert all(r['compile'] == 0 and r['run'] == 0 for r in focused), focused
-          PY
-      - name: Candidate ordinary Release suite
+        run: PROBE_LABEL=candidate python3 "$RUNNER_TEMP/compound-reduction.py"
+      - name: Final ordinary Release suite
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/compound-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/compound-validation/candidate-tests.log"
-      - name: Candidate ordinary self-host fixed point
+      - name: Final ordinary self-host fixed point
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/compound-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/compound-validation/candidate-self-host.log"
-      - name: Preserve all final evidence
+      - name: Preserve final-head evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: compound-conversion-candidate
-          path: |
-            ${{ runner.temp }}/compound-validation
-            ${{ runner.temp }}/compound-evidence
+          name: compound-conversion-final
+          path: ${{ runner.temp }}/compound-validation
           retention-days: 30
