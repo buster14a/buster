@@ -6158,6 +6158,228 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
     return result;
 }
 
+// Paste-free, stringify-free replacements are produced straight into their
+// task batch (c_macro_produce_plain_tasks); builtins, `#`, `##` and pragma
+// operands keep the staged path. Every case here compares the complete
+// preprocessed token list, and the runtime fixture compares what the
+// compiled program computes from the same expansions.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_plain_production(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // Batches whose exact size straddles the 64-task local array and its
+    // doublings while the parent's suspended tokens (`) tail`, DUP's second
+    // `x`, the ENABLE markers) sit below the batch: TRI's batch is
+    // 3 * size + 1 rows, produced inside DUP's argument context and then again
+    // twice from DUP's replacement.
+    u32 sizes[] = {0, 1, 2, 20, 21, 22, 41, 42, 43, 84, 85, 86, 170, 171, 172, 341, 342};
+    for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
+    {
+        for (u32 nested = 0; nested < 2; nested += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u64 capacity = BUSTER_KB(16);
+            char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+            u64 length = 0;
+            c_test_append_source(bytes, capacity, &length, S8("#define TRI(x) x x x\n#define DUP(x) x x\n#define NUMBERS "));
+            for (u32 index = 0; index < sizes[size_index]; index += 1)
+            {
+                c_test_append_source(bytes, capacity, &length, string_format(temporary.arena, S8("{u32} "), index));
+            }
+            c_test_append_source(bytes, capacity, &length, nested ? S8("\nDUP(TRI(NUMBERS)) tail\n") : S8("\nTRI(NUMBERS) tail\n"));
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
+                                                        (CPreprocessOptions){.source_path = S8("macro-plain-production.c")});
+            u64 expected_count = (u64)sizes[size_index] * 3 * (nested + 1);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+            BUSTER_TEST(arguments, preprocess.token_count == expected_count + 2);
+            for (u64 index = 0; index < expected_count; index += 1)
+            {
+                String8 expected = string_format(temporary.arena, S8("{u32}"), (u32)(index % sizes[size_index]));
+                c_test_preprocessed_token(arguments, &result, preprocess, index, C_TOKEN_PREPROCESSING_NUMBER, expected);
+            }
+            c_test_preprocessed_token(arguments, &result, preprocess, expected_count, C_TOKEN_IDENTIFIER, S8("tail"));
+            scratch_end(temporary);
+        }
+    }
+
+    String8 definitions = S8("#define ID(x) x\n#define DUP(x) x x\n#define FN(x) x\n#define PAIR(a,b) a b\n#define E(x)\n#define EMPTY\n"
+                             "#define ALIAS FN\n#define ALIAS2 ALIAS\n#define F(x) x F\n#define G(x) x\n#define H G(H)\n"
+                             "#define A B\n#define B A\n#define V(first,...) first __VA_ARGS__\n#define VA(...) __VA_ARGS__ end\n"
+                             "#define CAT(a,b) a ## b\n#define STR(x) #x\n#define XSTR(x) STR(x)\n#define VC(a,...) a , ## __VA_ARGS__\n"
+                             "#define J(a,b) a+b\n#define K(a,b) a + b\n#define L(a) [a]\n#define M(a) [ a]\n#define N(a) a[a]\n"
+                             "#define TWICE(x) x x\n#define WRAP(x) (x)\n");
+    struct
+    {
+        String8 input;
+        String8 expected;
+    } cases[] = {
+        // Empty replacements and empty arguments contribute no rows.
+        {S8("E(1 2 3) tail"), S8("tail")},
+        {S8("E() tail"), S8("tail")},
+        {S8("PAIR(,) tail"), S8("tail")},
+        {S8("PAIR(,2) tail"), S8("2 tail")},
+        {S8("PAIR(1,) tail"), S8("1 tail")},
+        {S8("ID(EMPTY) tail"), S8("tail")},
+        {S8("DUP(EMPTY) tail"), S8("tail")},
+        {S8("DUP() tail"), S8("tail")},
+        {S8("PAIR(EMPTY,EMPTY) tail"), S8("tail")},
+        // Nested aliases resolve across the rescan of a plain batch, and an
+        // alias produced as an argument still finds its parenthesis outside.
+        {S8("ALIAS2(5)"), S8("5")},
+        {S8("ID(ALIAS2)(6)"), S8("6")},
+        {S8("PAIR(ALIAS2,ID)(7)(8)"), S8("FN 7 (8)")},
+        {S8("DUP(ALIAS2)(9)"), S8("FN 9")},
+        {S8("WRAP(WRAP(WRAP(1)))"), S8("(((1)))")},
+        // Re-enabling boundaries: F is refused inside its own batch and the
+        // refusal is painted onto the token, so the later rescans in ID's
+        // and DUP's contexts refuse it as well.
+        {S8("F(1)(2)(3)"), S8("1 F (2) (3)")},
+        {S8("ID(F(1))(2)"), S8("1 F (2)")},
+        {S8("DUP(F(1))"), S8("1 F 1 F")},
+        {S8("F(1) F(2)"), S8("1 F 2 F")},
+        {S8("ID(H) H"), S8("H H")},
+        {S8("DUP(A) DUP(B)"), S8("A A B B")},
+        {S8("TWICE(TWICE(TWICE(x)))"), S8("x x x x x x x x")},
+        // Variadics without paste.
+        {S8("V(1, 2, 3)"), S8("1 2 , 3")},
+        {S8("V(1)"), S8("1")},
+        {S8("V(1,)"), S8("1")},
+        {S8("VA() tail"), S8("end tail")},
+        {S8("VA(a, b) tail"), S8("a , b end tail")},
+        {S8("V(ID(1), FN(2))"), S8("1 2")},
+        // Paste and stringify keep the staged path, including as arguments
+        // of plain macros and around them.
+        {S8("CAT(x,y)"), S8("xy")},
+        {S8("CAT(1,) tail"), S8("1 tail")},
+        {S8("CAT(,) tail"), S8("tail")},
+        {S8("ID(CAT(a,b))"), S8("ab")},
+        {S8("CAT(ID,)(3)"), S8("3")},
+        {S8("STR()"), S8("\"\"")},
+        {S8("STR(ID(1))"), S8("\"ID(1)\"")},
+        {S8("ID(STR(x  y))"), S8("\"x y\"")},
+        {S8("VC(1)"), S8("1")},
+        {S8("VC(1,2)"), S8("1 , 2")},
+        // Spacing survives into a later stringification: the replacement
+        // list's own spacing, and the argument's first token taking the
+        // parameter's spacing.
+        {S8("XSTR(J(1,2))"), S8("\"1+2\"")},
+        {S8("XSTR(K(1,2))"), S8("\"1 + 2\"")},
+        {S8("XSTR(L( 1 ))"), S8("\"[1]\"")},
+        {S8("XSTR(M(1))"), S8("\"[ 1]\"")},
+        {S8("XSTR(N( 1 ))"), S8("\"1[1]\"")},
+        {S8("XSTR(N(a b))"), S8("\"a b[a b]\"")},
+        {S8("XSTR(PAIR(J(1,2),K(3,4)))"), S8("\"1+2 3 + 4\"")},
+        {S8("XSTR(TWICE(EMPTY) x)"), S8("\"x\"")},
+        {S8("XSTR((V(1, 2,3)))"), S8("\"(1 2,3)\"")},
+        // Builtins inside plain batches.
+        {S8("PAIR(__LINE__,__LINE__)"), S8("27 27")},
+    };
+    for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("{S8}{S8}\n"), definitions, cases[case_index].input);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){0});
+        CLexResult expected = c_lex(temporary.arena, cases[case_index].expected);
+        BUSTER_TEST_RAW(arguments, preprocess.diagnostic_count == 0, cases[case_index].input);
+        BUSTER_TEST(arguments, expected.diagnostic_count == 0);
+        BUSTER_TEST_RAW(arguments, preprocess.token_count == expected.token_count, cases[case_index].input);
+        for (u64 index = 0; index + 1 < expected.token_count; index += 1)
+        {
+            c_test_preprocessed_token(arguments, &result, preprocess, index, expected.tokens[index].kind,
+                                      c_token_spelling(expected.spelling_base, expected.tokens[index]));
+        }
+        scratch_end(temporary);
+    }
+
+    // Provenance: every token a plain batch produces, argument tokens
+    // included, locates at the invocation, and a diagnostic inside an
+    // argument of a plain macro points at the line it was written on.
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source = string_format(temporary.arena, S8("{S8}#line 555 \"plain-origin.c\"\nDUP(PAIR(__LINE__, ID(__FILE__))) tail\n"), definitions);
+    CPreprocessResult locations = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-plain-production.c")});
+    BUSTER_TEST(arguments, locations.diagnostic_count == 0);
+    BUSTER_TEST(arguments, locations.token_count == 6);
+    c_test_preprocessed_token(arguments, &result, locations, 0, C_TOKEN_PREPROCESSING_NUMBER, S8("555"));
+    c_test_preprocessed_token(arguments, &result, locations, 1, C_TOKEN_STRING_LITERAL, S8("\"plain-origin.c\""));
+    c_test_preprocessed_token(arguments, &result, locations, 2, C_TOKEN_PREPROCESSING_NUMBER, S8("555"));
+    c_test_preprocessed_token(arguments, &result, locations, 3, C_TOKEN_STRING_LITERAL, S8("\"plain-origin.c\""));
+    c_test_preprocessed_token(arguments, &result, locations, 4, C_TOKEN_IDENTIFIER, S8("tail"));
+    for (u64 index = 0; index + 1 < locations.token_count; index += 1)
+    {
+        CSourceLocation location = c_preprocess_token_location(&locations, locations.tokens[index]);
+        BUSTER_TEST(arguments, location.line == 555);
+        BUSTER_TEST(arguments, location.column == (index == 4 ? 35 : 1));
+    }
+    scratch_end(temporary);
+
+    String8 invalid[] = {S8("DUP(FN(1,2))"), S8("PAIR(1,FN(1,2,3))"), S8("DUP(FN(1)")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        source = string_format(temporary.arena, S8("{S8}#line 606 \"plain-error.c\"\n{S8}\n"), definitions, invalid[index]);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.source_path = S8("macro-plain-production.c")});
+        bool diagnosed = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < preprocess.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = preprocess.diagnostics[diagnostic_index];
+            diagnosed |= diagnostic.kind == C_DIAGNOSTIC_INVALID_MACRO_INVOCATION && diagnostic.location.line == 606;
+        }
+        BUSTER_TEST_RAW(arguments, diagnosed, invalid[index]);
+        scratch_end(temporary);
+    }
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    // The same expansions compiled and run: the exit status is the count of
+    // expansions whose value the program disagrees with.
+    String8 program = S8("#define ID(x) x\n#define DUP(x) x x\n#define PAIR(a,b) a b\n#define E(x)\n#define EMPTY\n#define ADD(a,b) ((a) + (b))\n"
+                         "#define ALIAS ADD\n#define ALIAS2 ALIAS\n#define F(x) x + F\n#define V(first,...) first __VA_ARGS__\n"
+                         "#define CAT(a,b) a ## b\n#define STR(x) #x\n#define XSTR(x) STR(x)\n#define J(a,b) a+b\n#define TWICE(x) x x\n"
+                         "#define SEQ64(x) x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x\n"
+                         "static int F = 100;\n"
+                         "static int strsame(char const* a, char const* b) { while (*a && *a == *b) { a += 1; b += 1; } return *a == *b; }\n"
+                         "int main(void)\n{\n"
+                         "    int failures = 0;\n"
+                         "    failures += ALIAS2(1, 2) != 3;\n"
+                         "    failures += ID(ALIAS2)(4, 5) != 9;\n"
+                         "    failures += DUP(+ADD(1,1)) != 4;\n"
+                         "    failures += F(1) != 101;\n"
+                         "    failures += ID(F(2)) != 102;\n"
+                         "    failures += PAIR(ADD(1,2) E(-) +, ADD(3, 4)) != 10;\n"
+                         "    failures += V(1 +, 2 + 3) != 6;\n"
+                         "    failures += V(7) != 7;\n"
+                         "    failures += CAT(1,2) + ID(CAT(3,4)) != 46;\n"
+                         "    failures += !strsame(XSTR(J(1,2)), \"1+2\");\n"
+                         "    failures += !strsame(XSTR(PAIR(EMPTY,DUP(a))), \"a a\");\n"
+                         "    failures += (0 SEQ64(+1) + 0 DUP(SEQ64(+1))) != 192;\n"
+                         "    failures += TWICE(TWICE(TWICE(+1))) != 8;\n"
+                         "    return failures;\n}\n");
+    String8 program_path = buster_test_temporary_path(arguments->arena, S8("macro-plain-production"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(program_path, BUSTER_SLICE_TO_BYTE_SLICE(program))))
+    {
+        temporary = scratch_begin(&arguments->arena, 1);
+        String8 output = buster_test_temporary_path(temporary.arena, S8("macro-plain-production-run"), S8(".exe"));
+        String8 command[] = {S8("-nostdinc"), S8("-fverify-codegen"), S8("-o"), output, program_path};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+        if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 run[] = {output};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                        (ProcessSpawnOptions){.use_process_environment = true});
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("macro plain production runtime: status={u32} timed_out={u32}"),
+                                              execution.platform_status, (u32)execution.timed_out));
+            }
+        }
+        scratch_end(temporary);
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_source_metrics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -20928,6 +21150,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_order);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_locations);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
+    BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
     BUSTER_TEST_FIXTURE(arguments, c_test_local_static_aggregates);
 
