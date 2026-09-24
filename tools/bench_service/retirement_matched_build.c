@@ -7,6 +7,10 @@
 #include "retirement_matched_build.h"
 #include <pwd.h>
 #include <sys/wait.h>
+#if defined(__linux__)
+#include <linux/close_range.h>
+#include <sys/syscall.h>
+#endif
 
 #define BQ_RETIREMENT_BUILD_LOG_CAP (16u * 1024u * 1024u)
 #define BQ_RETIREMENT_BUILD_DRIVER_CAP (64u * 1024u * 1024u)
@@ -21,12 +25,15 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_path(char* output, size_t capacity,
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_retirement_build_driver_sha(char const* path,
+BUSTER_GLOBAL_LOCAL bool bq_retirement_build_driver_fd_sha(int file,
     char digest[SHA256_HEX_CAPACITY])
 {
-    int file = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     struct stat before = {0}, after = {0};
-    bool observed = file >= 0 && fstat(file, &before) == 0;
+    int descriptor_flags = file >= 3 ? fcntl(file, F_GETFD) : -1;
+    int access_flags = descriptor_flags >= 0 ? fcntl(file, F_GETFL) : -1;
+    bool observed = descriptor_flags >= 0 && (descriptor_flags & FD_CLOEXEC) &&
+        access_flags >= 0 && (access_flags & O_ACCMODE) == O_RDONLY &&
+        fstat(file, &before) == 0;
     bool owner_safe = observed && (before.st_uid == geteuid() ? !(before.st_mode & 0222) :
                       before.st_uid == 0 && !(before.st_mode & 0022));
     bool ok = observed && S_ISREG(before.st_mode) && before.st_nlink == 1 && owner_safe &&
@@ -54,6 +61,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_driver_sha(char const* path,
          before.st_mode == after.st_mode && before.st_nlink == after.st_nlink;
     if (ok) sha256_finish_hex(&hash, (char8*)digest);
     else digest[0] = 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_build_driver_sha(char const* path,
+    char digest[SHA256_HEX_CAPACITY])
+{
+    int file = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = bq_retirement_build_driver_fd_sha(file, digest);
     if (file >= 0 && close(file) != 0) ok = false;
     return ok;
 }
@@ -187,6 +202,29 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_build_command_sha(BqRetirementBuildStage 
     sha256_finish_hex(&hash, (char8*)digest);
 }
 
+/* The child keeps the verified executable descriptor across chdir; a later
+ * rename of the installed name cannot select a different driver. The worker
+ * still owns the separate candidate UID and sandbox around this stage. */
+BUSTER_GLOBAL_LOCAL void bq_retirement_build_exec_fd(int executable, int writer, int directory,
+    BqRetirementBuildStage const* stage)
+{
+    bool ok = dup2(writer, STDOUT_FILENO) == STDOUT_FILENO &&
+        dup2(writer, STDERR_FILENO) == STDERR_FILENO;
+    if (writer >= 3) close(writer);
+    if (directory >= 3) close(directory);
+    if (ok) ok = chdir(stage->cwd) == 0;
+#if defined(__linux__) && defined(SYS_close_range)
+    int input = ok ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
+    if (ok) ok = input >= 3 && dup2(input, STDIN_FILENO) == STDIN_FILENO;
+    if (input >= 0) close(input);
+    if (ok) ok = syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) == 0;
+    if (ok) fexecve(executable, (char* const*)stage->argv, (char* const*)stage->env);
+#else
+    (void)executable;
+#endif
+    _exit(126);
+}
+
 bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     BqRetirementBuildProcess* process)
 {
@@ -199,6 +237,10 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     if (ok) bq_retirement_build_command_sha(&stage, digest);
     int length = ok ? snprintf(name, sizeof(name), "build-log-%u", build->next) : -1;
     ok = ok && length > 0 && (u32)length < sizeof(name) && stage.argv[0][0] == '/';
+    int executable = ok ? open(stage.argv[0], O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+    char observed[SHA256_HEX_CAPACITY] = {0};
+    ok = ok && bq_retirement_build_driver_fd_sha(executable, observed) &&
+         !memcmp(observed, build->driver_sha256, SHA256_HEX_CAPACITY);
     int directory = ok ? bq_open_absolute_directory(string_from_pointer(build->attempt)) : -1;
     ok = ok && directory >= 3 && bq_owned_directory(directory, true, false) &&
          fstat(directory, &directory_stat) == 0;
@@ -208,16 +250,8 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
          S_ISREG(log_stat.st_mode) && log_stat.st_uid == geteuid() &&
          log_stat.st_nlink == 1 && log_stat.st_size == 0;
     pid_t child = ok ? fork() : -1;
-    if (child == 0)
-    {
-        if (dup2(writer, STDOUT_FILENO) != STDOUT_FILENO ||
-            dup2(writer, STDERR_FILENO) != STDERR_FILENO) _exit(126);
-        close(writer);
-        close(directory);
-        if (chdir(stage.cwd) != 0) _exit(126);
-        execve(stage.argv[0], (char* const*)stage.argv, (char* const*)stage.env);
-        _exit(127);
-    }
+    if (child == 0) bq_retirement_build_exec_fd(executable, writer, directory, &stage);
+    if (executable >= 0) close(executable);
     ok = ok && child > 0;
     if (ok)
     {

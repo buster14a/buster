@@ -125,8 +125,13 @@ The existing #923 build driver has fixed Release `--cc clang` generate/build
 stages for both subjects and separates service and candidate identities. The
 private matched-build stage helper now creates each log exclusively beneath
 the held attempt directory, launches the exact fixed argv, cwd and explicit
-environment, and polls the actual child wait. Completion freezes and reopens
-that same log inode, checks the launched stage and command digest, then stores
+environment, and polls the actual child wait. It opens and verifies the installed
+native build driver on a held descriptor, then executes that descriptor after
+the child redirects its output and marks other inherited descriptors close on
+exec. A replaced driver pathname therefore cannot select different bytes for
+that launch; a kernel without `close_range(CLOSE_RANGE_CLOEXEC)` fails the
+launch. Completion freezes and reopens that same log inode, checks the launched
+stage and command digest, then stores
 the observed exit status and log bytes in the durable stage receipt. A caller
 cannot supply an exit code or substitute a log from a different process. The
 whole-job worker still must own process isolation, deadlines, cancellation,
@@ -203,17 +208,16 @@ replacement. Limits are 4,096 files, 512 KiB of manifest, 512 MiB per file,
 traversable and readable by both service identities, and all files readable;
 executable files must also be executable by both. The operator must make the
 fixed `/opt` path's parent directories traversable by the candidate identity.
-It rechecks the exact bundle
-and fixed driver before each command and the bundle again on completion.
+It rechecks the exact bundle and fixed driver before each command, opens and
+hashes the driver descriptor again at launch, and rechecks the bundle on
+completion.
 Stage/final receipts bind the manifest SHA-256 and same-job inode identity;
 readback rechecks both along with the output binaries. A change to the bundle
 after the first stage poisons the sequence before another command is issued.
-The #923 trusted stage runner
-must execute each returned command with its fixed containment and separate
-candidate identity, capture an actual wait status and provide a service-owned
-immutable log descriptor. `complete` stores each command/exit/log as an
-immutable queue log plus receipt, reimports A, freezes `Release/ide` by
-descriptor after each successful build, and publishes the existing binary
+The #923 worker must apply its fixed containment, separate candidate identity,
+deadlines and cancellation to the launched child. `complete` stores each
+command/exit/log as an immutable queue log plus receipt, reimports A, freezes
+`Release/ide` by descriptor after each successful build, and publishes the existing binary
 record and one final build record only after all four stages succeed. Any
 failure poisons the session and leaves its prior stage receipts attributable.
 Four logs are individually capped at 16 MiB; each frozen binary at 512 MiB.
@@ -232,9 +236,9 @@ but only the runner's executable resolution and sandbox can prove the child
 did not read ambient tools, system libraries, headers or scripts outside that
 bundle. Its fixed absolute paths and dynamic dependencies must be reviewed
 against the final build, and the runner must forbid unapproved ambient inputs.
-The actual runner must keep the fixed installed driver path and tool closure
-stable across each stage, enforce the candidate UID/sandbox and log bound,
-then pass the final record digest through the authenticated lease. The
+The actual runner must keep the tool closure stable across each stage, enforce
+the candidate UID/sandbox and log bound, then pass the final record digest
+through the authenticated lease. The
 correctness/oracle lane and dependent first timed launch must consume these
 verified facts. A test fixture compiles two real miniature executables through
 the same pathname with the local host compiler and proves that a failed
@@ -255,8 +259,10 @@ two verified copies, removal of the temporary copy, and frozen binary readback
 after missing output, stale digest, same-byte inode replacement and changed
 content. The stage fixture also runs the actual fixed child process, retains
 its service-owned log, and rejects a changed launch digest before building any
-binary record. An unexpectedly reaped child cannot become a successful stage
-and releases its local descriptors after failing the build. The #923
-integration owner registers this dedicated
+binary record. It also replaces the driver's pathname after verifying its held
+descriptor and confirms the original executable still runs without an unrelated
+inheritable parent descriptor. An unexpectedly reaped child cannot become a
+successful stage and releases its local descriptors after failing the build.
+The #923 integration owner registers this dedicated
 test alongside the native and sanitizer service suite, then proves its exact
 submitted head on hosted runners.
