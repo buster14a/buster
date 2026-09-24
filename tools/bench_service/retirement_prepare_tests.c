@@ -184,6 +184,125 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_large_manifest(void)
     if (root[0] && ok) bq_prep_test_cleanup(root);
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_binary(int directory, char const* name, char const* bytes)
+{
+    int file = openat(directory, name, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+    bool ok = file >= 0 && bq_write_all(file, (u8 const*)bytes, (u32)strlen(bytes)) &&
+              fchmod(file, 0500) == 0 && fsync(file) == 0;
+    if (file >= 0 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* The miniature frozen files exercise the service's output record/importer,
+ * not the trusted Clang build or complete toolchain provenance. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const* job,
+    int installed, int workspaces, int attempt, char const* profile, char const* preparation_digest,
+    BqRetirementPreparation const* prepared, char record_digest[SHA256_HEX_CAPACITY])
+{
+    record_digest[0] = 0;
+    BqRetirementBinaries imported = {0};
+    String8 pinned = string_from_pointer(profile);
+    BQ_PREP_CHECK(mkdirat(attempt, "trusted-build", 0700) == 0);
+    int directory = openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(directory >= 0 && bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_record_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest) == BQ_SOURCE_MISMATCH && !record_digest[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  bq_prep_test_binary(directory, "candidate-ide", "compiler B\n") &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  &imported) == BQ_NOT_FOUND && !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(bq_retirement_binaries_record_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest) == BQ_OK && strlen(record_digest) == 64);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK &&
+                  !strcmp(imported.preparation_sha256, preparation_digest) &&
+                  !strcmp(imported.source_sha256[0], prepared->subjects[0].manifest_sha256) &&
+                  !strcmp(imported.source_sha256[1], prepared->subjects[1].manifest_sha256) &&
+                  strcmp(imported.binary_sha256[0], imported.binary_sha256[1]) &&
+                  strlen(imported.binary_identity_sha256[0]) == 64);
+    char wrong[SHA256_HEX_CAPACITY];
+    memcpy(wrong, record_digest, sizeof(wrong));
+    wrong[0] = wrong[0] == 'a' ? 'b' : 'a';
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, wrong, &imported) == BQ_CORRUPT && !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  wrong, record_digest, &imported) == BQ_RECIPE_MISMATCH && !imported.preparation_sha256[0]);
+    BqJob stale = *job;
+    stale.token += 1;
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, &stale, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) != BQ_OK && !imported.preparation_sha256[0]);
+    char second[SHA256_HEX_CAPACITY];
+    BQ_PREP_CHECK(bq_retirement_binaries_record_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, second) != BQ_OK && !second[0]);
+
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  renameat(directory, "base-ide", attempt, "held-base-ide") == 0 &&
+                  bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  unlinkat(directory, "base-ide", 0) == 0 &&
+                  renameat(attempt, "held-base-ide", directory, "base-ide") == 0 &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  renameat(directory, "candidate-ide", attempt, "held-candidate-ide") == 0 &&
+                  symlinkat("base-ide", directory, "candidate-ide") == 0 && fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  unlinkat(directory, "candidate-ide", 0) == 0 &&
+                  renameat(attempt, "held-candidate-ide", directory, "candidate-ide") == 0 &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    int binary = directory >= 0 ? openat(directory, "candidate-ide", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(binary >= 0 && fchmod(binary, 0700) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                  !imported.preparation_sha256[0]);
+    int modified = directory >= 0 ? openat(directory, "candidate-ide", O_WRONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(modified >= 0 && pwrite(modified, "X", 1, 0) == 1 &&
+                  fchmod(modified, 0500) == 0);
+    if (modified >= 0) close(modified);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(binary >= 0 && fchmod(binary, 0700) == 0);
+    modified = directory >= 0 ? openat(directory, "candidate-ide", O_WRONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(modified >= 0 && pwrite(modified, "compiler B\n", 11, 0) == 11 &&
+                  fchmod(modified, 0500) == 0);
+    if (modified >= 0) close(modified);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    int record = openat(queue->directory_fd, "binaries-1", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(record >= 0 && fchmod(record, 0600) == 0);
+    if (record >= 0) close(record);
+    record = openat(queue->directory_fd, "binaries-1", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(record >= 0 && pwrite(record, "X", 1, 0) == 1 && fchmod(record, 0400) == 0);
+    if (record >= 0) close(record);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    record = openat(queue->directory_fd, "binaries-1", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(record >= 0 && fchmod(record, 0600) == 0);
+    if (record >= 0) close(record);
+    record = openat(queue->directory_fd, "binaries-1", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(record >= 0 && pwrite(record, "B", 1, 0) == 1 && fchmod(record, 0400) == 0);
+    if (record >= 0) close(record);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    if (binary >= 0) close(binary);
+    if (directory >= 0) close(directory);
+}
+
 /* Exercise the service's durable producer/readback boundary through the real
  * source copier. This internal test request cannot be submitted: the public
  * registry still rejects the blocked retirement descriptor. */
@@ -257,6 +376,9 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
                               prepared->subjects[1].materialized_identity_sha256) &&
                       !strcmp(imported.subjects[0].manifest_sha256, prepared->subjects[0].manifest_sha256) &&
                       imported.source_reservation_bytes == prepared->source_reservation_bytes);
+        char binary_digest[SHA256_HEX_CAPACITY];
+        bq_prep_test_binary_handoff(&queue, &job, installed, workspaces, root, profile, digest,
+                                    prepared, binary_digest);
         char altered_digest[SHA256_HEX_CAPACITY];
         memcpy(altered_digest, digest, sizeof(altered_digest));
         altered_digest[0] = altered_digest[0] == 'a' ? 'b' : 'a';
@@ -319,6 +441,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
             BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
                           string_from_pointer(profile), original_digest, &imported) == BQ_CORRUPT &&
                           !imported.inventory_sha256[0]);
+            BqRetirementBinaries binaries = {0};
+            BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), original_digest, binary_digest,
+                          &binaries) == BQ_CORRUPT && !binaries.preparation_sha256[0]);
         }
         bool restored = installed_source >= 0 && fchmod(installed_source, 0700) == 0;
         if (restored && moved && replacement >= 0)

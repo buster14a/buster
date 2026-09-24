@@ -135,6 +135,37 @@ from the authenticated lease, consume both verified source identities and the
 complete build provenance before declaring ready for timing. The importer
 does not assert build provenance merely because the source preparation succeeds.
 
+The private `bq_retirement_binaries_record` and
+`bq_retirement_binaries_import` seam now binds frozen binary outputs to that
+preparation. After both successful *trusted* Clang stages, the integrator must
+put exactly the timed executables at `job-<id>-attempt-<token>/trusted-build/`
+`base-ide` and `candidate-ide` beneath the workspace root. The
+`trusted-build` directory must be service-owned, private and mode-read-only;
+each executable must be service-owned, single-link, executable, mode-read-only,
+nonempty and at most 512 MiB. The recorder independently imports A, hashes
+both actual files through no-follow descriptors, checks their inode identities,
+and writes a single durable `binaries-<job>` queue record. The importer repeats
+both source and binary observations and accepts only the exact canonical
+record digest provided through a service-authenticated channel. It clears
+returned facts on failure. A missing output, failed A handoff, edited file,
+same-byte inode replacement, stale attempt or changed record cannot yield
+binary facts. The fixture's tiny executable-shaped bytes cover this readback
+boundary; they are not real compiler builds.
+The 512 MiB file ceiling is a fail-closed interim bound; final capacity must
+be checked against the actual reviewed compiler outputs before admission.
+
+That record intentionally has **no toolchain, command, environment, cwd or
+build-log attestation**. The integration owner must still bind the complete
+reviewed toolchain/SDK/resource/sysroot/dependency closure and exact successful
+build argv/environment/cwd/logs to the genuine serial, matched, uninstrumented
+Clang stages in the configured root. The service must authenticate that build
+manifest and the immutable frozen executables at B's pre-timing launch, keep
+the launched file identities stable through use, and connect its verified
+source and binary digests to `BqRetirementPrepared`. Merely placing an
+untrusted or self-built binary in the private directory never proves Clang
+provenance. The compiled recipe remains blocked until that integration and
+the complete correctness/oracle path pass.
+
 ## Focused fixture
 
 Compile and run `retirement_prepare_tests.c` alongside
@@ -143,6 +174,8 @@ Compile and run `retirement_prepare_tests.c` alongside
 checks the pinned inventory, mismatched pin, invalid source request, impossible
 entry bound, unavailable storage query, source mutation, missing file, duplicate
 manifest entry, unlisted file/directory/symlink, byte-equal inode replacement,
-two verified copies and removal of the temporary copy. The #923 integration owner registers this dedicated
+two verified copies, removal of the temporary copy, and frozen binary readback
+after missing output, stale digest, same-byte inode replacement and changed
+content. The #923 integration owner registers this dedicated
 test alongside the native and sanitizer service suite, then proves its exact
 submitted head on hosted runners.
