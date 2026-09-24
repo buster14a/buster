@@ -174,6 +174,13 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   across batch pushes that may grow the array. An ENABLE marker remains below
   its replacement batch, and refused identifiers retain `no_expand` on rescans.
   Output nodes and source-stamp ownership are independent of task storage.
+  Ordinary paste-free/stringify-free replacements produce tokens directly into
+  a reserved batch only after every argument continuation finishes. Builtins and
+  pragma-like definitions retain materialization. The fill must not expand,
+  allocate spellings, intern symbols, or push tasks: it writes logical token `i`
+  at `base + count - i`, preserves argument no-expand painting and spacing, and
+  publishes the disabled bit and completed task count last. Empty replacements
+  still publish ENABLE. Never reserve a batch across argument expansion.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU

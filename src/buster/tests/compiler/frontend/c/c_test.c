@@ -6053,21 +6053,26 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_locations(UnitTestArguments
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    u32 sizes[] = {0, 1, 2, 15, 16, 17, 62, 63, 64, 65, 126, 127, 128, 129, 513};
+    u32 sizes[] = {0, 1, 2, 15, 16, 17, 62, 63, 64, 65, 126, 127, 128, 129, 255, 256, 257, 513, 1023, 1024, 1025};
     for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
     {
-        for (u32 nested = 0; nested < 2; nested += 1)
+        for (u32 nested = 0; nested < 4; nested += 1)
         {
             TemporalArena temporary = scratch_begin(&arguments->arena, 1);
             u64 capacity = BUSTER_KB(16);
             char8* bytes = arena_allocate(temporary.arena, char8, capacity);
             u64 length = 0;
-            c_test_append_source(bytes, capacity, &length, S8("#define ID(x) x\n#define DUP(x) x x\n#define NUMBERS "));
+            c_test_append_source(bytes, capacity, &length, S8("#define ID(x) x\n#define DUP(x) x x\n#define PAIR(a,b) a b\n#define NUMBERS "));
             for (u32 index = 0; index < sizes[size_index]; index += 1)
             {
                 c_test_append_source(bytes, capacity, &length, string_format(temporary.arena, S8("{u32} "), index));
             }
-            c_test_append_source(bytes, capacity, &length, nested ? S8("\nID(DUP(NUMBERS)) tail\n") : S8("\nNUMBERS tail\n"));
+            // Later invocations remain suspended below child floors while
+            // NUMBERS and repeated substitutions cross task-growth boundaries.
+            String8 invocations[] = {S8("\nNUMBERS tail\n"), S8("\nID(DUP(NUMBERS)) tail\n"),
+                                     S8("\nID(DUP(NUMBERS)) ID(NUMBERS) tail\n"),
+                                     S8("\nPAIR(ID(DUP(NUMBERS)),DUP(NUMBERS)) tail\n")};
+            c_test_append_source(bytes, capacity, &length, invocations[nested]);
             CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
                                                         (CPreprocessOptions){.source_path = S8("macro-task-batches.c")});
             u64 expected_count = (u64)sizes[size_index] * (nested + 1);
@@ -6086,7 +6091,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
     String8 definitions = S8("#define ID(x) x\n#define DUP(x) x x\n#define FN(x) x\n#define PAIR(a,b) a b\n"
                              "#define ALIAS FN\n#define EMPTY\n#define SELF SELF\n#define A B\n#define B A\n"
                              "#define CAT(a,b) a ## b\n#define STR(x) #x\n#define V(first,...) first __VA_ARGS__\n"
-                             "#define REC(x) x REC(x)\n");
+                             "#define REC(x) x REC(x)\n#define ALIAS2 ALIAS\n#define EXPAND_STR(x) STR(x)\n#define EDGE(a,b) a+b\n");
     struct
     {
         String8 input;
@@ -6108,6 +6113,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
         {S8("ID(EMPTY) tail"), S8("tail")},
         {S8("DUP(FN)(9)"), S8("FN 9")},
         {S8("ID(REC(1))"), S8("1 REC(1)")},
+        {S8("PAIR(,FN)(7)"), S8("7")},
+        {S8("PAIR(FN,)(7)"), S8("7")},
+        {S8("PAIR(EMPTY,FN)(7)"), S8("7")},
+        {S8("ID(ALIAS2)(13)"), S8("13")},
+        {S8("ID(DUP(FN))(9)"), S8("FN 9")},
+        {S8("PAIR(DUP(A),DUP(SELF)) tail"), S8("A A SELF SELF tail")},
+        {S8("ID(CAT(F,N))(19)"), S8("19")},
+        {S8("V(,7,8)"), S8("7,8")},
+        {S8("EXPAND_STR(EDGE(,1))"), S8("\"+1\"")},
+        {S8("EXPAND_STR(EDGE(1,))"), S8("\"1+\"")},
+        {S8("EXPAND_STR(EDGE(EMPTY,1))"), S8("\"+1\"")},
+        {S8("EXPAND_STR(EDGE(FN(1),FN(2)))"), S8("\"1+2\"")},
+        {S8("EXPAND_STR(PAIR(,FN)(7))"), S8("\"7\"")},
+        {S8("EXPAND_STR(ID(REC(1)))"), S8("\"1 REC(1)\"")},
+
     };
     for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
     {
@@ -6136,7 +6156,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* 
     c_test_preprocessed_token(arguments, &result, locations, 2, C_TOKEN_STRING_LITERAL, S8("\"task-origin.c\""));
     for (u64 index = 0; index + 1 < locations.token_count; index += 1)
     {
-        BUSTER_TEST(arguments, c_preprocess_token_location(&locations, locations.tokens[index]).line == 321);
+        CSourceLocation location = c_preprocess_token_location(&locations, locations.tokens[index]);
+        BUSTER_TEST(arguments, location.line == 321);
+        if (BUSTER_REQUIRE(arguments, location.file < locations.file_count))
+        {
+            BUSTER_STRING_TEST(arguments, locations.files[location.file], S8("task-origin.c"));
+        }
+        BUSTER_TEST(arguments, location.column == (index < 2 ? 1 : index == 2 ? 19 : 28));
     }
     scratch_end(temporary);
 

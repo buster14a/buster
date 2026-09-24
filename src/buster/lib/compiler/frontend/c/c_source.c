@@ -38,7 +38,7 @@
 //                                              sidecar consumed by parser
 //                                              shape walks
 //   c_macro_name_hash .. c_symbol_intern       macro and symbol tables
-//   c_macro_expansion_tasks_push ..            shared LIFO task batches,
+//   c_macro_expansion_tasks_reserve ..         shared LIFO task batches,
 //   c_preprocess_expand                        arguments, stringify, paste,
 //                                              rescan and context floors
 //   CPpClassMasks, c_pp_class_masks_build,     the per-64-token class
@@ -3906,14 +3906,13 @@ BUSTER_C_INTERNAL void c_preprocess_output_push(Arena* arena, CPreprocessTokenNo
     *count += 1;
 }
 
-// One capacity check for the whole batch. Reversing the stored tokens keeps
-// the next token at the top; an optional ENABLE marker sits below the batch.
-// No pointer into task storage escapes this helper or survives another push.
-BUSTER_C_INTERNAL void c_macro_expansion_tasks_push(Arena* arena, CMacroExpansionTaskStack* tasks, CPpToken const* tokens, u64 token_count, CMacro* macro)
+// Reservation never publishes tasks. Context floors are indices and survive
+// the copy of live parent work when storage grows.
+BUSTER_C_INTERNAL void c_macro_expansion_tasks_reserve(Arena* arena, CMacroExpansionTaskStack* tasks, u64 token_count, bool enable)
 {
     u64 maximum_count = UINT64_MAX / sizeof(CMacroExpansionTask);
-    BUSTER_VALIDATE(tasks->count < maximum_count && token_count <= maximum_count - tasks->count - (macro != 0));
-    u64 required = tasks->count + token_count + (macro != 0);
+    BUSTER_VALIDATE(tasks->count < maximum_count && token_count <= maximum_count - tasks->count - enable);
+    u64 required = tasks->count + token_count + enable;
     if (required > tasks->capacity)
     {
         u64 doubled = tasks->capacity > maximum_count / 2 ? maximum_count : tasks->capacity * 2;
@@ -3926,6 +3925,14 @@ BUSTER_C_INTERNAL void c_macro_expansion_tasks_push(Arena* arena, CMacroExpansio
         tasks->data = data;
         tasks->capacity = capacity;
     }
+}
+
+// One capacity check for the whole batch. Reversing the stored tokens keeps
+// the next token at the top; an optional ENABLE marker sits below the batch.
+// No pointer into task storage escapes this helper or survives another push.
+BUSTER_C_INTERNAL void c_macro_expansion_tasks_push(Arena* arena, CMacroExpansionTaskStack* tasks, CPpToken const* tokens, u64 token_count, CMacro* macro)
+{
+    c_macro_expansion_tasks_reserve(arena, tasks, token_count, macro != 0);
     u64 output = tasks->count;
     if (macro)
     {
@@ -4569,6 +4576,65 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
     return child;
 }
 
+// All argument continuations have completed before this helper is called.
+// Only ordinary definitions without paste/stringify reach it. Reservation is
+// the last operation that may relocate tasks: filling does not expand, intern,
+// allocate spellings, or publish child work. Arguments and definition rows are
+// arena-owned, not aliases into task storage. Use indices even across reserve.
+BUSTER_C_INTERNAL void c_macro_replacement_tasks_push(Arena* arena, CMacroExpansionTaskStack* tasks, CMacro* macro,
+                                                       CMacroArgument* arguments, CPpToken invocation)
+{
+    u64 token_count = macro->definition.plain_count;
+    for (u32 parameter_index = 0; parameter_index < macro->definition.parameter_count; parameter_index += 1)
+    {
+        // The materialized replacement's count is u32. Bound each product and
+        // sum before reserving, rather than silently narrowing the fused count.
+        u64 uses = macro->definition.parameter_use_count[parameter_index];
+        BUSTER_VALIDATE(!uses || arguments[parameter_index].expanded_token_count <= (UINT32_MAX - token_count) / uses);
+        token_count += uses * arguments[parameter_index].expanded_token_count;
+    }
+    u64 task_base = tasks->count;
+    c_macro_expansion_tasks_reserve(arena, tasks, token_count, true);
+    tasks->data[task_base] = (CMacroExpansionTask){.macro = macro, .kind = C_MACRO_EXPANSION_ENABLE};
+    u64 output = task_base + token_count;
+    u8 const* definition_spaces = macro->definition.replacement_space;
+    for (u32 replacement_index = 0; replacement_index < macro->definition.replacement_count; replacement_index += 1)
+    {
+        bool replacement_space = replacement_index ? !definition_spaces || definition_spaces[replacement_index] != 0 : invocation.preceded_by_space;
+        u32 parameter_index = macro->definition.parameter_index[replacement_index];
+        if (parameter_index == C_MACRO_PARAMETER_NONE)
+        {
+            CPpToken token = {
+                .token = macro->definition.replacement[replacement_index],
+                .stamp = invocation.stamp & C_PP_STAMP_MASK,
+                .foreign = true,
+                .preceded_by_space = replacement_space,
+            };
+            tasks->data[output--] = (CMacroExpansionTask){.token = token, .kind = C_MACRO_EXPANSION_TOKEN};
+        }
+        else
+        {
+            CMacroArgument argument = arguments[parameter_index];
+            for (u64 argument_index = 0; argument_index < argument.expanded_token_count; argument_index += 1)
+            {
+                CPpToken token = argument.expanded_tokens[argument_index];
+                token.stamp = invocation.stamp & C_PP_STAMP_MASK;
+                token.foreign = true;
+                if (!argument_index)
+                {
+                    token.preceded_by_space = replacement_space;
+                }
+                tasks->data[output--] = (CMacroExpansionTask){.token = token, .kind = C_MACRO_EXPANSION_TOKEN};
+            }
+        }
+    }
+    BUSTER_CHECK(output == task_base);
+    // The next pop is logical token zero; ENABLE follows all replacement
+    // tokens, including the zero-token case. Nothing observes a partial batch.
+    macro->disabled = true;
+    tasks->count = task_base + token_count + 1;
+}
+
 // Materialize a resolved invocation into `target`, the context its
 // replacement rescans in: the replacement tokens are pushed under the
 // macro's disabled bit, or, for a pragma-like macro, the operand becomes one
@@ -4578,23 +4644,31 @@ BUSTER_C_INTERNAL bool c_macro_materialize(Arena* arena, CSpellingSpace* space, 
                                             u32 argument_count, CPpToken invocation, CPpStampTable const* stamps, CPreprocessResult* result,
                                             CMacroExpansionContext* target, CMacroExpansionTaskStack* tasks)
 {
-    CPpToken* replacement_tokens = 0;
-    u32 replacement_count = 0;
-    bool ok = c_macro_replacement_tokens(arena, space, first_macro, macro, arguments, invocation, stamps, result, &replacement_tokens, &replacement_count);
-    if (ok)
+    bool ok = true;
+    if (!macro->builtin && !macro->definition.pragma_like && !macro->definition.has_paste && !macro->definition.has_stringify)
     {
-        if (macro->definition.pragma_like)
+        c_macro_replacement_tasks_push(arena, tasks, macro, arguments, invocation);
+    }
+    else
+    {
+        CPpToken* replacement_tokens = 0;
+        u32 replacement_count = 0;
+        ok = c_macro_replacement_tokens(arena, space, first_macro, macro, arguments, invocation, stamps, result, &replacement_tokens, &replacement_count);
+        if (ok)
         {
-            if (argument_count == 1)
+            if (macro->definition.pragma_like)
             {
-                CPpToken pragma = c_macro_pragma_token(space, macro, arguments[0], invocation);
-                c_preprocess_output_push(arena, &target->first_output, &target->last_output, pragma, &target->output_count);
+                if (argument_count == 1)
+                {
+                    CPpToken pragma = c_macro_pragma_token(space, macro, arguments[0], invocation);
+                    c_preprocess_output_push(arena, &target->first_output, &target->last_output, pragma, &target->output_count);
+                }
             }
-        }
-        else
-        {
-            macro->disabled = true;
-            c_macro_expansion_tasks_push(arena, tasks, replacement_tokens, replacement_count, macro);
+            else
+            {
+                macro->disabled = true;
+                c_macro_expansion_tasks_push(arena, tasks, replacement_tokens, replacement_count, macro);
+            }
         }
     }
     return ok;

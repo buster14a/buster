@@ -3,6 +3,10 @@
 #define TASK_ID(x) x
 #define TASK_FN(x) ((x) + 1)
 #define TASK_ALIAS TASK_FN
+#define TASK_ALIAS2 TASK_ALIAS
+#define TASK_PAIR(a,b) a b
+#define TASK_EDGE(a,b) a+b
+#define TASK_EXPAND_STR(x) TASK_STR(x)
 #define TASK_EMPTY()
 #define TASK_VALUE 1
 #define TASK_TWO(x) ((x) + (x))
@@ -55,5 +59,13 @@ int main(void)
     result |= !same_text(TASK_STR(task_self /* gap */ + TASK_VALUE), "task_self + TASK_VALUE");
     result |= sizeof(values) / sizeof(values[0]) != 3;
     result |= values[0] != 3 || values[1] != 4 || values[2] != 1;
+    result |= TASK_ID(TASK_ALIAS2)(13) != 14;
+    result |= TASK_PAIR(,TASK_FN)(7) != 8;
+    result |= TASK_PAIR(TASK_FN,)(7) != 8;
+    result |= TASK_PAIR(TASK_EMPTY(),TASK_FN)(7) != 8;
+    result |= TASK_ID(TASK_256(TASK_VALUE)) + TASK_ID(TASK_128(TASK_VALUE)) != 384;
+    result |= !same_text(TASK_EXPAND_STR(TASK_EDGE(,1)), "+1");
+    result |= !same_text(TASK_EXPAND_STR(TASK_EDGE(1,)), "1+");
+    result |= !same_text(TASK_EXPAND_STR(TASK_PAIR(,TASK_FN)(7)), "((7) + 1)");
     return result;
 }
