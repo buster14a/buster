@@ -53,10 +53,20 @@ POLICY_PATHS = (
     "tools/merge_queue_admission.py",
     "tools/native_retirement_merge_gate.py",
     "tools/native_retirement_integration.py",
+    "tools/native_retirement_contract.py",
+    "tools/native_retirement_dependency_binding.py",
+    "tools/native_retirement_external.py",
+    "tools/native_retirement_materializer.py",
+    "tools/native_retirement_rebind.py",
+    "tools/native_retirement_rebind_contract.py",
+    "tools/native_retirement_sdks.py",
     ".github/workflows/merge-queue-admission.yml",
     ".github/workflows/api-migration-policy.yml",
+    ".github/workflows/native-retirement-rebind.yml",
     ".github/main-merge-queue.ruleset.json",
     "docs/native-retirement-dependencies-v1.json",
+    "docs/native-retirement-sdks-v1.json",
+    "docs/native-retirement-support-v1.tsv",
 )
 
 
