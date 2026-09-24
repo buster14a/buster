@@ -20887,6 +20887,39 @@ BUSTER_C_INTERNAL void c_parse_validate_builtin_calls(CTypeParseMachine* machine
     }
 }
 
+// Whether the `&&` at `index`, whose previous token is a `)`, closes a cast
+// to a type name the scope resolves, so the operator spells a label address
+// rather than the conjunction the proven prefix test already rejected. A
+// parenthesized type name that is a sizeof/alignof operand is that operator's
+// operand, not a cast: `sizeof(int) && a` is a conjunction, as the proven
+// test already says of it.
+BUSTER_C_INTERNAL bool c_parse_label_address_cast_at(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 index)
+{
+    bool label = false;
+    u32 depth = 1;
+    u32 open = index - 1;
+    while (open > start && depth)
+    {
+        open -= 1;
+        depth += c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        depth -= c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS);
+    }
+    bool operand = !depth && open > start && preprocess.tokens[open - 1].kind == C_TOKEN_IDENTIFIER &&
+                   (c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[open - 1], C_SYMBOL_WELL_KNOWN_SIZEOF) ||
+                    c_parse_alignof_word(c_token_spelling(preprocess.spelling_base, preprocess.tokens[open - 1])));
+    if (!depth && !operand)
+    {
+        u32 cursor = open + 1;
+        CTypeId type = c_parse_machineless_base_type(result, preprocess, scope, cursor, index - 1, &cursor);
+        if (type.value < result->type_count)
+        {
+            type = c_parse_pointer_chain(result, preprocess, type, &cursor, index - 1);
+            label = type.value < result->type_count && cursor == index - 1;
+        }
+    }
+    return label;
+}
+
 // Source label facts are compact entity flags. Aggregate storage keeps the
 // union of its possible labels; canonical control-flow validation still owns
 // the exact target edges and subobject provenance of generated branches.
@@ -20899,28 +20932,9 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
         CToken token = preprocess.tokens[index];
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_AMPERSAND_AMPERSAND) && index + 1 < end)
         {
-            label = c_parse_label_address_prefix_proven(&preprocess, start, index);
-            if (!label && index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
-            {
-                u32 depth = 1;
-                u32 open = index - 1;
-                while (open > start && depth)
-                {
-                    open -= 1;
-                    depth += c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_RIGHT_PARENTHESIS);
-                    depth -= c_token_is_punctuator(&preprocess.tokens[open], C_PUNCTUATOR_LEFT_PARENTHESIS);
-                }
-                if (!depth)
-                {
-                    u32 cursor = open + 1;
-                    CTypeId type = c_parse_machineless_base_type(result, preprocess, scope, cursor, index - 1, &cursor);
-                    if (type.value < result->type_count)
-                    {
-                        type = c_parse_pointer_chain(result, preprocess, type, &cursor, index - 1);
-                        label = type.value < result->type_count && cursor == index - 1;
-                    }
-                }
-            }
+            label = c_parse_label_address_prefix_proven(&preprocess, start, index) ||
+                    (index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                     c_parse_label_address_cast_at(result, preprocess, scope, start, index));
         }
         else if (token.kind == C_TOKEN_IDENTIFIER)
         {
@@ -20956,26 +20970,52 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
     return label;
 }
 
-BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
-                                                      CDeclaration const* declaration, u8 const* skipped, CParseLoweringConstraintDiagnostic* diagnostic)
+// Whether the label-provenance walk below has anything to find in this body.
+// Every provenance fact it records descends from a label address or a computed
+// goto: c_parse_label_expression proves each `&&` before it marks a value, and
+// an entity is marked only from a marked value. A body with neither therefore
+// walks every assignment, return and call, looks up every identifier through
+// the scope chains and records nothing. The conjunction operator shares the
+// label address's spelling, and a body with a label and any `a && b` used to
+// pay that walk; prove the candidates here with the walk's own test so the
+// walk runs exactly when it can record or diagnose something. The proof needs
+// the token's scope only for the cast form, so it is resolved lazily.
+BUSTER_C_INTERNAL bool c_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration,
+                                                    u8 const* skipped)
 {
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
     bool needed = false;
     bool named_label = false;
-    bool address = false;
+    bool conjunction = false;
     for (u32 index = start; index + 1 < end; index += 1)
     {
-        if (!skipped[index - start])
+        if (!skipped || !skipped[index - start])
         {
             named_label |= c_ir_named_label_at(&preprocess, start, index, end);
-            address |= c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND);
+            conjunction |= c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND);
             needed |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[index], C_SYMBOL_WELL_KNOWN_GOTO) &&
                       c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR);
         }
     }
-    needed |= named_label && address;
-    if (needed)
+    for (u32 index = start; named_label && conjunction && !needed && index + 1 < end; index += 1)
+    {
+        if ((!skipped || !skipped[index - start]) && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND))
+        {
+            needed = c_parse_label_address_prefix_proven(&preprocess, start, index) ||
+                     (index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                      c_parse_label_address_cast_at(result, preprocess, c_parse_scope_for_token(result, declaration->scope, index), start, index));
+        }
+    }
+    return needed;
+}
+
+BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                      CDeclaration const* declaration, u8 const* skipped, CParseLoweringConstraintDiagnostic* diagnostic)
+{
+    u32 start = declaration->body_start;
+    u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
+    if (c_parse_label_values_needed(result, preprocess, declaration, skipped))
     {
         u64 mark = machine->scratch_arena->position;
         u8* labels = arena_allocate(machine->scratch_arena, u8, result->entity_count);
@@ -21106,6 +21146,13 @@ BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine,
     }
 
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration)
+{
+    return c_parse_label_values_needed(result, preprocess, declaration, 0);
+}
+#endif
 
 BUSTER_C_INTERNAL String8 c_parse_asm_constraint_shape(String8 text, bool output)
 {
