@@ -179,7 +179,27 @@ checks the compiled profile's `build-driver-sha256` against the installed fixed
 driver, and validates the workspace descriptor/path identity. `stage` returns
 four exact commands: baseline generate/build, then candidate generate/build,
 using the same `matched-build` configured pathname, fixed Release/Clang flags,
-single-job Ninja build and explicit environment. The #923 trusted stage runner
+single-job Ninja build and explicit environment. The source of `PATH` is the
+fixed `/opt/buster-bench/installed/toolchain/native-retirement-performance-v1/bin`.
+Before issuance, the service requires `toolchain-manifest-sha256` in the
+compiled profile and verifies the installed bundle beneath the held installed
+root. Its `toolchain.manifest` has `BQ-RETIREMENT-TOOLCHAIN-V1`,
+`platform=linux-x86_64`, then sorted lines of `<SHA-256> <relative path>`.
+The tree must include executable `bin/clang`, `bin/cmake`, `bin/ld` and
+`bin/ninja`. The verifier hashes every file, checks no-follow descriptors,
+read-only ownership, single links and an independent complete directory walk;
+it rejects extra files/directories, symlinks, wrong manifest bytes and inode
+replacement. Limits are 4,096 files, 512 KiB of manifest, 512 MiB per file,
+2 GiB of total listed bytes and 480 directories. Bundle directories must be
+traversable and readable by both service identities, and all files readable;
+executable files must also be executable by both. The operator must make the
+fixed `/opt` path's parent directories traversable by the candidate identity.
+It rechecks the exact bundle
+and fixed driver before each command and the bundle again on completion.
+Stage/final receipts bind the manifest SHA-256 and same-job inode identity;
+readback rechecks both along with the output binaries. A change to the bundle
+after the first stage poisons the sequence before another command is issued.
+The #923 trusted stage runner
 must execute each returned command with its fixed containment and separate
 candidate identity, capture an actual wait status and provide a service-owned
 immutable log descriptor. `complete` stores each command/exit/log as an
@@ -195,9 +215,14 @@ and reimports A and both binary outputs. The public
 `bq_retirement_correctness_begin_service` requires that authenticated build
 record digest and workspace root before opening B's binary holder or gate.
 This is a private handoff, not an executable retirement recipe: the blocked
-profile has no `build-driver-sha256`, the #923 runner has not been wired to
-these four commands and the complete reviewed Clang/linker/resource/SDK/
-sysroot/dependency closure has not been pinned or independently verified.
+profile has neither `build-driver-sha256` nor `toolchain-manifest-sha256`; the
+#923 runner has not been wired to these four commands and the final reviewed
+Clang/linker/resource/SDK/sysroot/dependency closure has not been pinned or
+independently verified. A complete bundle scan proves its installed files,
+but only the runner's executable resolution and sandbox can prove the child
+did not read ambient tools, system libraries, headers or scripts outside that
+bundle. Its fixed absolute paths and dynamic dependencies must be reviewed
+against the final build, and the runner must forbid unapproved ambient inputs.
 The actual runner must keep the fixed installed driver path and tool closure
 stable across each stage, enforce the candidate UID/sandbox and log bound,
 then pass the final record digest through the authenticated lease. The

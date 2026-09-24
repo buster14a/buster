@@ -34,11 +34,13 @@ typedef struct BqRetirementWalk
  * closure independently of the per-path manifest scan, using held descriptors
  * and checking names again before releasing each directory. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_tree_closed(int root, char const* manifest_name,
-                                                   BqRetirementSource const* expected)
+                                                   BqRetirementSource const* expected,
+                                                   bool candidate_readable)
 {
     BqRetirementWalk* stack = calloc(BQ_CLEANUP_DEPTH_CAP + 1, sizeof(*stack));
     struct stat root_info = {0};
-    bool ok = stack && fstat(root, &root_info) == 0 && S_ISDIR(root_info.st_mode);
+    bool ok = stack && fstat(root, &root_info) == 0 && S_ISDIR(root_info.st_mode) &&
+              (!candidate_readable || (root_info.st_mode & 0005) == 0005);
     u32 active = 0, files = 0, directories = 0, manifests = 0;
     if (ok)
     {
@@ -86,9 +88,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_tree_closed(int root, char const* manifes
                  (named.st_uid == 0 || named.st_uid == geteuid()) && (named.st_mode & 0222) == 0;
             if (ok && S_ISDIR(named.st_mode))
             {
+                if (candidate_readable) ok = (named.st_mode & 0005) == 0005;
                 int child = openat(parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
                 struct stat held_info = {0};
-                ok = current->depth + 1 <= expected->max_depth && active <= BQ_CLEANUP_DEPTH_CAP &&
+                ok = ok && current->depth + 1 <= expected->max_depth && active <= BQ_CLEANUP_DEPTH_CAP &&
                      ++directories <= expected->directories && child >= 0 && fstat(child, &held_info) == 0 &&
                      held_info.st_dev == named.st_dev && held_info.st_ino == named.st_ino;
                 if (ok)
@@ -111,9 +114,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_tree_closed(int root, char const* manifes
             }
             else if (ok && S_ISREG(named.st_mode) && named.st_nlink == 1)
             {
+                if (candidate_readable)
+                    ok = (named.st_mode & S_IROTH) &&
+                         (!(named.st_mode & S_IXUSR) || (named.st_mode & S_IXOTH));
                 if (manifest) manifests += 1;
                 else files += 1;
-                ok = files <= expected->entries && manifests <= 1;
+                ok = ok && files <= expected->entries && manifests <= 1;
             }
             else ok = false;
         }
@@ -348,7 +354,7 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_scan(int root, char const* manifest_name,
         }
     }
     ok = ok && observed->entries > 0 && offset == manifest.length &&
-         bq_retirement_tree_closed(root, manifest_name, observed);
+         bq_retirement_tree_closed(root, manifest_name, observed, false);
     if (ok)
     {
         struct stat named = {0};
