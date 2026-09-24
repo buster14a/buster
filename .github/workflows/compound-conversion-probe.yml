@@ -1,0 +1,61 @@
+name: Compound conversion semantic probe
+on:
+  push:
+    branches: [codex/compound-conversion-probe-20260924-astra]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Pin and build diagnostic compiler
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/compound-evidence"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/compound-evidence/transport.txt"
+          cp tools/compound_conversion_probe.py "$RUNNER_TEMP/compound-probe.py"
+          git checkout --detach fdebfb8810ed4db8c69d3b176f89f835fb77259c
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/compound-evidence/source.txt"
+          git archive HEAD | gzip > "$RUNNER_TEMP/compound-evidence/source.tar.gz"
+          clang --version > "$RUNNER_TEMP/compound-evidence/clang.txt"
+          gcc --version > "$RUNNER_TEMP/compound-evidence/gcc.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/compound-build"
+          "$RUNNER_TEMP/compound-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$RUNNER_TEMP/compound-evidence/configure.log"
+          "$RUNNER_TEMP/compound-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/compound-evidence/build.log"
+          sha256sum build/Release/ide > "$RUNNER_TEMP/compound-evidence/compiler.sha256"
+      - name: Independent bounded family
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: python3 "$RUNNER_TEMP/compound-probe.py"
+      - name: Preserve diagnostic family before broader gate
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compound-conversion-baseline
+          path: ${{ runner.temp }}/compound-evidence
+          retention-days: 30
+      - name: Baseline ordinary self-host
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/compound-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/compound-evidence/self-host.log"
+      - name: Preserve self-host result
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compound-conversion-self-host
+          path: ${{ runner.temp }}/compound-evidence/self-host.log
+          if-no-files-found: warn
+          retention-days: 30
