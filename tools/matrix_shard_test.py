@@ -303,7 +303,8 @@ class WorkflowSetupTests(unittest.TestCase):
             "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
             "tools/matrix_shard_test.py", "tools/differential_ci_policy_test.py",
             "tools/native_producer_profile_test.py", "tools/ci_configure_evidence_test.py",
-            "tools/ci_matrix_phases_test.py", "tools/ci_native_observation_test.py",
+            "tools/ci_matrix_phases_test.py", "tools/ci_matrix_phases_bridge_test.py",
+            "tools/ci_native_observation_test.py",
         }
         suites = re.findall(r'^          run_suite ([^ ]+) [^ ]+\.log$', block, re.M)
         self.assertEqual(set(suites), expected)

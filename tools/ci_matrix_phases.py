@@ -243,7 +243,7 @@ def analyze(root, coverage, environment=None):
         if task["phase"] != "configure" and task["tree"] in trees:
             require(records[task_id(task["tree"], "configure")]["end_us"] <= record["start_us"], f"build before configure: {name}")
     terminal = read(root / "terminal.json")
-    require(terminal.get("epoch_us") == epoch and terminal.get("result") == 0 and integer(terminal.get("terminal_us")), "failed/incomplete driver publication")
+    require(terminal.get("epoch_us") == epoch and type(terminal.get("result")) is int and terminal["result"] == 0 and integer(terminal.get("terminal_us")), "failed/incomplete driver publication")
     require(max(record["publication_start_us"] for record in records.values()) <= terminal["terminal_us"], "terminal before child publication")
     unexpected = {p.name for p in root.iterdir()} - consumed
     require(not unexpected, f"unknown/partial/duplicated evidence: {sorted(unexpected)}")
