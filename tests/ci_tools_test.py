@@ -857,7 +857,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         names = re.findall(r"^          - name: (.+)$", text, re.M)
         self.assertEqual(sorted(names), sorted(github_ci_time.PLATFORMS + github_ci_time.MOBILE + github_ci_time.NATIVE))
-        self.assertIn("fail-fast: false", text)
+        self.assertEqual(text.count("fail-fast: ${{ github.event_name == 'merge_group' }}"), 3)
         self.assertIn("test_all_combinations_ci --verbose=1", text)
         self.assertIn("test_mode_matrix --config Release", text)
         self.assertIn("./android/test_ci.sh --all", text)
