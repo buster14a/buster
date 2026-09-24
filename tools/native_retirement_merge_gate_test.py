@@ -306,6 +306,29 @@ class MergeGroupTests(unittest.TestCase):
         result = self.check(self.group(head), None)
         self.assertEqual(result["mode"], "ordinary-merge-group")
 
+    def test_second_ordinary_group_waits_until_first_synthetic_group_lands(self):
+        first = self.repository.branch("first", {"README.md": "first\n"})
+        second = self.repository.branch("second", {"docs/second.md": "second\n"})
+        first_group = self.group(first)
+        second_group = self.group(second, base=first_group)
+        with self.assertRaisesRegex(gate.AdmissionError, "group base does not equal live main"):
+            gate.check_event(self.repository.repo, first_group, second_group,
+                             self.repository.base, None, "merge_group", False)
+        result = gate.check_event(self.repository.repo, first_group, second_group,
+                                  first_group, None, "merge_group", False)
+        self.assertEqual(result["mode"], "ordinary-merge-group")
+        self.assertEqual(result["base"], first_group)
+        self.assertEqual(result["head"], second_group)
+
+    def test_old_sensitive_head_does_not_become_valid_after_predecessor_lands(self):
+        sensitive, _, api = self.prepared()
+        first = self.repository.branch("first", {"README.md": "first\n"})
+        first_group = self.group(first)
+        second_group = self.group(sensitive, base=first_group)
+        with self.assertRaisesRegex(gate.AdmissionError, "not based on"):
+            gate.check_event(self.repository.repo, first_group, second_group,
+                             first_group, None, "merge_group", False, api)
+
     def test_sensitive_group_requires_live_status_even_with_allow_pending(self):
         _, group, api = self.prepared()
         with self.assertRaisesRegex(gate.AdmissionError, "live trusted"):
@@ -338,7 +361,7 @@ class MergeGroupTests(unittest.TestCase):
     def test_stale_group_and_stale_integration_require_reconstruction(self):
         head, group, api = self.prepared()
         new_main = self.repository.branch("advanced", {"README.md": "new main\n"})
-        with self.assertRaisesRegex(gate.AdmissionError, "main advanced"):
+        with self.assertRaisesRegex(gate.AdmissionError, "group base does not equal live main"):
             gate.check_event(self.repository.repo, self.repository.base, group,
                              new_main, None, "merge_group", False, api)
         rebuilt = self.group(head, base=new_main)
@@ -509,13 +532,17 @@ class WorkflowPolicyTests(unittest.TestCase):
                         "if args.event=='pull_request': assert args.status_json\n"
                         "else: assert args.repository=='buster14a/buster'\n"
                         "print(json.dumps({'status':'admitted','mode':'trusted-integration'}))\n")
+                    (root / "trusted/tools/merge_queue_admission.py").write_text(
+                        "import json\nprint(json.dumps({'status':'base-landed'}))\n")
                     # Exercise the actual shell, supplying only remote read fixtures.
                     prefix = 'git() { printf "%s\\trefs/heads/main\\n" "$BASE_SHA"; }\ngh() { printf "[[]]\\n"; }\n'
                     result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", prefix + script],
                         env={**os.environ, "EVENT_NAME": event, "GITHUB_WORKSPACE": str(root),
                              "RUNNER_TEMP": str(root), "GITHUB_OUTPUT": str(root / "output"),
                              "GITHUB_REPOSITORY": "buster14a/buster", "BASE_SHA": "a" * 40,
-                             "TRUSTED_REF": "a" * 40, "HEAD_SHA": "b" * 40, "CANDIDATE_HEAD": "b" * 40},
+                             "TRUSTED_REF": "a" * 40, "HEAD_SHA": "b" * 40,
+                             "GITHUB_SHA": "b" * 40, "GITHUB_EVENT_PATH": str(root / "event.json"),
+                             "CANDIDATE_HEAD": "b" * 40},
                         capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
 
