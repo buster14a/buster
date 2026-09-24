@@ -24,10 +24,14 @@ declaration remains synthetic. Neither fixture provides a trusted Clang build,
 full population, oracle receipt or timed invocation.
 
 `retirement_artifact_service.{h,c}` provides the B-side artifact observation
-after each service-owned compiler process and before `row`. It opens each frozen
-read-only, single-link file by a single-component name under a held service
-directory; streams the bytes through a descriptor; parses the actual object or
-executable with the existing independent ELF/COFF/PE/Mach-O reader; and checks
+around each service-owned compiler process and before `row`. Before launch,
+`bq_retirement_artifact_start` records that the fixed output name is absent
+inside the held service-owned directory without other-user write access. The
+wrapper later requires that same name and directory identity, consumes the
+start, and opens each frozen, read-only, single-link file by a single-component
+name under the same service directory. It streams the bytes through a descriptor,
+parses the actual object or executable with the existing independent
+ELF/COFF/PE/Mach-O reader, and checks
 name, inode, mode, size and timestamps again before using the parsed file and
 code-section digests. `bq_retirement_correctness_row_service` derives
 `code_eligible` from the observed baseline section size and passes the readback
@@ -36,21 +40,24 @@ the authenticated row's target and stage (the twelve target IDs follow the
 performance contract's `TARGETS` order); mismatches fail. It also rejects
 supplied artifact/code values and artifact names for untimed controls. The
 producer must derive both output names from the frozen command plan and freeze
-files under the service UID before readback,
-and hold/recheck them through later timed launches. This join does not prove
-that the compiler created the named file or that an independent semantic oracle
-passed; those still require service-owned process/receipt and #509 execution.
+files under the service UID before readback, then hold and recheck them through
+later timed launches. This join does not prove that the compiler created the
+named file or that an independent semantic oracle passed; those still require
+service-owned process/receipt and #509 execution.
 
 For native link/self-host rows, the same wrapper requires completed, read-only,
 service-owned stdout/stderr log descriptors from both runtime processes. It
-hashes their exact bytes, including an empty output, checks CLOEXEC, ownership,
+creates each empty log exclusively before launch, hands its writer to the
+runner, and freezes it after the child has been reaped. At row readback it
+checks that the descriptor and original name still identify the fresh file. It
+hashes the exact bytes, including an empty output, checks CLOEXEC, ownership,
 single-link status, access mode, size and stable metadata, and rejects
 caller-filled output digests. The existing gate compares these observed hashes
 to the independently imported oracle digest. Object-only, foreign-target and
 untimed rows require absent runtime descriptors. The runner must bind each
 descriptor to the matching completed process and capture both streams in the
-oracle's declared order; this wrapper cannot authenticate a caller-selected
-descriptor or create an independent oracle.
+oracle's declared order; the prelaunch and finish calls alone cannot attest
+that a particular child wrote the log or create an independent oracle.
 
 The row wrapper also derives both compiler command hashes and applicable
 runtime command hashes from exact argv, cwd and explicit sorted environment
@@ -134,10 +141,12 @@ cc -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror -fwrapv \
 /tmp/retirement-correctness-test
 ```
 
-The focused fixture now copies its actual compiled executable into frozen
-service files for the link-row readback and captures the runtime output from
-two completed child processes. It rejects symlink/path substitution,
-predeclared code facts, writable output and mismatched machine identity. The
-fixture also reads frozen output logs and rejects wrong bytes, missing
-descriptors, caller-filled digests, mutable logs and changed argv/cwd/environment.
+The focused fixture records vacant output names before copying its actual
+compiled executable into frozen service files for the link-row readback. It
+captures fresh runtime logs from two completed child processes per row. It
+rejects preexisting outputs, symlink/path and finished-log substitution,
+mismatched start identities, predeclared code facts, writable output and
+mismatched machine identity. The fixture also reads frozen output logs and rejects
+wrong bytes, missing descriptors, caller-filled digests, mutable logs and changed
+argv/cwd/environment.
 The other synthetic rows remain structural tests, not a full-corpus pass.
