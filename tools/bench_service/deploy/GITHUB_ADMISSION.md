@@ -28,13 +28,17 @@ public repository even if another workflow later copies the labels.
 ## 2. Install and read back repository admission
 
 From a trusted checkout of protected `main`, with repository Administration
-write access and organization runner-group read access, run:
+write access and organization runner-group read access, first read back
+`BENCH_SERVICE_DISPATCH_ENABLED=false`. Create it explicitly with value
+`false` if it is absent. Do not rerun the installer during an enabled dispatch
+window. With dispatch staged disabled, run:
 
 ```sh
 bash tools/bench_service/deploy/configure_github_admission.sh buster14a/buster
 ```
 
-The installer disables the repository variable first, verifies the exact main
+The installer requires the repository variable to be exactly `false` without
+changing it, then verifies the exact main
 merge-queue ruleset `22537199`, verifies the runner group and rejects a
 repository-scoped benchmark runner. It reads and verifies the **existing**
 repository Actions policy for the exact workflow, admin role, and manual
@@ -46,13 +50,13 @@ team, or other actor: each would get independent dispatch authority. The
 additional branch ruleset retains deletion/force-push protection and
 `CI complete` plus `Benchmark service workflow policy`, without imposing
 one approval on every PR. The original main merge queue keeps all eight
-checks, one build/merge, `ALLGREEN`, and no bypass.
+checks, 20 concurrent builds, one merge, `ALLGREEN`, and no bypass.
 
 Only after readback of the actor policy and runner restriction does the
 installer clear required reviewers from `benchmark-9700x`. The environment
 remains restricted to the one exact `main` deployment branch. Thus normal
 use is one admin dispatch, with no separate deployment approval. If any
-readback fails, the variable remains `false`; investigate before retrying.
+readback fails, leave dispatch disabled and investigate before retrying.
 After installation, the read-only verifier fetches the benchmark ruleset,
 environment, deployment branch policies and repository variable again. It
 checks the reviewed ruleset without bypass actors, no required environment
