@@ -511,7 +511,7 @@ class InvalidationTests(unittest.TestCase):
 class WorkflowPolicyTests(unittest.TestCase):
     root = Path(__file__).resolve().parents[1]
 
-    def test_pr_bootstrap_keeps_legacy_trusted_cli_and_groups_get_repository(self):
+    def test_stale_pr_event_base_uses_trusted_live_main_and_groups_keep_queued_base(self):
         for name, step in (("api-migration-policy.yml", "Enforce trusted native-retirement integration"),
                            ("native-retirement-rebind.yml", "Reject feature-owned generated state and classify trust transitions")):
             workflow = (self.root / ".github/workflows" / name).read_text()
@@ -529,22 +529,43 @@ class WorkflowPolicyTests(unittest.TestCase):
                         "p.add_argument('--allow-pending',action='store_true')\n"
                         "if os.environ['EVENT_NAME']=='merge_group': p.add_argument('--repository',required=True)\n"
                         "args=p.parse_args()\n"
-                        "if args.event=='pull_request': assert args.status_json\n"
-                        "else: assert args.repository=='buster14a/buster'\n"
+                        "if args.event=='pull_request':\n"
+                        " assert args.status_json\n"
+                        " assert args.base==os.environ['TRUSTED_MAIN_SHA']==args.current_main\n"
+                        " assert args.base!=os.environ['STALE_EVENT_BASE_SHA']\n"
+                        "else:\n"
+                        " assert args.repository=='buster14a/buster'\n"
+                        " assert args.base==os.environ['BASE_SHA']\n"
                         "print(json.dumps({'status':'admitted','mode':'trusted-integration'}))\n")
                     (root / "trusted/tools/merge_queue_admission.py").write_text(
                         "import json\nprint(json.dumps({'status':'base-landed'}))\n")
-                    # Exercise the actual shell, supplying only remote read fixtures.
-                    prefix = 'git() { printf "%s\\trefs/heads/main\\n" "$BASE_SHA"; }\ngh() { printf "[[]]\\n"; }\n'
+                    # The PR event still names the old main, while a verified
+                    # writer has published a head based on the newer checkout.
+                    prefix = (
+                        'git() { if [[ "$*" == *"rev-parse HEAD"* ]]; then '
+                        'printf "%s\\n" "$TRUSTED_MAIN_SHA"; else '
+                        'printf "%s\\trefs/heads/main\\n" "$REMOTE_MAIN_SHA"; fi; }\n'
+                        'gh() { printf "[[]]\\n"; }\n'
+                    )
+                    env = {**os.environ, "EVENT_NAME": event, "GITHUB_WORKSPACE": str(root),
+                           "RUNNER_TEMP": str(root), "GITHUB_OUTPUT": str(root / "output"),
+                           "GITHUB_REPOSITORY": "buster14a/buster", "BASE_SHA": "a" * 40,
+                           "STALE_EVENT_BASE_SHA": "a" * 40,
+                           "TRUSTED_REF": "a" * 40, "TRUSTED_MAIN_SHA": "c" * 40,
+                           "REMOTE_MAIN_SHA": "c" * 40, "HEAD_SHA": "b" * 40,
+                           "GITHUB_SHA": "b" * 40, "GITHUB_EVENT_PATH": str(root / "event.json"),
+                           "CANDIDATE_HEAD": "b" * 40}
                     result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", prefix + script],
-                        env={**os.environ, "EVENT_NAME": event, "GITHUB_WORKSPACE": str(root),
-                             "RUNNER_TEMP": str(root), "GITHUB_OUTPUT": str(root / "output"),
-                             "GITHUB_REPOSITORY": "buster14a/buster", "BASE_SHA": "a" * 40,
-                             "TRUSTED_REF": "a" * 40, "HEAD_SHA": "b" * 40,
-                             "GITHUB_SHA": "b" * 40, "GITHUB_EVENT_PATH": str(root / "event.json"),
-                             "CANDIDATE_HEAD": "b" * 40},
-                        capture_output=True, text=True)
+                        env=env, capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
+                    if event == "pull_request":
+                        moved = subprocess.run(
+                            ["bash", "-e", "-o", "pipefail", "-c", prefix + script],
+                            env={**env, "REMOTE_MAIN_SHA": "d" * 40},
+                            capture_output=True, text=True,
+                        )
+                        self.assertNotEqual(moved.returncode, 0)
+                        self.assertIn("Main advanced after trusted PR policy checkout", moved.stderr)
 
     def test_admission_and_compatibility_are_independent_required_checks(self):
         workflow = (self.root / ".github/workflows/api-migration-policy.yml").read_text()

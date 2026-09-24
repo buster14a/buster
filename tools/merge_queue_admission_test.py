@@ -360,7 +360,7 @@ class CombinedTreeTests(unittest.TestCase):
             gate.git(repo, "commit", "-m", "base")
             main = gate.git(repo, "rev-parse", "HEAD")
             (repo / "tools").mkdir()
-            (repo / "tools/merge_queue_admission.py").write_text("new policy\n")
+            (repo / "tools/native_retirement_rebind.py").write_text("new rebinding policy\n")
             gate.git(repo, "add", ".")
             gate.git(repo, "commit", "-m", "predecessor changes policy")
             predecessor = gate.git(repo, "rev-parse", "HEAD")

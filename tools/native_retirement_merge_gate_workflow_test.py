@@ -73,16 +73,15 @@ class AdmissionWorkflowTests(unittest.TestCase):
             "python3 -B tools/" + name + " -v" for name in SUITES
         ])
 
-    def test_exact_candidate_and_trusted_base_keep_admission_authority(self):
+    def test_exact_candidate_and_live_main_keep_admission_authority(self):
         candidate = self.step("Check out exact candidate")
         self.assertIn("github.event.pull_request.head.sha", candidate)
         self.assertIn("github.event.merge_group.head_sha", candidate)
         self.assertIn("          path: candidate\n", candidate)
         self.assertIn("          persist-credentials: false\n", candidate)
         trusted = self.step("Check out the independently trusted admission policy")
-        self.assertIn("github.event.pull_request.base.sha", trusted)
-        self.assertIn("github.event_name == 'merge_group' && 'main'", trusted)
-        self.assertNotIn("ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}", trusted)
+        self.assertIn("          ref: main\n", trusted)
+        self.assertNotIn("github.event.pull_request.base.sha", trusted)
         self.assertIn("          path: trusted\n", trusted)
         self.assertIn("          persist-credentials: false\n", trusted)
         enforce = self.step("Enforce trusted native-retirement integration")
@@ -140,6 +139,25 @@ class AdmissionWorkflowTests(unittest.TestCase):
             self.assertNotEqual(later.returncode, 0)
             self.assertIn("requires trusted main with wait-base", later.stderr)
             self.assertNotIn("trusted native gate passed", later.stdout)
+
+    def test_rebinding_waits_on_trusted_main_before_classifying_second_group(self):
+        workflow = (ROOT / ".github/workflows/native-retirement-rebind.yml").read_text()
+        repository = workflow.split("  repository:\n", 1)[1]
+        self.assertIn("    timeout-minutes: 310\n", repository)
+        self.assertIn("(github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'main'", repository)
+        self.assertNotIn("github.event.pull_request.base.sha", repository)
+        checkout = repository.index("      - name: Check out the previously trusted rebinder revision")
+        wait = repository.index("      - name: Wait for the queued predecessor to land")
+        admission = repository.index("      - name: Reject feature-owned generated state")
+        self.assertLess(checkout, wait)
+        self.assertLess(wait, admission)
+        first_wait = repository[wait:admission]
+        self.assertIn("if: ${{ github.event_name == 'merge_group' }}", first_wait)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", first_wait)
+        self.assertIn("trusted/tools/merge_queue_admission.py wait-base", first_wait)
+        self.assertIn('--trusted-root "$GITHUB_WORKSPACE/trusted"', first_wait)
+        self.assertIn('--wait-seconds 18000', first_wait)
+        self.assertNotIn("continue-on-error", first_wait)
 
     def history(self, root: Path) -> tuple[Path, Path, Path, str, str]:
         repo = root / "repo"
