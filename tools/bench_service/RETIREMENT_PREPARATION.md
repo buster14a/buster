@@ -137,6 +137,14 @@ cannot supply an exit code or substitute a log from a different process. The
 whole-job worker still must own process isolation, deadlines, cancellation,
 and cleanup; a stage wait alone is not proof of a trusted Clang build.
 
+At begin the helper retains both subjects' imported preparation facts. Each
+launch opens the selected source directory, scans its complete manifest and
+same-job inode closure against those facts, then gives the child that held
+directory as its cwd with `fchdir`. A source pathname replaced before the open
+poisons the build; a pathname replaced after verification cannot redirect the
+child to another tree. The candidate sandbox and toolchain dependency closure
+remain requirements of the integrated worker.
+
 The integration owner must use the verified `source` directories and
 `preparation-<job>` facts in that path, replace its smoke-specific command and
 stage policy only when the retirement recipe is admitted, and retain the exact
@@ -209,8 +217,8 @@ traversable and readable by both service identities, and all files readable;
 executable files must also be executable by both. The operator must make the
 fixed `/opt` path's parent directories traversable by the candidate identity.
 It rechecks the exact bundle and fixed driver before each command, opens and
-hashes the driver descriptor again at launch, and rechecks the bundle on
-completion.
+hashes the driver descriptor again at launch, rechecks the selected source tree
+through its held descriptor, and rechecks the bundle on completion.
 Stage/final receipts bind the manifest SHA-256 and same-job inode identity;
 readback rechecks both along with the output binaries. A change to the bundle
 after the first stage poisons the sequence before another command is issued.
@@ -260,9 +268,10 @@ after missing output, stale digest, same-byte inode replacement and changed
 content. The stage fixture also runs the actual fixed child process, retains
 its service-owned log, and rejects a changed launch digest before building any
 binary record. It also replaces the driver's pathname after verifying its held
-descriptor and confirms the original executable still runs without an unrelated
-inheritable parent descriptor. An unexpectedly reaped child cannot become a
+descriptor, replaces the selected source pathname after its full scan, and
+confirms the original executable still runs in the original cwd without an
+unrelated inheritable parent descriptor. A replacement present before launch
+produces no log and poisons the build. An unexpectedly reaped child cannot become a
 successful stage and releases its local descriptors after failing the build.
-The #923 integration owner registers this dedicated
-test alongside the native and sanitizer service suite, then proves its exact
-submitted head on hosted runners.
+The native and sanitizer service suites register this dedicated test; verify
+the exact submitted head on hosted runners.

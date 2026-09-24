@@ -576,11 +576,11 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_compile_driver(char const* driver_path)
     return ok;
 }
 
-/* Execute an already verified driver FD after replacing its pathname. A
+/* Execute verified driver and source FDs after replacing both pathnames. A
  * deliberately inheritable parent FD must not reach the exec'd driver. */
-BUSTER_GLOBAL_LOCAL bool bq_prep_test_driver_exec_fd(char const* driver_path,
-    char const* workspace_path, char const expected_sha256[SHA256_HEX_CAPACITY],
-    int attempt, BqRetirementBuildStage const* command)
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_held_exec_fd(BqRetirementMatchedBuild* build,
+    char const* driver_path, char const* workspace_path,
+    int attempt, BqRetirementBuildStage const* command, bool reject_source)
 {
     char held[512], probe[512], digest[SHA256_HEX_CAPACITY] = {0};
     int held_length = snprintf(held, sizeof(held), "%s/held-driver", workspace_path);
@@ -590,22 +590,34 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_driver_exec_fd(char const* driver_path,
         fcntl(90, F_GETFD) < 0 && errno == EBADF;
     int executable = ok ? open(driver_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
     ok = ok && bq_retirement_build_driver_fd_sha(executable, digest) &&
-        !memcmp(expected_sha256, digest, SHA256_HEX_CAPACITY);
+        !memcmp(build->driver_sha256, digest, SHA256_HEX_CAPACITY);
+    int source = ok ? bq_retirement_build_source_fd(build) : -1;
+    ok = ok && source >= 3;
+    int parent = ok ? openat(attempt, "base", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat parent_info = {0};
+    bool parent_valid = parent >= 3 && fstat(parent, &parent_info) == 0;
+    ok = ok && parent_valid;
     int writer = ok ? openat(attempt, "driver-probe-log",
         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     ok = ok && writer >= 3;
     int input = ok ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
     ok = ok && input >= 3 && dup2(input, 90) == 90;
     if (input >= 0) close(input);
-    bool moved = false, replaced = false;
+    bool moved = false, replaced = false, source_moved = false, source_replaced = false;
     if (ok) moved = rename(driver_path, held) == 0;
     ok = ok && moved;
     if (ok) replaced = symlink("/missing-retirement-driver", driver_path) == 0;
     ok = ok && replaced;
-    BqRetirementBuildStage stage = command ? *command : (BqRetirementBuildStage){0};
+    if (ok) ok = fchmod(parent, (parent_info.st_mode & 07777) | S_IWUSR) == 0;
+    if (ok) source_moved = renameat(parent, "source", parent, "held-source") == 0;
+    ok = ok && source_moved;
+    if (ok) source_replaced = symlinkat("/missing-retirement-source", parent, "source") == 0;
+    ok = ok && source_replaced;
+    if (parent_valid && fchmod(parent, parent_info.st_mode & 07777) != 0) ok = false;
+    BqRetirementBuildStage stage = *command;
     stage.argv[3] = probe;
     pid_t child = ok ? fork() : -1;
-    if (child == 0) bq_retirement_build_exec_fd(executable, writer, attempt, &stage);
+    if (child == 0) bq_retirement_build_exec_fd(executable, writer, attempt, source, &stage);
     int status = 0;
     pid_t waited = -1;
     do { if (child > 0) waited = waitpid(child, &status, 0); }
@@ -613,9 +625,23 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_driver_exec_fd(char const* driver_path,
     ok = ok && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     if (fcntl(90, F_GETFD) >= 0 && close(90) != 0) ok = false;
     if (executable >= 0 && close(executable) != 0) ok = false;
+    if (source >= 0 && close(source) != 0) ok = false;
     if (writer >= 0 && close(writer) != 0) ok = false;
     if (replaced && unlink(driver_path) != 0) ok = false;
     if (moved && rename(held, driver_path) != 0) ok = false;
+    if (ok && reject_source)
+    {
+        BqRetirementBuildProcess unlaunched = {0};
+        struct stat absent = {0};
+        ok = !bq_retirement_matched_build_launch(build, &unlaunched) && build->failed &&
+            !unlaunched.state && fstatat(attempt, "build-log-0", &absent, AT_SYMLINK_NOFOLLOW) < 0 &&
+            errno == ENOENT;
+    }
+    if (parent_valid && fchmod(parent, (parent_info.st_mode & 07777) | S_IWUSR) != 0) ok = false;
+    if (source_replaced && unlinkat(parent, "source", 0) != 0) ok = false;
+    if (source_moved && renameat(parent, "held-source", parent, "source") != 0) ok = false;
+    if (parent_valid && fchmod(parent, parent_info.st_mode & 07777) != 0) ok = false;
+    if (parent >= 3 && close(parent) != 0) ok = false;
     int reader = writer >= 0 ? openat(attempt, "driver-probe-log", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
     char output[64] = {0};
     ssize_t count = reader >= 3 ? pread(reader, output, sizeof(output) - 1, 0) : -1;
@@ -778,10 +804,11 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             command.argc == 16 && !strcmp(command.argv[7], "clang") &&
             !strcmp(command.argv[3], build.build) && !strcmp(command.cwd, build.source[0]) &&
             !strcmp(command.env[0], checked.path));
-        if (trial == 1)
-            BQ_PREP_CHECK(bq_prep_test_driver_exec_fd(driver_path, workspace_path,
-                driver_digest, attempt, &command) &&
-                bq_retirement_matched_build_stage(&build, &command));
+        if (trial == 1 || trial == 6)
+            BQ_PREP_CHECK(bq_prep_test_held_exec_fd(&build, driver_path, workspace_path,
+                attempt, &command, trial == 6) &&
+                (trial == 6 ? build.failed && !bq_retirement_matched_build_stage(&build, &command) :
+                              bq_retirement_matched_build_stage(&build, &command)));
         if (trial == 6)
         {
             BqRetirementBuildProcess unlaunched = {0};

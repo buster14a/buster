@@ -27,6 +27,8 @@ typedef struct BqRetirementMatchedBuild
     char attempt[BQ_RETIREMENT_BUILD_PATH_CAP];
     char build[BQ_RETIREMENT_BUILD_PATH_CAP];
     char source[2][BQ_RETIREMENT_BUILD_PATH_CAP];
+    /* Imported A facts rechecked through the cwd descriptor at every launch. */
+    BqRetirementSource prepared_source[2];
     char driver[BQ_RETIREMENT_BUILD_PATH_CAP];
     BqRetirementToolchain toolchain;
     char preparation_sha256[SHA256_HEX_CAPACITY];
