@@ -57,6 +57,7 @@ jobs:
           sha256sum subjects/* > evidence/compilers.sha256
           find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs.sha256
           "$RUNNER_TEMP/buster-build" bench_throughput self-test
+          mv build/throughput-tool-tests "$RUNNER_TEMP/stock-throughput-tool-tests"
           git apply --check tools/throughput/experiments/1028-trusted-only.patch
           git apply tools/throughput/experiments/1028-trusted-only.patch
           git diff -- tools/throughput/throughput.c tools/throughput/tests.c > evidence/harness-selection.diff
