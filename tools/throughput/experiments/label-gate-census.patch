@@ -1,0 +1,167 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index 2d4d08fd..f1d4c9b2 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -89,6 +89,32 @@
+ 
+ #include "c_internal.h"
+ #include <buster/lib/compiler/frontend/c/c_parse_internal.h>
++#include <stdio.h>
++
++// Ephemeral census counters (diagnostic build only; never timed).
++static u64 census_functions;
++static u64 census_body_tokens;
++static u64 census_label_named;
++static u64 census_label_conjunction;
++static u64 census_label_needed_old;
++static u64 census_label_needed_new;
++static u64 census_label_walk_body_tokens;
++static u64 census_label_expression_calls;
++static u64 census_label_expression_tokens;
++static u64 census_label_lookups;
++static u64 census_label_scope_queries;
++static u64 census_label_memset_bytes;
++static u64 census_label_gate_proofs;
++static u64 census_label_gate_cast_proofs;
++static u64 census_type_queries;
++static u64 census_type_query_hits;
++static u64 census_type_query_uncached;
++static u64 census_type_query_tokens;
++static u64 census_lookup_calls;
++static u64 census_lookup_fast;
++static u64 census_lookup_hops;
++static u64 census_scope_queries;
++static bool census_in_label_values;
+ 
+ BUSTER_C_INTERNAL bool c_declaration_keyword(String8 spelling)
+ {
+@@ -4177,15 +4203,19 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
+         (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
+         (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
+     bool valid;
++    census_type_queries += 1;
++    census_type_query_uncached += !query && !machine->frame_count;
+     if (query && query->end == end && query->scope.value == scope.value &&
+         (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
+         (query->flags & flags) == flags && query->type.value < result->type_count)
+     {
++        census_type_query_hits += 1;
+         *type_out = query->type;
+         valid = true;
+     }
+     else
+     {
++        census_type_query_tokens += end > start ? end - start : 0;
+         u32 frame_start = machine->frame_count;
+         CParseResult checkpoint = *result;
+         u32 mutation_mark = machine->mutation_count;
+@@ -13293,6 +13323,7 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
+     CEntityId found = C_ENTITY_ID_INVALID;
+     while (scope.value != C_ID_UNDERLYING_INVALID && found.value == C_ID_UNDERLYING_INVALID)
+     {
++        census_lookup_hops += 1;
+         u64 hash = c_parse_entity_lookup_hash(symbol, name, scope);
+         u32 bucket = (u32)hash & (result->entity_lookup_bucket_count - 1);
+         CEntityId entity = result->entity_lookup_buckets[bucket];
+@@ -13316,8 +13347,11 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_chain(CParseResult* result, CS
+ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, CScopeId scope, u32 symbol, String8 name)
+ {
+     CEntityId found;
++    census_lookup_calls += 1;
++    census_label_lookups += census_in_label_values;
+     if (result->binding_by_symbol && symbol && symbol < result->binding_capacity && scope.value == result->binding_scope.value)
+     {
++        census_lookup_fast += 1;
+         found = result->binding_by_symbol[symbol];
+ #if !BUSTER_OPTIMIZE
+         BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name).value);
+@@ -16139,6 +16173,8 @@ BUSTER_C_SHARED void c_parse_index_scope_children(CParseResult* result, Arena* a
+ BUSTER_C_SHARED CScopeId c_parse_scope_for_token(CParseResult* result, CScopeId root, u32 token_index)
+ {
+     CScopeId best = root;
++    census_scope_queries += 1;
++    census_label_scope_queries += census_in_label_values;
+     if (result && root.value < result->scope_count && result->scope_children_offsets)
+     {
+         // Siblings do not overlap. Find the last child starting at or before
+@@ -20927,6 +20963,8 @@ BUSTER_C_INTERNAL bool c_parse_label_expression(CTypeParseMachine* machine, CPar
+                                                   u8 const* labels, u32 start, u32 end)
+ {
+     bool label = false;
++    census_label_expression_calls += 1;
++    census_label_expression_tokens += end > start ? end - start : 0;
+     for (u32 index = start; !label && index < end; index += 1)
+     {
+         CToken token = preprocess.tokens[index];
+@@ -20998,15 +21036,31 @@ BUSTER_C_INTERNAL bool c_parse_label_values_needed(CParseResult* result, CPrepro
+                       c_token_is_punctuator(&preprocess.tokens[index + 1], C_PUNCTUATOR_STAR);
+         }
+     }
++    census_functions += 1;
++    census_body_tokens += end - start;
++    census_label_named += named_label;
++    census_label_conjunction += conjunction;
++    census_label_needed_old += needed || (named_label && conjunction);
+     for (u32 index = start; named_label && conjunction && !needed && index + 1 < end; index += 1)
+     {
+         if ((!skipped || !skipped[index - start]) && c_token_is_punctuator(&preprocess.tokens[index], C_PUNCTUATOR_AMPERSAND_AMPERSAND))
+         {
++            census_label_gate_proofs += 1;
++            census_label_gate_cast_proofs += index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS);
+             needed = c_parse_label_address_prefix_proven(&preprocess, start, index) ||
+                      (index > start && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS) &&
+                       c_parse_label_address_cast_at(result, preprocess, c_parse_scope_for_token(result, declaration->scope, index), start, index));
+         }
+     }
++    census_label_needed_new += needed;
++    bool needed_new = needed;
++    // Census: run the walk under the baseline gate so its work is measured.
++    needed = needed || (named_label && conjunction);
++    if (needed)
++    {
++        fprintf(stderr, "CENSUS_LABEL_FUNCTION name=%.*s body_tokens=%u named_label=%d conjunction=%d needed_new=%d\n",
++                (int)declaration->name.length, (char const*)declaration->name.pointer, end - start, (int)named_label, (int)conjunction, (int)needed_new);
++    }
+     return needed;
+ }
+ 
+@@ -21017,6 +21071,9 @@ BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine,
+     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
+     if (c_parse_label_values_needed(result, preprocess, declaration, skipped))
+     {
++        census_in_label_values = true;
++        census_label_walk_body_tokens += end - start;
++        census_label_memset_bytes += result->entity_count;
+         u64 mark = machine->scratch_arena->position;
+         u8* labels = arena_allocate(machine->scratch_arena, u8, result->entity_count);
+         memset(labels, 0, result->entity_count);
+@@ -21143,6 +21200,7 @@ BUSTER_C_INTERNAL void c_parse_validate_label_values(CTypeParseMachine* machine,
+             c_parse_lowering_constraint_consider(diagnostic, message, index, location);
+         }
+         arena_set_position(machine->scratch_arena, mark);
++        census_in_label_values = false;
+     }
+ 
+ }
+@@ -22025,6 +22083,21 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine*
+         }
+     }
+     result->expression_scalar_types = 0;
++    fprintf(stderr,
++            "CENSUS tokens=%llu functions=%llu body_tokens=%llu entities=%u scopes=%u declarations=%u types=%u\n"
++            "CENSUS label_named=%llu label_conjunction=%llu label_needed_old=%llu label_needed_new=%llu label_gate_proofs=%llu label_gate_cast_proofs=%llu\n"
++            "CENSUS label_walk_body_tokens=%llu label_expression_calls=%llu label_expression_tokens=%llu label_lookups=%llu label_scope_queries=%llu label_memset_bytes=%llu\n"
++            "CENSUS type_queries=%llu type_query_hits=%llu type_query_uncached=%llu type_query_tokens=%llu\n"
++            "CENSUS lookup_calls=%llu lookup_fast=%llu lookup_hops=%llu scope_queries=%llu\n",
++            (unsigned long long)preprocess.token_count, (unsigned long long)census_functions, (unsigned long long)census_body_tokens,
++            result->entity_count, result->scope_count, result->declaration_count, result->type_count,
++            (unsigned long long)census_label_named, (unsigned long long)census_label_conjunction, (unsigned long long)census_label_needed_old,
++            (unsigned long long)census_label_needed_new, (unsigned long long)census_label_gate_proofs, (unsigned long long)census_label_gate_cast_proofs,
++            (unsigned long long)census_label_walk_body_tokens, (unsigned long long)census_label_expression_calls,
++            (unsigned long long)census_label_expression_tokens, (unsigned long long)census_label_lookups, (unsigned long long)census_label_scope_queries,
++            (unsigned long long)census_label_memset_bytes, (unsigned long long)census_type_queries, (unsigned long long)census_type_query_hits,
++            (unsigned long long)census_type_query_uncached, (unsigned long long)census_type_query_tokens, (unsigned long long)census_lookup_calls,
++            (unsigned long long)census_lookup_fast, (unsigned long long)census_lookup_hops, (unsigned long long)census_scope_queries);
+ }
+ 
+ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPreprocessResult preprocess, CParserResult syntax,

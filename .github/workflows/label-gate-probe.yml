@@ -1,0 +1,221 @@
+name: Label-provenance gate probe (temporary)
+on:
+  push:
+    branches:
+      - devin/label-values-gate-probe-20260924
+permissions:
+  contents: read
+concurrency:
+  group: label-gate-probe
+  cancel-in-progress: false
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      BASELINE_SHA: 744a948f41291b4238d1755b1507678799f1206d
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 744a948f41291b4238d1755b1507678799f1206d
+          path: baseline
+          persist-credentials: false
+      - name: Runner tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold valgrind
+      - name: Matched builds
+        id: builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence subjects frozen/src frozen/generated
+          exec > >(tee evidence/builds.log) 2>&1
+          set -x
+          git -C baseline rev-parse HEAD 'HEAD^{tree}'
+          git -C candidate rev-parse HEAD 'HEAD^{tree}'
+          clang --version; cmake --version; ninja --version; valgrind --version; uname -a; lscpu; free -b
+          grep -c avx512f /proc/cpuinfo || true
+          diff -qr baseline/src candidate/src || true
+          for tree in baseline candidate; do
+            (cd "$tree" && clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/build-$tree")
+            (cd "$tree" && "$RUNNER_TEMP/build-$tree" generate --config Release --cc clang --ci -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=OFF)
+            (cd "$tree" && "$RUNNER_TEMP/build-$tree" build --config Release -t ide -- -j4)
+            cp "$tree/build/Release/ide" "subjects/$tree"
+            cp "$tree/build/compile_commands.json" "evidence/compile-commands-$tree.json"
+          done
+          git -C candidate archive HEAD:src | tar -xf - -C frozen/src
+          cp -a candidate/build/generated/. frozen/generated/
+          sha256sum subjects/* > evidence/compilers.sha256
+          find frozen -type f -print0 | sort -z | xargs -0 sha256sum > evidence/frozen-inputs.sha256
+      - name: Unity object identity and diagnostics probe
+        if: ${{ !cancelled() && steps.builds.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/identity.log) 2>&1
+          set -x
+          for form in frontend-ssa no-frontend-ssa; do
+            for name in baseline candidate; do
+              (cd frozen && "../subjects/$name" cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c "-f$form" \
+                 -fsource-metrics="../evidence/unity-$name-$form.metrics" src/buster/apps/ide/ide.c -o "../evidence/unity-$name-$form.o") \
+                 > "evidence/unity-$name-$form.stdout" 2> "evidence/unity-$name-$form.stderr"
+            done
+            cmp "evidence/unity-baseline-$form.o" "evidence/unity-candidate-$form.o"
+            cmp "evidence/unity-baseline-$form.stderr" "evidence/unity-candidate-$form.stderr"
+          done
+          sha256sum evidence/unity-*.o
+          mkdir -p evidence/diagnostics
+          python3 - <<'PY'
+          import pathlib, subprocess, json
+          cases = [
+              "int f(int a, int b) { if (a && b) goto done; a += b; done: return a && b; }",
+              "int g(int); int f(int a, int b) { retry: if (g(a) && (b) && g(a && b)) goto retry; return (a) && b; }",
+              "int f(int a) { char c = 'x'; again: if (c == 'x' && a) goto again; return (c) && a; }",
+              "int f(int a, int b) { struct s { int x; } v = {a}; l: return (v.x) && b && (int)a; }",
+              "typedef int T; int f(int a) { l: return sizeof(T) && a; }",
+              "int f(int a) { l: return sizeof(int) && a; }",
+              "int f(int a) { l: return _Alignof(int) && a; }",
+              "int f(int a, int b) { return a && b; }",
+              "int f(void) { void *p = &&done; goto *p; done: return 0; }",
+              "int f(void) { void *p = (void *)&&done; goto *p; done: return 0; }",
+              "int f(void) { typedef void *P; P p = (P)&&done; goto *p; done: return 0; }",
+              "int f(void) { typedef void *P; P p = 0; p = (const P)&&done; goto *p; done: return 0; }",
+              "int f(void *p) { goto *p; }",
+              "int f(int a) { l: return a && &&l; }",
+              "void *saved; int f(void) { saved = &&target; target: return 0; }",
+              "void *f(void) { a: return &&a; }",
+              "void h(void *); void f(void) { a: h(&&a); }",
+              "int f(void *p) { goto *p; }",
+              "struct pair { void *target; }; int f(int i) { struct pair t[2] = { { &&z }, { &&o } }; goto *t[i].target; z: return 1; o: return 2; }",
+          ]
+          out = pathlib.Path("evidence/diagnostics")
+          rows = []
+          for index, source in enumerate(cases):
+              path = out / f"case-{index}.c"
+              path.write_text(source + "\n")
+              row = {"case": index, "source": source}
+              for name in ["baseline", "candidate"]:
+                  for action in ["-fsyntax-only", "-c"]:
+                      artifact = out / "case.o"
+                      artifact.unlink(missing_ok=True)
+                      cmd = [f"subjects/{name}", "cc", "-g0", "-std=gnu23", action, str(path), "-o", str(artifact)]
+                      p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                      row[f"{name}{action}"] = {"exit": p.returncode, "stdout": p.stdout.decode(errors="replace"), "stderr": p.stderr.decode(errors="replace")}
+              row["identical"] = all(row[f"baseline{a}"] == row[f"candidate{a}"] for a in ["-fsyntax-only", "-c"])
+              rows.append(row)
+              print(index, "identical" if row["identical"] else "DIFFERS", "|", source)
+              for name in ["baseline", "candidate"]:
+                  r = row[f"{name}-fsyntax-only"]
+                  print("   ", name, r["exit"], r["stderr"].strip().replace("\n", " || ")[:400])
+          (out / "results.json").write_text(json.dumps(rows, indent=1) + "\n")
+          PY
+      - name: Census build and unity census
+        id: census
+        if: ${{ !cancelled() && steps.builds.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/census.log) 2>&1
+          set -x
+          cd candidate
+          git apply --check tools/throughput/experiments/label-gate-census.patch
+          git apply tools/throughput/experiments/label-gate-census.patch
+          git diff --stat
+          "$RUNNER_TEMP/build-candidate" build --config Release -t ide -- -j4
+          cp build/Release/ide ../subjects/census
+          git checkout -- src
+          cd ..
+          sha256sum subjects/census >> evidence/compilers.sha256
+          (cd frozen && ../subjects/census cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -c -ffrontend-ssa \
+             src/buster/apps/ide/ide.c -o ../evidence/unity-census.o) > evidence/unity-census.stdout 2> evidence/unity-census.stderr
+          cmp evidence/unity-census.o evidence/unity-candidate-frontend-ssa.o
+          grep -E '^CENSUS' evidence/unity-census.stderr | tee evidence/unity-census.txt
+          grep -c CENSUS_LABEL_FUNCTION evidence/unity-census.stderr || true
+      - name: Scaling family census
+        if: ${{ !cancelled() && steps.census.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/family.log) 2>&1
+          python3 candidate/tools/throughput/experiments/label_gate_family.py --output family
+          python3 - <<'PY'
+          import json, pathlib, re, subprocess
+          manifest = json.loads(pathlib.Path("family/manifest.json").read_text())
+          rows = []
+          for unit in manifest:
+              path = pathlib.Path("family") / unit["file"]
+              row = dict(unit)
+              p = subprocess.run(["subjects/census", "cc", "-g0", "-std=gnu23", "-fsyntax-only", str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+              row["exit"] = p.returncode
+              text = p.stderr.decode(errors="replace")
+              counters = {}
+              for line in text.splitlines():
+                  if line.startswith("CENSUS ") :
+                      for key, value in re.findall(r"(\w+)=(\d+)", line):
+                          counters[key] = int(value)
+              row["counters"] = counters
+              for name in ["baseline", "candidate"]:
+                  q = subprocess.run([f"subjects/{name}", "cc", "-g0", "-std=gnu23", "-c", str(path), "-o", f"family/{name}.o"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+                  row[f"{name}_exit"] = q.returncode
+                  row[f"{name}_stderr"] = q.stderr.decode(errors="replace")
+              row["objects_identical"] = pathlib.Path("family/baseline.o").read_bytes() == pathlib.Path("family/candidate.o").read_bytes()
+              rows.append(row)
+              c = counters
+              print(f"{unit['shape']:14} M={unit['M']:4} K={unit['K']:3} D={unit['D']:3} exit={p.returncode} identical={row['objects_identical']} "
+                    f"needed_old={c.get('label_needed_old')} needed_new={c.get('label_needed_new')} walk_tokens={c.get('label_walk_body_tokens')} "
+                    f"expr_calls={c.get('label_expression_calls')} expr_tokens={c.get('label_expression_tokens')} label_lookups={c.get('label_lookups')} "
+                    f"label_scope_queries={c.get('label_scope_queries')} gate_proofs={c.get('label_gate_proofs')} gate_cast_proofs={c.get('label_gate_cast_proofs')} "
+                    f"lookup_calls={c.get('lookup_calls')} lookup_fast={c.get('lookup_fast')} lookup_hops={c.get('lookup_hops')}")
+          pathlib.Path("evidence/family-results.json").write_text(json.dumps(rows, indent=1) + "\n")
+          assert all(r["exit"] == 0 and r["baseline_exit"] == 0 and r["candidate_exit"] == 0 and r["objects_identical"] for r in rows)
+          PY
+      - name: Deterministic instruction counts (callgrind)
+        if: ${{ !cancelled() && steps.builds.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/callgrind.log) 2>&1
+          if grep -q avx512f /proc/cpuinfo; then
+            echo "CALLGRIND_UNAVAILABLE: host exposes AVX-512, -march=native subjects may carry EVEX"
+          fi
+          cd frozen
+          for action in syntax object; do
+            for name in baseline candidate; do
+              if [ "$action" = syntax ]; then extra=(-fsyntax-only); else extra=(-c -o "../evidence/callgrind-$name.o"); fi
+              if ! valgrind --tool=callgrind --cache-sim=no --branch-sim=no --callgrind-out-file="../evidence/callgrind-$name-$action.out" \
+                   "../subjects/$name" cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -g -ffrontend-ssa "${extra[@]}" \
+                   src/buster/apps/ide/ide.c > "../evidence/callgrind-$name-$action.stdout" 2> "../evidence/callgrind-$name-$action.stderr"; then
+                echo "CALLGRIND_FAILED $name $action"; tail -5 "../evidence/callgrind-$name-$action.stderr"
+                continue
+              fi
+              grep -E 'Collected|refs' "../evidence/callgrind-$name-$action.stderr" || true
+              callgrind_annotate --inclusive=no "../evidence/callgrind-$name-$action.out" 2>/dev/null | head -60 > "../evidence/callgrind-$name-$action.annotate" || true
+            done
+          done
+          cd ..
+          for action in syntax object; do
+            for name in baseline candidate; do
+              printf '%s %s ' "$name" "$action"; grep -E '^summary:|^totals:' "evidence/callgrind-$name-$action.out" | head -1 || true
+            done
+          done
+          for name in baseline candidate; do
+            grep -E 'c_parse_label_expression|c_parse_validate_label_values|c_parse_label_values_needed|c_parse_lookup_entity_chain|c_parse_lookup_entity_symbol|c_parse_scope_for_token|c_parse_validate_lowering_constraints|c_parse_label_address' "evidence/callgrind-$name-syntax.annotate" || true
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: label-gate-probe-${{ github.run_id }}
+          path: |
+            evidence
+            candidate/build/CMakeCache.txt
+            baseline/build/CMakeCache.txt
+          retention-days: 14
+          if-no-files-found: error
