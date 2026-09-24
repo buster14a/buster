@@ -322,15 +322,10 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
     (C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(REGISTER) | \
      C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(CONSTEXPR))
 
-// The two well-known questions c_analyze_semantics asks of a declaration's
-// whole token range rather than of one token: `overloadable`, which makes a
-// file-scope name admit several declarations, and the thread-storage words
-// an object declaration may carry.  Both name attributes almost no
-// translation unit spells, and both used to be answered by a walk of every
-// token of every declaration -- 4,6 M token visits per stage-1 compile of
-// this tree, and the largest mispredicting branch in the frontend.  The
-// token census marks the candidates for both in one bitmap instead, and
-// each question becomes an OR of the words its range covers.
+// c_analyze_semantics_core asks declaration-range questions about
+// `overloadable`, thread storage, and file-scope `static` storage. The token
+// census marks their candidate words once; each question becomes an OR of
+// only the words its range covers.
 #define C_PARSE_DECLARATION_RANGE_KEYWORDS                                                                                  \
     (C_SYMBOL_WELL_KNOWN_BIT(OVERLOADABLE) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23) | C_SYMBOL_WELL_KNOWN_BIT(STATIC))
 
