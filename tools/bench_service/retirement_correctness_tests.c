@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include "../../src/buster/lib/hash.c"
 #include "retirement_correctness.c"
@@ -440,22 +441,19 @@ static int frozen_runtime_log(int directory, char const* name, char const* conte
     return result;
 }
 
-static bool capture_runtime_output(int output, char const* executable)
+static int wait_runtime_output(BqRetirementRuntimeStart* start)
 {
-    pid_t child = output >= 3 ? fork() : -1;
-    if (!child)
+    int result = 0;
+    for (unsigned attempt = 0; !result && attempt < 10000; attempt += 1)
     {
-        char* const arguments[] = {(char*)executable, "--retirement-oracle-output", NULL};
-        if (dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0) _exit(126);
-        close(output);
-        execv(executable, arguments);
-        _exit(127);
+        result = bq_retirement_runtime_poll(start);
+        if (!result)
+        {
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
     }
-    int status = 0;
-    pid_t waited = -1;
-    do { if (child > 0) waited = waitpid(child, &status, 0); }
-    while (waited < 0 && errno == EINTR);
-    return child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return result;
 }
 
 static void test_frozen_artifact_readback(char const* executable)
@@ -466,6 +464,9 @@ static void test_frozen_artifact_readback(char const* executable)
     CHECK(directory >= 0);
     if (directory >= 0)
     {
+        char* resolved = realpath(executable, NULL);
+        CHECK(resolved != NULL);
+        char const* process_executable = resolved ? resolved : executable;
         char const* oracle_output = "independent-oracle-output\n";
         char oracle_sha256[65];
         Sha256 oracle_hash;
@@ -495,7 +496,7 @@ static void test_frozen_artifact_readback(char const* executable)
         CHECK(bq_retirement_runtime_start(active_log, &stale_runtime) &&
               !bq_retirement_runtime_start(
                   (BqRetirementArtifactLocation){directory, "unexpected-output"}, &stale_runtime) &&
-              stale_runtime.state == 1);
+              stale_runtime.state == BQ_RETIREMENT_RUNTIME_CREATED);
         bq_retirement_runtime_abort(&stale_runtime);
         CHECK(bq_retirement_runtime_absent(&stale_runtime) &&
               unlinkat(directory, "active-output", 0) == 0);
@@ -514,18 +515,43 @@ static void test_frozen_artifact_readback(char const* executable)
         char* const base_compiler[] = {"/trusted/base-ide", "-c", "input.c", NULL};
         char* const candidate_compiler[] = {"/trusted/candidate-ide", "-c", "input.c", NULL};
         char* const changed_compiler[] = {"/trusted/candidate-ide", "-O2", "input.c", NULL};
-        char* const base_runtime[] = {"/scratch/base", NULL};
-        char* const candidate_runtime[] = {"/scratch/candidate", NULL};
+        char* const runtime_arguments[] = {(char*)process_executable,
+            "--retirement-oracle-output", NULL};
         char* const changed_runtime[] = {"/scratch/other", NULL};
         char* const environment[] = {"HOME=/nonexistent", "LC_ALL=C", NULL};
         char* const unordered_environment[] = {"LC_ALL=C", "HOME=/nonexistent", NULL};
         BqRetirementRowCommands commands[2] = {
             {{base_compiler, environment, "/source/base", 3, 2},
-             {base_runtime, environment, "/scratch/base", 1, 2}},
+             {runtime_arguments, environment, root, 2, 2}},
             {{candidate_compiler, environment, "/source/candidate", 3, 2},
-             {candidate_runtime, environment, "/scratch/candidate", 1, 2}}
+             {runtime_arguments, environment, root, 2, 2}}
         };
-        for (unsigned fault = 0; fault < 18; fault += 1)
+        BqRetirementRuntimeStart unlaunched = {0};
+        BqRetirementArtifactLocation no_launch = {directory, "no-launch-output"};
+        int no_launch_reader = -1;
+        CHECK(bq_retirement_runtime_start(no_launch, &unlaunched));
+        CHECK(!bq_retirement_runtime_finish(&unlaunched, &no_launch_reader) &&
+              no_launch_reader == -1 && bq_retirement_runtime_absent(&unlaunched));
+        CHECK(unlinkat(directory, "no-launch-output", 0) == 0);
+        BqRetirementRuntimeStart failed = {0};
+        BqRetirementArtifactLocation failed_output = {directory, "failed-output"};
+        char* const failed_arguments[] = {(char*)process_executable,
+            "--retirement-oracle-fail", NULL};
+        BqRetirementProcessCommand failed_command = {
+            failed_arguments, environment, root, 2, 2
+        };
+        int failed_reader = -1;
+        CHECK(bq_retirement_runtime_start(failed_output, &failed));
+        CHECK(bq_retirement_runtime_launch(&failed, &failed_command));
+        CHECK(!bq_retirement_runtime_finish(&failed, &failed_reader) &&
+              failed_reader == -1 && failed.state == BQ_RETIREMENT_RUNTIME_RUNNING);
+        bq_retirement_runtime_abort(&failed);
+        CHECK(failed.state == BQ_RETIREMENT_RUNTIME_RUNNING);
+        CHECK(wait_runtime_output(&failed) == -1 && failed.state == BQ_RETIREMENT_RUNTIME_FAILED);
+        CHECK(!bq_retirement_runtime_finish(&failed, &failed_reader) &&
+              bq_retirement_runtime_absent(&failed));
+        CHECK(unlinkat(directory, "failed-output", 0) == 0);
+        for (unsigned fault = 0; fault < 19; fault += 1)
         {
             BqRetirementArtifactStart starts[2] = {0};
             BqRetirementRuntimeStart runtime_starts[2] = {0};
@@ -545,7 +571,9 @@ static void test_frozen_artifact_readback(char const* executable)
             {
                 CHECK(bq_retirement_runtime_start(runtime_locations[side],
                     &runtime_starts[side]));
-                CHECK(capture_runtime_output(runtime_starts[side].writer, executable));
+                CHECK(bq_retirement_runtime_launch(&runtime_starts[side],
+                    &commands[side].runtime));
+                CHECK(wait_runtime_output(&runtime_starts[side]) == 1);
                 CHECK(bq_retirement_runtime_finish(&runtime_starts[side],
                     &runtime_outputs[side]));
             }
@@ -592,6 +620,7 @@ static void test_frozen_artifact_readback(char const* executable)
             if (fault == 14) commands[1].compiler.directory = "/source/other";
             if (fault == 15) starts[1].directory_inode ^= 1;
             if (fault == 16) runtime_starts[1].file_inode ^= 1;
+            if (fault == 18) runtime_starts[1].command_sha256[0] ^= 1;
             if (fault == 17)
             {
                 CHECK(renameat(directory, "candidate-output", directory, "displaced-output") == 0);
@@ -639,7 +668,7 @@ static void test_frozen_artifact_readback(char const* executable)
             commands[1].compiler.arguments = candidate_compiler;
             commands[1].compiler.environment = environment;
             commands[1].compiler.directory = "/source/candidate";
-            commands[1].runtime.arguments = candidate_runtime;
+            commands[1].runtime.arguments = runtime_arguments;
             CHECK(bq_retirement_output_absent(&starts[0]) &&
                   bq_retirement_output_absent(&starts[1]) &&
                   bq_retirement_runtime_absent(&runtime_starts[0]) &&
@@ -681,6 +710,7 @@ static void test_frozen_artifact_readback(char const* executable)
               unlinkat(directory, "wrong-output", 0) == 0 &&
               unlinkat(directory, "empty-output", 0) == 0);
         CHECK(close(directory) == 0);
+        free(resolved);
     }
     if (created) CHECK(rmdir(root) == 0);
 }
@@ -690,6 +720,7 @@ int main(int argc, char** argv)
     int result = 0;
     if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-output"))
         result = fputs("independent-oracle-output\n", stdout) < 0 || fflush(stdout) != 0;
+    else if (argc == 2 && !strcmp(argv[1], "--retirement-oracle-fail")) result = 7;
     else
     {
         test_valid();
