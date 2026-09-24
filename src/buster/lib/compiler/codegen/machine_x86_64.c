@@ -11753,6 +11753,14 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
 #define MACHINE_X64_CHUNK_DIRECTION_LOAD 0u
 #define MACHINE_X64_CHUNK_DIRECTION_STORE 1u
 BUSTER_GLOBAL_LOCAL u8 machine_x64_chunk_memory_tables[2][MACHINE_X64_CHUNK_WIDTH_COUNT];
+// Frame chunks are the closed RBP, forced-disp32 row of those same tables:
+// the record depends only on direction, width and data register, so prewarm
+// copies the sixteen RBP records of each table here and a spill or reload
+// reads one record instead of re-validating the table index and re-deriving
+// the displacement class and row stride per call. The frame base offset is
+// still added at emission time; it is a per-function fact. A zero byte count
+// is the same refusal an unprepared table gave.
+BUSTER_GLOBAL_LOCAL MachineX64GprEncoding machine_x64_frame_chunk_encodings[2][MACHINE_X64_CHUNK_WIDTH_COUNT][16];
 // Chunk byte counts are 1, 2, 4 and 8 (machine_x64_copy_chunk); every other
 // value took the ladder's 64-bit arm, so it maps to the last width here.
 BUSTER_GLOBAL_LOCAL u8 const machine_x64_chunk_width_index[9] = {3, 0, 1, 3, 2, 3, 3, 3, 3};
@@ -11789,6 +11797,17 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
             load_entry && load_entry->plan_valid && load_entry->variant_count ? load_entry->variable_memory_encoding_tables[0] : 0;
         machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_STORE][width_slot] =
             store_entry && store_entry->plan_valid && store_entry->variant_count ? store_entry->variable_memory_encoding_tables[0] : 0;
+        for (u32 direction = 0; direction < 2; direction += 1)
+        {
+            u8 table_plus_one = machine_x64_chunk_memory_tables[direction][width_slot];
+            for (u32 reg = 0; reg < 16; reg += 1)
+            {
+                machine_x64_frame_chunk_encodings[direction][width_slot][reg] =
+                    table_plus_one && table_plus_one <= machine_x64_variable_memory_encoding_table_count
+                        ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[2][reg + (MACHINE_X64_RBP << 4)]
+                        : (MachineX64GprEncoding){0};
+            }
+        }
     }
 }
 
@@ -13651,20 +13670,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
     bool force_disp32, MachineX64ExactEmitCounters* counters);
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
-                                                             MachineX64ExactEmitCounters* counters)
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
+                                                                      MachineX64ExactEmitCounters* counters)
 {
-    // Spill/reload and expansion chunks are the same MOV/MOVZX population as
-    // pointer memory.  Preserve their canonical frame shape by selecting the
-    // already-proven disp32 lane rather than rebuilding physical operands.
-    if (machine_x64_emit_variable_memory_encoding(
-            encoder,
-            machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
-                                           [machine_x64_chunk_width_slot(chunk)],
-            reg, MACHINE_X64_RBP, (s32)(0u - offset), true, counters))
-        return true;
-    if (encoder->overflow) return false;
-
     u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
                                                                            : MACHINE_X64_LOAD_FRAME)
                       : (chunk == 1 ? MACHINE_X64_STORE_FRAME8 : chunk == 2 ? MACHINE_X64_STORE_FRAME16 : chunk == 4 ? MACHINE_X64_STORE_FRAME32
@@ -13689,6 +13697,78 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
     MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 0);
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
 }
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
+                                                                           MachineX64ExactEmitCounters* counters)
+{
+    bool result = false;
+    MachineX64GprEncoding const* encoding =
+        machine_x64_frame_chunk_encodings[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
+                                         [machine_x64_chunk_width_slot(chunk)] + (reg & 15u);
+    u32 byte_count = encoding->byte_count;
+    if (reg < 16 && byte_count)
+    {
+        if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
+        {
+            encoder->overflow = true;
+            if (counters)
+            {
+                counters->attempts += 1;
+                counters->fallbacks += 1;
+            }
+        }
+        else
+        {
+            machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
+            u32 value = (0u - offset) + encoder->frame_base_offset;
+            memcpy(encoder->bytes + encoder->count + byte_count - (u32)sizeof(u32), &value, sizeof(value));
+            encoder->count += byte_count;
+            if (counters)
+            {
+                counters->attempts += 1;
+                counters->successes += 1;
+            }
+            result = true;
+        }
+    }
+    else
+    {
+        result = machine_x64_emit_exact_frame_chunk_metadata(encoder, load, reg, offset, chunk, counters);
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_x64_test_frame_chunk_prepared(void)
+{
+    bool result = machine_x64_exact_opcode_map_ready;
+    for (u32 direction = 0; direction < 2; direction += 1)
+    {
+        for (u32 width_slot = 0; width_slot < MACHINE_X64_CHUNK_WIDTH_COUNT; width_slot += 1)
+        {
+            for (u32 reg = 0; reg < 16; reg += 1)
+            {
+                u32 byte_count = machine_x64_frame_chunk_encodings[direction][width_slot][reg].byte_count;
+                result &= byte_count > sizeof(u32) && byte_count <= 15;
+            }
+        }
+    }
+    return result;
+}
+
+MachineEncodeResult machine_x64_test_emit_frame_chunk(u8* bytes, u32 capacity, u32 start, u32 frame_base_offset, bool load, u32 reg,
+                                                      u32 offset, u32 chunk, bool reference)
+{
+    MachineX64Encoder encoder = {.bytes = bytes, .capacity = capacity, .count = start, .frame_base_offset = frame_base_offset};
+    MachineX64ExactEmitCounters counters = {0};
+    MachineEncodeResult result = {.bytes = bytes};
+    result.valid = reference ? machine_x64_emit_exact_frame_chunk_metadata(&encoder, load, reg, offset, chunk, &counters)
+                             : machine_x64_emit_exact_frame_chunk(&encoder, load, reg, offset, chunk, &counters);
+    result.byte_count = encoder.count;
+    machine_x64_exact_counters_assign(&result, counters);
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_x87(MachineX64Encoder* encoder, String8 mnemonic,
                                                BusterX86MetadataPhysicalOperand const* operands, u32 operand_count);
