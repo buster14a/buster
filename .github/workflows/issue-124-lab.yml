@@ -1,0 +1,28 @@
+name: Issue 124 isolated source transport
+on:
+  push:
+    branches: [codex/124-encoding-lab-20260924-a]
+    paths: [.github/workflows/issue-124-lab.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          persist-credentials: false
+      - name: Archive immutable tracked source
+        run: |
+          mkdir -p "$RUNNER_TEMP/issue124"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/issue124/revision.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/issue124/source.tar.gz"
+          sha256sum "$RUNNER_TEMP/issue124/source.tar.gz" > "$RUNNER_TEMP/issue124/source.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue124-source-2e942e80
+          path: ${{ runner.temp }}/issue124/
+          retention-days: 7
+          if-no-files-found: error
