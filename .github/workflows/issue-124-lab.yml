@@ -1,4 +1,4 @@
-name: Issue 124 isolated source transport
+name: Issue 124 isolated encoder census
 on:
   push:
     branches: [codex/124-encoding-lab-20260924-a]
@@ -6,23 +6,100 @@ on:
 permissions:
   contents: read
 jobs:
-  source:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+  census:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      BUSTER_TEST_JOBS: '2'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 2e942e80a87666409cf29d3e24a68d322b9e71fd
           persist-credentials: false
-      - name: Archive immutable tracked source
+      - name: Record host and construct native driver
+        shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/issue124"
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/issue124/revision.txt"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/issue124/source.tar.gz"
-          sha256sum "$RUNNER_TEMP/issue124/source.tar.gz" > "$RUNNER_TEMP/issue124/source.sha256"
-      - uses: actions/upload-artifact@v4
+          set -euo pipefail
+          E="$RUNNER_TEMP/issue124-census"
+          mkdir -p "$E" build
+          echo "E=$E" >> "$GITHUB_ENV"
+          git rev-parse HEAD HEAD^{tree} > "$E/revision.txt"
+          { clang --version; cmake --version; ninja --version; lscpu; uname -a; } > "$E/host.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o build/driver
+          ./build/driver bench_throughput generate --output "$E/inputs" --profile ci
+          printf 'extern int issue124_declared(void);\n' > "$E/inputs/prewarm_control.c"
+      - name: Build immutable uninstrumented trusted compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/driver generate --build-directory build/issue124-subject --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DCMAKE_LINKER_TYPE=DEFAULT 2>&1 | tee "$E/baseline-configure.log"
+          ./build/driver build --build-directory build/issue124-subject --config Release -t ide -- -j2 2>&1 | tee "$E/baseline-build.log"
+          cp build/issue124-subject/Release/ide "$E/baseline-ide"
+          cp build/issue124-subject/{CMakeCache.txt,compile_commands.json} "$E/"
+          sha256sum "$E/baseline-ide" > "$E/baseline.sha256"
+          nm -S --size-sort "$E/baseline-ide" > "$E/baseline-symbols.txt"
+          size -A "$E/baseline-ide" > "$E/baseline-sections.txt"
+          for symbol in machine_x64_emit_exact_form machine_x64_emit_exact_recipe machine_x64_emit_fixed_template machine_x64_metadata_shape_cache_find machine_encode_x86_64; do
+            objdump -d --disassemble="$symbol" "$E/baseline-ide" > "$E/$symbol.asm"
+          done
+          mkdir -p "$E/frozen"
+          git archive HEAD | tar -x -C "$E/frozen"
+          cp -a build/issue124-subject/generated "$E/generated"
+      - name: Build separate diagnostic coverage compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build/driver generate --build-directory build/issue124-subject --ci --cc clang -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF -DCMAKE_LINKER_TYPE=DEFAULT '-DCMAKE_C_FLAGS=-fprofile-instr-generate -fcoverage-mapping' 2>&1 | tee "$E/diagnostic-configure.log"
+          ./build/driver build --build-directory build/issue124-subject --config Release -t ide -- -j2 2>&1 | tee "$E/diagnostic-build.log"
+          cp build/issue124-subject/Release/ide "$E/diagnostic-ide"
+          cp build/issue124-subject/compile_commands.json "$E/diagnostic-commands.json"
+          sha256sum "$E/diagnostic-ide" > "$E/diagnostic.sha256"
+          MAJOR=$(clang -dumpversion | cut -d. -f1)
+          PROF=$(command -v llvm-profdata-$MAJOR || command -v llvm-profdata)
+          COV=$(command -v llvm-cov-$MAJOR || command -v llvm-cov)
+          "$PROF" --version > "$E/profile-tools.txt"
+          "$COV" --version >> "$E/profile-tools.txt"
+          echo "PROF=$PROF" >> "$GITHUB_ENV"
+          echo "COV=$COV" >> "$GITHUB_ENV"
+      - name: Census frozen native harness inputs and unity source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$E/profiles" "$E/objects" "$E/coverage"
+          status=0
+          while IFS= read -r -d '' source; do
+            name=$(basename "$source" .c)
+            for mode in none mir-stack fast quality; do
+              label="$name-$mode"
+              mkdir -p "$E/profiles/$label"
+              rc=0
+              LLVM_PROFILE_FILE="$E/profiles/$label/%p.profraw" timeout 120 "$E/diagnostic-ide" cc -c -g0 -O0 "-fregister-allocator=$mode" "$source" -o "$E/objects/$label.o" > "$E/objects/$label.log" 2>&1 || rc=$?
+              printf '%s\t%s\n' "$label" "$rc" | tee -a "$E/compile-status.tsv"
+              if [[ $rc != 0 ]]; then status=1; fi
+            done
+          done < <(find "$E/inputs" -name '*.c' -print0 | sort -z)
+          for mode in fast mir-stack; do
+            label="unity-$mode"
+            mkdir -p "$E/profiles/$label"
+            rc=0
+            (cd "$E/frozen"; LLVM_PROFILE_FILE="$E/profiles/$label/%p.profraw" timeout 180 "$E/diagnostic-ide" cc -g -O0 -Isrc "-I$E/generated" -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -lm "-fregister-allocator=$mode" src/buster/apps/ide/ide.c -o "$E/objects/$label.exe") > "$E/objects/$label.log" 2>&1 || rc=$?
+            printf '%s\t%s\n' "$label" "$rc" | tee -a "$E/compile-status.tsv"
+            if [[ $rc != 0 ]]; then status=1; fi
+          done
+          for dir in "$E/profiles"/*; do
+            name=$(basename "$dir")
+            if compgen -G "$dir/*.profraw" > /dev/null; then
+              "$PROF" merge -sparse "$dir"/*.profraw -o "$E/coverage/$name.profdata"
+              "$COV" export "$E/diagnostic-ide" -instr-profile="$E/coverage/$name.profdata" src/buster/lib/compiler/codegen/machine_x86_64.c > "$E/coverage/$name.json"
+              "$COV" show "$E/diagnostic-ide" -instr-profile="$E/coverage/$name.profdata" src/buster/lib/compiler/codegen/machine_x86_64.c -show-branches=count > "$E/coverage/$name.txt"
+            fi
+          done
+          printf 'instrumentation=diagnostic-only\nperformance-verdict=NOT-RUN\n' > "$E/disposition.txt"
+          exit "$status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: issue124-source-2e942e80
-          path: ${{ runner.temp }}/issue124/
-          retention-days: 7
+          name: issue124-census-${{ github.run_id }}
+          path: ${{ runner.temp }}/issue124-census/
+          retention-days: 14
           if-no-files-found: error
