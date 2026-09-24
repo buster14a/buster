@@ -127,6 +127,8 @@ int main(void)
     failed |= f80_to_double(3.25L) != 3.25 || f80_to_float(-1.5L) != -1.5f;
     failed |= f80_from_signed(-9223372036854775807LL) != -9223372036854775807.0L;
     failed |= f80_to_signed(-3.75L) != -3 || f80_to_signed(3.75L) != 3;
+    // A long long result must not narrow through signed int.
+    failed |= f80_to_signed(0x1p31L) != 2147483648LL;
     failed |= f80_from_unsigned(0xffffffffU) != 4294967295.0L;
     failed |= f80_to_unsigned(4294967295.75L) != 0xffffffffU;
     volatile long double copy = 0.0L;
