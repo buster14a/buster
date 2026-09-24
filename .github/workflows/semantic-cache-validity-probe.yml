@@ -1,0 +1,53 @@
+name: Semantic cache validity (temporary)
+on:
+  push:
+    branches: [astra/1028-cache-validity-744a948f]
+permissions:
+  contents: read
+concurrency:
+  group: semantic-cache-validity-1028
+  cancel-in-progress: false
+jobs:
+  correctness:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    env:
+      BUSTER_TEST_JOBS: '1'
+    steps:
+      - name: Diagnostic tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Independent pinned subject
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 744a948f41291b4238d1755b1507678799f1206d
+          path: subject
+          persist-credentials: false
+      - name: Existing linker dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+      - name: Record host tools
+        run: |
+          clang --version
+          cmake --version
+          ninja --version
+          uname -a
+      - name: Frozen baseline, traced cache, and uncached recomputation
+        run: python3 tools/semantic_cache_validity_probe.py --root subject --output "$RUNNER_TEMP/cache-validity"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: semantic-cache-validity
+          path: |
+            ${{ runner.temp }}/cache-validity/*.json
+            ${{ runner.temp }}/cache-validity/*.jsonl
+            ${{ runner.temp }}/cache-validity/*.log
+            ${{ runner.temp }}/cache-validity/*.diagnostics
+            ${{ runner.temp }}/cache-validity/*-c_parse.c
+            ${{ runner.temp }}/cache-validity/CMakeCache.txt
+            ${{ runner.temp }}/cache-validity/inputs
+          retention-days: 14
+          if-no-files-found: error
