@@ -1479,6 +1479,127 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_runtime(UnitTestArguments* argume
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_volatile_split_bit_fields(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("#pragma pack(1)\n"
+                        "struct signed_bits { signed : 29; volatile signed f1 : 30; };\n"
+                        "struct unsigned_bits { signed : 3; volatile unsigned f8 : 31; };\n"
+                        "static struct signed_bits signed_object;\n"
+                        "static struct unsigned_bits unsigned_object;\n"
+                        "static int take_signed(int value) { return value; }\n"
+                        "static unsigned take_unsigned(unsigned value) { return value; }\n"
+                        "int read_signed(void) { return signed_object.f1; }\n"
+                        "int call_signed(void) { return take_signed(signed_object.f1); }\n"
+                        "int branch_signed(int enabled) { return enabled || signed_object.f1 | 0; }\n"
+                        "int conditional_signed(int enabled) { return enabled ? (signed_object.f1 | 0) : 1; }\n"
+                        "long long widen_signed(void) { return signed_object.f1; }\n"
+                        "unsigned read_unsigned(void) { return unsigned_object.f8; }\n"
+                        "unsigned call_unsigned(void) { return take_unsigned(unsigned_object.f8); }\n"
+                        "int main(void) {\n"
+                        "    int signed_values[] = {0, 1, -1, 123456789, -123456789, 536870911, -536870912};\n"
+                        "    for (unsigned index = 0; index < sizeof(signed_values) / sizeof(signed_values[0]); index += 1) {\n"
+                        "        int value = signed_values[index];\n"
+                        "        signed_object.f1 = value;\n"
+                        "        if (read_signed() != value || call_signed() != value || widen_signed() != (long long)value) return 1;\n"
+                        "        if (branch_signed(0) != (value != 0) || branch_signed(1) != 1) return 2;\n"
+                        "        if (conditional_signed(0) != 1 || conditional_signed(1) != value) return 3;\n"
+                        "    }\n"
+                        "    unsigned unsigned_values[] = {0u, 1u, 19088743u, 1073741824u, 2147483647u};\n"
+                        "    for (unsigned index = 0; index < sizeof(unsigned_values) / sizeof(unsigned_values[0]); index += 1) {\n"
+                        "        unsigned value = unsigned_values[index];\n"
+                        "        unsigned_object.f8 = value;\n"
+                        "        if (read_unsigned() != value || call_unsigned() != value) return 4;\n"
+                        "    }\n"
+                        "    return 0;\n"
+                        "}\n");
+    Target targets[] = {target_native, target_native, target_native, target_native, target_native, target_native};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(targets); index += 1)
+    {
+        targets[index].cpu_arch = index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        targets[index].os = index < 2 ? OPERATING_SYSTEM_LINUX : index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+    }
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 dialect = 0; dialect < 2; dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessOptions options = {
+                    .target = targets[target_index],
+                    .data_layout = target_data_layout(targets[target_index]),
+                    .dialect = dialect ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17,
+                };
+                CPreprocessResult tokens = c_preprocess(temporary.arena, source, options);
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("volatile-split-bit-fields.c"), tokens, parse,
+                                                                          targets[target_index],
+                                                                          (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        IrValidationResult validation = ir_validate_canonical_module(lowered.program, &lowered.program->modules[0]);
+                        BUSTER_TEST_RAW(arguments, validation.error == IR_VALIDATION_NONE,
+                                        string_format(temporary.arena,
+                                                      S8("volatile split bit-fields target={u32} dialect={u32} form={u32}: error={u32}"),
+                                                      target_index, dialect, form, (u32)validation.error));
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source_path = buster_test_temporary_path(arguments->arena, S8("volatile-split-bit-fields"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+        String8 frontend_forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+        String8 dialect_flags[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialect_flags); dialect += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontend_forms); form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("volatile-split-bit-fields-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialect_flags[dialect], allocators[allocator], frontend_forms[form],
+                                        S8("-fverify-codegen"), S8("-o"), output, source_path};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                                                                                             (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = allocator != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                                    string_format(temporary.arena,
+                                                  S8("volatile split bit-fields {S8} {S8} {S8}: {S8}"),
+                                                  dialect_flags[dialect], allocators[allocator], frontend_forms[form], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                                                   (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                            string_format(temporary.arena,
+                                                          S8("volatile split bit-fields runtime status={u32} timed_out={u32}"),
+                                                          execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enumerator_type_differential(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -20885,6 +21006,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
+    BUSTER_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);

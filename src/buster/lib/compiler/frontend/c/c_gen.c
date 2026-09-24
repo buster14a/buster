@@ -6931,7 +6931,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SHIFT_LEFT, source);
         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
     }
-    IrValueId result = c_ir_emit_cast(builder, assembled, type, source);
+    // A bit-field place may be volatile even though the value of its read is
+    // not qualified. Keep the split path's result type in step with the
+    // ordinary load path; otherwise a multi-piece access leaks the qualified
+    // field type into arithmetic, returns, and call arguments.
+    IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
+    IrValueId result = c_ir_emit_cast(builder, assembled, result_type, source);
     c_ir_mark_unsigned_bit_field_value(builder, result, field);
     return result;
 }
