@@ -66,7 +66,11 @@ def analyze(path):
     site_counts = collections.Counter()
     with open(path, "rt", errors="replace") as source:
         for line in source:
-            row = parse_line(line)
+            try:
+                row = parse_line(line)
+            except (ValueError, IndexError):
+                stats["malformed_lines"] += 1
+                continue
             if not row:
                 continue
             tag = row["tag"]

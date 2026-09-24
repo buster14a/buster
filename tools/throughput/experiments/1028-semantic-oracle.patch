@@ -1,8 +1,8 @@
 diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
-index 60bf69ed..56405b55 100644
+index 60bf69ed..97a095f8 100644
 --- a/src/buster/lib/compiler/frontend/c/c_gen.c
 +++ b/src/buster/lib/compiler/frontend/c/c_gen.c
-@@ -93,6 +93,61 @@
+@@ -93,6 +93,62 @@
  #include "c_internal.h"
  #include <buster/lib/compiler/ir/ir_construction.h>
  
@@ -19,6 +19,7 @@ index 60bf69ed..56405b55 100644
 +        resolved = true;
 +        char const* path = getenv("BUSTER_SEMANTIC_TRACE");
 +        if (path && *path) file = fopen(path, "a");
++        if (file) setvbuf(file, 0, _IOLBF, 1u << 16);
 +    }
 +    return file;
 +}
@@ -64,7 +65,7 @@ index 60bf69ed..56405b55 100644
  BUSTER_C_INTERNAL bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
  
  // Preprocess file indices are registered as IR sources in table order, so a
-@@ -1799,6 +1854,7 @@ BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId enti
+@@ -1799,6 +1855,7 @@ BUSTER_C_INTERNAL u32 c_ir_debug_scope_depth(CParseResult* parse, CEntityId enti
  typedef struct CIrDirectSsa CIrDirectSsa;
  typedef struct CIntegerIrBuilder CIntegerIrBuilder;
  typedef struct CIrConstantEntityIndex CIrConstantEntityIndex;
@@ -72,7 +73,7 @@ index 60bf69ed..56405b55 100644
  
  // Constant-expression identifier fallback uses the oldest entity with an
  // exact spelling.  The parse name buckets retain that ordering, but following
-@@ -12882,7 +12938,7 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
+@@ -12882,7 +12939,7 @@ BUSTER_C_INTERNAL u32 c_ir_find_function_for_call(CIntegerIrBuilder* builder, u3
          bool viable = true;
          for (u32 argument_index = 0; argument_index < signature.parameter_count; argument_index += 1)
          {
@@ -81,7 +82,7 @@ index 60bf69ed..56405b55 100644
              u32 conversion_rank = c_ir_implicit_conversion_rank(builder, argument_type, signature.parameter_types[argument_index]);
              if (conversion_rank == UINT32_MAX || rank > UINT32_MAX - conversion_rank)
              {
-@@ -16765,7 +16821,7 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
+@@ -16765,7 +16822,7 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
              valid = false;
              break;
          }
@@ -90,7 +91,7 @@ index 60bf69ed..56405b55 100644
          if (controller_type.value == IR_ID_UNDERLYING_INVALID)
          {
              builder->failure_token_index = content_start;
-@@ -16907,7 +16963,7 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
+@@ -16907,7 +16964,7 @@ BUSTER_C_INTERNAL bool c_ir_generic_selection(CIntegerIrBuilder* builder, u32 to
          }
          selected->selected_start = match_start;
          selected->selected_end = match_end;
@@ -99,7 +100,7 @@ index 60bf69ed..56405b55 100644
          if (selected->type.value == IR_ID_UNDERLYING_INVALID)
          {
              builder->failure_token_index = match_start;
-@@ -20796,7 +20852,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
+@@ -20796,7 +20853,7 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                          if (callee_start < callee_end &&
                              c_token_is_punctuator(&builder->preprocess.tokens[callee_start], C_PUNCTUATOR_STAR))
                          {
@@ -108,7 +109,7 @@ index 60bf69ed..56405b55 100644
                              IrType* operand = ir_type_from_id(&builder->program->types, operand_type);
                              IrType* pointee = operand && operand->kind == IR_TYPE_POINTER ? ir_type_from_id(&builder->program->types, operand->element_type) : 0;
                              if (!pointee || pointee->kind == IR_TYPE_FUNCTION)
-@@ -27945,7 +28001,7 @@ c_ir_expression_core_loop:
+@@ -27945,7 +28002,7 @@ c_ir_expression_core_loop:
                  }
                  IrTypeId expression_type = c_ir_sizeof_operand_is_unmapped_array_object(builder, operand_start, operand_end)
                                                 ? IR_TYPE_ID_INVALID
@@ -117,7 +118,7 @@ index 60bf69ed..56405b55 100644
                  IrType* expression = ir_type_from_id(&builder->program->types, expression_type);
                  if (!expression || !expression->layout.resolved)
                  {
-@@ -31595,14 +31651,30 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
+@@ -31595,14 +31652,30 @@ BUSTER_C_INTERNAL IrTypeId c_ir_predict_expression_type_attempt(CIntegerIrBuilde
      return result.value == IR_ID_UNDERLYING_INVALID ? builder->s32_type : result;
  }
  
@@ -151,7 +152,7 @@ index 60bf69ed..56405b55 100644
  }
  
  BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* builder)
-@@ -31691,8 +31763,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
+@@ -31691,8 +31764,8 @@ BUSTER_C_INTERNAL void c_ir_lower_conditional_value_step(CIntegerIrBuilder* buil
              }
              return;
          }
@@ -162,7 +163,7 @@ index 60bf69ed..56405b55 100644
          IrType* true_type_value = ir_type_from_id(&builder->program->types, true_type);
          IrType* false_type_value = ir_type_from_id(&builder->program->types, false_type);
          IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, question + 1, colon, colon + 1, expression_end);
-@@ -32213,8 +32285,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
+@@ -32213,8 +32286,8 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_step(CIntegerIrBuilder* builder)
                                        &nested_expression_end);
              if (nested_conditional)
              {
@@ -173,7 +174,7 @@ index 60bf69ed..56405b55 100644
                  IrTypeId result_type = c_ir_conditional_result_type(builder, true_type, false_type, conditional_question + 1, conditional_colon,
                                                                      conditional_colon + 1, conditional_end);
                  IrSourceRange source = c_ir_token_source_range(builder, builder->preprocess.tokens[conditional_start]);
-@@ -40854,7 +40926,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
+@@ -40854,7 +40927,7 @@ BUSTER_C_INTERNAL bool c_ir_initializer_value_is_aggregate_expression(CIntegerIr
              }
          }
      }
@@ -183,10 +184,10 @@ index 60bf69ed..56405b55 100644
  }
  
 diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
-index b5c6a8e4..3f2c1373 100644
+index b5c6a8e4..9300268d 100644
 --- a/src/buster/lib/compiler/frontend/c/c_parse.c
 +++ b/src/buster/lib/compiler/frontend/c/c_parse.c
-@@ -4165,6 +4165,93 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
+@@ -4165,6 +4165,94 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
      c_type_parse_frame_complete(machine, last, end, true);
  }
  
@@ -204,6 +205,7 @@ index b5c6a8e4..3f2c1373 100644
 +        resolved = true;
 +        char const* path = getenv("BUSTER_SEMANTIC_TRACE");
 +        if (path && *path) file = fopen(path, "a");
++        if (file) setvbuf(file, 0, _IOLBF, 1u << 16);
 +    }
 +    return file;
 +}
@@ -280,7 +282,7 @@ index b5c6a8e4..3f2c1373 100644
  BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                         CScopeId scope, u32 start, u32 end, CTypeId* type_out)
  {
-@@ -4176,6 +4263,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
+@@ -4176,6 +4264,7 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
          (machine->validate_expression_constraints ? C_PARSE_EXPRESSION_QUERY_CHECKED : 0u) |
          (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
          (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
@@ -288,7 +290,7 @@ index b5c6a8e4..3f2c1373 100644
      bool valid;
      if (query && query->end == end && query->scope.value == scope.value &&
          (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
-@@ -4183,35 +4271,63 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
+@@ -4183,35 +4272,63 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
      {
          *type_out = query->type;
          valid = true;
