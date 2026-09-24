@@ -1,0 +1,111 @@
+name: Literal policy validation
+on:
+  push:
+    branches: [codex/semantic-policy-probe-20260924]
+    paths: [.github/workflows/literal-policy-validate.yml]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      BUSTER_TEST_JOBS: '3'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Reconstruct the isolated candidate
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/literal-evidence" "$RUNNER_TEMP/literal-tools"
+          cp tools/literal-policy.patch tools/literal_policy_verify.py tools/semantic_policy_screen.py "$RUNNER_TEMP/literal-tools/"
+          cd "$RUNNER_TEMP/literal-tools"
+          printf '%s  literal-policy.patch\n' 108724177f2438b868668f3b03bb1b4d76af8de280f46f3d9e888f5aa968f6cd | sha256sum -c -
+          cd "$GITHUB_WORKSPACE"
+          git checkout --detach 2e942e80a87666409cf29d3e24a68d322b9e71fd
+          test "$(git rev-parse HEAD^{tree})" = f976bfd7cdb8830a8a15d959ef36f0152f1b767d
+          git apply --check "$RUNNER_TEMP/literal-tools/literal-policy.patch"
+          git apply "$RUNNER_TEMP/literal-tools/literal-policy.patch"
+          git diff --check
+          test "$(git diff --name-only | wc -l)" -eq 2
+          test "$(git hash-object src/buster/lib/compiler/frontend/c/c_gen.c)" = dc538a4963dd0364a37600e9c3ada636050f67e2
+          test "$(git hash-object src/buster/tests/compiler/frontend/c/c_test.c)" = b71ef9556e38f6518d93b088f026505c153f49e5
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c
+          git commit -m 'fix(c): share cached and semantic integer literal limits (#1089)'
+          git rev-parse HEAD HEAD^{tree} HEAD^ HEAD^^{tree} > "$RUNNER_TEMP/literal-evidence/revisions.txt"
+          git diff HEAD^ HEAD --binary > "$RUNNER_TEMP/literal-evidence/candidate.patch"
+          git bundle create "$RUNNER_TEMP/literal-evidence/candidate.bundle" HEAD ^HEAD^
+          cp "$RUNNER_TEMP/literal-tools/"*.py "$RUNNER_TEMP/literal-evidence/"
+      - name: Build candidate on the standard hosted runner
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y mold
+          clang --version > "$RUNNER_TEMP/literal-evidence/clang.txt"
+          gcc --version > "$RUNNER_TEMP/literal-evidence/gcc.txt"
+          uname -a > "$RUNNER_TEMP/literal-evidence/host.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/literal-build"
+          "$RUNNER_TEMP/literal-build" generate --cc clang --ci 2>&1 | tee "$RUNNER_TEMP/literal-evidence/generate.log"
+          "$RUNNER_TEMP/literal-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/literal-evidence/build.log"
+          cp build/Release/ide "$RUNNER_TEMP/literal-evidence/ide-candidate"
+          sha256sum build/Release/ide > "$RUNNER_TEMP/literal-evidence/binary-sha256.txt"
+      - name: Explicit reference profiles and foreign layouts
+        id: references
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/literal-tools/semantic_policy_screen.py" build/Release/ide "$RUNNER_TEMP/literal-evidence/screen" | tee "$RUNNER_TEMP/literal-evidence/screen.log"
+          python3 "$RUNNER_TEMP/literal-tools/literal_policy_verify.py" build/Release/ide "$RUNNER_TEMP/literal-evidence/reference" | tee "$RUNNER_TEMP/literal-evidence/reference.log"
+      - name: Full registered Release suite
+        id: tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/literal-build" build --config Release -t test_all 2>&1 | tee "$RUNNER_TEMP/literal-evidence/test-all.log"
+      - name: Candidate self-host fixed point
+        id: selfhost
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/literal-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/literal-evidence/self-host.log"
+      - name: Existing native execution-mode matrix
+        id: modes
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/literal-build" test_mode_matrix --config Release 2>&1 | tee "$RUNNER_TEMP/literal-evidence/modes.log"
+      - name: Publish only the new feature branch
+        if: ${{ !cancelled() && steps.references.outcome == 'success' && steps.tests.outcome == 'success' && steps.selfhost.outcome == 'success' && steps.modes.outcome == 'success' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=no)"
+          branch=codex/1089-literal-limit-policy
+          expected=2e942e80a87666409cf29d3e24a68d322b9e71fd
+          test "$(git ls-remote origin refs/heads/$branch | cut -f1)" = "$expected"
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$branch"
+          git rev-parse HEAD > "$RUNNER_TEMP/literal-evidence/published-head.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ !cancelled() }}
+        with:
+          name: literal-policy-${{ github.run_id }}
+          path: ${{ runner.temp }}/literal-evidence
+          if-no-files-found: error
+          retention-days: 14
