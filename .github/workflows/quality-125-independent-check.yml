@@ -1,0 +1,62 @@
+name: QUALITY 125 independent regression check
+on:
+  push:
+    branches: [review/125-region-check-20260924-1a5ebc1c]
+    paths: [.github/workflows/quality-125-independent-check.yml]
+permissions:
+  contents: read
+concurrency:
+  group: quality-125-independent-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Release, Debug]
+    env:
+      BUSTER_TEST_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      CONFIGURATION: ${{ matrix.configuration }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 1a5ebc1c42170327a639d69a5f009355408f767a
+          persist-credentials: false
+      - name: Build exact test head with the repository driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/quality-125-independent-$CONFIGURATION"
+          mkdir -p "$evidence"
+          exec > >(tee "$evidence/build.log") 2>&1
+          test "$(git rev-parse HEAD)" = 1a5ebc1c42170327a639d69a5f009355408f767a
+          test "$(git rev-parse 'HEAD^{tree}')" = 0b53ee9c9c90202344ee1695c45801b84677e4e2
+          git rev-parse HEAD 'HEAD^{tree}' | tee "$evidence/revisions.txt"
+          git archive HEAD | gzip -n > "$evidence/test-source.tar.gz"
+          clang --version
+          uname -a
+          lscpu
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o "$RUNNER_TEMP/quality-125-independent-driver"
+          flags=()
+          if test "$CONFIGURATION" = Debug; then flags+=(--sanitize); fi
+          "$RUNNER_TEMP/quality-125-independent-driver" generate --config "$CONFIGURATION" --cc clang --ci --linker DEFAULT "${flags[@]}" -DBUSTER_UNITY_BUILD=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_BENCH_ALLOCATIONS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          "$RUNNER_TEMP/quality-125-independent-driver" build --config "$CONFIGURATION" -t ide -- -j2
+          sha256sum "build/$CONFIGURATION/ide" > "$evidence/compiler.sha256"
+          cp build/compile_commands.json build/CMakeCache.txt "$evidence/"
+      - name: Run the full registered suite including the two new fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/quality-125-independent-driver" build --config "$CONFIGURATION" -t test_all -- -j2 2>&1 | tee "$RUNNER_TEMP/quality-125-independent-$CONFIGURATION/tests.log"
+          grep -F 'fixture=machine_test_quality_region_boundaries ' "$RUNNER_TEMP/quality-125-independent-$CONFIGURATION/tests.log"
+          grep -F 'fixture=machine_test_quality_region_all_prefixes ' "$RUNNER_TEMP/quality-125-independent-$CONFIGURATION/tests.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: quality-125-independent-${{ matrix.configuration }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/quality-125-independent-${{ matrix.configuration }}
+          if-no-files-found: error
+          retention-days: 14
