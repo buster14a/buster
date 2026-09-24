@@ -1,0 +1,378 @@
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -23106,7 +23106,11 @@
+         IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->ptrdiff_type);
+         right = c_ir_emit_binary_value(builder, right, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
+     }
+-    else if (!pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
++    // Ordinary op= performs the binary operation with the original RHS
++    // type, then converts its result on assignment (C11 6.5.16.2p3).
++    // Pre-converting the RHS loses floating fractions and integer rank.
++    // Keep the separate atomic update path unchanged in this repair.
++    else if (atomic && !pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
+     {
+         right = c_ir_emit_cast(builder, right, value_type, source);
+         operation_right = right;
+--- a/src/buster/tests/compiler/frontend/c/c_test.c
++++ b/src/buster/tests/compiler/frontend/c/c_test.c
+@@ -17232,6 +17232,328 @@
+     return result;
+ }
+ 
++// Non-atomic op= must retain the RHS type until the corresponding binary
++// operation. This examines canonical IR before any shared preparation pass.
++BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_conversion_ir(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++    Target targets[] = {
++        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
++        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
++    };
++    String8 qualifiers[] = {S8(""), S8("volatile ")};
++    String8 bodies[] = {
++        S8("int observed = ({S8}); return observed;"),
++        S8("return identity({S8});"),
++        S8("return ({S8});"),
++        S8("int matched; if (({S8}) == 4) matched = 1; else matched = 0; return matched;"),
++        S8("({S8}); return 0;"),
++        S8("return ({{ int captured = ({S8}); captured; }});"),
++    };
++    typedef struct CCompoundConversionIrCase CCompoundConversionIrCase;
++    struct CCompoundConversionIrCase
++    {
++        String8 left_type;
++        String8 right_type;
++        String8 expression;
++        IrBinaryOperation operation;
++        IrTypeKind kind;
++        u32 bit_width;
++    };
++    CCompoundConversionIrCase cases[] = {
++        {S8("int"), S8("double"), S8("*place *= right"), IR_BINARY_FLOAT_MULTIPLY, IR_TYPE_FLOAT, 64},
++        {S8("unsigned char"), S8("unsigned"), S8("*place /= right"), IR_BINARY_UNSIGNED_DIVIDE, IR_TYPE_INTEGER, 32},
++    };
++    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
++    {
++        for (u32 form = 0; form < 2; form += 1)
++        {
++            for (u32 qualifier = 0; qualifier < BUSTER_ARRAY_LENGTH(qualifiers); qualifier += 1)
++            {
++                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
++                {
++                    for (u32 context = 0; context < BUSTER_ARRAY_LENGTH(bodies); context += 1)
++                    {
++                        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
++                        Target target = targets[target_index];
++                        String8 body = string_format(temporary.arena, bodies[context], cases[case_index].expression);
++                        String8 source = string_format(temporary.arena,
++                            S8("int identity(int value) {{ return value; }} int probe({S8}{S8}* place, {S8} right) {{ {S8} }}"),
++                            qualifiers[qualifier], cases[case_index].left_type, cases[case_index].right_type, body);
++                        CPreprocessResult tokens = c_preprocess(temporary.arena, source,
++                            (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17});
++                        CParseResult parse = c_parse(temporary.arena, tokens);
++                        CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("compound-conversion.c"), tokens, parse, target,
++                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
++                        BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && !lowered.diagnostic_count, source);
++                        IrProgram* program = lowered.program;
++                        if (BUSTER_REQUIRE(arguments, program && program->module_count == 1))
++                        {
++                            IrModule* module = program->modules;
++                            BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
++                            IrFunction* function = c_test_find_ir_function(module, S8("probe"));
++                            if (BUSTER_REQUIRE(arguments, function != 0))
++                            {
++                                u32 operations = 0;
++                                u32 volatile_loads = 0;
++                                u32 volatile_stores = 0;
++                                for (u32 index = 0; index < function->instruction_count; index += 1)
++                                {
++                                    IrInstruction* instruction = function->instructions + index;
++                                    volatile_loads += instruction->opcode == IR_OPCODE_LOAD && instruction->volatile_access;
++                                    volatile_stores += instruction->opcode == IR_OPCODE_STORE && instruction->volatile_access;
++                                    if (instruction->opcode == IR_OPCODE_BINARY && instruction->binary_operation == cases[case_index].operation)
++                                    {
++                                        IrType* type = ir_type_from_id(&program->types, instruction->canonical_type);
++                                        if (BUSTER_REQUIRE(arguments, type != 0))
++                                        {
++                                            BUSTER_TEST(arguments, type->kind == cases[case_index].kind && type->bit_width == cases[case_index].bit_width);
++                                            BUSTER_TEST(arguments, !type->is_volatile && !type->is_atomic);
++                                        }
++                                        operations += 1;
++                                    }
++                                }
++                                BUSTER_TEST_RAW(arguments, operations == 1, source);
++                                BUSTER_TEST_RAW(arguments, volatile_loads == qualifier && volatile_stores == qualifier, source);
++                            }
++                            BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
++                        }
++                        scratch_end(temporary);
++                    }
++                }
++            }
++        }
++    }
++    return result;
++}
++
++// Four distinguishing arithmetic rows and two controls, each with plain and
++// volatile places in six contexts, plus six bit-field and six saved-place
++// expansion controls. The 84 probes assert counts, not a C-unspecified order.
++BUSTER_GLOBAL_LOCAL String8 const c_test_compound_conversion_source = S8_INITIALIZER(
++    "/* GNU17, x86-64 Linux: conversion-placement family; no order oracle. */\n"
++    "_Static_assert(sizeof(int) == 4 && (unsigned char)256u == 0,\n"
++    "               \"This bounded oracle requires the recorded target widths\");\n"
++    "\n"
++    "#define CONTEXTS(N, EXPR, EXPECTED) \\\n"
++    "static int N##_identity(int value) { return value; } \\\n"
++    "static int N##_return_value(void) { return (EXPR); } \\\n"
++    "static int N##_initializer(void) \\\n"
++    "{ N##_reset(); int observed = (EXPR); return N##_check(observed == (EXPECTED)); } \\\n"
++    "static int N##_argument(void) \\\n"
++    "{ N##_reset(); int observed = N##_identity((EXPR)); return N##_check(observed == (EXPECTED)); } \\\n"
++    "static int N##_return_context(void) \\\n"
++    "{ N##_reset(); int observed = N##_return_value(); return N##_check(observed == (EXPECTED)); } \\\n"
++    "static int N##_condition(void) \\\n"
++    "{ N##_reset(); int matched; if ((EXPR) == (EXPECTED)) matched = 1; else matched = 0; return N##_check(matched); } \\\n"
++    "static int N##_statement(void) \\\n"
++    "{ N##_reset(); (EXPR); return N##_check(1); } \\\n"
++    "static int N##_extension(void) \\\n"
++    "{ N##_reset(); int observed = ({ int captured = (EXPR); captured; }); return N##_check(observed == (EXPECTED)); }\n"
++    "\n"
++    "#define SCALAR(N, TYPE, QUALIFIER, INITIAL, RHS_TYPE, RHS, OP, EXPECTED) \\\n"
++    "static QUALIFIER TYPE N##_object; \\\n"
++    "static unsigned N##_left_calls; \\\n"
++    "static unsigned N##_right_calls; \\\n"
++    "static QUALIFIER TYPE* N##_slot(void) \\\n"
++    "{ N##_left_calls += 1; return &N##_object; } \\\n"
++    "static RHS_TYPE N##_rhs(void) \\\n"
++    "{ N##_right_calls += 1; return (RHS); } \\\n"
++    "static void N##_reset(void) \\\n"
++    "{ N##_object = (INITIAL); N##_left_calls = 0; N##_right_calls = 0; return; } \\\n"
++    "static int N##_check(int value_ok) \\\n"
++    "{ return !value_ok | ((N##_object != (EXPECTED)) << 1) | ((N##_left_calls != 1) << 2) | ((N##_right_calls != 1) << 3); } \\\n"
++    "CONTEXTS(N, (*N##_slot() OP N##_rhs()), EXPECTED)\n"
++    "\n"
++    "SCALAR(mul_plain, int, , 3, double, 1.5, *=, 4)\n"
++    "SCALAR(mul_volatile, int, volatile, 3, double, 1.5, *=, 4)\n"
++    "SCALAR(div_plain, int, , 3, double, 1.5, /=, 2)\n"
++    "SCALAR(div_volatile, int, volatile, 3, double, 1.5, /=, 2)\n"
++    "SCALAR(byte_div_plain, unsigned char, , 200, unsigned, 257u, /=, 0)\n"
++    "SCALAR(byte_div_volatile, unsigned char, volatile, 200, unsigned, 257u, /=, 0)\n"
++    "SCALAR(bool_add_plain, _Bool, , 1, int, -1, +=, 0)\n"
++    "SCALAR(bool_add_volatile, _Bool, volatile, 1, int, -1, +=, 0)\n"
++    "SCALAR(same_plain, int, , 3, int, 2, *=, 6)\n"
++    "SCALAR(same_volatile, int, volatile, 3, int, 2, *=, 6)\n"
++    "SCALAR(byte_add_plain, unsigned char, , 200, unsigned, 257u, +=, 201)\n"
++    "SCALAR(byte_add_volatile, unsigned char, volatile, 200, unsigned, 257u, +=, 201)\n"
++    "\n"
++    "/* A narrow unsigned bit-field is an important control: the old helper\n"
++    "   already exempts this representation from its premature RHS conversion. */\n"
++    "static struct Bits { unsigned value : 8; } bitfield_object;\n"
++    "static unsigned bitfield_left_calls;\n"
++    "static unsigned bitfield_right_calls;\n"
++    "static struct Bits* bitfield_div_slot(void)\n"
++    "{ bitfield_left_calls += 1; return &bitfield_object; }\n"
++    "static unsigned bitfield_div_rhs(void)\n"
++    "{ bitfield_right_calls += 1; return 257u; }\n"
++    "static void bitfield_div_reset(void)\n"
++    "{ bitfield_object.value = 200; bitfield_left_calls = 0; bitfield_right_calls = 0; return; }\n"
++    "static int bitfield_div_check(int value_ok)\n"
++    "{ return !value_ok | ((bitfield_object.value != 0) << 1) | ((bitfield_left_calls != 1) << 2) | ((bitfield_right_calls != 1) << 3); }\n"
++    "CONTEXTS(bitfield_div, (bitfield_div_slot()->value /= bitfield_div_rhs()), 0)\n"
++    "\n"
++    "/* The saved-place expansion is equivalent here: rhs modifies only its own\n"
++    "   counter, not the pointer, destination, or left counter. No order is tested. */\n"
++    "static int expanded_object;\n"
++    "static unsigned expanded_left_calls;\n"
++    "static unsigned expanded_right_calls;\n"
++    "static int* expanded_mul_slot(void)\n"
++    "{ expanded_left_calls += 1; return &expanded_object; }\n"
++    "static double expanded_mul_rhs(void)\n"
++    "{ expanded_right_calls += 1; return 1.5; }\n"
++    "static void expanded_mul_reset(void)\n"
++    "{ expanded_object = 3; expanded_left_calls = 0; expanded_right_calls = 0; return; }\n"
++    "static int expanded_mul_check(int value_ok)\n"
++    "{ return !value_ok | ((expanded_object != 4) << 1) | ((expanded_left_calls != 1) << 2) | ((expanded_right_calls != 1) << 3); }\n"
++    "CONTEXTS(expanded_mul, ({ int* saved_place = expanded_mul_slot(); *saved_place = *saved_place * expanded_mul_rhs(); }), 4)\n"
++    "\n"
++    "int main(void)\n"
++    "{\n"
++    "    int failure = 0;\n"
++    "    { int observed = mul_plain_initializer(); if (!failure && observed) failure = 1; }\n"
++    "    { int observed = mul_plain_argument(); if (!failure && observed) failure = 2; }\n"
++    "    { int observed = mul_plain_return_context(); if (!failure && observed) failure = 3; }\n"
++    "    { int observed = mul_plain_condition(); if (!failure && observed) failure = 4; }\n"
++    "    { int observed = mul_plain_statement(); if (!failure && observed) failure = 5; }\n"
++    "    { int observed = mul_plain_extension(); if (!failure && observed) failure = 6; }\n"
++    "    { int observed = mul_volatile_initializer(); if (!failure && observed) failure = 7; }\n"
++    "    { int observed = mul_volatile_argument(); if (!failure && observed) failure = 8; }\n"
++    "    { int observed = mul_volatile_return_context(); if (!failure && observed) failure = 9; }\n"
++    "    { int observed = mul_volatile_condition(); if (!failure && observed) failure = 10; }\n"
++    "    { int observed = mul_volatile_statement(); if (!failure && observed) failure = 11; }\n"
++    "    { int observed = mul_volatile_extension(); if (!failure && observed) failure = 12; }\n"
++    "    { int observed = div_plain_initializer(); if (!failure && observed) failure = 13; }\n"
++    "    { int observed = div_plain_argument(); if (!failure && observed) failure = 14; }\n"
++    "    { int observed = div_plain_return_context(); if (!failure && observed) failure = 15; }\n"
++    "    { int observed = div_plain_condition(); if (!failure && observed) failure = 16; }\n"
++    "    { int observed = div_plain_statement(); if (!failure && observed) failure = 17; }\n"
++    "    { int observed = div_plain_extension(); if (!failure && observed) failure = 18; }\n"
++    "    { int observed = div_volatile_initializer(); if (!failure && observed) failure = 19; }\n"
++    "    { int observed = div_volatile_argument(); if (!failure && observed) failure = 20; }\n"
++    "    { int observed = div_volatile_return_context(); if (!failure && observed) failure = 21; }\n"
++    "    { int observed = div_volatile_condition(); if (!failure && observed) failure = 22; }\n"
++    "    { int observed = div_volatile_statement(); if (!failure && observed) failure = 23; }\n"
++    "    { int observed = div_volatile_extension(); if (!failure && observed) failure = 24; }\n"
++    "    { int observed = byte_div_plain_initializer(); if (!failure && observed) failure = 25; }\n"
++    "    { int observed = byte_div_plain_argument(); if (!failure && observed) failure = 26; }\n"
++    "    { int observed = byte_div_plain_return_context(); if (!failure && observed) failure = 27; }\n"
++    "    { int observed = byte_div_plain_condition(); if (!failure && observed) failure = 28; }\n"
++    "    { int observed = byte_div_plain_statement(); if (!failure && observed) failure = 29; }\n"
++    "    { int observed = byte_div_plain_extension(); if (!failure && observed) failure = 30; }\n"
++    "    { int observed = byte_div_volatile_initializer(); if (!failure && observed) failure = 31; }\n"
++    "    { int observed = byte_div_volatile_argument(); if (!failure && observed) failure = 32; }\n"
++    "    { int observed = byte_div_volatile_return_context(); if (!failure && observed) failure = 33; }\n"
++    "    { int observed = byte_div_volatile_condition(); if (!failure && observed) failure = 34; }\n"
++    "    { int observed = byte_div_volatile_statement(); if (!failure && observed) failure = 35; }\n"
++    "    { int observed = byte_div_volatile_extension(); if (!failure && observed) failure = 36; }\n"
++    "    { int observed = bool_add_plain_initializer(); if (!failure && observed) failure = 37; }\n"
++    "    { int observed = bool_add_plain_argument(); if (!failure && observed) failure = 38; }\n"
++    "    { int observed = bool_add_plain_return_context(); if (!failure && observed) failure = 39; }\n"
++    "    { int observed = bool_add_plain_condition(); if (!failure && observed) failure = 40; }\n"
++    "    { int observed = bool_add_plain_statement(); if (!failure && observed) failure = 41; }\n"
++    "    { int observed = bool_add_plain_extension(); if (!failure && observed) failure = 42; }\n"
++    "    { int observed = bool_add_volatile_initializer(); if (!failure && observed) failure = 43; }\n"
++    "    { int observed = bool_add_volatile_argument(); if (!failure && observed) failure = 44; }\n"
++    "    { int observed = bool_add_volatile_return_context(); if (!failure && observed) failure = 45; }\n"
++    "    { int observed = bool_add_volatile_condition(); if (!failure && observed) failure = 46; }\n"
++    "    { int observed = bool_add_volatile_statement(); if (!failure && observed) failure = 47; }\n"
++    "    { int observed = bool_add_volatile_extension(); if (!failure && observed) failure = 48; }\n"
++    "    { int observed = same_plain_initializer(); if (!failure && observed) failure = 49; }\n"
++    "    { int observed = same_plain_argument(); if (!failure && observed) failure = 50; }\n"
++    "    { int observed = same_plain_return_context(); if (!failure && observed) failure = 51; }\n"
++    "    { int observed = same_plain_condition(); if (!failure && observed) failure = 52; }\n"
++    "    { int observed = same_plain_statement(); if (!failure && observed) failure = 53; }\n"
++    "    { int observed = same_plain_extension(); if (!failure && observed) failure = 54; }\n"
++    "    { int observed = same_volatile_initializer(); if (!failure && observed) failure = 55; }\n"
++    "    { int observed = same_volatile_argument(); if (!failure && observed) failure = 56; }\n"
++    "    { int observed = same_volatile_return_context(); if (!failure && observed) failure = 57; }\n"
++    "    { int observed = same_volatile_condition(); if (!failure && observed) failure = 58; }\n"
++    "    { int observed = same_volatile_statement(); if (!failure && observed) failure = 59; }\n"
++    "    { int observed = same_volatile_extension(); if (!failure && observed) failure = 60; }\n"
++    "    { int observed = byte_add_plain_initializer(); if (!failure && observed) failure = 61; }\n"
++    "    { int observed = byte_add_plain_argument(); if (!failure && observed) failure = 62; }\n"
++    "    { int observed = byte_add_plain_return_context(); if (!failure && observed) failure = 63; }\n"
++    "    { int observed = byte_add_plain_condition(); if (!failure && observed) failure = 64; }\n"
++    "    { int observed = byte_add_plain_statement(); if (!failure && observed) failure = 65; }\n"
++    "    { int observed = byte_add_plain_extension(); if (!failure && observed) failure = 66; }\n"
++    "    { int observed = byte_add_volatile_initializer(); if (!failure && observed) failure = 67; }\n"
++    "    { int observed = byte_add_volatile_argument(); if (!failure && observed) failure = 68; }\n"
++    "    { int observed = byte_add_volatile_return_context(); if (!failure && observed) failure = 69; }\n"
++    "    { int observed = byte_add_volatile_condition(); if (!failure && observed) failure = 70; }\n"
++    "    { int observed = byte_add_volatile_statement(); if (!failure && observed) failure = 71; }\n"
++    "    { int observed = byte_add_volatile_extension(); if (!failure && observed) failure = 72; }\n"
++    "    { int observed = bitfield_div_initializer(); if (!failure && observed) failure = 73; }\n"
++    "    { int observed = bitfield_div_argument(); if (!failure && observed) failure = 74; }\n"
++    "    { int observed = bitfield_div_return_context(); if (!failure && observed) failure = 75; }\n"
++    "    { int observed = bitfield_div_condition(); if (!failure && observed) failure = 76; }\n"
++    "    { int observed = bitfield_div_statement(); if (!failure && observed) failure = 77; }\n"
++    "    { int observed = bitfield_div_extension(); if (!failure && observed) failure = 78; }\n"
++    "    { int observed = expanded_mul_initializer(); if (!failure && observed) failure = 79; }\n"
++    "    { int observed = expanded_mul_argument(); if (!failure && observed) failure = 80; }\n"
++    "    { int observed = expanded_mul_return_context(); if (!failure && observed) failure = 81; }\n"
++    "    { int observed = expanded_mul_condition(); if (!failure && observed) failure = 82; }\n"
++    "    { int observed = expanded_mul_statement(); if (!failure && observed) failure = 83; }\n"
++    "    { int observed = expanded_mul_extension(); if (!failure && observed) failure = 84; }\n"
++    "    return failure;\n"
++    "}\n");
++
++BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_conversion_runtime(UnitTestArguments* arguments)
++{
++    UnitTestResult result = {0};
++#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
++    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
++                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
++    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
++    String8 optimizations[] = {S8("-O0"), S8("-O2")};
++    TemporalArena source_temporary = scratch_begin(&arguments->arena, 1);
++    String8 input = buster_test_temporary_path(source_temporary.arena, S8("compound-conversion-input"), S8(".c"));
++    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(c_test_compound_conversion_source))))
++    {
++        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
++        {
++            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
++            {
++                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
++                {
++                    Arena* conflicts[] = {arguments->arena, source_temporary.arena};
++                    TemporalArena temporary = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
++                    String8 output = buster_test_temporary_path(temporary.arena, S8("compound-conversion-run"), S8(".exe"));
++                    String8 command[] = {S8("-std=gnu17"), S8("-nostdinc"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char"),
++                                         allocators[allocator], frontends[form], optimizations[optimization], S8("-fverify-codegen"),
++                                         S8("-o"), output, input};
++                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
++                    invocation.reject_machine_fallback = allocator != 0;
++                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
++                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
++                        string_format(temporary.arena, S8("compound conversion {S8} {S8} {S8}: {S8}"),
++                                      allocators[allocator], frontends[form], optimizations[optimization], compiled.diagnostic));
++                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
++                    {
++                        String8 run[] = {output};
++                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
++                            (ProcessSpawnOptions){.use_process_environment = true});
++                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
++                        {
++                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
++                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
++                                string_format(temporary.arena, S8("compound conversion {S8} {S8} {S8}: first failing probe status={u32}, timed_out={u32}"),
++                                              allocators[allocator], frontends[form], optimizations[optimization], execution.platform_status,
++                                              (u32)execution.timed_out));
++                        }
++                    }
++                    scratch_end(temporary);
++                }
++            }
++        }
++    }
++    scratch_end(source_temporary);
++#else
++    BUSTER_UNUSED(arguments);
++#endif
++    return result;
++}
++
+ // Parameter objects need the same effective alignment as ordinary local
+ // declarations. Checking IR on every native target catches the frontend loss
+ // even when a machine backend independently recovers the type's alignment.
+@@ -21556,6 +21878,8 @@
+     BUSTER_TEST_FIXTURE(arguments, c_test_parameter_local_alignment);
+     BUSTER_TEST_FIXTURE(arguments, c_test_qualified_parameter_values);
+     BUSTER_TEST_FIXTURE(arguments, c_test_qualified_compound_values);
++    BUSTER_TEST_FIXTURE(arguments, c_test_compound_conversion_ir);
++    BUSTER_TEST_FIXTURE(arguments, c_test_compound_conversion_runtime);
+ 
+     TemporalArena nested_temporary = scratch_begin(0, 0);
+     String8 nested_prefix = S8("static int identity(int value)"
+--- a/docs/agents/frontend/calls.md
++++ b/docs/agents/frontend/calls.md
+@@ -121,10 +121,16 @@
+   a deliberately mismatched call before shared promotion. The minimal fixture
+   and the existing native differential corpus cover execution and compatible
+   function pointers (GitHub #361).
+-  Compound assignments likewise compute with the unqualified value type,
+-  including when a narrower right operand needs promotion. Their original
+-  place retains volatile load/store effects and the separate atomic update
+-  path; `c_test_qualified_compound_values` checks both frontend forms.
++  Non-atomic compound assignments retain the RHS arithmetic type until the
++  corresponding binary operation and convert only the resulting value on
++  assignment. The unqualified destination value type is not a license to
++  pre-narrow that RHS: `int x = 3; x *= 1.5;` must multiply as `double` and
++  then store 4. The original place retains volatile load/store effects;
++  the separate atomic update path is unchanged by this repair.
++  `c_test_qualified_compound_values` checks qualifier handling in both frontend
++  forms; `c_test_compound_conversion_ir` checks the pre-preparation operation
++  types, and `c_test_compound_conversion_runtime` covers conversion placement
++  and exactly-once designators across expression contexts.
+ - A by-value parameter's local copy retains its type's natural alignment.
+   `c_ir_emit_parameter` must pass the resolved layout alignment to
+   `c_ir_emit_local`, just as an ordinary declaration does. Rounding a slot's
