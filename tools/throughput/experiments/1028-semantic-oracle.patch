@@ -1,5 +1,5 @@
 diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
-index 60bf69ed..97a095f8 100644
+index 60bf69ed..43a47378 100644
 --- a/src/buster/lib/compiler/frontend/c/c_gen.c
 +++ b/src/buster/lib/compiler/frontend/c/c_gen.c
 @@ -93,6 +93,62 @@
@@ -183,6 +183,28 @@ index 60bf69ed..97a095f8 100644
      return c_ir_initializer_type_is_aggregate(ir_type_from_id(&builder->program->types, expression_type));
  }
  
+@@ -49139,6 +49212,21 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
+             c_ir_infer_incomplete_array_bounds(&constant_builder, &result);
+         }
+     }
++    {
++        // DIAGNOSTIC PATCH (#1028): publish the settled C type -> IR type map so
++        // semantic query answers can be joined against lowering predictions.
++        FILE* trace = c_ir_trace_file();
++        if (trace)
++        {
++            fprintf(trace, "TU tokens=%llu types=%u target=%u\n", (unsigned long long)preprocess.token_count, parse.type_count, (u32)target.cpu_arch);
++            for (u32 type_index = 0; type_index < parse.type_count; type_index += 1)
++            {
++                fprintf(trace, "TM %u ", type_index);
++                c_ir_trace_type_signature(trace, program, c_type_ir_map[type_index]);
++                fprintf(trace, "\n");
++            }
++        }
++    }
+     // An array element has to be addressable at its own alignment in every
+     // slot, which requires its size to be a multiple of that alignment:
+     // `typedef int cache_line __attribute__((aligned(64)))` puts the second
 diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
 index b5c6a8e4..9300268d 100644
 --- a/src/buster/lib/compiler/frontend/c/c_parse.c
