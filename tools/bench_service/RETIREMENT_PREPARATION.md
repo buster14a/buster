@@ -51,20 +51,22 @@ again, then removes the temporary sibling by its held device/inode identity.
 A failed copy remains part of the sealed attempt for the existing durable
 failure and cleanup path. Once retirement preflight starts, an immutable
 `preparation-<job>` queue record retains the request, attempt, inventory,
-source commit/tree, manifest, capacity, outcome and number of independently
-verified subjects, including for partial failures. The correctness lane must
-require `status=ready`, both completed subjects and the actual ready job,
-then recheck its materialized inputs.
+source commit/tree, manifest, capacity, both installed and copied source inode
+closures, outcome and number of independently verified subjects, including for
+partial failures. The correctness lane must require `status=ready`, both
+completed subjects and the actual ready job, then recheck its materialized
+inputs.
 
 The supervisor now calls `bq_retirement_preparation_ready` after result-root
 creation and before unit launch. It independently rereads the private durable
 record, rechecks the installed inventory and source bytes without repeating the
 pre-copy free-space reservation, and hashes both materialized source copies.
 The exact canonical successful record must match the current job, token and
-request. It records each materialized copy's same-job inode closure in addition
-to its portable manifest identity, so a byte-equal replacement fails on
-readback. A missing, failed, changed or stale record, or a modified source copy,
-prevents launch. The returned service-owned record digest is an A handoff
+request. The V2 record binds each installed source and materialized copy's
+same-job inode closure in addition to the portable manifest identity, so a
+byte-equal replacement of either tree fails on readback. A missing, failed,
+changed or stale record, or a modified source copy, prevents launch. The
+returned service-owned record digest is an A handoff
 identity. The supervisor requires its lowercase 64-byte value for the
 retirement recipe and carries it in the V2 authenticated lease response. The
 unit validates the recipe and echoes the digest in the acknowledgement before

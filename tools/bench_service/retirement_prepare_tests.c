@@ -247,6 +247,10 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
         BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
                       string_from_pointer(profile), digest, &imported) == BQ_OK &&
                       !strcmp(imported.inventory_sha256, prepared->inventory_sha256) &&
+                      !strcmp(imported.subjects[0].installed_identity_sha256,
+                              prepared->subjects[0].installed_identity_sha256) &&
+                      !strcmp(imported.subjects[1].installed_identity_sha256,
+                              prepared->subjects[1].installed_identity_sha256) &&
                       !strcmp(imported.subjects[0].materialized_identity_sha256,
                               prepared->subjects[0].materialized_identity_sha256) &&
                       !strcmp(imported.subjects[1].materialized_identity_sha256,
@@ -286,6 +290,47 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
         char original_digest[SHA256_HEX_CAPACITY];
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
                       string_from_pointer(profile), original_digest, NULL) == BQ_OK);
+        char installed_path[128];
+        int installed_length = snprintf(installed_path, sizeof(installed_path), "sources/%s/src",
+                                        prepared->subjects[0].commit);
+        int installed_source = installed_length > 0 && (u32)installed_length < sizeof(installed_path) ?
+                               bq_open_directory_path(installed, string_from_pointer(installed_path)) : -1;
+        /* Keep the old inode outside the installed tree while substituting a
+         * byte-identical file. The current inventory and manifest still pass. */
+        bool moved = installed_source >= 0 && fchmod(installed_source, 0700) == 0 &&
+                     renameat(installed_source, "main.c", workspaces, "held-installed-main.c") == 0;
+        int replacement = moved ? openat(installed_source, "main.c", O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC |
+                                         O_NOFOLLOW, 0600) : -1;
+        bool swapped = replacement >= 0 && bq_write_all(replacement, (u8 const*)"int a;\n", 7) &&
+                       fchmod(replacement, 0400) == 0 && fchmod(installed_source, 0500) == 0;
+        if (replacement >= 0) close(replacement);
+        BQ_PREP_CHECK(swapped);
+        if (swapped)
+        {
+            BqRetirementPreparation rescanned = {0};
+            BQ_PREP_CHECK(bq_retirement_preflight_pinned_impl(installed, workspaces, &job.request,
+                          string_from_pointer(profile), &rescanned, false) == BQ_OK &&
+                          !strcmp(rescanned.subjects[0].manifest_sha256,
+                                  prepared->subjects[0].manifest_sha256) &&
+                          strcmp(rescanned.subjects[0].installed_identity_sha256,
+                                 prepared->subjects[0].installed_identity_sha256));
+            BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
+            BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), original_digest, &imported) == BQ_CORRUPT &&
+                          !imported.inventory_sha256[0]);
+        }
+        bool restored = installed_source >= 0 && fchmod(installed_source, 0700) == 0;
+        if (restored && moved && replacement >= 0)
+            restored = unlinkat(installed_source, "main.c", 0) == 0;
+        if (restored && moved)
+            restored = renameat(workspaces, "held-installed-main.c", installed_source, "main.c") == 0;
+        if (installed_source >= 0 && fchmod(installed_source, 0500) != 0) restored = false;
+        BQ_PREP_CHECK(restored);
+        if (installed_source >= 0) close(installed_source);
+        BQ_PREP_CHECK(restored && bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest, NULL) == BQ_OK &&
+                      !strcmp(digest, original_digest));
         BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 && mkdirat(copied, "unlisted", 0500) == 0 &&
                       fchmod(copied, 0500) == 0);
         BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,

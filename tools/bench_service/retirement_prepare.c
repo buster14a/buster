@@ -16,7 +16,7 @@
 #include <sys/statvfs.h>
 
 #define BQ_RETIREMENT_INVENTORY_CAP 4096u
-#define BQ_RETIREMENT_PREPARATION_RECORD_CAP 1024u
+#define BQ_RETIREMENT_PREPARATION_RECORD_CAP 2048u
 #define BQ_RETIREMENT_COPY_OVERHEAD (1024ull * 1024ull)
 
 typedef struct BqRetirementWalk
@@ -509,10 +509,11 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_preparation_format(char body[BQ_RETIREMENT
                                                          BqError outcome, u32 completed_subjects)
 {
     int length = snprintf(body, BQ_RETIREMENT_PREPARATION_RECORD_CAP,
-                          "BQ-RETIREMENT-PREP-V1\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\n"
+                          "BQ-RETIREMENT-PREP-V2\njob=%" PRIu64 "\ntoken=%" PRIu64 "\nrequest=%.64s\n"
                           "status=%s\nreason=%s\ncompleted-subjects=%u\n"
                           "inventory=%.64s\nbase=%.64s %.64s %.64s %u %" PRIu64 " %u %u %u %u\n"
                           "candidate=%.64s %.64s %.64s %u %" PRIu64 " %u %u %u %u\n"
+                          "base-installed-identity=%.64s\ncandidate-installed-identity=%.64s\n"
                           "base-copy-identity=%.64s\ncandidate-copy-identity=%.64s\n"
                           "source-reservation-bytes=%" PRIu64 "\n",
                           (uint64_t)job->id, (uint64_t)job->token, job->digest,
@@ -529,6 +530,8 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_preparation_format(char body[BQ_RETIREMENT
                           (uint64_t)preparation->subjects[1].bytes, preparation->subjects[1].directories,
                           preparation->subjects[1].max_path, preparation->subjects[1].max_depth,
                           preparation->subjects[1].manifest_bytes,
+                          preparation->subjects[0].installed_identity_sha256,
+                          preparation->subjects[1].installed_identity_sha256,
                           preparation->subjects[0].materialized_identity_sha256,
                           preparation->subjects[1].materialized_identity_sha256,
                           (uint64_t)preparation->source_reservation_bytes);
@@ -541,7 +544,9 @@ bool bq_retirement_preparation_record(BqQueue* queue, BqJob const* job,
     char name[48], body[BQ_RETIREMENT_PREPARATION_RECORD_CAP];
     int length = bq_retirement_preparation_format(body, job, preparation, outcome, completed_subjects);
     bool ready = outcome == BQ_OK && completed_subjects == 2;
-    bool identities = !ready || (bq_retirement_hex(string_from_pointer(preparation->subjects[0].materialized_identity_sha256), 64) &&
+    bool identities = !ready || (bq_retirement_hex(string_from_pointer(preparation->subjects[0].installed_identity_sha256), 64) &&
+                                 bq_retirement_hex(string_from_pointer(preparation->subjects[1].installed_identity_sha256), 64) &&
+                                 bq_retirement_hex(string_from_pointer(preparation->subjects[0].materialized_identity_sha256), 64) &&
                                  bq_retirement_hex(string_from_pointer(preparation->subjects[1].materialized_identity_sha256), 64));
     bool ok = identities && length > 0 && (u32)length < sizeof(body) &&
               bq_record_name(name, "preparation", job->id) &&
