@@ -11728,8 +11728,41 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
     return element_type;
 }
 
+BUSTER_C_INTERNAL bool c_parse_token_in_c23_attribute(CPreprocessResult preprocess, u32 token_index, u32 start, u32 end)
+{
+    // Declaration recovery may start its token span at the first attribute
+    // name when the C23 attribute itself was the unrecognized part. In that
+    // case, extend the probe back to the start of this declaration statement.
+    u32 scan_start = BUSTER_MIN(start, token_index);
+    if (scan_start == token_index || end <= token_index)
+    {
+        scan_start = token_index;
+        while (scan_start)
+        {
+            u32 previous = scan_start - 1;
+            CToken token = preprocess.tokens[previous];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                break;
+            }
+            scan_start = previous;
+        }
+    }
+    u32 token_count = (u32)preprocess.token_count;
+    for (u32 index = scan_start; index < token_index && index + 1 < token_count; index += 1)
+    {
+        u32 after = 0;
+        if (c_parse_c23_attribute_at(preprocess, index, token_count, &after) && token_index < after)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index,
-                                                            bool parameter, u32 parameter_start, u32 parameter_end)
+                                                            bool parameter, u32 segment_start, u32 segment_end)
 {
     bool unknown = false;
     if (token_index < preprocess.token_count && preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
@@ -11753,8 +11786,9 @@ BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, 
         // legacy identifier-list form, not a parameter declaration with a
         // missing type specifier. Keep it out of the unknown-type diagnostic;
         // typed parameters with a misspelled specifier contain another token.
-        bool is_old_style_identifier = parameter && token_index == parameter_start && parameter_end == parameter_start + 1;
-        unknown = !is_typedef && !is_unmodeled_builtin_type && !is_old_style_identifier;
+        bool is_old_style_identifier = parameter && token_index == segment_start && segment_end == segment_start + 1;
+        bool is_attribute_identifier = c_parse_token_in_c23_attribute(preprocess, token_index, segment_start, segment_end);
+        unknown = !is_typedef && !is_unmodeled_builtin_type && !is_old_style_identifier && !is_attribute_identifier;
         if (unknown)
         {
             c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
@@ -12118,7 +12152,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                 (declarator_start < name_index ||
                  (declarator_start == name_index && result->diagnostic_count == type_diagnostic_start)))
             {
-                c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, false, 0, 0);
+                c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, false, declaration->token_start, name_index);
             }
             base = c_parse_apply_vector_attribute(result, preprocess, declaration->scope, base, declaration->token_start, name_index);
         }
