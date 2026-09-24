@@ -161,12 +161,15 @@ class ClassificationTests(unittest.TestCase):
     def test_authorized_bootstrap_and_policy_routes_are_distinct(self):
         bootstrap = integration.classify_paths(["tools/native_retirement_rebind.py"])
         policy = integration.classify_paths(["docs/native-retirement-dependencies-v1.json"])
+        support_policy = integration.classify_paths(["docs/native-retirement-support-v1.tsv"])
         self.assertEqual(bootstrap.kind, "bootstrap")
         self.assertEqual(policy.kind, "policy")
         with self.assertRaisesRegex(integration.IntegrationError, "requires"):
             integration.enforce_classification(bootstrap, "bootstrap", False)
         integration.enforce_classification(bootstrap, "bootstrap", True)
         integration.enforce_classification(policy, "policy", True)
+        self.assertEqual(support_policy.kind, "policy")
+        integration.enforce_classification(support_policy, "policy", True)
 
     def test_candidate_cannot_change_its_authority_and_policy_together(self):
         report = integration.classify_paths([
@@ -176,6 +179,11 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(report.kind, "split-required")
         with self.assertRaisesRegex(integration.IntegrationError, "split"):
             integration.enforce_classification(report, None, True)
+        support_report = integration.classify_paths([
+            "tools/native_retirement_materializer.py",
+            "docs/native-retirement-support-v1.tsv",
+        ])
+        self.assertEqual(support_report.kind, "split-required")
 
     def test_noncanonical_paths_fail_closed(self):
         for path in ("../policy", "/absolute", "a/../b"):

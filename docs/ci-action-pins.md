@@ -1,10 +1,11 @@
 # Approved GitHub action references
 
 `tools/check_action_pins.py` checks every `.yml` and `.yaml` workflow under
-`.github/workflows/`. Each `uses` value must name an approved GitHub action
-path and a full lowercase commit SHA. Mutable branches/tags, unlisted paths
-and unapproved revisions fail. Local and container actions require a separate
-policy decision before use; the one same-commit workflow exception is below.
+`.github/workflows/` and every local action manifest under `.github/actions/`.
+Each remote `uses` value must name an approved GitHub action path and a full
+lowercase commit SHA. Mutable branches/tags, unlisted paths and unapproved
+revisions fail. Local and container references require a separate policy
+decision before use; approved same-commit references are listed below.
 
 The `Workflow lint` job runs the checker and `tests/action_pins_test.py` before
 actionlint. The checker now lives under `tools/` because the Forgejo workflows
@@ -29,6 +30,29 @@ Other workflows remain on v4.6.2 until their independent validation.
 Checkout necessarily precedes repository-local checks; its literal pin must
 itself be reviewed in the PR. This policy cannot prevent a PR author from
 changing the checker together with a workflow.
+
+## Approved local CI evidence-upload composite action
+
+`./.github/actions/native-artifact-upload` is approved only for two Buster CI
+uses: the packed native evidence step after successful packaging, and the
+mobile log-retention step after `Mobile result and reproduction`. The mobile
+caller runs it under `!cancelled()`, so build, lifecycle, test, and coverage
+failures still retain the available logs. Its inputs preserve the mobile
+artifact name and path, the upload action's default compression level (6),
+`if-no-files-found: ignore`, and seven-day retention.
+
+The composite uses the existing pinned upload-artifact v7 action for the
+initial attempt and one retry, tolerates only the initial failure, waits
+15 seconds, and sets `overwrite: true` on the blocking retry. Recovery and
+evidence loss are reported explicitly. A successful retry does not change any
+earlier build or coverage failure. Regression coverage in
+`tools/ci_native_observation_test.py` checks both callers, all three mobile
+matrix entries, the matching retry inputs, cancellation, and the two-attempt
+limit.
+
+The checker allows this exact local path, then scans its manifest with the same
+remote action allowlist. It does not authorize arbitrary local or container
+actions.
 
 ## Approved same-commit reusable workflow
 

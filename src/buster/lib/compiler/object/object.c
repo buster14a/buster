@@ -27,6 +27,7 @@
 //
 // Layout, in file order; each anchor is a definition to search for:
 //   object_buffer_write .. object_writer_capacity  append-only write buffer
+//   object_writer_capacity_aligned                 checked ELF/Mach-O file bound
 //   object_assembly_build_index                    stable section/offset views
 //   object_assembly_append_*                       the disassembly printer
 //                                                  (x86 and AArch64 operand
@@ -163,6 +164,82 @@ BUSTER_GLOBAL_LOCAL u64 object_writer_capacity(ObjectFile* object)
         result += object->symbols[symbol].name.length + 128;
     }
     result += (u64)object->relocation_count * 64;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_writer_capacity_add(u64* total, u64 amount)
+{
+    bool result = total && amount <= UINT64_MAX - *total;
+    if (result)
+    {
+        *total += amount;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_writer_capacity_aligned(ObjectFile* object, ObjectFormat format, u64* capacity)
+{
+    bool format_valid = format == OBJECT_FORMAT_ELF64 || format == OBJECT_FORMAT_MACH_O64;
+    bool result = object && capacity && format_valid;
+    if (capacity)
+    {
+        *capacity = 0;
+    }
+    if (result)
+    {
+        result = (!object->section_count || object->sections) && (!object->symbol_count || object->symbols);
+    }
+    u64 total = 16384;
+    for (u32 section = 0; result && section < object->section_count; section += 1)
+    {
+        ObjectSection* source = object->sections + section;
+        result = object_writer_capacity_add(&total, source->data.length);
+        if (result)
+        {
+            result = object_writer_capacity_add(&total, 256);
+        }
+        if (result && format == OBJECT_FORMAT_ELF64)
+        {
+            // ELF copies each section name and may add one .rela name per section.
+            result = object_writer_capacity_add(&total, source->name.length);
+            if (result)
+            {
+                result = object_writer_capacity_add(&total, 1);
+            }
+            if (result)
+            {
+                result = object_writer_capacity_add(&total, source->name.length);
+            }
+            if (result)
+            {
+                result = object_writer_capacity_add(&total, 6);
+            }
+        }
+        if (result)
+        {
+            // Zero-fill contributes alignment but no serialized payload through data.length.
+            u64 alignment = source->alignment;
+            u64 alignment_padding = alignment ? alignment - 1 : 0;
+            result = object_writer_capacity_add(&total, alignment_padding);
+        }
+    }
+    for (u32 symbol = 0; result && symbol < object->symbol_count; symbol += 1)
+    {
+        result = object_writer_capacity_add(&total, object->symbols[symbol].name.length);
+        if (result)
+        {
+            result = object_writer_capacity_add(&total, 128);
+        }
+    }
+    if (result)
+    {
+        u64 relocation_overhead = format == OBJECT_FORMAT_MACH_O64 ? 80 : 64;
+        result = object_writer_capacity_add(&total, (u64)object->relocation_count * relocation_overhead);
+    }
+    if (result)
+    {
+        *capacity = total;
+    }
     return result;
 }
 
@@ -5475,6 +5552,9 @@ enum
 {
     OBJECT_COFF_SECTION_LINK_COMDAT = 0x00001000,
     OBJECT_COFF_SECTION_LINK_NRELOC_OVFL = 0x01000000,
+    OBJECT_COFF_SECTION_ALIGNMENT_SHIFT = 20,
+    OBJECT_COFF_SECTION_ALIGNMENT_MASK = 0x00f00000,
+    OBJECT_COFF_SECTION_MAX_ALIGNMENT = 8192,
     // COFF counts the overflow marker itself; 65,536 real entries need 65,537.
     OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT = UINT16_MAX + 2,
     OBJECT_COFF_STORAGE_EXTERNAL = 2,
@@ -11095,18 +11175,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_split_initializer_priorities(Arena* arena,
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object)
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64_with_capacity(Arena* arena, ObjectFile* object, u64 capacity)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_ELF64,
     };
-    // One `.init_array.NNNNN`/`.fini_array.NNNNN` section per GNU priority
-    // group, appended past OBJECT_SECTION_COUNT.  Everything below is already
-    // generic over section_count and reads each section's own name, so the
-    // split costs the writer's body nothing.
-    ObjectFile split_object = object_split_initializer_priorities(arena, object, OBJECT_FORMAT_ELF64);
-    object = &split_object;
-    u64 capacity = object_writer_capacity(object);
     ObjectBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
@@ -11359,6 +11432,22 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* 
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64(Arena* arena, ObjectFile* object)
+{
+    ObjectArtifact result = {
+        .format = OBJECT_FORMAT_ELF64,
+        .error = OBJECT_ERROR_CAPACITY,
+    };
+    // Priority groups become extra sections before the bound is computed.
+    ObjectFile split_object = object_split_initializer_priorities(arena, object, OBJECT_FORMAT_ELF64);
+    u64 capacity = 0;
+    if (object_writer_capacity_aligned(&split_object, OBJECT_FORMAT_ELF64, &capacity))
+    {
+        result = object_write_elf64_with_capacity(arena, &split_object, capacity);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL u16 object_coff_relocation_type(CpuArch arch, ObjectRelocationKind kind)
 {
     if (arch == CPU_ARCH_X86_64)
@@ -11472,6 +11561,27 @@ BUSTER_GLOBAL_LOCAL bool object_coff_bind_aarch64_tls_index(Arena* arena, Object
     object->symbol_count = output_symbol_count;
     object->relocations = relocations;
     return true;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_coff_section_alignment_characteristics(ObjectSection* section, u32* characteristics)
+{
+    bool result = false;
+    if (section && characteristics && (u32)section->kind < OBJECT_SECTION_COUNT)
+    {
+        u32 alignment = section->alignment ? section->alignment : object_section_default_alignment(section->kind);
+        if (alignment && !(alignment & (alignment - 1)) && alignment <= OBJECT_COFF_SECTION_MAX_ALIGNMENT)
+        {
+            u32 code = 1;
+            while (alignment > 1)
+            {
+                alignment >>= 1;
+                code += 1;
+            }
+            *characteristics = code << OBJECT_COFF_SECTION_ALIGNMENT_SHIFT;
+            result = true;
+        }
+    }
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* object)
@@ -11676,6 +11786,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
     {
         ObjectSection* source = object->sections + section;
         u64 offset = COFF_HEADER_SIZE + (u64)section * COFF_SECTION_SIZE;
+        u32 alignment_characteristics = 0;
+        if (!object_coff_section_alignment_characteristics(source, &alignment_characteristics))
+        {
+            buffer.error = OBJECT_ERROR_UNSUPPORTED_ALIGNMENT;
+        }
         if (source->name.length > 8)
         {
             // Names longer than the inline field live in the string table and
@@ -11692,19 +11807,20 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_coff(Arena* arena, ObjectFile* o
         object_write_u32_at(&buffer, offset + 24, relocation_counts[section] ? relocation_offsets[section] : 0);
         object_write_u16_at(&buffer, offset + 32,
                             relocation_counts[section] > UINT16_MAX ? UINT16_MAX : (u16)relocation_counts[section]);
-        // The initializer arrays take Clang's shape for the `.CRT$X*` group:
-        // read-only initialized data aligned to 8, which is the entry size,
-        // so a priority group never pads a null slot into the middle of the
-        // merged array the way a 16-byte alignment would.
-        u32 characteristics = source->kind == OBJECT_SECTION_TEXT             ? 0x60500020
-                              : source->kind == OBJECT_SECTION_READ_ONLY_DATA ? 0x40500040
+        // Alignment is a linker placement requirement. The raw file data
+        // above remains four-byte aligned; only these Characteristics bits
+        // carry the in-memory section alignment. Zero uses the per-kind
+        // default, while explicit stronger requirements are preserved.
+        u32 characteristics = source->kind == OBJECT_SECTION_TEXT             ? 0x60000020
+                              : source->kind == OBJECT_SECTION_READ_ONLY_DATA ? 0x40000040
                               : source->kind == OBJECT_SECTION_WINDOWS_PDATA || source->kind == OBJECT_SECTION_WINDOWS_XDATA
-                                  ? 0x40300040
+                                  ? 0x40000040
                               : source->kind == OBJECT_SECTION_INIT_ARRAY || source->kind == OBJECT_SECTION_FINI_ARRAY
-                                  ? 0x40400040
-                              : object_section_kind_is_debug(source->kind)     ? 0x42100040
-                              : object_section_kind_is_zero_fill(source->kind) ? 0xc0500080
-                                                                               : 0xc0500040;
+                                  ? 0x40000040
+                              : object_section_kind_is_debug(source->kind)     ? 0x42000040
+                              : object_section_kind_is_zero_fill(source->kind) ? 0xc0000080
+                                                                               : 0xc0000040;
+        characteristics = (characteristics & ~(u32)OBJECT_COFF_SECTION_ALIGNMENT_MASK) | alignment_characteristics;
         if (relocation_counts[section] > UINT16_MAX)
         {
             characteristics |= OBJECT_COFF_SECTION_LINK_NRELOC_OVFL;
@@ -11760,12 +11876,11 @@ BUSTER_GLOBAL_LOCAL bool object_mach_place_difference(ObjectFile* object, Object
             object->sections[relocation->section].kind == OBJECT_SECTION_UNWIND);
 }
 
-BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFile* object)
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64_with_capacity(Arena* arena, ObjectFile* object, u64 capacity)
 {
     ObjectArtifact result = {
         .format = OBJECT_FORMAT_MACH_O64,
     };
-    u64 capacity = object_writer_capacity(object);
     ObjectBuffer buffer = {
         .bytes = arena_allocate(arena, u8, capacity),
         .capacity = capacity,
@@ -12088,6 +12203,20 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFil
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_mach_o64(Arena* arena, ObjectFile* object)
+{
+    ObjectArtifact result = {
+        .format = OBJECT_FORMAT_MACH_O64,
+        .error = OBJECT_ERROR_CAPACITY,
+    };
+    u64 capacity = 0;
+    if (object_writer_capacity_aligned(object, OBJECT_FORMAT_MACH_O64, &capacity))
+    {
+        result = object_write_mach_o64_with_capacity(arena, object, capacity);
+    }
+    return result;
+}
+
 ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat format)
 {
     ObjectArtifact result = {
@@ -12106,10 +12235,20 @@ ObjectArtifact object_write(Arena* arena, ObjectFile* object, ObjectFormat forma
     for (u32 section = 0; section < object->section_count; section += 1)
     {
         ObjectSection* source = object->sections + section;
-        if ((source->data.length && !source->data.pointer) || (source->alignment && (source->alignment & (source->alignment - 1))) ||
+        if ((u32)source->kind >= OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
+            (source->alignment && (source->alignment & (source->alignment - 1))) ||
             (object_section_kind_is_zero_fill(source->kind) && source->data.length))
         {
             return result;
+        }
+        if (format == OBJECT_FORMAT_COFF)
+        {
+            u32 alignment_characteristics = 0;
+            if (!object_coff_section_alignment_characteristics(source, &alignment_characteristics))
+            {
+                result.error = OBJECT_ERROR_UNSUPPORTED_ALIGNMENT;
+                return result;
+            }
         }
     }
     for (u32 symbol = 0; symbol < object->symbol_count; symbol += 1)
