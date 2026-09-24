@@ -47,17 +47,20 @@ service-owned process/receipt and #509 execution.
 
 For native link/self-host rows, the same wrapper requires completed, read-only,
 service-owned stdout/stderr log descriptors from both runtime processes. It
-creates each empty log exclusively before launch, hands its writer to the
-runner, and freezes it after the child has been reaped. At row readback it
-checks that the descriptor and original name still identify the fresh file. It
-hashes the exact bytes, including an empty output, checks CLOEXEC, ownership,
-single-link status, access mode, size and stable metadata, and rejects
+creates each empty log exclusively before launch. The private runtime launch
+validates the exact argv, cwd and environment, forks the child with both output
+streams on that writer, and records the command digest. Nonblocking poll reaps
+that child and records its actual wait result; a nonzero exit or signal prevents
+freezing. The worker supplies the deadline and whole-job cancellation. At row
+readback the wrapper checks the frozen log's original inode and the launched
+command digest before accepting its output bytes. It hashes the exact
+bytes, including an empty output, checks CLOEXEC, ownership, single-link status, access mode, size and stable metadata, and rejects
 caller-filled output digests. The existing gate compares these observed hashes
 to the independently imported oracle digest. Object-only, foreign-target and
-untimed rows require absent runtime descriptors. The runner must bind each
-descriptor to the matching completed process and capture both streams in the
-oracle's declared order; the prelaunch and finish calls alone cannot attest
-that a particular child wrote the log or create an independent oracle.
+untimed rows require absent runtime descriptors. The runner must capture both
+streams in the oracle's declared order, attest compiler processes and obtain
+the independent oracle from the admitted path. Runtime
+launch and poll alone do not qualify a correctness row or a timed invocation.
 
 The row wrapper also derives both compiler command hashes and applicable
 runtime command hashes from exact argv, cwd and explicit sorted environment
@@ -143,9 +146,10 @@ cc -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror -fwrapv \
 
 The focused fixture records vacant output names before copying its actual
 compiled executable into frozen service files for the link-row readback. It
-captures fresh runtime logs from two completed child processes per row. It
-rejects preexisting outputs, symlink/path and finished-log substitution,
-mismatched start identities, predeclared code facts, writable output and
+launches two actual runtime children with exact explicit plans, polls their
+wait results and freezes their service-owned logs. A nonzero child exit and
+an unlaunched log fail before readback. It rejects preexisting outputs,
+symlink/path and finished-log substitution, mismatched start identities, predeclared code facts, writable output and
 mismatched machine identity. The fixture also reads frozen output logs and rejects
 wrong bytes, missing descriptors, caller-filled digests, mutable logs and changed
 argv/cwd/environment.

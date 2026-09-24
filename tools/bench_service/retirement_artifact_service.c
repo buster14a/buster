@@ -4,9 +4,9 @@
  * again after parsing, then commits both sides to the correctness gate.
  * Runtime output is hashed from the completed service-owned process log and
  * compared with an independently established oracle by the gate. Process
- * plans are hashed with the measurement lane's canonical serializer. Binding
- * those plans and logs to actual processes, collecting their wait statuses
- * and producing the independent oracle remain the service runner's work.
+ * plans are hashed with the measurement lane's canonical serializer. Runtime
+ * launch and poll bind each log to the exact executed plan and wait result.
+ * Compiler launches and independent oracle production remain runner work.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "retirement_artifact_service.h"
@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define BQ_RETIREMENT_ARTIFACT_READ_CAP (512u * 1024u * 1024u)
@@ -118,7 +119,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_output_absent(BqRetirementArtifactStart c
 BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_absent(BqRetirementRuntimeStart const* start)
 {
     return start && bq_retirement_output_absent(&start->location) &&
-        !start->file_device && !start->file_inode && !start->writer && !start->state;
+        !start->file_device && !start->file_inode && !start->writer &&
+        !start->process && !start->command_sha256[0] && !start->state;
 }
 
 bool bq_retirement_runtime_start(BqRetirementArtifactLocation location,
@@ -142,7 +144,7 @@ bool bq_retirement_runtime_start(BqRetirementArtifactLocation location,
             start->file_device = (uint64_t)file.st_dev;
             start->file_inode = (uint64_t)file.st_ino;
             start->writer = writer;
-            start->state = 1;
+            start->state = BQ_RETIREMENT_RUNTIME_CREATED;
         }
     }
     if (!ok && writer >= 0) close(writer);
@@ -153,8 +155,11 @@ void bq_retirement_runtime_abort(BqRetirementRuntimeStart* start)
 {
     if (start)
     {
-        if (start->state == 1 && start->writer >= 3) close(start->writer);
-        *start = (BqRetirementRuntimeStart){0};
+        if (start->state != BQ_RETIREMENT_RUNTIME_RUNNING)
+        {
+            if (start->state && start->writer >= 3) close(start->writer);
+            *start = (BqRetirementRuntimeStart){0};
+        }
     }
 }
 
@@ -164,7 +169,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_started(BqRetirementRuntimeStart 
     struct stat named = {0}, file = {0};
     BqRetirementArtifactLocation location = {0};
     if (start) location = (BqRetirementArtifactLocation){start->location.directory, start->location.name};
-    bool ok = start && start->state == 2 && bq_retirement_output_started(location, &start->location) &&
+    bool ok = start && start->state == BQ_RETIREMENT_RUNTIME_FROZEN && !start->process && start->command_sha256[0] &&
+        bq_retirement_output_started(location, &start->location) &&
         descriptor >= 3 && fstat(descriptor, &file) == 0 &&
         fstatat(location.directory, location.name, &named, AT_SYMLINK_NOFOLLOW) == 0 &&
         bq_retirement_artifact_stable(&file, &named) &&
@@ -175,27 +181,29 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_runtime_started(BqRetirementRuntimeStart 
 bool bq_retirement_runtime_finish(BqRetirementRuntimeStart* start, int* read_descriptor)
 {
     struct stat file = {0};
-    bool ok = start && read_descriptor && start->state == 1 && start->writer >= 3 &&
+    bool live = start && start->state == BQ_RETIREMENT_RUNTIME_RUNNING;
+    bool ok = start && read_descriptor && start->state == BQ_RETIREMENT_RUNTIME_REAPED && !start->process &&
+        start->command_sha256[0] && start->writer >= 3 &&
         fstat(start->writer, &file) == 0 && S_ISREG(file.st_mode) &&
         file.st_uid == geteuid() && file.st_nlink == 1 &&
         start->file_device == (uint64_t)file.st_dev && start->file_inode == (uint64_t)file.st_ino &&
         file.st_size >= 0 && (uint64_t)file.st_size <= BQ_RETIREMENT_RUNTIME_LOG_CAP &&
         fchmod(start->writer, 0400) == 0 && fsync(start->writer) == 0;
     if (read_descriptor) *read_descriptor = -1;
-    if (start && start->state == 1 && start->writer >= 3)
+    if (start && !live && start->state && start->writer >= 3)
     {
         if (close(start->writer) != 0) ok = false;
         start->writer = -1;
     }
     int reader = ok ? openat(start->location.directory, start->location.name,
         O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
-    if (ok) start->state = 2;
+    if (ok) start->state = BQ_RETIREMENT_RUNTIME_FROZEN;
     if (ok) ok = bq_retirement_runtime_started(start, reader);
     if (ok) *read_descriptor = reader;
     else
     {
         if (reader >= 0) close(reader);
-        if (start) *start = (BqRetirementRuntimeStart){0};
+        if (start && !live) *start = (BqRetirementRuntimeStart){0};
     }
     return ok;
 }
@@ -287,6 +295,65 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_command_hash(BqRetirementProcessCommand c
     return ok;
 }
 
+/* The worker owns the deadline and kills the whole job on cancellation. This
+ * private child remains registered until poll observes its actual wait status. */
+bool bq_retirement_runtime_launch(BqRetirementRuntimeStart* start,
+    BqRetirementProcessCommand const* command)
+{
+    char digest[65] = {0};
+    struct stat file = {0};
+    BqRetirementArtifactLocation location = {0};
+    if (start) location = (BqRetirementArtifactLocation){start->location.directory, start->location.name};
+    int descriptor_flags = start && start->writer >= 3 ? fcntl(start->writer, F_GETFD) : -1;
+    int access_flags = descriptor_flags >= 0 ? fcntl(start->writer, F_GETFL) : -1;
+    bool ok = start && start->state == BQ_RETIREMENT_RUNTIME_CREATED && command &&
+        bq_retirement_command_hash(command, digest) && command->arguments[0][0] == '/' &&
+        bq_retirement_output_started(location, &start->location) &&
+        descriptor_flags >= 0 && (descriptor_flags & FD_CLOEXEC) &&
+        access_flags >= 0 && (access_flags & O_ACCMODE) == O_WRONLY &&
+        fstat(start->writer, &file) == 0 && S_ISREG(file.st_mode) &&
+        start->file_device == (uint64_t)file.st_dev &&
+        start->file_inode == (uint64_t)file.st_ino && file.st_nlink == 1;
+    pid_t child = ok ? fork() : -1;
+    if (child == 0)
+    {
+        if (dup2(start->writer, STDOUT_FILENO) < 0 ||
+            dup2(start->writer, STDERR_FILENO) < 0 ||
+            chdir(command->directory) != 0) _exit(126);
+        close(start->writer);
+        execve(command->arguments[0], command->arguments, command->environment);
+        _exit(127);
+    }
+    ok = ok && child > 0;
+    if (ok)
+    {
+        start->process = child;
+        memcpy(start->command_sha256, digest, sizeof(digest));
+        start->state = BQ_RETIREMENT_RUNTIME_RUNNING;
+    }
+    return ok;
+}
+
+int bq_retirement_runtime_poll(BqRetirementRuntimeStart* start)
+{
+    int result = -1;
+    if (start && start->state == BQ_RETIREMENT_RUNTIME_RUNNING && start->process > 0)
+    {
+        int status = 0;
+        pid_t waited = waitpid(start->process, &status, WNOHANG);
+        if (waited == 0 || (waited < 0 && errno == EINTR)) result = 0;
+        else
+        {
+            bool passed = waited == start->process && WIFEXITED(status) &&
+                WEXITSTATUS(status) == 0;
+            start->process = 0;
+            start->state = passed ? BQ_RETIREMENT_RUNTIME_REAPED : BQ_RETIREMENT_RUNTIME_FAILED;
+            result = passed ? 1 : -1;
+        }
+    }
+    return result;
+}
+
 bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
     BqRetirementArtifactLocation artifacts[2], BqRetirementArtifactStart starts[2],
     int runtime_outputs[2], BqRetirementRuntimeStart runtime_starts[2],
@@ -338,6 +405,7 @@ bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
                 bq_retirement_command_absent(&commands[side].runtime);
             if (ok) ok = runtime ?
                 bq_retirement_runtime_started(&runtime_starts[side], runtime_outputs[side]) &&
+                !strcmp(runtime_starts[side].command_sha256, output->runtime_command_sha256) &&
                 bq_retirement_runtime_read(runtime_outputs[side], output->runtime_output_sha256) &&
                 bq_retirement_runtime_started(&runtime_starts[side], runtime_outputs[side]) :
                 runtime_outputs[side] == -1 && bq_retirement_runtime_absent(&runtime_starts[side]);
@@ -350,9 +418,8 @@ bool bq_retirement_correctness_row_service(BqRetirementCorrectness* gate,
         for (unsigned side = 0; side < 2; side += 1)
         {
             starts[side] = (BqRetirementArtifactStart){0};
-            if (runtime_starts[side].state == 1)
+            if (runtime_starts[side].state != BQ_RETIREMENT_RUNTIME_RUNNING)
                 bq_retirement_runtime_abort(&runtime_starts[side]);
-            else runtime_starts[side] = (BqRetirementRuntimeStart){0};
         }
     if (gate && !ok) gate->failed = 1;
     return ok;

@@ -5,6 +5,7 @@
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_ARTIFACT_SERVICE_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_ARTIFACT_SERVICE_H
 #include "retirement_correctness.h"
+#include <sys/types.h>
 
 typedef struct BqRetirementArtifactLocation
 {
@@ -22,11 +23,22 @@ typedef struct BqRetirementArtifactStart
     unsigned armed;
 } BqRetirementArtifactStart;
 
+enum
+{
+    BQ_RETIREMENT_RUNTIME_CREATED = 1,
+    BQ_RETIREMENT_RUNTIME_FROZEN = 2,
+    BQ_RETIREMENT_RUNTIME_RUNNING = 3,
+    BQ_RETIREMENT_RUNTIME_REAPED = 4,
+    BQ_RETIREMENT_RUNTIME_FAILED = 5
+};
+
 typedef struct BqRetirementRuntimeStart
 {
     BqRetirementArtifactStart location;
     uint64_t file_device, file_inode;
     int writer;
+    pid_t process;
+    char command_sha256[65];
     unsigned state;
 } BqRetirementRuntimeStart;
 
@@ -46,14 +58,20 @@ typedef struct BqRetirementRowCommands
 /* Supply a zeroed start and call before each process. Artifact start records
  * an absent fixed output name under a held service-owned directory without
  * other-user write access. Runtime start creates a fresh empty log; pass its
- * writer to the trusted runner for stdout/stderr, then call
- * finish after reaping the child. The caller owns and closes the returned
- * read descriptor. Abort an unfinished capture with runtime_abort; the
- * partial file remains available as failure evidence. */
+ * writer to the private launcher. Poll through the worker deadline, then
+ * freeze with finish after observing exit zero. The caller owns and closes
+ * the returned read descriptor. Abort after any live child has been cancelled
+ * and reaped; the partial file remains as failure evidence. */
 BUSTER_F_DECL bool bq_retirement_artifact_start(BqRetirementArtifactLocation location,
     BqRetirementArtifactStart* start);
 BUSTER_F_DECL bool bq_retirement_runtime_start(BqRetirementArtifactLocation location,
     BqRetirementRuntimeStart* start);
+/* Launch the validated command with stdout/stderr on the fresh writer.
+ * Poll is nonblocking: 0 means running, 1 means exit zero, -1 fails.
+ * The worker owns the deadline, cancellation and process-group cleanup. */
+BUSTER_F_DECL bool bq_retirement_runtime_launch(BqRetirementRuntimeStart* start,
+    BqRetirementProcessCommand const* command);
+BUSTER_F_DECL int bq_retirement_runtime_poll(BqRetirementRuntimeStart* start);
 BUSTER_F_DECL bool bq_retirement_runtime_finish(BqRetirementRuntimeStart* start, int* read_descriptor);
 BUSTER_F_DECL void bq_retirement_runtime_abort(BqRetirementRuntimeStart* start);
 
@@ -63,8 +81,9 @@ BUSTER_F_DECL void bq_retirement_runtime_abort(BqRetirementRuntimeStart* start);
  * Pass the prelaunch artifact start for each compiler output and the finished
  * runtime start with its read-only CLOEXEC descriptor for each applicable
  * execution. Use -1 and a zeroed start for inapplicable runtimes. The service
- * must bind each actual process and its wait status to these starts, including
- * stdout and stderr in the frozen oracle order. The readback consumes the
+ * must bind each compiler process and wait status to its start. Runtime
+ * launch and poll bind the log to an executed plan and its wait status. The
+ * runner owns deadlines and stdout/stderr ordering. Readback consumes the
  * starts, derives code eligibility and poisons the gate on failed or changed
  * reads. Untimed controls require absent locations and zeroed starts.
  */
