@@ -320,15 +320,17 @@ was frozen before sampling; the admitted service receipt must bind both facts.
   that binary's provenance.
 - **The dedicated Ryzen 7 9700X is no longer a general GitHub Actions
   executor.** `.github/workflows/zen5-audit.yml` is retired. The only GitHub
-  workflow allowed to select `[self-hosted, Linux, X64, buster-zen5,
-  ryzen-9700x]` is `.github/workflows/9700x-service-dispatch.yml`, which does
-  not check out repository content and invokes only the operator-installed
-  fixed gateway. Its admitted path is the one-pair `validate-buster-v1`
+  workflow admitted to the restricted `buster-9700x-service-dispatch` runner
+  group is `.github/workflows/9700x-service-dispatch.yml`; it selects that group
+  and `[self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`, does not check out
+  repository content, and invokes only the operator-installed fixed gateway.
+  Its admitted path is the one-pair `validate-buster-v1`
   smoke recipe; it is not the former stage-1 diagnostic, an A/A
   qualification, or a performance verdict.
   Keep `BENCH_SERVICE_DISPATCH_ENABLED=false` until the protected-main
   ruleset, protected environment, host authorization, installed identities,
-  clean queue, and independent reviewer are verified as described in
+  clean queue, and administrator reviewer with self-review prevention are
+  verified as described in
   [`tools/bench_service/deploy/GITHUB_ADMISSION.md`](../../tools/bench_service/deploy/GITHUB_ADMISSION.md).
   `native-retirement-performance-v1` remains blocked. Use the local trusted
   capture methods above for ad-hoc profiling. Historical audit notes retain
