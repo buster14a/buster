@@ -17932,6 +17932,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
     u32* active_calls = arena_allocate(builder->temporary_arena, u32, active_capacity);
     u32 active_call_count = 0;
     u32 last_root = UINT32_MAX;
+    // Calls after a comma are lowered with their expression so the left side
+    // cannot be overtaken. Argument separators also use commas; there the
+    // expression walk's source-order choice is one valid order for unsequenced
+    // arguments. Keep the outermost comma's delimiter level until it closes
+    // or its statement ends, so unrelated later expressions prepare normally.
+    u32 comma_sequence_depth = UINT32_MAX;
     // A call in an operand only a taken branch runs is left unprepared here:
     // hoisting runs it unconditionally. The branch's own lowering prepares it
     // inside the block that runs, the way c_ir_lower_conditional_value_step
@@ -17958,6 +17964,19 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // children of an enclosing call, so the prepared-call emitter can
         // temporarily clear preparation while lowering that body.
         c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index);
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            if (comma_sequence_depth == UINT32_MAX)
+            {
+                comma_sequence_depth = lazy.depth;
+            }
+        }
+        else if (comma_sequence_depth != UINT32_MAX &&
+                 (lazy.depth < comma_sequence_depth ||
+                  (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) && lazy.depth == comma_sequence_depth)))
+        {
+            comma_sequence_depth = UINT32_MAX;
+        }
         // Every shape prepared below -- a named, builtin, indexed, member or
         // parenthesized callee -- is the token right before a `(`, and the
         // rejection at the bottom refuses anything else.  That one byte is
@@ -18205,7 +18224,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         {
             continue;
         }
-        if (c_ir_lazy_operand_scan_deferred(lazy))
+        if (c_ir_lazy_operand_scan_deferred(lazy) || comma_sequence_depth != UINT32_MAX)
         {
             if (active_call_count)
             {
