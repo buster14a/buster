@@ -23,6 +23,24 @@ four real miniature host-compiled process stages and readback; the one-row B
 declaration remains synthetic. Neither fixture provides a trusted Clang build,
 full population, oracle receipt or timed invocation.
 
+`retirement_artifact_service.{h,c}` provides the B-side artifact observation
+after each service-owned compiler process and before `row`. It opens each frozen
+read-only, single-link file by a single-component name under a held service
+directory; streams the bytes through a descriptor; parses the actual object or
+executable with the existing independent ELF/COFF/PE/Mach-O reader; and checks
+name, inode, mode, size and timestamps again before using the parsed file and
+code-section digests. `bq_retirement_correctness_row_service` derives
+`code_eligible` from the observed baseline section size and passes the readback
+to the existing gate. Format, machine and object/executable status derive from
+the authenticated row's target and stage (the twelve target IDs follow the
+performance contract's `TARGETS` order); mismatches fail. It also rejects
+supplied artifact/code values and artifact names for untimed controls. The
+producer must derive both output names from the frozen command plan and freeze
+files under the service UID before readback,
+and hold/recheck them through later timed launches. This join does not prove
+that the compiler created the named file or that an independent semantic oracle
+passed; those still require service-owned process/receipt and #509 execution.
+
 ## Trusted inputs
 
 The service must first verify the complete #1018 preparation and independently
@@ -96,3 +114,8 @@ cc -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror -fwrapv \
   tools/bench_service/retirement_correctness_tests.c -o /tmp/retirement-correctness-test
 /tmp/retirement-correctness-test
 ```
+
+The focused fixture now copies its actual compiled executable into frozen
+service files for the link-row readback. It rejects symlink/path substitution,
+predeclared code facts, writable output and mismatched machine identity. The
+other synthetic rows remain structural tests, not a full-corpus pass.
