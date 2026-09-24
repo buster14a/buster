@@ -125,6 +125,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_traffic(UnitTestArgument
     BUSTER_TEST(arguments, machine_quality_region_next(zeros, BUSTER_ARRAY_LENGTH(zeros), UINT32_MAX) == UINT32_MAX);
     return result;
 }
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_gpr_preparation(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineX64GprPreparationAudit audit = machine_x64_test_gpr_preparation();
+    BUSTER_TEST_RAW(arguments, audit.valid,
+                    string_format(arguments->arena, S8("GPR preparation: {u32} tables, {u32} distinct/{u32} replicated rows, {u32} cases, {u32} failures"),
+                                  audit.tables, audit.distinct_rows, audit.replicated_rows, audit.cases, audit.failures));
+    BUSTER_TEST(arguments, audit.tables == 64 && audit.rows == 64u * 256u);
+    BUSTER_TEST(arguments, audit.zero_register_tables && audit.one_register_tables && audit.two_register_tables);
+    BUSTER_TEST(arguments, audit.tables == audit.zero_register_tables + audit.one_register_tables + audit.two_register_tables);
+    BUSTER_TEST(arguments, audit.distinct_rows + audit.replicated_rows == audit.rows && audit.cases > audit.rows);
+    return result;
+}
+
 // Independent goldens correspond to x86_64_movabs_encoding_oracle.s. The
 // bounded producer comparison also checks every byte outside the instruction.
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArguments* arguments)
@@ -7657,6 +7671,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                     string_format(arguments->arena, S8("exact_map.fixed_template_rows == 1466 (rows: {u32})"), exact_map.fixed_template_rows));
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
+    BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);

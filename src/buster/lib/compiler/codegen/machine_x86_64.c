@@ -11388,8 +11388,13 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
         return 0;
 
     MachineX64GprEncodingTable* table = machine_x64_gpr_encoding_tables + machine_x64_gpr_encoding_table_count;
+    // The checked projection consumes zero, one, or two register nibbles.
+    // Higher key bits cannot affect any physical operand, feature, or patch
+    // probe. Ask the metadata authority once per distinct input, not once
+    // per duplicate dense-table row. The full 256-row representation stays.
+    u32 distinct_register_keys = 1u << (4u * register_operand_count);
     bool compact = true;
-    for (u32 register_key = 0; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    for (u32 register_key = 0; register_key < distinct_register_keys; register_key += 1)
     {
         u8 register_values[2] = {(u8)(register_key & 15u), (u8)(register_key >> 4)};
         u32 register_value_index = 0;
@@ -11522,6 +11527,17 @@ BUSTER_GLOBAL_LOCAL u8 machine_x64_exact_prepare_gpr_encoding_table(
             }
         }
         compact &= emitted.byte_count <= 3;
+    }
+    // Replicate only the bytes the old metadata query would write. In
+    // particular, retain each destination's unused padding if an earlier
+    // rejected staging attempt touched this table slot. Publish neither the
+    // table count nor the ready bit until every distinct query/probe passed.
+    for (u32 register_key = distinct_register_keys; register_key < BUSTER_ARRAY_LENGTH(table->encodings); register_key += 1)
+    {
+        MachineX64GprEncoding const* source = table->encodings + (register_key & (distinct_register_keys - 1u));
+        MachineX64GprEncoding* destination = table->encodings + register_key;
+        memcpy(destination->bytes, source->bytes, source->byte_count);
+        destination->byte_count = source->byte_count;
     }
     if (compact)
     {
@@ -14328,6 +14344,143 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_recipe(MachineX64Encoder* encode
     }
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[variant_index], operands, variant.operand_count, force_disp32, false, 0, false, counters);
 }
+
+#if BUSTER_INCLUDE_TESTS
+// Both sides consume the same recipe/token authority. The reference disables
+// prepared consumers in a private entry copy, never in the published map.
+// This deliberately exercises the worker's ordinary operand projection rather
+// than copying the preparer's projection or spelling any architectural bytes.
+MachineX64GprPreparationAudit machine_x64_test_gpr_preparation(void)
+{
+    MachineX64GprPreparationAudit result = {0};
+    bool visited[MACHINE_X64_GPR_ENCODING_TABLE_CAPACITY] = {0};
+    machine_x86_64_exact_prewarm();
+    for (u32 ordinal = 0; ordinal < BUSTER_ARRAY_LENGTH(machine_x64_exact_opcode_map); ordinal += 1)
+    {
+        MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_map + ordinal;
+        for (u32 variant_index = 0; entry->descriptor && variant_index < entry->variant_count; variant_index += 1)
+        {
+            u8 table_plus_one = entry->gpr_encoding_tables[variant_index];
+            if (!table_plus_one || table_plus_one > machine_x64_gpr_encoding_table_count || visited[table_plus_one - 1u])
+            {
+                continue;
+            }
+            visited[table_plus_one - 1u] = true;
+            MachineX64GprEncodingTable const* table = machine_x64_gpr_encoding_tables + (table_plus_one - 1u);
+            MachineX64GprEncodingTable snapshot = *table;
+            u32 distinct_keys = 1u << (4u * table->operand_count);
+            result.tables += 1;
+            result.zero_register_tables += table->operand_count == 0;
+            result.one_register_tables += table->operand_count == 1;
+            result.two_register_tables += table->operand_count == 2;
+            result.distinct_rows += distinct_keys;
+            result.replicated_rows += 256u - distinct_keys;
+            MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, variant_index);
+            MachineX64ExactRecipe descriptor = {
+                .recipe = entry->descriptor->recipe, .key = variant.key,
+                .features = variant.features, .feature_count = variant.feature_count,
+                .operand_count = variant.operand_count, .flags = variant.flags,
+                .operand_slots = {variant.operand_slots[0], variant.operand_slots[1], variant.operand_slots[2], variant.operand_slots[3]},
+                .operand_kinds = {variant.operand_kinds[0], variant.operand_kinds[1], variant.operand_kinds[2], variant.operand_kinds[3]},
+                .operand_widths = {variant.operand_widths[0], variant.operand_widths[1], variant.operand_widths[2], variant.operand_widths[3]},
+                .variant_selector = MACHINE_X64_EXACT_VARIANT_FIXED,
+            };
+            MachineX64PreparedExactOpcode prepared = {
+                .descriptor = &descriptor, .metadata_tokens = {entry->metadata_tokens[variant_index]},
+                .gpr_encoding_tables = {table_plus_one}, .single_gpr_encoding_table = table_plus_one,
+                .variant_count = 1, .variant_valid_mask = 1, .plan_valid = true,
+            };
+            MachineX64PreparedExactOpcode reference = prepared;
+            reference.gpr_encoding_tables[0] = 0;
+            reference.single_gpr_encoding_table = 0;
+            for (u32 key = 0; key < BUSTER_ARRAY_LENGTH(table->encodings); key += 1)
+            {
+                MachineX64GprEncoding const* encoding = table->encodings + key;
+                MachineX64GprEncoding const* canonical = table->encodings + (key & (distinct_keys - 1u));
+                bool row_valid = encoding->byte_count && encoding->byte_count <= sizeof(encoding->bytes) &&
+                                 encoding->byte_count == canonical->byte_count;
+                if (row_valid)
+                {
+                    row_valid = memcmp(encoding->bytes, canonical->bytes, encoding->byte_count) == 0;
+                }
+                if (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_COMPACT)
+                {
+                    row_valid &= encoding->byte_count <= 3 && encoding->bytes[3] == encoding->byte_count;
+                }
+                result.rows += 1;
+                result.failures += !row_valid;
+                u8 registers[4] = {0};
+                if (table->operand_count) registers[table->operand_slots[0]] = (u8)(key & 15u);
+                if (table->operand_count > 1) registers[table->operand_slots[1]] = (u8)(key >> 4);
+                // All dense rows get an independent metadata-byte comparison.
+                // The affected zero/one-register representatives additionally
+                // get patched values, rebased frames, offsets, and tight tails.
+                u32 probe_count = table->operand_count < 2 && key < distinct_keys ? 3u : 1u;
+                for (u32 probe = 0; row_valid && probe < probe_count; probe += 1)
+                {
+                    u32 offset = probe == 2 ? 129u : 0u;
+                    MachineStackPlacement placement = {.stack_slot_offsets = &offset, .valid = true};
+                    MachineInstruction instruction = {0};
+                    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction.operands); slot += 1)
+                    {
+                        instruction.operands[slot] = machine_ref_make(MACHINE_REF_STACK_SLOT, 0);
+                    }
+                    u32 frame_base_offset = probe == 2 && (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_PATCH_DISPLACEMENT) ? 4096u : 0u;
+                    u64 immediate = probe ? 0x5au : 0u;
+                    u32 payload = (table->flags & MACHINE_X64_GPR_ENCODING_TABLE_IMMEDIATE_FROM_PAYLOAD) ? (u32)immediate : 0u;
+                    u32 tail_count = probe_count > 1 ? 5u : 1u;
+                    for (u32 tail = 0; tail < tail_count; tail += 1)
+                    {
+                        u32 available = tail == 0 ? 15u : tail == 1 ? encoding->byte_count :
+                                        tail == 2 ? (u32)encoding->byte_count - 1u : tail == 3 ? 16u : 0u;
+                        u32 start = tail ? 7u : 0u;
+                        u8 bytes[32];
+                        u8 expected[32];
+                        u8 untouched[32];
+                        memset(bytes, 0xa5, sizeof(bytes));
+                        memset(expected, 0xa5, sizeof(expected));
+                        memset(untouched, 0xa5, sizeof(untouched));
+                        MachineX64Encoder actual = {.bytes = bytes, .count = start, .capacity = start + available,
+                                                    .frame_base_offset = frame_base_offset};
+                        MachineX64Encoder oracle = {.bytes = expected, .count = start, .capacity = start + available,
+                                                    .frame_base_offset = frame_base_offset};
+                        MachineX64ExactEmitCounters actual_counts = {0};
+                        MachineX64ExactEmitCounters oracle_counts = {0};
+                        bool actual_valid = machine_x64_emit_exact_recipe(&actual, &prepared, &instruction, &placement, registers,
+                                                                          payload, immediate, true, &actual_counts);
+                        bool oracle_valid = machine_x64_emit_exact_recipe(&oracle, &reference, &instruction, &placement, registers,
+                                                                          payload, immediate, true, &oracle_counts);
+                        bool fits = available >= encoding->byte_count;
+                        bool equal = actual_valid == fits && oracle_valid == fits && actual.overflow == !fits && oracle.overflow == !fits &&
+                                     actual.count == start + (fits ? encoding->byte_count : 0u) && actual.count == oracle.count &&
+                                     actual_counts.attempts == 1 && actual_counts.successes == (u32)fits && actual_counts.fallbacks == (u32)!fits &&
+                                     memcmp(&actual_counts, &oracle_counts, sizeof(actual_counts)) == 0;
+                        if (fits)
+                        {
+                            equal &= memcmp(bytes + start, expected + start, encoding->byte_count) == 0;
+                        }
+                        else
+                        {
+                            equal &= memcmp(bytes, untouched, sizeof(bytes)) == 0 && memcmp(expected, untouched, sizeof(expected)) == 0;
+                        }
+                        equal &= memcmp(bytes, untouched, start) == 0 && memcmp(expected, untouched, start) == 0 &&
+                                 memcmp(bytes + actual.capacity, untouched + actual.capacity, sizeof(bytes) - actual.capacity) == 0 &&
+                                 memcmp(expected + oracle.capacity, untouched + oracle.capacity, sizeof(expected) - oracle.capacity) == 0;
+                        result.cases += 1;
+                        result.failures += !equal;
+                    }
+                }
+            }
+            // Repeated prewarm is read-only, including table padding/flags.
+            machine_x86_64_exact_prewarm();
+            result.failures += memcmp(table, &snapshot, sizeof(snapshot)) != 0;
+        }
+    }
+    result.valid = result.failures == 0 && result.tables == machine_x64_gpr_encoding_table_count &&
+                   result.rows == result.tables * 256u && result.distinct_rows + result.replicated_rows == result.rows;
+    return result;
+}
+#endif
 
 // Allocator copies and rematerializations are not a separate encoding
 // population.  Feed them through the same prepared recipe lane as ordinary
