@@ -1627,6 +1627,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_syntax_diagnostic_equiva
         {S8("int (*fp)(void) = 7;\n"), false, false, S8("cannot convert from 'int' to 'function pointer'")},
         {S8("int old(void); int g(void) { char *z=0; void *v=(int *)0; int *p=0; _Bool b=p; int (*fp)(void)=0; char *a=(0); char *c=1-1; return old() + b + (v!=0) + (fp!=0) + (a==c); }\n"), true},
         {S8("int g(void) { int *p=(int *)5; return p != 0; }\n"), true},
+        {S8("int g(void) { int values[2]; int *p=values; p += 1; p -= 1; return p == values; }\n"), true},
         {S8("typedef union { void *p; char *c; } U __attribute__((transparent_union)); void consume(U); int g(int *p) { consume(p); return 0; }\n"), true, true},
         {S8("int f(int); int g(void) { return sizeof(f()); }\n"), false},
         {S8("int f(void); int g(void) { return sizeof(f(1)); }\n"), false},

@@ -18670,7 +18670,7 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
 
 BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* machine, CParseResult* result,
                                                               CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
-                                                              u32 start, u32 end, String8* message_out)
+                                                              u32 start, u32 end, bool simple_value_conversion, String8* message_out)
 {
     CTypeId source = C_TYPE_ID_INVALID;
     bool incompatible = false;
@@ -18683,7 +18683,9 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_aggregate_value(CTypeParseMachine* m
         bool target_aggregate = target.kind == C_TYPE_STRUCT || target.kind == C_TYPE_UNION;
         bool source_aggregate = from.kind == C_TYPE_STRUCT || from.kind == C_TYPE_UNION;
         incompatible = target_aggregate != source_aggregate && !target.is_transparent_union;
-        String8 conversion = c_parse_assignment_conversion_message(machine, result, preprocess, scope, destination, source, start, end);
+        String8 conversion = simple_value_conversion
+            ? c_parse_assignment_conversion_message(machine, result, preprocess, scope, destination, source, start, end)
+            : c_parse_scalar_conversion_message(preprocess.target, target.kind, from.kind, machine->runtime_expression_constraints);
         if (conversion.length)
         {
             incompatible = true;
@@ -18960,7 +18962,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                                     CTypeId parameter = result->parameters[value.parameter_start + parameter_index].type;
                                     String8 conversion_message = {0};
                                     if (c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, parameter, argument_start, argument_end,
-                                                                             &conversion_message))
+                                                                             true, &conversion_message))
                                     {
                                         c_parse_lowering_constraint_consider(diagnostic,
                                             conversion_message.length ? conversion_message : S8("argument is incompatible with the parameter type"),
@@ -19047,8 +19049,9 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
                 c_parse_constraint_expression_end(result, preprocess, index + 1, end), &source, diagnostic);
         }
         String8 assignment_conversion_message = {0};
+        bool simple_assignment = c_token_is_punctuator(&token, C_PUNCTUATOR_EQUAL);
         if (assignment && typed && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, type_id,
-                index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end), &assignment_conversion_message))
+                index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end), simple_assignment, &assignment_conversion_message))
         {
             c_parse_lowering_constraint_consider(diagnostic,
                 assignment_conversion_message.length ? assignment_conversion_message : S8("assignment value is incompatible with the destination type"),
@@ -19419,7 +19422,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachi
         c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, start, end, &source, &checked);
         String8 conversion_message = {0};
         if (!checked.message.length && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end,
-                                                                            &conversion_message))
+                                                                            true, &conversion_message))
             c_parse_lowering_constraint_consider(&checked,
                 conversion_message.length ? conversion_message : S8("initializer has an incompatible type"), start, end);
     }
@@ -19885,7 +19888,7 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
             String8 conversion_message = {0};
             bool braced = start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE);
             bool incompatible = !shape.message.length && !braced &&
-                c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, declaration.type, start, end, &conversion_message);
+                c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, declaration.type, start, end, true, &conversion_message);
             if (incompatible)
             {
                 c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[start]), C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS,
@@ -20108,7 +20111,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             CParseInitializerDiagnostic shape = c_parse_validate_initializer_shape(machine, result, preprocess, entity->scope, entity->type,
                                                                                   shape_start, shape_end);
             if (entity->type.value < result->type_count && result->types[entity->type.value].kind == C_TYPE_NULLPTR &&
-                c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type, shape_start, shape_end, 0))
+                c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type, shape_start, shape_end, true, 0))
                 c_parse_lowering_constraint_consider(diagnostic, S8("only a value of type nullptr_t may be converted to nullptr_t"), start, shape_end);
             if (!entity->is_static_storage)
             {
@@ -20145,7 +20148,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                 bool braced = initializer_start < initializer_end &&
                               c_token_is_punctuator(&preprocess.tokens[initializer_start], C_PUNCTUATOR_LEFT_BRACE);
                 bool incompatible = !braced && c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
-                                                                                     initializer_start, initializer_end, &conversion_message);
+                                                                                     initializer_start, initializer_end, true, &conversion_message);
                 if (incompatible)
                 {
                     c_parse_lowering_constraint_consider(diagnostic,
@@ -20217,7 +20220,7 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
                             cursor + 1, value_end, &initializer_type, diagnostic);
                         String8 conversion_message = {0};
                         if (c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
-                                                                  cursor + 1, value_end, &conversion_message))
+                                                                  cursor + 1, value_end, true, &conversion_message))
                             c_parse_lowering_constraint_consider(diagnostic,
                                 conversion_message.length ? conversion_message : S8("initializer has an incompatible type"), cursor, value_end);
                     }
