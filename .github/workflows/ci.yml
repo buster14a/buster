@@ -232,25 +232,42 @@ jobs:
         id: workflow_tools
         if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
         # Thirteen suites include native fixture builds and process launches.
-        # Windows ARM64 exceeded 120s with passing tests in run 35733354799.
-        timeout-minutes: ${{ matrix.platform == 'windows' && 5 || 2 }}
+        # Windows ARM64 exceeded 120s in run 35733354799; Intel macOS
+        # exhausted 120s in run 35934837738 despite passing suite summaries.
+        timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
-          "$BUSTER_CI_PYTHON" tools/ci_admission_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/ci-admission.log"
-          "$BUSTER_CI_PYTHON" tools/ci_zig_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-installer-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_zig_cache_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-cache-policy-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_android_sdk_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/android-sdk-installer-test.log"
-          "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
-          "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
-          "$BUSTER_CI_PYTHON" tools/matrix_shard_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-shard.log"
-          "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
-          "$BUSTER_CI_PYTHON" tools/native_producer_profile_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-producer-profile.log"
-          "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_matrix_phases_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-phases-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_native_observation_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-observation-test.log"
+          workflow_tools_started=$SECONDS
+          run_suite() {
+            local suite=$1 log=$2 started=$SECONDS status
+            printf 'SUITE_START path=%s at=%s\n' "$suite" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/$log"; then
+              printf 'SUITE_END path=%s result=success elapsed_seconds=%s at=%s\n' \
+                "$suite" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            else
+              status=$?
+              printf 'SUITE_END path=%s result=failure status=%s elapsed_seconds=%s at=%s\n' \
+                "$suite" "$status" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              return "$status"
+            fi
+          }
+          run_suite tests/ci_tools_test.py workflow-tools.log
+          run_suite tools/ci_admission_test.py ci-admission.log
+          run_suite tools/ci_zig_test.py zig-installer-test.log
+          run_suite tools/ci_zig_cache_test.py zig-cache-policy-test.log
+          run_suite tools/ci_android_sdk_test.py android-sdk-installer-test.log
+          run_suite tools/analyzer_selection_test.py analyzer-selection.log
+          run_suite tools/coverage_manifest_test.py coverage-manifest.log
+          run_suite tools/matrix_shard_test.py matrix-shard.log
+          run_suite tools/differential_ci_policy_test.py differential-ci-policy.log
+          run_suite tools/native_producer_profile_test.py native-producer-profile.log
+          run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
+          run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
+          run_suite tools/ci_native_observation_test.py native-observation-test.log
+          printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
+            "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared budget; see docs/ci-bootstrap-wrapper.md.
