@@ -142,6 +142,9 @@ class RulesTests(unittest.TestCase):
 
     def test_desired_ruleset(self):
         gate.validate_ruleset(self.ruleset())
+        self.assertEqual(self.ruleset()["bypass_actors"], gate.BYPASS_ACTORS)
+        self.assertEqual(gate.QUEUE["max_entries_to_build"], 20)
+        self.assertEqual(self.ruleset()["rules"][-1]["parameters"], gate.QUEUE)
 
     def test_readonly_omission_is_not_an_administrator_audit(self):
         data = live_rules()
@@ -150,13 +153,18 @@ class RulesTests(unittest.TestCase):
             gate.validate_ruleset(data)
         self.assertNotIn("bypass_actors", data)
 
-    def test_visible_bypass_and_malformed_inventory_fail_in_both_modes(self):
-        for inventory in (None, {}, "", False, [{"actor_type": "OrganizationAdmin"}]):
+    def test_unreviewed_bypass_and_malformed_inventory_fail_in_both_modes(self):
+        for inventory in (None, {}, "", False, [],
+                          gate.BYPASS_ACTORS[:1], gate.BYPASS_ACTORS * 2,
+                          [{"actor_type": "OrganizationAdmin"}],
+                          [gate.BYPASS_ACTORS[1], gate.BYPASS_ACTORS[0]],
+                          [{**gate.BYPASS_ACTORS[0], "bypass_mode": "pull_requests_only"},
+                           gate.BYPASS_ACTORS[1]]):
             for read_only in (False, True):
                 with self.subTest(inventory=inventory, read_only=read_only):
                     data = self.ruleset()
                     data["bypass_actors"] = inventory
-                    with self.assertRaisesRegex(gate.AdmissionError, "standing bypasses"):
+                    with self.assertRaisesRegex(gate.AdmissionError, "bypass actors differ"):
                         gate.validate_ruleset(data, read_only_response=read_only)
 
     def test_reader_bypass_authority_is_rejected(self):
@@ -171,11 +179,11 @@ class RulesTests(unittest.TestCase):
         for hidden in (False, True):
             data = live_rules()
             if not hidden:
-                data["bypass_actors"] = []
+                data["bypass_actors"] = gate.BYPASS_ACTORS
             with patch.object(api, "get", return_value=data):
                 report = gate.live_ruleset(api, "buster14a/buster")
                 self.assertEqual(report["bypass_inventory"],
-                                 "hidden" if hidden else "verified-empty")
+                                 "hidden" if hidden else "verified-expected")
         for key, value in (("id", 1), ("id", str(gate.RULESET_ID)),
                            ("source_type", "Organization"), ("source", "other/repo")):
             data = live_rules()
@@ -203,8 +211,8 @@ class RulesTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(gate.AdmissionError):
                 gate.validate_ruleset(data, read_only_response=True)
 
-    def test_each_admission_check_remains_independently_required(self):
-        for context in ("Native retirement merge admission", "Main integration admission"):
+    def test_each_required_check_remains_independently_required(self):
+        for context in (*gate.CHECKS.values(), gate.RETIREMENT_CONTEXT, gate.CONTEXT):
             with self.subTest(context=context):
                 data = self.ruleset()
                 parameters = data["rules"][3]["parameters"]
@@ -215,8 +223,16 @@ class RulesTests(unittest.TestCase):
                 with self.assertRaises(gate.AdmissionError):
                     gate.validate_ruleset(data)
 
-    def test_no_parallel_builds_batches_rewrites_or_headgreen(self):
-        for key, value in (("max_entries_to_build", 2), ("max_entries_to_merge", 2),
+    def test_build_concurrency_is_exactly_twenty(self):
+        for value in (1, 2, 4, 5, 6, 7, 10, 19, 21):
+            data = self.ruleset()
+            data["rules"][-1]["parameters"]["max_entries_to_build"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    gate.AdmissionError, f"max_entries_to_build: expected 20, got {value}"):
+                gate.validate_ruleset(data)
+
+    def test_merge_batches_rewrites_or_headgreen_are_rejected(self):
+        for key, value in (("max_entries_to_merge", 2),
                            ("grouping_strategy", "HEADGREEN"), ("merge_method", "SQUASH"),
                            ("merge_method", "REBASE")):
             data = self.ruleset()
@@ -381,20 +397,25 @@ class OrchestrationTests(unittest.TestCase):
                     gate.run_gate(arguments)
 
     def test_ruleset_change_during_ci_rejects_admission(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            event = Path(temporary) / "event.json"
-            event.write_text("{}")
-            arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
-                                        repo_root=Path(temporary), wait_seconds=0)
-            changed = live_rules()
-            changed["enforcement"] = "disabled"
-            with patch.object(gate, "identity", return_value=candidate()), \
-                    patch.object(gate, "live_identity"), patch.object(gate, "GitHub") as api, \
-                    patch.object(gate, "collect", return_value=([{"run_id": 1}], [])), \
-                    patch.object(gate, "retirement_admission", return_value={"attestation_id": 1}):
-                api.return_value.get.side_effect = [live_rules(), changed]
-                with self.assertRaisesRegex(gate.AdmissionError, "must be active"):
-                    gate.run_gate(arguments)
+        for change, reason in (("enforcement", "must be active"),
+                               ("build concurrency", "max_entries_to_build: expected 20, got 1")):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                event = Path(temporary) / "event.json"
+                event.write_text("{}")
+                arguments = SimpleNamespace(event=event, repository="buster14a/buster", sha="b" * 40,
+                                            repo_root=Path(temporary), wait_seconds=0)
+                changed = live_rules()
+                if change == "enforcement":
+                    changed["enforcement"] = "disabled"
+                else:
+                    changed["rules"][-1]["parameters"]["max_entries_to_build"] = 1
+                with patch.object(gate, "identity", return_value=candidate()), \
+                        patch.object(gate, "live_identity"), patch.object(gate, "GitHub") as api, \
+                        patch.object(gate, "collect", return_value=([{"run_id": 1}], [])), \
+                        patch.object(gate, "retirement_admission", return_value={"attestation_id": 1}):
+                    api.return_value.get.side_effect = [live_rules(), changed]
+                    with self.assertRaisesRegex(gate.AdmissionError, reason):
+                        gate.run_gate(arguments)
 
     def test_workflow_inventory_rejects_removed_group_trigger_and_paths_filter(self):
         with tempfile.TemporaryDirectory() as temporary:

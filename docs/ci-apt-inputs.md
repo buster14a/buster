@@ -40,6 +40,13 @@ window, not to signatures or package authentication. A failed index, missing
 exact package build, dependency conflict or selection mismatch is fatal. There
 is no retry against live repositories and no unauthenticated fallback.
 
+For an HTTP 5xx response from the exact signed snapshot, provisioning retries
+the whole failed apt update or install command twice, after 30 and 60 seconds.
+Individual apt transfers also retain their three configured retries. Every
+whole-command attempt has its own retained argv, exit status and diagnostics.
+Signature errors, missing versions and unrelated failures stop immediately;
+an unavailable snapshot still fails the gate after the bounded retries.
+
 All named packages are reinstalled at their exact versions even when already
 present. Named downgrades are permitted so newer hosted copies cannot defeat
 the lock; removal of unrelated packages is forbidden. The helper verifies the
@@ -79,6 +86,7 @@ Run the offline failure controls with:
 
 ```sh
 python3 tests/ci_apt_test.py -v
+python3 tools/ci_apt_retry_test.py -v
 ```
 
 The path-filtered `Pinned apt input qualification` workflow runs both profiles

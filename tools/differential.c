@@ -5,6 +5,7 @@
 // d_case_lane dynamically admits complete cases into the persistent lane gang;
 // d_cases_run validates and publishes case-owned evidence in registry order.
 // d_workers_self_test checks live admission, unequal cases and arena cleanup.
+// d_reference_* owns explicit reference dialect capabilities and argv policy.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <signal.h>
 
@@ -52,12 +53,16 @@ struct DObservation
 };
 typedef struct DResult DResult;
 struct DResult { DObservation compile; DObservation link; DObservation run; bool linked; bool ran; bool verified; };
+typedef enum DReferenceDialect { D_REFERENCE_GNU, D_REFERENCE_MSVC } DReferenceDialect;
 typedef struct DSettings DSettings;
 struct DSettings
 {
     Arena* arena;
     String8 ide;
     String8 cc;
+    String8 cc_version;
+    String8 cc_target;
+    DReferenceDialect reference_dialect;
     String8 out;
     String8 include;
     SliceString8 library_paths;
@@ -254,6 +259,13 @@ BUSTER_GLOBAL_LOCAL String8 d_reference_compiler(Arena* arena, String8 file)
     bool explicit_path = d_contains(file, S8("/")) || d_contains(file, S8("\\"));
     String8 result = explicit_path ? os_path_absolute(arena, file, true) : executable_resolve_in_path(arena, file);
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_reference_capabilities(DSettings* settings, bool native_windows, bool custom_source)
+{
+    bool valid = settings->reference_dialect == D_REFERENCE_GNU ||
+        (native_windows && custom_source && !settings->sanitize_oracle && settings->reduce_limit == 0);
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL String8 const d_sanitizer_environment_names[] = {
@@ -743,28 +755,81 @@ BUSTER_GLOBAL_LOCAL u32 d_matrix(DConfig* configs, u32 capacity)
 // Source-only flags belong to compilation; sanitizer runtime flags also belong
 // to the final link. Explicit library paths make the Visual Studio developer
 // shell's LIB contract visible to child compilers that do not consume LIB.
-BUSTER_GLOBAL_LOCAL u64 d_caller_arguments(DSettings* settings, DCase test, bool compile, String8* argv)
+BUSTER_GLOBAL_LOCAL u64 d_caller_arguments(DSettings* settings, DCase test, bool compile, bool optimize, String8* argv)
 {
     Arena* arena = settings->arena;
     u64 count = 0;
     argv[count++] = settings->cc;
-    if (compile)
+    if (settings->reference_dialect == D_REFERENCE_MSVC)
     {
-        argv[count++] = S8("-O0");
-        argv[count++] = S8("-fwrapv");
-        argv[count++] = S8("-fno-strict-aliasing");
-        argv[count++] = S8("-funsigned-char");
+        argv[count++] = S8("/nologo");
+        if (compile)
+        {
+            argv[count++] = S8("/std:c11");
+            argv[count++] = S8("/TC");
+            argv[count++] = S8("/J");
+            argv[count++] = optimize ? S8("/O2") : S8("/Od");
+            if (test.include.length) { argv[count++] = string_format(arena, S8("/I{S8}"), test.include); }
+            if (settings->include.length) { argv[count++] = string_format(arena, S8("/I{S8}"), settings->include); }
+        }
     }
-    if (settings->sanitize_oracle)
+    else
     {
-        argv[count++] = S8("-fsanitize=address,undefined");
-        argv[count++] = S8("-fno-sanitize-recover=all");
+        if (compile)
+        {
+            argv[count++] = optimize ? S8("-O2") : S8("-O0");
+            argv[count++] = S8("-fwrapv");
+            argv[count++] = S8("-fno-strict-aliasing");
+            argv[count++] = S8("-funsigned-char");
+        }
+        if (settings->sanitize_oracle)
+        {
+            argv[count++] = S8("-fsanitize=address,undefined");
+            argv[count++] = S8("-fno-sanitize-recover=all");
+        }
+        if (compile && test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
+        if (compile && settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
+        for (u64 index = 0; index < settings->library_paths.length; index += 1)
+        {
+            argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
+        }
     }
-    if (compile && test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
-    if (compile && settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
-    for (u64 index = 0; index < settings->library_paths.length; index += 1)
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u64 d_reference_compile_arguments(DSettings* settings, DCase test, String8 source, String8 object,
+                                                       bool optimize, String8* argv)
+{
+    u64 count = d_caller_arguments(settings, test, true, optimize, argv);
+    argv[count++] = source;
+    argv[count++] = S8("/c");
+    argv[count++] = string_format(settings->arena, S8("/Fo{S8}"), object);
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u64 d_reference_link_arguments(DSettings* settings, DCase test, String8 caller, String8 object,
+                                                    String8 executable, bool compile_caller, String8* argv)
+{
+    u64 count = d_caller_arguments(settings, test, compile_caller, false, argv);
+    if (caller.length) { argv[count++] = caller; }
+    argv[count++] = object;
+    if (settings->reference_dialect == D_REFERENCE_MSVC)
     {
-        argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
+        argv[count++] = string_format(settings->arena, S8("/Fe{S8}"), executable);
+        argv[count++] = S8("/link");
+        for (u64 index = 0; index < settings->library_paths.length; index += 1)
+        {
+            argv[count++] = string_format(settings->arena, S8("/LIBPATH:{S8}"), settings->library_paths.pointer[index]);
+        }
+        argv[count++] = S8("legacy_stdio_definitions.lib");
+    }
+    else
+    {
+#if BUSTER_LINUX
+        argv[count++] = S8("-no-pie");
+#endif
+        argv[count++] = S8("-o");
+        argv[count++] = executable;
     }
     return count;
 }
@@ -779,17 +844,26 @@ BUSTER_GLOBAL_LOCAL String8 d_prepare_caller(DSettings* settings, DCase test, St
     Arena* arena = settings->arena;
     String8 caller_directory = path_join(arena, directory, S8("caller"));
     make_directory_recursive(arena, caller_directory);
-    String8 object = path_join(arena, caller_directory, S8("caller.o"));
+    String8 object = path_join(arena, caller_directory,
+        settings->reference_dialect == D_REFERENCE_MSVC ? S8("caller.obj") : S8("caller.o"));
     os_file_delete(object);
     bool ready = false;
     if (!path_exists(arena, object) && !settings->io_failed)
     {
         String8* argv = arena_allocate(arena, String8, 40 + settings->library_paths.length);
-        u64 count = d_caller_arguments(settings, test, true, argv);
-        argv[count++] = test.host;
-        argv[count++] = S8("-c");
-        argv[count++] = S8("-o");
-        argv[count++] = object;
+        u64 count = 0;
+        if (settings->reference_dialect == D_REFERENCE_MSVC)
+        {
+            count = d_reference_compile_arguments(settings, test, test.host, object, false, argv);
+        }
+        else
+        {
+            count = d_caller_arguments(settings, test, true, false, argv);
+            argv[count++] = test.host;
+            argv[count++] = S8("-c");
+            argv[count++] = S8("-o");
+            argv[count++] = object;
+        }
         DObservation compile = d_observe(settings, (SliceString8){.pointer = argv, .length = count},
             path_join(arena, caller_directory, S8("compile")));
         ready = d_caller_ready(compile, path_exists(arena, object), settings->io_failed);
@@ -813,7 +887,8 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
 {
     Arena* arena = settings->arena;
     make_directory_recursive(arena, directory);
-    String8 object = path_join(arena, directory, S8("subject.o"));
+    String8 object = path_join(arena, directory,
+        settings->reference_dialect == D_REFERENCE_MSVC ? S8("subject.obj") : S8("subject.o"));
 #if BUSTER_WINDOWS
     String8 executable = path_join(arena, directory, S8("program.exe"));
 #else
@@ -823,55 +898,60 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
     os_file_delete(object);
     os_file_delete(executable);
     String8* argv = arena_allocate(arena, String8, 40 + settings->library_paths.length);
+    bool msvc_host = host && settings->reference_dialect == D_REFERENCE_MSVC;
     u64 count = 0;
-    argv[count++] = host ? settings->cc : settings->ide;
-    if (host)
+    if (msvc_host)
     {
-        argv[count++] = optimize ? S8("-O2") : S8("-O0");
-        if (settings->sanitize_oracle)
-        {
-            argv[count++] = S8("-fsanitize=address,undefined");
-            argv[count++] = S8("-fno-sanitize-recover=all");
-        }
+        count = d_reference_compile_arguments(settings, test, test.source, object, optimize, argv);
     }
     else
     {
-        argv[count++] = S8("cc");
-        if (d_optimizations[config.optimization].length) { argv[count++] = d_optimizations[config.optimization]; }
-        String8 allocator = d_allocators[config.allocator];
-        if (string_equal(allocator, S8("alias-none"))) { argv[count++] = S8("-fno-register-allocator"); }
-        else if (!string_equal(allocator, S8("default"))) { argv[count++] = string_format(arena, S8("-fregister-allocator={S8}"), allocator); }
-        if ((test.strict_mir || settings->strict_mir) && d_mir_config(config)) { argv[count++] = S8("-fno-machine-fallback"); }
-        argv[count++] = (config.promotion & 1) ? S8("-fcanonical-local-promotion") : S8("-fno-canonical-local-promotion");
-        argv[count++] = (config.promotion & 2) ? S8("-ftarget-local-promotion") : S8("-fno-target-local-promotion");
-        argv[count++] = (config.promotion & 4) ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa");
-        if (settings->verify) { argv[count++] = S8("-fverify-codegen"); }
-    }
-    argv[count++] = S8("-fwrapv");
-    argv[count++] = S8("-fno-strict-aliasing");
-    argv[count++] = S8("-funsigned-char");
-    if (test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
-    if (settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
-    for (u64 index = 0; index < settings->library_paths.length; index += 1)
-    {
-        argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
-    }
-    argv[count++] = test.source;
-    if (test.host.length && host) { argv[count++] = test.host; }
-    bool object_only = (!host && test.host.length) || test.reject;
-    if (object_only) { argv[count++] = S8("-c"); }
+        argv[count++] = host ? settings->cc : settings->ide;
+        if (host)
+        {
+            argv[count++] = optimize ? S8("-O2") : S8("-O0");
+            if (settings->sanitize_oracle)
+            {
+                argv[count++] = S8("-fsanitize=address,undefined");
+                argv[count++] = S8("-fno-sanitize-recover=all");
+            }
+        }
+        else
+        {
+            argv[count++] = S8("cc");
+            if (d_optimizations[config.optimization].length) { argv[count++] = d_optimizations[config.optimization]; }
+            String8 allocator = d_allocators[config.allocator];
+            if (string_equal(allocator, S8("alias-none"))) { argv[count++] = S8("-fno-register-allocator"); }
+            else if (!string_equal(allocator, S8("default"))) { argv[count++] = string_format(arena, S8("-fregister-allocator={S8}"), allocator); }
+            if ((test.strict_mir || settings->strict_mir) && d_mir_config(config)) { argv[count++] = S8("-fno-machine-fallback"); }
+            argv[count++] = (config.promotion & 1) ? S8("-fcanonical-local-promotion") : S8("-fno-canonical-local-promotion");
+            argv[count++] = (config.promotion & 2) ? S8("-ftarget-local-promotion") : S8("-fno-target-local-promotion");
+            argv[count++] = (config.promotion & 4) ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa");
+            if (settings->verify) { argv[count++] = S8("-fverify-codegen"); }
+        }
+        argv[count++] = S8("-fwrapv");
+        argv[count++] = S8("-fno-strict-aliasing");
+        argv[count++] = S8("-funsigned-char");
+        if (test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
+        if (settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
+        for (u64 index = 0; index < settings->library_paths.length; index += 1)
+        {
+            argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
+        }
+        argv[count++] = test.source;
+        if (test.host.length && host) { argv[count++] = test.host; }
+        bool object_only = (!host && test.host.length) || test.reject;
+        if (object_only) { argv[count++] = S8("-c"); }
 #if BUSTER_LINUX
-    if (host && !object_only) { argv[count++] = S8("-no-pie"); }
+        if (host && !object_only) { argv[count++] = S8("-no-pie"); }
 #endif
 #if BUSTER_WINDOWS
-    // The Windows UCRT does not export the legacy direct printf symbol used by
-    // the headerless observables and generated-source corpus. Keep those exact
-    // sources and link Microsoft's compatibility definitions into both sides
-    // of the differential instead of pruning the cases on this host.
-    if (!object_only && !test.host.length) { argv[count++] = S8("-llegacy_stdio_definitions"); }
+        // Headerless Buster printf needs the UCRT compatibility definitions.
+        if (!object_only && !test.host.length) { argv[count++] = S8("-llegacy_stdio_definitions"); }
 #endif
-    argv[count++] = S8("-o");
-    argv[count++] = object_only ? object : executable;
+        argv[count++] = S8("-o");
+        argv[count++] = object_only ? object : executable;
+    }
     DResult result = {0};
     result.compile = d_observe(settings, (SliceString8){.pointer = argv, .length = count}, path_join(arena, directory, S8("compile")));
     result.verified = host || !settings->verify;
@@ -882,19 +962,34 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
     if (!test.reject && d_success(result.compile))
     {
         bool executable_ready = path_exists(arena, executable);
-        if (!host && test.host.length && path_exists(arena, object))
+        if ((msvc_host || (!host && test.host.length)) && path_exists(arena, object))
         {
-            count = d_caller_arguments(settings, test, !caller_object.length, argv);
-            argv[count++] = caller_object.length ? caller_object : test.host;
-            argv[count++] = object;
-#if BUSTER_LINUX
-            argv[count++] = S8("-no-pie");
-#endif
-            argv[count++] = S8("-o");
-            argv[count++] = executable;
-            result.link = d_observe(settings, (SliceString8){.pointer = argv, .length = count}, path_join(arena, directory, S8("link")));
             result.linked = true;
-            executable_ready = d_success(result.link) && path_exists(arena, executable);
+            String8 link_caller = caller_object;
+            bool caller_ready = true;
+            if (msvc_host && test.host.length)
+            {
+                link_caller = path_join(arena, directory, S8("oracle-caller.obj"));
+                os_file_delete(link_caller);
+                count = d_reference_compile_arguments(settings, test, test.host, link_caller, optimize, argv);
+                result.link = d_observe(settings, (SliceString8){.pointer = argv, .length = count},
+                    path_join(arena, directory, S8("caller-compile")));
+                caller_ready = d_caller_ready(result.link, path_exists(arena, link_caller), settings->io_failed);
+            }
+            if (caller_ready)
+            {
+                if (settings->reference_dialect == D_REFERENCE_MSVC)
+                {
+                    count = d_reference_link_arguments(settings, test, link_caller, object, executable, false, argv);
+                }
+                else
+                {
+                    count = d_reference_link_arguments(settings, test, link_caller.length ? link_caller : test.host,
+                        object, executable, !link_caller.length, argv);
+                }
+                result.link = d_observe(settings, (SliceString8){.pointer = argv, .length = count}, path_join(arena, directory, S8("link")));
+            }
+            executable_ready = caller_ready && d_success(result.link) && path_exists(arena, executable);
         }
         if (executable_ready)
         {
@@ -1977,7 +2072,7 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
     {
         caller_settings.sanitize_oracle = sanitize != 0;
         String8 argv[40];
-        u64 argc = d_caller_arguments(&caller_settings, caller_case, true, argv);
+        u64 argc = d_caller_arguments(&caller_settings, caller_case, true, false, argv);
         String8 expected[] = {S8("compiler with spaces"), S8("-O0"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char")};
         errors += argc != 9 + sanitize * 2;
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1) { errors += !string_equal(argv[index], expected[index]); }
@@ -1990,7 +2085,7 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         errors += !string_equal(argv[argc - 3], S8("-Iglobal include"));
         errors += !string_equal(argv[argc - 2], S8("-Lfirst library"));
         errors += !string_equal(argv[argc - 1], S8("-Lsecond-library"));
-        argc = d_caller_arguments(&caller_settings, caller_case, false, argv);
+        argc = d_caller_arguments(&caller_settings, caller_case, false, false, argv);
         errors += argc != 3 + sanitize * 2 || !string_equal(argv[0], caller_settings.cc);
         if (sanitize)
         {
@@ -1999,6 +2094,50 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         }
         errors += !string_equal(argv[argc - 2], S8("-Lfirst library"));
         errors += !string_equal(argv[argc - 1], S8("-Lsecond-library"));
+    }
+    DSettings msvc_settings = caller_settings;
+    msvc_settings.reference_dialect = D_REFERENCE_MSVC;
+    msvc_settings.sanitize_oracle = false;
+    errors += !d_reference_capabilities(&msvc_settings, true, true);
+    errors += d_reference_capabilities(&msvc_settings, false, true);
+    errors += d_reference_capabilities(&msvc_settings, true, false);
+    msvc_settings.sanitize_oracle = true;
+    errors += d_reference_capabilities(&msvc_settings, true, true);
+    msvc_settings.sanitize_oracle = false;
+    msvc_settings.reduce_limit = 1;
+    errors += d_reference_capabilities(&msvc_settings, true, true);
+    msvc_settings.reduce_limit = 0;
+    {
+        String8 argv[40];
+        String8 compile_expected[] = {S8("compiler with spaces"), S8("/nologo"), S8("/std:c11"), S8("/TC"),
+            S8("/J"), S8("/Od"), S8("/Isource include"), S8("/Iglobal include"), S8("fixed caller.c"),
+            S8("/c"), S8("/Foobject path/caller.obj")};
+        u64 argc = d_reference_compile_arguments(&msvc_settings, caller_case, caller_case.host,
+            S8("object path/caller.obj"), false, argv);
+        errors += argc != BUSTER_ARRAY_LENGTH(compile_expected);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(compile_expected); index += 1)
+        {
+            errors += !string_equal(argv[index], compile_expected[index]);
+        }
+        argc = d_reference_compile_arguments(&msvc_settings, caller_case, S8("subject path/source.c"),
+            S8("object path/subject.obj"), true, argv);
+        errors += argc != BUSTER_ARRAY_LENGTH(compile_expected) || !string_equal(argv[5], S8("/O2")) ||
+            !string_equal(argv[8], S8("subject path/source.c")) ||
+            !string_equal(argv[10], S8("/Foobject path/subject.obj"));
+        String8 link_expected[] = {S8("compiler with spaces"), S8("/nologo"), S8("object path/caller.obj"),
+            S8("object path/subject.obj"), S8("/Feoutput path/program.exe"), S8("/link"),
+            S8("/LIBPATH:first library"), S8("/LIBPATH:second-library"), S8("legacy_stdio_definitions.lib")};
+        argc = d_reference_link_arguments(&msvc_settings, caller_case, S8("object path/caller.obj"),
+            S8("object path/subject.obj"), S8("output path/program.exe"), false, argv);
+        errors += argc != BUSTER_ARRAY_LENGTH(link_expected);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_expected); index += 1)
+        {
+            errors += !string_equal(argv[index], link_expected[index]);
+        }
+        argc = d_reference_link_arguments(&msvc_settings, caller_case, (String8){0},
+            S8("object path/subject.obj"), S8("output path/program.exe"), false, argv);
+        errors += argc != BUSTER_ARRAY_LENGTH(link_expected) - 1 ||
+            !string_equal(argv[2], S8("object path/subject.obj"));
     }
     DObservation caller_compile = {.kind = D_EXIT};
     errors += !d_caller_ready(caller_compile, true, false);
@@ -2122,7 +2261,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         .out = S8("build/differential"), .timeout_seconds = 10, .reduce_limit = 64, .verify = true};
     settings.library_paths.pointer = arena_allocate(arena, String8, arguments.length);
     DCase custom = {.name = S8("custom")};
-    bool list = false, self_test = false, valid = true;
+    bool list = false, self_test = false, valid = true, generated_explicit = false;
     String8 child_mode = {0}, self_test_path = {0}, cancellation_test = {0};
     u32 cancellation_signal = 0;
     u32 generated = 4, seed = 1, requested_jobs = 1, jobs = 1, self_test_index = 0, self_test_count = 0;
@@ -2146,6 +2285,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
             else if (string_equal(arg, S8("--self-test-count"))) { valid &= d_number(value, &self_test_count); }
             else if (string_equal(arg, S8("--ide"))) { settings.ide = value; }
             else if (string_equal(arg, S8("--cc"))) { settings.cc = value; }
+            else if (string_equal(arg, S8("--reference-dialect")))
+            {
+                if (string_equal(value, S8("gnu"))) { settings.reference_dialect = D_REFERENCE_GNU; }
+                else if (string_equal(value, S8("msvc"))) { settings.reference_dialect = D_REFERENCE_MSVC; }
+                else { valid = false; }
+            }
             else if (string_equal(arg, S8("--out"))) { settings.out = value; }
             else if (string_equal(arg, S8("--source"))) { custom.source = value; }
             else if (string_equal(arg, S8("--host"))) { custom.host = value; }
@@ -2155,7 +2300,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                 valid &= value.length != 0;
                 if (value.length) { settings.library_paths.pointer[settings.library_paths.length++] = value; }
             }
-            else if (string_equal(arg, S8("--generated"))) { valid &= d_number(value, &generated) && generated <= 10000; }
+            else if (string_equal(arg, S8("--generated")))
+            {
+                generated_explicit = true;
+                valid &= d_number(value, &generated) && generated <= 10000;
+            }
             else if (string_equal(arg, S8("--jobs"))) { valid &= d_number(value, &requested_jobs); }
             else if (string_equal(arg, S8("--seed"))) { valid &= d_number(value, &seed); }
             else if (string_equal(arg, S8("--minimize"))) { valid &= d_number(value, &settings.reduce_limit) && settings.reduce_limit <= 10000; }
@@ -2165,6 +2314,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     }
     if (child_mode.length) { d_self_test_child(arena, child_mode, self_test_path, self_test_index, self_test_count); valid = false; }
     valid &= !(custom.host.length && custom.reject) && (!(custom.host.length || custom.reject) || custom.source.length);
+    if (settings.reference_dialect == D_REFERENCE_MSVC && !custom.reject) { custom.require_zero = true; }
+    if (settings.reference_dialect == D_REFERENCE_MSVC && generated_explicit && generated != 0)
+    {
+        string_print(S8("error: MSVC reference does not support requested generated cases; use --generated 0 with --source\n"));
+        valid = false;
+    }
+    if (valid && !list && !self_test && !d_reference_capabilities(&settings, BUSTER_WINDOWS, custom.source.length != 0))
+    {
+        string_print(S8("error: MSVC reference requires native Windows, --source, --minimize 0, and no --sanitize-oracle; only reviewed standard-C/Windows-ABI sources are admitted\n"));
+        valid = false;
+    }
     valid &= d_jobs(requested_jobs, os_get_logical_thread_count(), os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &jobs);
     u32 total_cases = custom.source.length ? 1 : (u32)BUSTER_ARRAY_LENGTH(d_builtin_cases) + generated;
     jobs = BUSTER_MIN(jobs, total_cases);
@@ -2175,7 +2335,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     if (cancellation_test.length) { failures = d_cancellation_self_test(arena, cancellation_test); }
     else if (!valid)
     {
-        string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--library-path dir]... [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
+        string_print(S8("usage: test_differential [--ide path] [--cc compiler] [--reference-dialect gnu|msvc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--library-path dir]... [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
         failures = 1;
     }
     else if (self_test) { failures = d_self_test(arena); }
@@ -2192,7 +2352,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         {
             settings.ide = os_path_absolute(arena, settings.ide, true);
             settings.cc = d_reference_compiler(arena, settings.cc);
-            if (!path_exists(arena, settings.ide) || !settings.cc.length || !d_create_output(arena, settings.out))
+            bool compiler_ready = path_exists(arena, settings.ide) && settings.cc.length;
+            if (compiler_ready && settings.reference_dialect == D_REFERENCE_MSVC)
+            {
+                MatrixCoverageCapability capability = {0};
+                compiler_ready = matrix_coverage_probe(arena, matrix_coverage_target_current(), BUILD_COMPILER_CL,
+                    settings.cc, &capability) && d_contains(capability.version, S8("Microsoft (R) C/C++ Optimizing Compiler Version"));
+                if (compiler_ready)
+                {
+                    settings.cc_version = capability.version;
+                    settings.cc_target = capability.target;
+                }
+                else { string_print(S8("error: MSVC reference probe failed (require cl.exe and a native-target Visual Studio developer environment)\n")); }
+            }
+            if (!compiler_ready || !d_create_output(arena, settings.out))
             {
                 string_print(S8("error: compiler missing or output directory already exists (refusing stale evidence)\n"));
                 failures = 1;
@@ -2216,7 +2389,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                     String8 manifest = string_format(arena, S8("version=1\nide={S8}\ncc={S8}\nconfigurations={u32}\nseed={u32}\ngenerated={u32}\nverify={u32}\nsanitize_oracle={u32}\nstrict_mir={u32}\n"),
                         settings.ide, settings.cc, count, seed, custom.source.length ? 0 : generated,
                         (u32)settings.verify, (u32)settings.sanitize_oracle, (u32)settings.strict_mir);
-                    manifest = string_format(arena, S8("{S8}jobs_requested={u32} jobs_effective={u32} cases={u32}\n"), manifest, requested_jobs, jobs, total_cases);
+                    String8 dialect = settings.reference_dialect == D_REFERENCE_MSVC ? S8("msvc") : S8("gnu");
+                    String8 capabilities = settings.reference_dialect == D_REFERENCE_MSVC ?
+                        S8("custom-standard-c-windows-abi;no-sanitizer;no-reduction") : S8("existing-corpus;asan-ubsan-reduction");
+                    manifest = string_format(arena, S8("{S8}reference_dialect={S8}\nreference_version={S8}\nreference_target={S8}\nreference_capabilities={S8}\nenvironment_policy=inherited-with-per-child-sanitizer-report-options\ninclude={S8}\njobs_requested={u32} jobs_effective={u32} cases={u32}\n"),
+                        manifest, dialect, settings.cc_version, settings.cc_target, capabilities, settings.include,
+                        requested_jobs, jobs, total_cases);
                     manifest = string_format(arena, S8("{S8}library_path_count={u64}\n"), manifest, settings.library_paths.length);
                     for (u64 index = 0; index < settings.library_paths.length; index += 1)
                     {

@@ -109,6 +109,9 @@ jobs:
           retention-days: 7
 
   test:
+    # Queue desktop shards wait for cheap workflow lint. Ordinary runs still
+    # execute for diagnostics even when lint fails.
+    needs: lint
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -116,11 +119,11 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    if: ${{ !cancelled() && github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.lint.result == 'success') }}
     name: ${{ matrix.name }} ${{ matrix.shard }}
     timeout-minutes: 300
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         lane: [linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64, windows-aarch64]
         shard: [release, checks]
@@ -232,26 +235,43 @@ jobs:
         id: workflow_tools
         if: ${{ matrix.shard == 'release' && steps.zig_cache_policy.outcome == 'success' }}
         # Thirteen suites include native fixture builds and process launches.
-        # Windows ARM64 exceeded 120s with passing tests in run 35733354799.
-        timeout-minutes: ${{ matrix.platform == 'windows' && 5 || 2 }}
+        # Windows ARM64 exceeded 120s in run 35733354799; Intel macOS
+        # exhausted 120s in run 35934837738 despite passing suite summaries.
+        timeout-minutes: ${{ (matrix.os == 'windows' || matrix.os == 'macos') && 5 || 2 }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/buster-ci"
-          "$BUSTER_CI_PYTHON" tests/ci_tools_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/workflow-tools.log"
-          "$BUSTER_CI_PYTHON" tools/ci_admission_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/ci-admission.log"
-          "$BUSTER_CI_PYTHON" tools/ci_zig_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-installer-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_zig_cache_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig-cache-policy-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_android_sdk_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/android-sdk-installer-test.log"
-          "$BUSTER_CI_PYTHON" tools/analyzer_selection_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/analyzer-selection.log"
-          "$BUSTER_CI_PYTHON" tools/coverage_manifest_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/coverage-manifest.log"
-          "$BUSTER_CI_PYTHON" tools/matrix_shard_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-shard.log"
-          "$BUSTER_CI_PYTHON" tools/differential_ci_policy_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/differential-ci-policy.log"
-          "$BUSTER_CI_PYTHON" tools/native_producer_profile_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-producer-profile.log"
-          "$BUSTER_CI_PYTHON" tools/ci_configure_evidence_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/configure-evidence-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_matrix_phases_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-phases-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_matrix_phases_bridge_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/matrix-phases-bridge-test.log"
-          "$BUSTER_CI_PYTHON" tools/ci_native_observation_test.py -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/native-observation-test.log"
+          workflow_tools_started=$SECONDS
+          run_suite() {
+            local suite=$1 log=$2 started=$SECONDS status
+            printf 'SUITE_START path=%s at=%s\n' "$suite" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            if "$BUSTER_CI_PYTHON" "$suite" -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/$log"; then
+              printf 'SUITE_END path=%s result=success elapsed_seconds=%s at=%s\n' \
+                "$suite" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            else
+              status=$?
+              printf 'SUITE_END path=%s result=failure status=%s elapsed_seconds=%s at=%s\n' \
+                "$suite" "$status" "$((SECONDS - started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              return "$status"
+            fi
+          }
+          run_suite tests/ci_tools_test.py workflow-tools.log
+          run_suite tools/ci_admission_test.py ci-admission.log
+          run_suite tools/ci_zig_test.py zig-installer-test.log
+          run_suite tools/ci_zig_cache_test.py zig-cache-policy-test.log
+          run_suite tools/ci_android_sdk_test.py android-sdk-installer-test.log
+          run_suite tools/analyzer_selection_test.py analyzer-selection.log
+          run_suite tools/coverage_manifest_test.py coverage-manifest.log
+          run_suite tools/matrix_shard_test.py matrix-shard.log
+          run_suite tools/differential_ci_policy_test.py differential-ci-policy.log
+          run_suite tools/native_producer_profile_test.py native-producer-profile.log
+          run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
+          run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
+          run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
+          run_suite tools/ci_native_observation_test.py native-observation-test.log
+          printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
+            "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
       # Wrapper integration starts many real shells. It must not consume the
       # policy suites' shared budget; see docs/ci-bootstrap-wrapper.md.
@@ -713,6 +733,71 @@ jobs:
             cmd /d /s /c $Modes | Tee-Object -FilePath (Join-Path $Logs 'modes.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Native MSVC reference differential
+        id: msvc_reference
+        if: ${{ !cancelled() && steps.modes_windows.outcome == 'success' && matrix.platform == 'windows' }}
+        shell: powershell
+        env:
+          VS_ARCH: ${{ matrix.vs_arch }}
+          VS_COMPONENT: ${{ matrix.vs_component }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPaths = @(& $VsWhere -latest -products * -requires $env:VS_COMPONENT -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $VsPaths.Count -eq 0) { throw 'MSVC toolchain missing' }
+          & (Join-Path $VsPaths[0].Trim() 'Common7\Tools\Launch-VsDevShell.ps1') -Arch $env:VS_ARCH -HostArch amd64 -SkipAutomaticLocation
+          $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
+          $Root = Join-Path $env:RUNNER_TEMP 'buster-ci'
+          $Sources = Join-Path $Root 'msvc source with spaces'
+          $Include = Join-Path $Root 'msvc include with spaces'
+          $Libraries = Join-Path $Root 'msvc library with spaces'
+          New-Item -ItemType Directory -Force -Path $Sources, $Include, $Libraries | Out-Null
+          $Subject = Join-Path $Sources 'subject.c'
+          $Caller = Join-Path $Sources 'caller.c'
+          Copy-Item 'tools/fixtures/msvc_reference_subject.c' $Subject
+          Copy-Item 'tools/fixtures/msvc_reference_caller.c' $Caller
+          $Output = Join-Path $Root 'msvc reference with spaces'
+          $MsvcArgs = @('test_differential', '--ide', 'build/Release/ide.exe', '--cc', 'cl.exe',
+            '--reference-dialect', 'msvc', '--source', $Subject, '--host', $Caller,
+            '--include', $Include, '--library-path', $Libraries, '--minimize', '0',
+            '--strict-mir', '--out', $Output)
+          $ErrorActionPreference = 'Continue'
+          & $Driver @MsvcArgs 2>&1 | Tee-Object -FilePath (Join-Path $Root 'msvc-reference.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $Manifest = Join-Path $Output 'manifest.txt'
+          if (-not (Test-Path -LiteralPath $Manifest)) { throw 'MSVC manifest missing' }
+          $ManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Manifest).Hash
+          & $Driver @MsvcArgs 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0 -or (Get-FileHash -Algorithm SHA256 -LiteralPath $Manifest).Hash -ne $ManifestHash) {
+            throw 'Existing MSVC output was reused or changed'
+          }
+          $Controls = @(
+            @{ Name = 'sanitizer'; Extra = @('--sanitize-oracle'); Compiler = 'cl.exe' },
+            @{ Name = 'reduction'; Extra = @('--minimize', '1'); Compiler = 'cl.exe' },
+            @{ Name = 'missing'; Extra = @(); Compiler = 'buster-missing-cl.exe' }
+          )
+          foreach ($Control in $Controls) {
+            $RejectedOutput = Join-Path $Root "msvc-rejected-$($Control.Name)"
+            $RejectedArgs = @('test_differential', '--ide', 'build/Release/ide.exe',
+              '--cc', $Control.Compiler, '--reference-dialect', 'msvc', '--source', $Subject,
+              '--minimize', '0', '--out', $RejectedOutput) + $Control.Extra
+            & $Driver @RejectedArgs 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0 -or (Test-Path -LiteralPath $RejectedOutput)) {
+              throw "MSVC $($Control.Name) control did not fail before execution"
+            }
+          }
+          $BadOutput = Join-Path $Root 'msvc-rejected-dialect'
+          & $Driver test_differential --ide build/Release/ide.exe --cc cl.exe `
+            --reference-dialect unknown --source $Subject --minimize 0 --out $BadOutput 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0 -or (Test-Path -LiteralPath $BadOutput)) {
+            throw 'Unknown reference dialect was accepted'
+          }
+          $RejectOutput = Join-Path $Root 'msvc-invalid-source'
+          & $Driver test_differential --ide build/Release/ide.exe --cc cl.exe --reference-dialect msvc `
+            --source tools/fixtures/msvc_reference_invalid.c --reject --minimize 0 --out $RejectOutput 2>&1 |
+            Tee-Object -FilePath (Join-Path $Root 'msvc-invalid.log')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Native configuration differential matrix
         id: differential
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'unix' }}
@@ -744,7 +829,7 @@ jobs:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
           # Unix equivalent: BUSTER_CI_REQUIRED: modes differential
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows' || 'modes differential' }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference' || 'modes differential' }}
           BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for the matching native commands and coverage contract.
         # Unix equivalent: run: python3 tools/ci_summary.py
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
@@ -758,12 +843,13 @@ jobs:
         shell: bash
         env:
           BUSTER_CI_NATIVE_PLATFORM: ${{ matrix.platform }}
-          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
+          BUSTER_CI_NATIVE_COMPLETE: ${{ matrix.platform == 'windows' && steps.modes_windows.outcome == 'success' && steps.msvc_reference.outcome == 'success' && '1' || matrix.platform == 'unix' && steps.modes.outcome == 'success' && steps.differential.outcome == 'success' && '1' || '0' }}
         run: if test -n "$BUSTER_CI_OBSERVATION_ROOT"; then python_command="$BUSTER_CI_PYTHON"; if test -z "$python_command" || ! command -v "$python_command" >/dev/null 2>&1; then python_command=python3; fi; mkdir -p "$RUNNER_TEMP/native-ci-upload"; pack_status=0; "$python_command" tools/ci_native_observation.py run --root "$BUSTER_CI_OBSERVATION_ROOT" --phase evidence_packing --sequence 85 -- "$python_command" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload" || pack_status=$?; expect_complete="$BUSTER_CI_NATIVE_COMPLETE"; if test "$pack_status" -ne 0; then expect_complete=0; fi; finalize_status=0; if test "$BUSTER_CI_NATIVE_PLATFORM" = unix; then "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase differential_driver_refresh --required-phase differential_preparation --required-phase differential_producer_check --required-phase differential_corpus --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; else "$python_command" tools/ci_native_observation.py finalize --root "$BUSTER_CI_OBSERVATION_ROOT" --artifact-directory "$RUNNER_TEMP/native-ci-upload" --expect-complete "$expect_complete" --required-phase calibration_cpu --required-phase calibration_filesystem --required-phase bootstrap_driver --required-phase configuration --required-phase producer_build --required-phase mode_payload --required-phase evidence_packing --required-phase upload_handoff || finalize_status=$?; fi; if test "$pack_status" -ne 0; then exit "$pack_status"; fi; exit "$finalize_status"; elif test -n "$BUSTER_CI_PYTHON" && command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; else python3 tools/ci_pack_evidence.py --source "$RUNNER_TEMP/buster-ci" --output "$RUNNER_TEMP/native-ci-upload"; fi
 
       - name: Retain native logs
         if: ${{ !cancelled() && steps.pack.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
+        uses: ./.github/actions/native-artifact-upload
         with:
           name: native-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-ci-upload/
@@ -779,7 +865,7 @@ jobs:
           BUSTER_CI_STEPS: ${{ toJSON(steps) }}
           BUSTER_CI_RUNNER: ${{ matrix.runner }}
           # Unix equivalent: BUSTER_CI_REQUIRED: modes differential pack
-          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows pack' || 'modes differential pack' }}
+          BUSTER_CI_REQUIRED: ${{ matrix.platform == 'windows' && 'modes_windows msvc_reference pack' || 'modes differential pack' }}
           BUSTER_CI_REPRO: See docs/windows-ci-coverage.md and docs/ci-suite-partition.md for native evidence packaging and fallback.
         # Unix equivalent: run: python3 tools/ci_summary.py
         run: if command -v "$BUSTER_CI_PYTHON" >/dev/null 2>&1; then "$BUSTER_CI_PYTHON" tools/ci_summary.py; else python3 tools/ci_summary.py; fi
@@ -803,7 +889,7 @@ jobs:
     name: ${{ matrix.name }}
     timeout-minutes: 300
     strategy:
-      fail-fast: false
+      fail-fast: ${{ github.event_name == 'merge_group' }}
       matrix:
         include:
           - name: Android x86-64
@@ -946,10 +1032,14 @@ jobs:
 
       - name: Retain mobile logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: mobile
+          label_title: Mobile
           name: mobile-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
+          compression-level: 6
           if-no-files-found: ignore
           retention-days: 7
 
@@ -972,9 +1062,22 @@ jobs:
           deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-updates main universe
           deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-security main universe
           SOURCES
-          apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/uefi-sources.list" -o 'Dir::Etc::sourceparts=-' -o 'APT::Get::List-Cleanup=0')
-          sudo apt-get "${apt_options[@]}" update
-          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
+          # Retry transient snapshot transport failures without changing the signed source or package pins.
+          apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/uefi-sources.list" -o 'Dir::Etc::sourceparts=-' \
+            -o 'APT::Get::List-Cleanup=0' -o 'APT::Update::Error-Mode=any' -o 'Acquire::Retries=3')
+          retry_snapshot_apt() {
+            local attempt=1
+            while ! sudo apt-get "${apt_options[@]}" "$@"; do
+              if (( attempt == 3 )); then
+                echo '::error::Pinned Ubuntu snapshot unavailable after three apt attempts.'
+                return 1
+              fi
+              sleep "$(( 30 * attempt ))"
+              (( attempt += 1 ))
+            done
+          }
+          retry_snapshot_apt update
+          retry_snapshot_apt install -y --no-install-recommends \
             qemu-system-x86=1:8.2.2+ds-0ubuntu1.18 qemu-system-arm=1:8.2.2+ds-0ubuntu1.18 \
             qemu-system-common=1:8.2.2+ds-0ubuntu1.18 qemu-system-data=1:8.2.2+ds-0ubuntu1.18 \
             ovmf=2024.02-2ubuntu0.9 qemu-efi-aarch64=2024.02-2ubuntu0.9

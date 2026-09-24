@@ -792,6 +792,7 @@ struct CTypeParseFrame
     bool has_function_suffix;
     bool original_type_valid;
     bool is_bit_field;
+    bool tag_only_declaration;
     bool scanning_inner_parameters;
     bool has_inner_parameters;
     bool inner_variadic;

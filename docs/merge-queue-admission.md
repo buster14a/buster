@@ -5,10 +5,17 @@
 Adapter baseline: `f5ce6cdc10e0e9f49b8698a82944daf4688c0f2e` (after #927 and #933).
 On 2026-09-22, after #945 landed, ruleset `22537199` was updated and read back:
 eight required GitHub Actions checks, non-strict branch freshness, no bypass,
-and a single-build/single-merge ALLGREEN queue using merge commits. The saved
-response passes `check-ruleset` at main `6929d847fbab0014284f698cd235ddb570d60e9d`.
-`.github/main-merge-queue.ruleset.json` describes that configuration; verify live
-settings before relying on it. The checker has no write API.
+and an initial build limit of one with a merge limit of one, ALLGREEN, and
+merge commits. The saved response passed `check-ruleset` at main
+`6929d847fbab0014284f698cd235ddb570d60e9d`. The checked-in ruleset now
+describes the desired build limit of 20; verify live settings before relying
+on it. The checker has no write API.
+
+On 2026-09-24, the administrator intentionally added Repository admin (role 5)
+and `davidgmbb` (user 39247043) as `always` bypass actors. The repository
+contract now expects exactly those two. This records the live setting; a bypass
+does not satisfy or replace any of the eight required checks or admission
+receipts for a normal queued merge.
 
 The trusted retirement gate and queue collector have landed. The adapter admits
 one synthetic merge commit only when its first parent is current main and its
@@ -20,18 +27,34 @@ fixtures do not establish GitHub's live synthetic-commit shape or queue behavior
 ## One admission owner, no branch-freshness requirement
 
 GitHub's native merge queue owns order, synthetic heads and rebuilding. Configure
-`max_entries_to_build: 1`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`max_entries_to_build: 20`, `max_entries_to_merge: 1`, `min_entries_to_merge: 1`,
+`min_entries_to_merge_wait_minutes: 0`, `check_response_timeout_minutes: 360`,
 `grouping_strategy: ALLGREEN`, and `merge_method: MERGE`. Retain
 `strict_required_status_checks_policy: false`. A clean feature branch does not
 need to be manually updated merely because main advanced. The queue, not the
 feature author, constructs and validates the combined candidate.
 
-Build concurrency and merge batch size are distinct controls; both are one.
+Build concurrency permits up to 20 queued candidates to run speculative
+combined-head validation concurrently; it does not authorize 20 merges. The
+merge limit of one serializes admission and merging, and GitHub rebuilds stale
+groups after main advances. `ALLGREEN` requires every queued group to satisfy
+its required checks. `MERGE` retains merge commits. Required checks still bind
+the exact group and the trusted retirement gate still owns sensitive trees.
 The 360-minute queue timeout exceeds the admission workflow's 310-minute job
 limit and its five-hour bounded wait. A timeout is a failure, not permission to
-merge. Cancellation only coalesces the same PR or merge-group ref; main-push
-policy runs use unique run-ID groups. Workflow concurrency is not a FIFO queue
-and is never used as a replacement for GitHub queue enforcement.
+merge. Workflow concurrency cancellation only coalesces the same PR or
+merge-group ref; main-push policy runs use unique run-ID groups. Separately, the
+trusted default-branch CI lifecycle controller starts from the in-progress
+Buster CI merge-group run. It watches that run's jobs and the live ruleset's
+required GitHub Actions checks across workflows. A completed non-success
+required check or Buster CI job cancels active Actions runs for that exact
+merge-group head. Optional check failures do not invalidate the group.
+Candidate workflows retain read-only authority; the
+write-capable watcher executes only the default-branch controller and never
+checks out candidate bytes or artifacts. Workflow concurrency is not a FIFO
+queue and is never used as a replacement for GitHub queue enforcement.
+The self-hosted 9700X benchmark service is manual `workflow_dispatch` work,
+not a `merge_group` workflow, so the queue does not schedule it.
 
 There is no second retirement publisher. The existing protected
 `native-retirement-integration.yml` writer remains the sole authority allowed
@@ -116,8 +139,9 @@ truncation and ambiguous results fail closed.
 Immediately before admission, the collector repeats the six-result read and
 trusted-publication verification, requires the same evidence, rechecks live main and the queue ref, and validates
 the active ruleset again. The ruleset validator retains the six original checks,
-preserves independent retirement admission, adds the exact-group gate, rejects visible bypasses/strict branch updates, and
-requires the single-build/single-merge policy. The success artifact records each
+preserves independent retirement admission, adds the exact-group gate, rejects
+visible bypass inventories other than the two reviewed actors and strict branch updates, and
+requires the exact 20-build/one-merge policy. The success artifact records each
 required workflow's run ID, run attempt and job ID. These are read-only checks;
 GitHub's enforced queue still owns the final atomic admission/rebuild decision.
 
@@ -127,15 +151,15 @@ GitHub returns `bypass_actors` only to callers with write access to the ruleset.
 The Actions read-only token normally receives no such property. The live
 collector validates the ruleset identity, enforcement, scope, required checks,
 queue settings and every other policy field it can read. An explicitly returned
-bypass list must be empty; an explicitly returned caller bypass capability must
+bypass list must equal the two reviewed actors; an explicitly returned caller bypass capability must
 be `never`. Missing bypass data is recorded as `hidden` in both ruleset reads
 in the admission artifact and explained in the log. It is not reported as a
-verified empty list.
+verified actor inventory.
 
-No-standing-bypass configuration is an administrator-audited deployment
+The exact two-actor bypass configuration is an administrator-audited deployment
 invariant, not something the read-only workflow can independently prove.
 `check-ruleset` remains strict: a saved administrator response must explicitly
-contain `bypass_actors: []`. Audit that response at activation, after every
+contain both actors with `always` mode and no others. Audit that response at activation, after every
 ruleset change, and after any emergency recovery. Do not give the admission
 workflow ruleset-write credentials to expose this field.
 
@@ -151,7 +175,26 @@ main/group invalidates the current attempt. GitHub must build a fresh group and
 rerun required workflows. Content conflicts use #869's exact-path explanation;
 the queue removes/blocks the PR, never chooses `ours`, `theirs` or a union merge.
 
-## Activation and acceptance
+## Build-limit rollout and acceptance
+
+### Changing the live build limit
+
+The merge-group workflow runs admission code from its trusted base, so a PR
+changing the repository queue contract must first pass the policy already on
+`main`. If live build concurrency has been raised ahead of the repository
+contract, temporarily restore the live `Build concurrency` field in ruleset
+`22537199` to `1` and read back all queue parameters. Merge the policy PR
+through the existing queue with all required checks; do not bypass admission.
+Resolve the exact resulting `main` commit before changing the live setting to
+`20`. Read the ruleset back and observe `Main integration admission` accept a
+new exact merge group. Between the PR merge and the live edit, the trusted
+policy expects `20` while GitHub still reports `1`, so new groups fail closed.
+Only the build limit changes; leave the merge limit, grouping strategy, merge
+method, timeout, checks, non-strict freshness and bypass settings untouched.
+The read-only collector cannot update rulesets; a repository administrator
+changes **Settings → Rulesets → main → Require merge queue → Build concurrency**.
+
+### Remaining acceptance
 
 Activation is complete. Retain evidence for the remaining live exercises below;
 do not close #867 based on settings or offline fixtures alone:
@@ -195,8 +238,9 @@ python3 -B tools/merge_queue_admission.py check-ruleset /tmp/live-main-ruleset.j
 
 ## Emergency policy
 
-There is no standing bypass. A repair PR
-with genuine passing checks is preferred. Any emergency settings change needs
+There are two reviewed standing bypass actors. A repair PR with genuine
+passing checks is preferred; using bypass does not make a failed or missing
+check successful. Any emergency settings change needs
 explicit administrator authorization, a recorded reason and exact before/after
 settings, followed by restoration and read-back verification. Never mint a green
 check for cancelled, missing, failed or stale validation. Do not run a post-merge
