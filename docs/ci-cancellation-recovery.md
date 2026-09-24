@@ -25,10 +25,12 @@ x86-64 job marked `failure`; investigate that failure separately.
 
 ## Automatic recovery
 
-`.github/workflows/ci-recovery.yml` observes completed `Buster CI` runs. It
+`.github/workflows/ci-recovery.yml` observes `Buster CI` lifecycle events. It
 becomes active only after landing on the default branch, with the existing
-`GH_ACTIONS_CI_ENABLED=true` setting. It does not modify compiler/build policy,
-runner labels, coverage, cancellation groups, or merge requirements.
+`GH_ACTIONS_CI_ENABLED=true` setting. Completed ordinary PR runs retain the
+bounded recovery behavior below. An in-progress merge-group run instead starts
+the trusted fail-fast watcher described in the next section. Neither path
+modifies compiler/build policy, runner labels, coverage, or merge requirements.
 
 The default-branch helper `.github/scripts/recover-ci.py` requests at most one
 automatic retry (attempt 2), only when all these conditions hold:
@@ -62,11 +64,34 @@ for `workflow_run`, that is the trusted default-branch revision. It never
 checks out the triggering branch or reads its artifacts. Only that job has
 `actions: write`; the separate offline test job has `contents: read`.
 
+## Merge-queue fail-fast
+
+For a `merge_group` Buster CI run, the same default-branch controller starts one
+bounded watcher with job-scoped `actions: write`. It polls the exact triggering
+run and its latest job conclusions without checking out or executing candidate
+bytes. The first completed Buster CI job whose conclusion is not `success`
+invalidates that merge group. The watcher then requests cancellation of every
+active Actions run with the same merge-group head SHA and `merge_group` event.
+Completed or different-head runs are never targeted.
+
+Buster CI also enables native matrix `fail-fast` only for `merge_group`. That
+cancels sibling cells inside the failing desktop, native, or mobile matrix while
+the trusted watcher cancels the other exact-head workflows. Pull-request,
+main-push and manual matrices remain exhaustive for diagnostics.
+
+The watcher is intentionally not implemented inside candidate-controlled
+`ci.yml`: merge-group candidate code retains read-only permissions. The
+write-capable controller executes `github.sha` from the default branch and
+uses only GitHub event/API metadata. Race responses indicating a run already
+finished are treated as a no-op; other API errors remain visible failures of the
+controller rather than authorization to continue or fabricate success.
+
 ## Validation and escalation
 
 Run `python3 tests/ci_recovery_test.py` to exercise successful partial recovery,
 real failures, aggregate failures, exhausted retries, superseded/closed PRs,
-opt-out, competing runs, pagination and changes during the decision. These
+opt-out, competing runs, pagination, merge-group exact-head cancellation and
+changes during either decision. These
 offline tests also run for PR changes to the recovery files. Existing workflow
 lint covers the added YAML. No local compiler build is needed for this change.
 
