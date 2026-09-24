@@ -69,7 +69,7 @@ jobs:
                  > "evidence/unity-$name-$form.stdout" 2> "evidence/unity-$name-$form.stderr"
             done
             cmp "evidence/unity-baseline-$form.o" "evidence/unity-candidate-$form.o"
-            cmp "evidence/unity-baseline-$form.stderr" "evidence/unity-candidate-$form.stderr"
+            cmp <(grep -v "^+ " "evidence/unity-baseline-$form.stderr") <(grep -v "^+ " "evidence/unity-candidate-$form.stderr")
           done
           sha256sum evidence/unity-*.o
           mkdir -p evidence/diagnostics
