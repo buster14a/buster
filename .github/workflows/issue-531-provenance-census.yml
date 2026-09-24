@@ -1,0 +1,103 @@
+name: Issue 531 provenance census
+
+# Deterministic dependency-provenance census for #531 on a standard hosted
+# runner: which function bodies publish shared canonical entities and which
+# consume entities published by earlier bodies. Counts only; no timing is
+# recorded. Ordinary PRs never run it: it triggers only for the owning branch.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/issue-531-provenance-census.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-531-census-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  census:
+    if: >-
+      ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' &&
+          (github.event_name == 'workflow_dispatch' || github.head_ref == 'codex/531-provenance-census-20260924') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      EVIDENCE: docs/performance-audits/evidence/2026-09-24T125648Z
+      HISTORY: docs/performance-audits/evidence/2026-09-23T145513Z
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Record exact revision and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/revision.txt
+          git rev-parse 'HEAD^{tree}' > evidence/tree.txt
+          git rev-parse HEAD:src/buster/lib/compiler/frontend/c/c_gen.c > evidence/c_gen_blob.txt
+          { clang --version; nproc; uname -a; } > evidence/toolchain.txt
+      - name: Prepare the pinned SQLite amalgamation outside the census
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          curl --fail --location https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip -o external/sqlite-amalgamation.zip
+          printf '%s  %s\n' 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d external/sqlite-amalgamation.zip | sha256sum --check
+          unzip -q external/sqlite-amalgamation.zip -d external
+          printf '%s  %s\n' b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189 external/sqlite-amalgamation-3530400/sqlite3.c | sha256sum --check
+      - name: Build the baseline compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-tools
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable build.c -o .ci-tools/build
+          .ci-tools/build generate --ci --cc clang --linker DEFAULT
+          .ci-tools/build build --config Release -t ide
+          cp build/Release/ide evidence/ide-baseline
+      - name: Build the probe compiler from the retained patch, then restore the source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply "$EVIDENCE/provenance-probe.patch"
+          .ci-tools/build build --config Release -t ide
+          cp build/Release/ide evidence/ide-census
+          git checkout -- src/buster/lib/compiler/frontend/c/c_gen.c
+          test -z "$(git status --porcelain -- src)"
+          sha256sum evidence/ide-baseline evidence/ide-census > evidence/compilers.sha256
+      - name: Run the census over the frozen inputs
+        id: census
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$HISTORY/gen_populations.py" evidence/populations
+          python3 "$EVIDENCE/run_census.py" --baseline "$PWD/evidence/ide-baseline" --census "$PWD/evidence/ide-census" \
+            --repo "$PWD" --out evidence/census --sqlite "$PWD/external/sqlite-amalgamation-3530400" \
+            --populations "$PWD/evidence/populations" 2>&1 | tee evidence/census-run.log
+      - name: Analyze
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for case in stage1 cfuncs operations tiny many_small few_large sqlite3; do
+            if [ ! -s "evidence/census/$case.tsv" ]; then
+              echo "# $case: no rows"
+            elif [ "$case" = stage1 ]; then
+              python3 "$EVIDENCE/analyze.py" "evidence/census/$case.tsv" --history "$HISTORY/census/stage1.tsv"
+            else
+              python3 "$EVIDENCE/analyze.py" "evidence/census/$case.tsv"
+            fi
+            echo
+          done 2>&1 | tee evidence/analysis.txt
+          rm -f evidence/census/*.o evidence/ide-baseline evidence/ide-census
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: issue-531-provenance-census-${{ github.event.pull_request.head.sha || github.sha }}
+          path: evidence
+          retention-days: 14
+          if-no-files-found: error
