@@ -299,6 +299,42 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const
     if (record >= 0) close(record);
     BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
                   preparation_digest, record_digest, &imported) == BQ_OK);
+    BqRetirementHeldBinaries held = {.descriptors = {-1, -1}};
+    BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &held) == BQ_OK &&
+                  held.descriptors[0] >= 0 && held.descriptors[1] >= 0 &&
+                  !strcmp(held.verified.binary_sha256[0], imported.binary_sha256[0]) &&
+                  (fcntl(held.descriptors[0], F_GETFD) & FD_CLOEXEC) != 0);
+    struct stat pinned_info = {0}, after_swap = {0};
+    BQ_PREP_CHECK(held.descriptors[0] >= 0 && fstat(held.descriptors[0], &pinned_info) == 0 &&
+                  directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  renameat(directory, "base-ide", attempt, "held-base-ide") == 0 &&
+                  bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
+                  fchmod(directory, 0500) == 0);
+    char original[12] = {0};
+    BQ_PREP_CHECK(held.descriptors[0] >= 0 && fstat(held.descriptors[0], &after_swap) == 0 &&
+                  pinned_info.st_dev == after_swap.st_dev && pinned_info.st_ino == after_swap.st_ino &&
+                  pread(held.descriptors[0], original, 11, 0) == 11 && !strcmp(original, "compiler A\n"));
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    BqRetirementHeldBinaries refused = {.descriptors = {-1, -1}};
+    BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &refused) == BQ_CORRUPT &&
+                  refused.descriptors[0] == -1 && refused.descriptors[1] == -1 &&
+                  !refused.verified.preparation_sha256[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  unlinkat(directory, "base-ide", 0) == 0 &&
+                  renameat(attempt, "held-base-ide", directory, "base-ide") == 0 &&
+                  fchmod(directory, 0500) == 0);
+    int old_descriptor = held.descriptors[0];
+    bq_retirement_binaries_release(&held);
+    BQ_PREP_CHECK(held.descriptors[0] == -1 && held.descriptors[1] == -1 &&
+                  !held.verified.preparation_sha256[0] &&
+                  fcntl(old_descriptor, F_GETFD) == -1 && errno == EBADF);
+    BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &held) == BQ_OK);
+    bq_retirement_binaries_release(&held);
     if (binary >= 0) close(binary);
     if (directory >= 0) close(directory);
 }

@@ -154,6 +154,18 @@ boundary; they are not real compiler builds.
 The 512 MiB file ceiling is a fail-closed interim bound; final capacity must
 be checked against the actual reviewed compiler outputs before admission.
 
+`bq_retirement_binaries_acquire` now opens both exact files as held,
+close-on-exec descriptors after importing the durable binary record. It
+recomputes their content and inode identities against that record, repeats
+the source/binary readback, and returns the descriptors only if both still
+match. A pathname swap after acquisition cannot change the file held by the
+service. The launcher must execute these descriptors rather than reopen the
+names, retain them until all dependent launches finish, and call
+`bq_retirement_binaries_release` on every exit path. The private fixture
+proves a byte-identical replacement makes a new acquisition fail while a
+previously held descriptor still reads the original inode; it does not
+execute a compiler or assert Clang provenance.
+
 That record intentionally has **no toolchain, command, environment, cwd or
 build-log attestation**. The integration owner must still bind the complete
 reviewed toolchain/SDK/resource/sysroot/dependency closure and exact successful
