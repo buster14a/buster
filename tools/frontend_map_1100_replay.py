@@ -12,6 +12,7 @@ root = Path(sys.argv[1]).resolve()
 evidence = Path(sys.argv[2]).resolve()
 variant = sys.argv[3]
 compiler = Path(sys.argv[4]).resolve()
+frozen = Path(sys.argv[5]).resolve()
 evidence.mkdir(parents=True, exist_ok=True)
 inputs = evidence / 'inputs'
 inputs.mkdir(exist_ok=True)
@@ -40,7 +41,7 @@ cases = []
 for name in sources:
     flags = ['-std=c23'] if name.startswith('alias') else ['-std=c17']
     cases.append((name, [*flags, '-g', '-c', str(inputs / (name + '.c'))], name not in ('malformed', 'error')))
-cases.append(('own_source', ['-g', '-Isrc', '-Ibuild/generated', '-DBUSTER_UNITY_BUILD=1', '-DBUSTER_INCLUDE_TESTS=0', '-c', 'src/buster/apps/ide/ide.c'], True))
+cases.append(('own_source', ['-g', '-I' + str(frozen / 'src'), '-I' + str(frozen / 'build/generated'), '-DBUSTER_UNITY_BUILD=1', '-DBUSTER_INCLUDE_TESTS=0', '-c', str(frozen / 'src/buster/apps/ide/ide.c')], True))
 records = []
 for name, args, success in cases:
     output = evidence / 'same-output.o'
