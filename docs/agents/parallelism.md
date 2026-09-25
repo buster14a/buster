@@ -85,6 +85,16 @@ are shared within a TU. Serial table prewarm does not remove these dependencies.
 `compiler_parallel_prewarm()` is the complete native-C prewarm entry for a
 caller launching an external gang; idle persistent workers still count as live.
 
+Arena reuse pools are per thread (`arena_pool_head` in `arena.c`): a destroyed
+arena parks on the destroying thread and only that thread's `arena_create`
+can take it back. A pooled arena that one lane fills and another thread
+releases must therefore be created by the releasing thread. The TU cohort's
+coordinator creates each slot's arena before `lane_run` and destroys it after
+ordered publication, so at most one TU arena per slot circulates. Creating it
+on the lane reserved a fresh arena on every worker lane in every cohort and
+parked each one on the coordinator, up to `ARENA_POOL_LIMIT`; no worker ever
+reused one.
+
 Lane startup allocates worker records and handle storage before acquiring the
 startup gate. Allocation failures may enter the fatal diagnostic path, so the
 gate protects thread publication and cancellation without enclosing allocation.

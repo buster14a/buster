@@ -22,9 +22,11 @@
 // compiler_driver_publish_c_diagnostics preserves producer/stage ordering.
 // Optional fallback_records retain source/function attribution across TU arena
 // destruction; no per-function recording is allocated in ordinary compilation.
-// compiler_driver_unit_lane owns one private TU arena/collector per stable
-// input slot. Opt-in native C link batches publish in input order only after
-// the gang returns; assembly and archive selection remain serial boundaries.
+// compiler_driver_unit_lane fills one private TU arena/collector per stable
+// input slot; the coordinator creates and destroys those arenas, so the
+// per-thread arena pool circulates them. Opt-in native C link batches publish
+// in input order only after the gang returns; assembly and archive selection
+// remain serial boundaries.
 // archive.c owns indexed archive extraction and its pass-ordered worklist.
 
 #include <buster/lib/compiler/driver/driver.h>
@@ -4088,11 +4090,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType compiler_driver_unit_lane(void* argument)
     LaneRange range = lane_range(batch->count);
     for (u64 index = range.start; index < range.end; index += 1)
     {
+        // The coordinator created this slot's arena and will destroy it; the
+        // lane only fills it.
         CompilerDriverUnit* unit = &batch->units[index];
-        unit->arena = arena_create((ArenaCreation){
-            .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
-            .flags = {.pool_reuse = 1},
-        });
         if (unit->arena)
         {
             unit->warnings = (CompilerDriverDiagnosticCollector){
@@ -4448,6 +4448,21 @@ CompilerDriverResult compiler_driver_execute_invocation(Arena* arena, CompilerDr
                 }
                 batch_end = batch_first + unit_task_count;
                 memset(unit_tasks, 0, sizeof(*unit_tasks) * unit_task_count);
+                // Arena pools are per thread (arena.c), and this thread destroys
+                // every slot after ordered publication, so it creates them too.
+                // A lane-created arena would park here where no worker can take
+                // it back: every cohort would reserve and fault fresh worker
+                // arenas while this pool filled toward ARENA_POOL_LIMIT
+                // committed TU arenas across cohorts and invocations. Created
+                // here, at most one arena per slot circulates. A failed
+                // creation stays a null slot and is diagnosed in input order.
+                for (u32 index = 0; index < unit_task_count; index += 1)
+                {
+                    unit_tasks[index].arena = arena_create((ArenaCreation){
+                        .reserved_size = COMPILER_DRIVER_C_TRANSLATION_UNIT_RESERVED_SIZE,
+                        .flags = {.pool_reuse = 1},
+                    });
+                }
                 if (unit_task_count > 1 && !units_prewarmed)
                 {
                     compiler_parallel_prewarm();
