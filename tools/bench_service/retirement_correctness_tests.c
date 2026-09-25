@@ -15,6 +15,7 @@
 #include "../../src/buster/lib/hash.c"
 #include "retirement_correctness.c"
 #include "retirement_artifact_service.c"
+#include "retirement_correctness_oracle.c"
 
 #define BQ_TEST_ROWS 6u
 #define BQ_TEST_CHECKS (BQ_RETIREMENT_CHECK_COUNT - 1u)
@@ -555,13 +556,15 @@ static void test_frozen_artifact_readback(char const* executable)
             "--retirement-oracle-output", NULL};
         char* const changed_runtime[] = {"/scratch/other",
             "--retirement-oracle-output", NULL};
-        char* const environment[] = {"HOME=/nonexistent", "LC_ALL=C", NULL};
-        char* const unordered_environment[] = {"LC_ALL=C", "HOME=/nonexistent", NULL};
+        char* const environment[] = {"ASAN_OPTIONS=detect_leaks=0",
+            "HOME=/nonexistent", "LC_ALL=C", NULL};
+        char* const unordered_environment[] = {"LC_ALL=C",
+            "HOME=/nonexistent", "ASAN_OPTIONS=detect_leaks=0", NULL};
         BqRetirementRowCommands commands[2] = {
-            {{base_compiler, environment, root, 3, 2},
-             {runtime_arguments, environment, root, 2, 2}},
-            {{candidate_compiler, environment, root, 3, 2},
-             {runtime_arguments, environment, root, 2, 2}}
+            {{base_compiler, environment, root, 3, 3},
+             {runtime_arguments, environment, root, 2, 3}},
+            {{candidate_compiler, environment, root, 3, 3},
+             {runtime_arguments, environment, root, 2, 3}}
         };
         BqRetirementRuntimeStart unlaunched = {0};
         BqRetirementArtifactLocation no_launch = {directory, "no-launch-output"};
@@ -575,7 +578,7 @@ static void test_frozen_artifact_readback(char const* executable)
         char* const failed_arguments[] = {(char*)process_executable,
             "--retirement-oracle-fail", NULL};
         BqRetirementProcessCommand failed_command = {
-            failed_arguments, environment, root, 2, 2
+            failed_arguments, environment, root, 2, 3
         };
         int failed_reader = -1;
         CHECK(bq_retirement_runtime_start(failed_output, &failed));
@@ -593,7 +596,7 @@ static void test_frozen_artifact_readback(char const* executable)
         char* const failed_compiler_arguments[] = {(char*)process_executable,
             "--retirement-oracle-fail", NULL};
         BqRetirementProcessCommand failed_compiler_command = {
-            failed_compiler_arguments, environment, root, 2, 2
+            failed_compiler_arguments, environment, root, 2, 3
         };
         CHECK(bq_retirement_artifact_start(failed_artifact, &failed_compiler) &&
               bq_retirement_artifact_launch(&failed_compiler, &failed_compiler_command));
@@ -774,6 +777,199 @@ static void test_frozen_artifact_readback(char const* executable)
     if (created) CHECK(rmdir(root) == 0);
 }
 
+/* An independent executable is frozen under the service UID, then run through
+ * the ordinary observed child boundary. The positive expectation comes from
+ * its actual bytes; the candidate's claimed expected digest is never used. */
+static void test_independent_oracle(char const* executable)
+{
+    char root[] = "/tmp/bq-retirement-oracle-XXXXXX";
+    bool created = mkdtemp(root) != NULL;
+    int directory = created ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    CHECK(directory >= 3);
+    if (directory >= 3)
+    {
+        char path[4096];
+        char const* input = executable;
+        if (executable[0] != '/')
+        {
+            CHECK(getcwd(path, sizeof(path)) != NULL &&
+                  strlen(path) + strlen(executable) + 2 < sizeof(path));
+            size_t length = strlen(path);
+            path[length] = '/';
+            memcpy(path + length + 1, executable, strlen(executable) + 1);
+            input = path;
+        }
+        CHECK(copy_frozen_artifact(directory, input, "independent-reference") &&
+              fchmodat(directory, "independent-reference", 0500, 0) == 0);
+        int reference_binary = openat(directory, "independent-reference",
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        CHECK(reference_binary >= 3);
+        if (reference_binary >= 3)
+        {
+            BqCorrectnessFixture fixture;
+            fixture_init(&fixture);
+            memset(fixture.trusted[1].independent_oracle_sha256, 0, 65);
+            memset(fixture.trusted[5].independent_oracle_sha256, 0, 65);
+            BqRetirementOracleReference references[2] = {0};
+            char binary_digest[65] = {0}, command_digest[65] = {0};
+            CHECK(bq_retirement_oracle_file_hash(reference_binary,
+                BQ_RETIREMENT_ORACLE_BINARY_CAP, true, binary_digest));
+            char fd_path[64];
+            CHECK(snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", reference_binary) > 0);
+            char* const argv[] = {fd_path, "--retirement-oracle-output", NULL};
+            char* const environment[] = {"ASAN_OPTIONS=detect_leaks=0",
+                "HOME=/nonexistent", "LC_ALL=C", NULL};
+            BqRetirementProcessCommand command = {argv, environment, root, 2, 3};
+            CHECK(tp_retirement_command_fields_hash(argv, 2, root, environment, 3, command_digest));
+            for (unsigned i = 0; i < 2; i += 1)
+            {
+                BqRetirementTrustedRow const* row = &fixture.trusted[i ? 5 : 1];
+                BqRetirementOracleReference* reference = &references[i];
+                reference->row = row->row;
+                reference->census_row = row->census_row;
+                reference->target = row->target;
+                memcpy(reference->preparation_sha256, fixture.prepared.preparation_sha256, 65);
+                memcpy(reference->source_sha256, row->source_sha256, 65);
+                memcpy(reference->configuration_sha256, row->configuration_sha256, 65);
+                digest(reference->build_receipt_sha256, (char)('b' + i));
+                memcpy(reference->binary_sha256, binary_digest, 65);
+                memcpy(reference->command_sha256, command_digest, 65);
+                strcpy(reference->output_name, i ? "reference-output-2" : "reference-output-1");
+            }
+            char pin[65] = {0};
+            CHECK(bq_retirement_oracle_spec_hash(&fixture.prepared,
+                references, 2, pin));
+            BqRetirementOracleLedger ledger = {0};
+            CHECK(!bq_retirement_oracle_begin(&ledger, &fixture.prepared,
+                fixture.trusted, references, 1, pin) && ledger.failed);
+            ledger = (BqRetirementOracleLedger){0};
+            references[1].row = 1;
+            CHECK(!bq_retirement_oracle_begin(&ledger, &fixture.prepared,
+                fixture.trusted, references, 2, pin));
+            references[1].row = 5;
+            ledger = (BqRetirementOracleLedger){0};
+            references[0].binary_sha256[0] ^= 1;
+            CHECK(!bq_retirement_oracle_begin(&ledger, &fixture.prepared,
+                fixture.trusted, references, 2, pin));
+            references[0].binary_sha256[0] ^= 1;
+            ledger = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&ledger, &fixture.prepared,
+                fixture.trusted, references, 2, pin) && !bq_retirement_oracle_ready(&ledger));
+            BqRetirementRuntimeStart starts[2] = {0};
+            int outputs[2] = {-1, -1};
+            for (unsigned i = 0; i < 2; i += 1)
+            {
+                BqRetirementArtifactLocation location = {
+                    directory, i ? "reference-output-2" : "reference-output-1"
+                };
+                CHECK(bq_retirement_runtime_start(location, &starts[i]) &&
+                      bq_retirement_runtime_launch(&starts[i], &command) &&
+                      wait_runtime_output(&starts[i]) == 1 &&
+                      bq_retirement_runtime_finish(&starts[i], &outputs[i]));
+            }
+            CHECK(!bq_retirement_oracle_observe(&ledger, reference_binary, &command,
+                &starts[1], outputs[1]) && ledger.failed && ledger.done == 0);
+            for (unsigned fault = 0; fault < 5; fault += 1)
+            {
+                BqRetirementOracleLedger rejected = {0};
+                CHECK(bq_retirement_oracle_begin(&rejected, &fixture.prepared,
+                    fixture.trusted, references, 2, pin));
+                BqRetirementProcessCommand observed_command = command;
+                BqRetirementRuntimeStart observed_start = starts[0];
+                int observed_binary = reference_binary;
+                int observed_output = outputs[0];
+                if (fault == 0) observed_command.environment_count = 1;
+                if (fault == 1) observed_start.state = BQ_RETIREMENT_RUNTIME_REAPED;
+                if (fault == 2) observed_binary = outputs[1];
+                if (fault == 3) observed_output = outputs[1];
+                if (fault == 4) observed_start.command_sha256[0] ^= 1;
+                CHECK(!bq_retirement_oracle_observe(&rejected, observed_binary,
+                    &observed_command, &observed_start, observed_output) &&
+                    rejected.failed && rejected.done == 0 &&
+                    !bq_retirement_oracle_ready(&rejected));
+            }
+            ledger = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&ledger, &fixture.prepared,
+                fixture.trusted, references, 2, pin));
+            CHECK(bq_retirement_oracle_observe(&ledger, reference_binary, &command,
+                &starts[0], outputs[0]) && ledger.done == 1);
+            char expected[65] = {0};
+            Sha256 hash;
+            sha256_init(&hash);
+            char const* bytes = "independent-oracle-output\n";
+            sha256_add(&hash, bytes, strlen(bytes));
+            sha256_finish_hex(&hash, expected);
+            CHECK(!strcmp(fixture.trusted[1].independent_oracle_sha256, expected) &&
+                  !bq_retirement_oracle_finish(&ledger));
+            /* A candidate-supplied expected value cannot be installed again. */
+            BqRetirementOracleLedger other = {0};
+            CHECK(!bq_retirement_oracle_begin(&other, &fixture.prepared,
+                fixture.trusted, references, 2, pin));
+            char changed_fd_path[] = "/proc/self/fd/9999";
+            char* const changed_argv[] = {changed_fd_path, "--retirement-oracle-output", NULL};
+            BqRetirementProcessCommand changed = {changed_argv, environment, root, 2, 3};
+            CHECK(!bq_retirement_oracle_observe(&ledger, reference_binary, &changed,
+                &starts[1], outputs[1]) && ledger.failed);
+            ledger = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&ledger, &fixture.prepared,
+                fixture.trusted, references, 2, pin) == false);
+            /* Resume the original holder after rejecting its injected value. */
+            memset(fixture.trusted[1].independent_oracle_sha256, 0, 65);
+            ledger = (BqRetirementOracleLedger){0};
+            CHECK(bq_retirement_oracle_begin(&ledger, &fixture.prepared,
+                fixture.trusted, references, 2, pin));
+            CHECK(bq_retirement_oracle_observe(&ledger, reference_binary, &command,
+                &starts[0], outputs[0]));
+            CHECK(bq_retirement_oracle_observe(&ledger, reference_binary, &command,
+                &starts[1], outputs[1]));
+            CHECK(bq_retirement_oracle_finish(&ledger) && bq_retirement_oracle_ready(&ledger));
+            fixture.trusted[5].independent_oracle_sha256[0] ^= 1;
+            CHECK(!bq_retirement_oracle_ready(&ledger));
+            fixture.trusted[5].independent_oracle_sha256[0] ^= 1;
+            CHECK(bq_retirement_oracle_ready(&ledger));
+            references[1].command_sha256[0] ^= 1;
+            CHECK(!bq_retirement_oracle_ready(&ledger));
+            references[1].command_sha256[0] ^= 1;
+            CHECK(bq_retirement_oracle_ready(&ledger));
+            fixture.trusted[0].compiler_eligible ^= 1;
+            CHECK(!bq_retirement_oracle_ready(&ledger));
+            fixture.trusted[0].compiler_eligible ^= 1;
+            CHECK(bq_retirement_oracle_ready(&ledger));
+            /* The B gate compares both measured sides to the newly observed
+             * reference bytes. A changed candidate output never reaches a
+             * timed-start decision in this private fixture. */
+            for (unsigned row_index = 0; row_index < 2; row_index += 1)
+            {
+                unsigned row = row_index ? 5u : 1u;
+                for (unsigned side = 0; side < 2; side += 1)
+                    memcpy(fixture.supplied[row].side[side].runtime_output_sha256,
+                        fixture.trusted[row].independent_oracle_sha256, 65);
+            }
+            begin_fixture(&fixture);
+            checks_fixture(&fixture);
+            rows_fixture(&fixture);
+            CHECK(bq_retirement_correctness_finish(&fixture.gate) &&
+                  bq_retirement_correctness_ready(&fixture.gate));
+            fixture.supplied[1].side[1].runtime_output_sha256[0] ^= 1;
+            begin_fixture(&fixture);
+            checks_fixture(&fixture);
+            CHECK(bq_retirement_correctness_row(&fixture.gate, &fixture.supplied[0]));
+            CHECK(!bq_retirement_correctness_row(&fixture.gate, &fixture.supplied[1]) &&
+                  !bq_retirement_correctness_ready(&fixture.gate));
+            unsigned timed_starts = 0;
+            if (bq_retirement_correctness_ready(&fixture.gate)) timed_starts += 1;
+            CHECK(timed_starts == 0);
+            CHECK(close(outputs[0]) == 0 && close(outputs[1]) == 0 &&
+                  close(reference_binary) == 0);
+            CHECK(unlinkat(directory, "independent-reference", 0) == 0 &&
+                  unlinkat(directory, "reference-output-1", 0) == 0 &&
+                  unlinkat(directory, "reference-output-2", 0) == 0);
+        }
+        CHECK(close(directory) == 0);
+    }
+    if (created) CHECK(rmdir(root) == 0);
+}
+
 int main(int argc, char** argv)
 {
     int result = 0;
@@ -794,6 +990,7 @@ int main(int argc, char** argv)
         test_bad_import();
         test_partial_and_sealed();
         test_large_population();
+        if (argc > 0) test_independent_oracle(argv[0]);
         if (argc > 0) test_frozen_artifact_readback(argv[0]);
         printf("RETIREMENT_CORRECTNESS_TEST assertions=%u failures=%u launches=%u\n",
                assertions, failures, launches);

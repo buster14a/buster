@@ -130,6 +130,23 @@ receipt bytes/digest against a separate authority. A digest obtained from the
 candidate or downloaded result is not a trusted receipt. Any required host
 unavailable at qualification leaves the campaign blocked.
 
+`retirement_correctness_oracle.{h,c}` now provides a private reference-output
+producer for eligible native runtime rows. A separately admitted ledger pin
+covers the complete applicable row set, each row's preparation, source,
+configuration, independent build receipt, frozen reference-program digest,
+exact argv/cwd/environment digest, and frozen output name. The service
+must verify that pin against installed policy and authenticate the independent
+build receipt before calling `bq_retirement_oracle_begin`. It runs each held
+reference program through the ordinary service-owned runtime start, launch,
+poll, and finish path under the worker's deadline. `observe` checks the
+read-only program descriptor and the actual frozen output descriptor, then
+sets the row's expected output digest from observed bytes. Missing, duplicate,
+out-of-order, substituted, or candidate-filled expectations fail closed;
+`finish` seals every reference result. The service has no production caller for
+this seam yet, and the blocked profile has no oracle ledger pin or admitted
+independent build receipts. The new two-row executable fixture proves the
+mechanics, not a full-corpus oracle run.
+
 Before `row`, the service derives exact compiler and applicable runtime command
 hashes (argv, cwd and environment) independently from the admitted oracle
 path. The gate binds those hashes for both binary sides to observed commands;
