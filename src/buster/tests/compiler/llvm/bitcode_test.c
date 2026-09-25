@@ -215,6 +215,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
             command[command_count++] = S8("-mattr=+popcnt");
         }
         command[command_count++] = S8("-o");
+        u32 output_index = command_count;
         command[command_count++] = output;
         command[command_count++] = source;
         CompilerDriverResult emitted = compiler_driver_execute_invocation(
@@ -226,9 +227,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
         if (fixtures[fixture].both_optimizations && emitted.error == COMPILER_DRIVER_ERROR_NONE)
         {
-            command[2] = buster_test_temporary_path(arena, S8("buster-llvm-repeat"), S8(".bc"));
+            command[output_index] = buster_test_temporary_path(arena, S8("buster-llvm-repeat"), S8(".bc"));
             CompilerDriverResult repeated = compiler_driver_execute_invocation(
-                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = command_count}));
             BUSTER_TEST(arguments, repeated.error == COMPILER_DRIVER_ERROR_NONE && llvm_bitcode_artifact_is_valid(repeated.llvm_bitcode));
             BUSTER_TEST(arguments, emitted.llvm_bitcode.bytes.length == repeated.llvm_bitcode.bytes.length &&
                                   !memcmp(emitted.llvm_bitcode.bytes.pointer, repeated.llvm_bitcode.bytes.pointer,
