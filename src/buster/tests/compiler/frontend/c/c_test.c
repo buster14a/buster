@@ -21431,6 +21431,154 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_post_tag_declaration_specifiers(UnitTe
     return result;
 }
 
+// Buster deliberately selects signed __int128 for decimal magnitudes above
+// INT64_MAX. Test that established extension, not Clang's different raw-literal
+// policy, and retain explicit unsigned suffixes/casts as independent controls.
+BUSTER_GLOBAL_LOCAL String8 const c_test_integer_literal_policy_source = S8_INITIALIZER(
+    "typedef __int128 wide;\n"
+    "#define LO ((wide)9223372036854775808ULL)\n"
+    "#define HI ((wide)18446744073709551615ULL)\n"
+    "enum { literal_index = (9223372036854775808 >> 63) };\n"
+    "int literal_designated[2] = { [(18446744073709551615 >> 63)] = 9 };\n"
+    "wide literal_scalar = 9223372036854775808;\n"
+    "wide literal_array[3] = { 9223372036854775808, 18446744073709551615L, 18446744073709551615LL };\n"
+    "wide literal_conditional = 1 ? 18446744073709551615 : 0;\n"
+    "wide literal_return(void) { return 18446744073709551615; }\n"
+    "wide literal_echo(wide x) { return x; }\n"
+    "_Static_assert(sizeof(9223372036854775808) == 16, \"wide literal\");\n"
+    "_Static_assert(sizeof(18446744073709551615LL) == 16, \"wide suffix\");\n"
+    "_Static_assert(sizeof(+9223372036854775808) == 16, \"promotion\");\n"
+    "_Static_assert(sizeof(1 ? 9223372036854775808 : 0U) == 16, \"conditional type\");\n"
+    "_Static_assert(sizeof(18446744073709551615ULL) == 8, \"unsigned suffix\");\n"
+    "_Static_assert(sizeof(0xffffffffffffffff) == 8, \"hex candidate\");\n"
+    "_Static_assert(sizeof((unsigned long long)9223372036854775808) == 8, \"explicit cast\");\n"
+    "_Static_assert(sizeof(2147483648L) == 8, \"LP64 and LLP64 candidate order\");\n"
+    "int main(void)\n"
+    "{\n"
+    "    wide local = 9223372036854775808;\n"
+    "    wide array[2] = { 9223372036854775808L, 18446744073709551615LL };\n"
+    "    int result = local != LO || array[0] != LO || array[1] != HI;\n"
+    "    result |= literal_scalar != LO || literal_array[0] != LO || literal_array[1] != HI || literal_array[2] != HI;\n"
+    "    result |= literal_conditional != HI || literal_return() != HI || literal_echo(18446744073709551615) != HI;\n"
+    "    result |= literal_index != 1 || literal_designated[1] != 9;\n"
+    "    result |= sizeof(9223372036854775808) != 16 || sizeof(+9223372036854775808) != 16;\n"
+    "    result |= sizeof(1 ? 9223372036854775808 : 0U) != 16;\n"
+    "    result |= sizeof((unsigned long long)9223372036854775808) != 8;\n"
+    "    result |= (1 ? -1 : 9223372036854775808) >= 0;\n"
+    "    result |= (1 ? 9223372036854775808 : 0) != LO;\n"
+    "    result |= 9223372036854775808L != LO || 18446744073709551615LL != HI;\n"
+    "    result |= sizeof(1L) != sizeof(long) || sizeof(1UL) != sizeof(unsigned long);\n"
+    "    result |= sizeof(2147483648L) != 8 || sizeof(0xffffffffffffffff) != 8;\n"
+    "    return result;\n"
+    "}\n"
+);
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU11, C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_integer_literal_policy_source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target),
+                    .dialect = dialects[dialect],
+                });
+                CParseResult parse = c_parse(temporary.arena, tokens);
+                if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+                {
+                    CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("integer-literal-policy.c"), tokens, parse, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                    {
+                        IrProgram* program = lowered.program;
+                        IrModule* module = program->modules;
+                        BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                        u32 checked = 0;
+                        for (u32 index = 0; index < module->global_count; index += 1)
+                        {
+                            IrGlobal* global = module->globals + index;
+                            IrSymbol* symbol = ir_symbol_from_id(&program->symbols, global->symbol);
+                            if (symbol && (string_equal(symbol->name, S8("literal_scalar")) || string_equal(symbol->name, S8("literal_conditional"))))
+                            {
+                                bool low = string_equal(symbol->name, S8("literal_scalar"));
+                                IrType* type = ir_type_from_id(&program->types, global->type);
+                                checked += 1;
+                                if (BUSTER_REQUIRE(arguments, type && global->bytes.pointer && global->bytes.length == 16))
+                                {
+                                    BUSTER_TEST(arguments, type->kind == IR_TYPE_INTEGER && type->is_signed && type->bit_width == 128);
+                                    for (u32 byte_index = 0; byte_index < 16; byte_index += 1)
+                                    {
+                                        u8 expected = (u8)(byte_index >= 8 ? 0 : low ? byte_index == 7 ? 128 : 0 : 255);
+                                        u32 offset = program->data_layout.endianness == TARGET_ENDIAN_LITTLE ? byte_index : 15 - byte_index;
+                                        BUSTER_TEST(arguments, global->bytes.pointer[offset] == expected);
+                                    }
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, checked == 2);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_literal_policy_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                      S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 dialects[] = {S8("-std=gnu11"), S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 source = buster_test_temporary_path(arguments->arena, S8("integer-literal-policy"), S8(".c"));
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_integer_literal_policy_source))))
+    {
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("integer-literal-policy-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], modes[mode], form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
+                                         S8("-fverify-codegen"), S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -21463,6 +21611,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
+    BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);
