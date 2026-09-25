@@ -44,6 +44,17 @@ static inline uint64_t bq_phase_clock(void)
     return result;
 }
 
+/* Convert the supervisor's absolute CLOCK_MONOTONIC millisecond deadline to
+ * this channel's nanosecond domain without wrapping on hostile input. */
+static inline bool bq_phase_deadline_from_milliseconds(uint64_t deadline_milliseconds,
+                                                       uint64_t* deadline_nanoseconds)
+{
+    bool ok = deadline_nanoseconds && deadline_milliseconds <= UINT64_MAX / UINT64_C(1000000);
+    if (deadline_nanoseconds)
+        *deadline_nanoseconds = ok ? deadline_milliseconds * UINT64_C(1000000) : 0;
+    return ok;
+}
+
 static inline void bq_phase_put(unsigned char* bytes, uint64_t value)
 {
     for (unsigned i = 0; i < 8; ++i) bytes[i] = (unsigned char)(value >> (i * 8));

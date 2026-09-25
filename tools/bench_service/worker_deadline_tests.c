@@ -316,14 +316,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
     BQ_CHECK(bq_worker_execution_deadline(200, 1, &absolute) && absolute == 201);
     BQ_CHECK(bq_worker_execution_deadline(200, 1001, &absolute) && absolute == 202);
     BQ_CHECK(bq_worker_execution_deadline(0, 60ull * 60 * 1000000, &absolute) && absolute == 3600000);
-    BQ_CHECK(bq_worker_deadline_nanoseconds(201, &absolute_nanoseconds) &&
+    BQ_CHECK(bq_phase_deadline_from_milliseconds(201, &absolute_nanoseconds) &&
              absolute_nanoseconds == 201000000ull);
     u64 largest_milliseconds = UINT64_MAX / 1000000ull;
-    BQ_CHECK(bq_worker_deadline_nanoseconds(largest_milliseconds, &absolute_nanoseconds) &&
+    BQ_CHECK(bq_phase_deadline_from_milliseconds(largest_milliseconds, &absolute_nanoseconds) &&
              absolute_nanoseconds == largest_milliseconds * 1000000ull);
-    BQ_CHECK(!bq_worker_deadline_nanoseconds(largest_milliseconds + 1, &absolute_nanoseconds) &&
+    BQ_CHECK(!bq_phase_deadline_from_milliseconds(largest_milliseconds + 1, &absolute_nanoseconds) &&
              absolute_nanoseconds == 0);
-    BQ_CHECK(!bq_worker_deadline_nanoseconds(1, NULL));
+    BQ_CHECK(!bq_phase_deadline_from_milliseconds(1, NULL));
 
     struct sigaction action = {0}, prior = {0};
     action.sa_handler = bq_test_alarm_handler;
