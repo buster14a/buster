@@ -3801,7 +3801,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_elf_t
         String8 clang_consumer_object = buster_test_temporary_path(temporary.arena, S8("buster-tls-clang-consumer"), S8(".o"));
         String8 buster_provider_object = buster_test_temporary_path(temporary.arena, S8("buster-tls-buster-provider"), S8(".o"));
         String8 clang_provider_command[] = {
-            clang, S8("-fPIC"), S8("-c"), S8("tests/basic_c_tls_identity_provider.c"), S8("-o"), clang_provider_object,
+            clang, S8("-fPIC"), S8("-c"), S8("tools/fixtures/basic_c_tls_identity_provider.c"), S8("-o"), clang_provider_object,
         };
         ProcessSpawnResult clang_provider_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_provider_command),
             (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
@@ -3809,7 +3809,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_elf_t
             os_process_wait_deadline(temporary.arena, clang_provider_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
         BUSTER_TEST(arguments, clang_provider_compiled);
         String8 clang_consumer_command[] = {
-            clang, S8("-fPIC"), S8("-c"), S8("tests/basic_c_tls_identity_consumer.c"), S8("-o"), clang_consumer_object,
+            clang, S8("-fPIC"), S8("-c"), S8("tools/fixtures/basic_c_tls_identity_consumer.c"), S8("-o"), clang_consumer_object,
         };
         ProcessSpawnResult clang_consumer_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_consumer_command),
             (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
@@ -3819,7 +3819,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_elf_t
 
         String8 provider_command[] = {
             S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-linux"), S8("-fPIC"), S8("-fno-machine-fallback"),
-            S8("tests/basic_c_tls_identity_provider.c"), S8("-o"), buster_provider_object,
+            S8("tools/fixtures/basic_c_tls_identity_provider.c"), S8("-o"), buster_provider_object,
         };
         CompilerDriverInvocation provider_invocation = compiler_driver_parse_arguments(
             temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(provider_command));
@@ -3837,7 +3837,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_elf_t
                     position ? S8("buster-tls-buster-pic-consumer") : S8("buster-tls-buster-static-consumer"), S8(".o"));
                 String8 compile_command[] = {
                     S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-linux"), positions[position], S8("-fno-machine-fallback"),
-                    S8("tests/basic_c_tls_identity_consumer.c"), S8("-o"), buster_consumer_object,
+                    S8("tools/fixtures/basic_c_tls_identity_consumer.c"), S8("-o"), buster_consumer_object,
                 };
                 CompilerDriverInvocation compile_invocation = compiler_driver_parse_arguments(
                     temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_command));
@@ -3877,7 +3877,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_elf_t
                 String8 buster_linked_executable = buster_test_temporary_path(temporary.arena,
                     position ? S8("buster-tls-buster-link-pic") : S8("buster-tls-buster-link-static"), S8(".exe"));
                 String8 buster_link_command[] = {
-                    positions[position], S8("-fno-machine-fallback"), S8("tests/basic_c_tls_identity_consumer.c"),
+                    positions[position], S8("-fno-machine-fallback"), S8("tools/fixtures/basic_c_tls_identity_consumer.c"),
                     clang_provider_object, S8("-o"), buster_linked_executable,
                 };
                 CompilerDriverInvocation buster_link_invocation = compiler_driver_parse_arguments(
