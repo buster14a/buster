@@ -157,7 +157,8 @@ rejects 5.
 The detector exposes three root causes. The minimal witnesses below print the
 Buster value first.
 
-* **R1: scope-blind binding in type-level constants.**
+* **R1: scope-blind binding in type-level constants**
+  ([#1247](https://github.com/buster14a/buster/issues/1247)).
   * A block-scope struct member bound resolves `N` to the file-scope `N`: size 1
     instead of 9.
   * Sibling functions each with a local `enum { K }` share the first function's
@@ -170,7 +171,9 @@ Buster value first.
     `struct Buffer { int value[CAP]; }`, gives the second buffer 16 bytes while its
     loop writes 256. The program crashes with SIGSEGV.
 * **R2: parse-side layout evaluates member bounds with the preprocessor
-  evaluator.**
+  evaluator**
+  ([#1238](https://github.com/buster14a/buster/issues/1238),
+  [#1247](https://github.com/buster14a/buster/issues/1247)).
   * The layout cannot evaluate a bound of `sizeof(char[SZ])`.
   * As a result, `enum { E = sizeof(struct S) }` on such a struct is rejected as
     "not an integer constant expression".
@@ -180,10 +183,12 @@ Buster value first.
   * Of the remaining 15, some are D2 bounds that R1 makes negative, some are
     nested records, and 2 are H3 `enum { snapK = sizeof obj }` snapshots.
 * **R3: declarations in an `if`/`switch` controlling expression are not in
-  scope.**
+  scope**
+  ([#1304](https://github.com/buster14a/buster/issues/1304)).
   * Given `if (sizeof(enum { Q = 8 })) value = Q;`, the substatement sees the
     outer `Q`, or reports "use of undeclared identifier".
 
 This detector does not cover `_Static_assert` arithmetic: cast-free assertions
 are evaluated with `#if` rules, so `_Static_assert(~0u == UINT_MAX, "")` fails.
-That separate constant-context probe finding is recorded with its issue.
+That separate constant-context probe finding is tracked in
+[#1238](https://github.com/buster14a/buster/issues/1238).
