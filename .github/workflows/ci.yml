@@ -766,10 +766,21 @@ jobs:
           Copy-Item 'tools/fixtures/msvc_reference_subject.c' $Subject
           Copy-Item 'tools/fixtures/msvc_reference_caller.c' $Caller
           $Output = Join-Path $Root 'msvc reference with spaces'
+          if ($env:VS_ARCH -eq 'arm64') {
+            $TimeoutControlLog = Join-Path $Root 'msvc-timeout-control.log'
+            & $Driver test_differential --self-test --reference-timeout 1 2>&1 | Tee-Object -FilePath $TimeoutControlLog
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if (-not (Select-String -Quiet -LiteralPath $TimeoutControlLog -Pattern 'DIFFERENTIAL_TIMEOUT_CONTROL reference_timeout_seconds=1 result=timeout')) {
+              throw 'MSVC one-second timeout control did not observe a timeout'
+            }
+          }
           $MsvcArgs = @('test_differential', '--ide', 'build/Release/ide.exe', '--cc', 'cl.exe',
             '--reference-dialect', 'msvc', '--source', $Subject, '--host', $Caller,
             '--include', $Include, '--library-path', $Libraries, '--minimize', '0',
-            '--strict-mir', '--out', $Output)
+            '--reference-timeout', '60', '--strict-mir', '--out', $Output)
+          if ($env:VS_ARCH -eq 'arm64') {
+            $MsvcArgs += @('--reference-samples', '12')
+          }
           $ErrorActionPreference = 'Continue'
           & $Driver @MsvcArgs 2>&1 | Tee-Object -FilePath (Join-Path $Root 'msvc-reference.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
