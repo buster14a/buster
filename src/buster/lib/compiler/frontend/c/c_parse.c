@@ -13264,6 +13264,13 @@ BUSTER_C_INTERNAL CTypeId c_parse_conditional_expression_type(Arena* arena, CPre
     {
         return c_parse_conditional_pointer_type(arena, preprocess, result, scope, left, right, left_start, left_end, right_start, right_end);
     }
+    // GNU vector conditionals retain the vector type when both operands are
+    // exactly the same type. Scalar arithmetic below must still run for equal
+    // integer types so narrow operands receive their integer promotions.
+    if (left.value == right.value && left_value.kind == C_TYPE_VECTOR)
+    {
+        return left;
+    }
     if (left_value.kind == right_value.kind &&
         (left_value.kind == C_TYPE_STRUCT || left_value.kind == C_TYPE_UNION))
     {
