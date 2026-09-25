@@ -2633,17 +2633,6 @@ BUSTER_GLOBAL_LOCAL IrAbiConvention codegen_canonical_ir_abi_convention(CodegenA
     return ir_abi_convention_for_target(codegen_target_for_abi(abi));
 }
 
-BUSTER_GLOBAL_LOCAL bool codegen_canonical_abi_part_is_float(IrAbiClass abi_class)
-{
-    return abi_class == IR_ABI_CLASS_FLOAT || abi_class == IR_ABI_CLASS_VECTOR;
-}
-
-// Whether a Win64 argument rides the positional XMM register the way a scalar
-// float does. A single-lane float vector has the same shape as its element on
-// this convention (clang's de-facto ABI; see the Win64 vector branch of
-// ir_classify_abi_value), so both spellings take the float path at call sites
-// and function entries.
-
 // The canonical x86-64 backend keeps the 80-bit spelling in a sixteen-byte
 // slot: ten semantic bytes followed by six zero bytes.  It is deliberately a
 // byte-level representation here; host long double has a different size and
