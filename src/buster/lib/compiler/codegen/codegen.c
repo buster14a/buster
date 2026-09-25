@@ -2538,8 +2538,11 @@ void codegen_prewarm_for_target(Target target)
     {
         return;
     }
-    // Exact machine emission reads these tables without ever filling them, so
+    // Exact machine emission reads these tables without filling them, so
     // they are initialized here rather than on first use during emission.
+    // The one exception is the closed shape set, registered here and resolved
+    // per shape on its first serial lookup; a caller about to run a gang uses
+    // machine_x86_64_exact_prewarm_all_shapes instead.
     buster_x86_metadata_prewarm();
     machine_x86_64_exact_prewarm();
 }

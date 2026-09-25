@@ -56,8 +56,12 @@
   derived facts and each record's validity — fill on the first *serial* touch
   of each form, so a caller about to hand the tables to a gang must call
   `buster_x86_metadata_prewarm_all_forms()` first, which fills every one of
-  them. A new lazily built global adds both the check and a line in its
-  module's prewarm.
+  them. The machine encoder's closed expansion-shape set follows the same
+  rule: `machine_x86_64_exact_prewarm` registers its queries and resolves
+  each shape on its first serial lookup, and
+  `machine_x86_64_exact_prewarm_all_shapes()` resolves all of them before a
+  gang may emit x86-64 code. A new lazily built global adds both the check
+  and a line in its module's prewarm.
   Publish the flag *after* the state, never before: the x86 metadata decode
   needs two flags for this, one guarding re-entry from the reads its own
   layout checks make through the accessors and one, set last, that every
