@@ -164,6 +164,93 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_cleanup(char const* path)
     BQ_PREP_CHECK(rmdir(path) == 0);
 }
 
+/* The production entry's first census boundary uses exact profile-pinned
+ * declaration bytes. The miniature B fixture uses the pinned test seam and
+ * cannot stand in for this derived 192-row-per-subject matrix. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_support_population(void)
+{
+    char directory[] = "/tmp/bq-retirement-support-XXXXXX";
+    char path[128], profile[128];
+    char const* ledger = "path\trole\tcompile_obligation\tbytes\tsha256\n"
+        "tests/a.c\tsubject\tsupported-object-zero-fallback\t4\t"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "tests/b.c\tsubject\tregistered-non-object-control\t5\t"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "tests/z.h\tsupport-file\tdependency-only\t3\t"
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n";
+    BQ_PREP_CHECK(mkdtemp(directory) != NULL);
+    int length = snprintf(path, sizeof(path), "%s/support.tsv", directory);
+    BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(path) && bq_prep_test_write(path, ledger));
+    BqRetirementPrepared prepared = {.rows = 386, .object_rows = 384};
+    bq_digest(ledger, (u32)strlen(ledger), (char8*)prepared.support_sha256);
+    length = snprintf(profile, sizeof(profile), "support-declaration-sha256=%.64s\n",
+                      prepared.support_sha256);
+    BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(profile));
+    int file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(file >= 3 && bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    prepared.object_rows = 192;
+    BQ_PREP_CHECK(!bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    prepared.object_rows = 384;
+    prepared.rows = 385;
+    BQ_PREP_CHECK(!bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    prepared.rows = 386;
+    char first = prepared.support_sha256[0];
+    prepared.support_sha256[0] = first == '0' ? '1' : '0';
+    BQ_PREP_CHECK(!bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    prepared.support_sha256[0] = first;
+    BQ_PREP_CHECK(fcntl(file, F_SETFD, 0) == 0 &&
+                  !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared) &&
+                  fcntl(file, F_SETFD, FD_CLOEXEC) == 0);
+    BQ_PREP_CHECK(chmod(path, 0600) == 0 &&
+                  !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared) &&
+                  chmod(path, 0400) == 0);
+    char link[128];
+    length = snprintf(link, sizeof(link), "%s/alias", directory);
+    BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(link) && linkat(AT_FDCWD, path, AT_FDCWD, link, 0) == 0 &&
+                  !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared) &&
+                  unlink(link) == 0);
+    BQ_PREP_CHECK(close(file) == 0 && !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(chmod(path, 0600) == 0);
+    file = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(file >= 3 && !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(file >= 3 && pwrite(file, "x", 1, 6) == 1 && close(file) == 0 &&
+                  chmod(path, 0400) == 0);
+    file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(file >= 3 && !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    if (file >= 3) BQ_PREP_CHECK(close(file) == 0);
+    BQ_PREP_CHECK(unlink(path) == 0);
+
+    /* Replay the repository's currently reviewed 559-input declaration too;
+     * the service receives a private read-only copy, never a mutable git file. */
+    char* actual = malloc(BQ_RETIREMENT_SUPPORT_BYTES_CAP + 1u);
+    u32 actual_bytes = 0;
+    int source = open("docs/native-retirement-support-v1.tsv", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(actual && source >= 3 &&
+                  bq_read_file(source, (u8*)actual, BQ_RETIREMENT_SUPPORT_BYTES_CAP, &actual_bytes));
+    if (source >= 3) BQ_PREP_CHECK(close(source) == 0);
+    if (actual && actual_bytes)
+    {
+        actual[actual_bytes] = 0;
+        length = snprintf(path, sizeof(path), "%s/actual.tsv", directory);
+        BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(path) &&
+                      bq_prep_test_write(path, actual));
+        prepared = (BqRetirementPrepared){.rows = 78914, .object_rows = 78912};
+        bq_digest(actual, actual_bytes, (char8*)prepared.support_sha256);
+        length = snprintf(profile, sizeof(profile), "support-declaration-sha256=%.64s\n",
+                          prepared.support_sha256);
+        BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(profile));
+        file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(file >= 3 &&
+                      bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+        prepared.object_rows -= 192;
+        BQ_PREP_CHECK(!bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+        if (file >= 3) BQ_PREP_CHECK(close(file) == 0);
+        BQ_PREP_CHECK(unlink(path) == 0);
+    }
+    free(actual);
+    BQ_PREP_CHECK(rmdir(directory) == 0);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_large_manifest(void)
 {
     char root[80] = "/tmp/bq-retirement-large-XXXXXX";
@@ -1384,6 +1471,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
 
 int main(void)
 {
+    bq_prep_test_support_population();
     char installed[80] = {0}, workspaces[80] = {0}, profile[512] = {0};
     BqRetirementSource subjects[2] = {0};
     BqRequest request = {0};

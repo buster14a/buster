@@ -11,8 +11,19 @@ preparation, matched-build receipts and binary record using service-held
 installed/workspace descriptors and authenticated record digests. It opens
 both verified frozen binaries, checks
 the independently supplied B declaration's preparation, source and binary
-digests against that readback, and checks its support declaration against the
-compiled profile pin. Only then does it call `bq_retirement_correctness_begin`.
+digests against that readback. Before the build import, the public entry reads
+a private, read-only, single-link support declaration descriptor, verifies the
+exact bytes against the compiled profile SHA-256 pin, and counts actual subject
+rows (including registered non-object controls). The 12-target, 2-frontend,
+2-PIC, 4-allocator #508 matrix requires 192 object rows per subject. It rejects
+a B declaration with a different `object_rows` count or fewer than two additional
+link/self-host stage rows. This independently establishes the current 78,912
+object-row count from the reviewed 411-subject ledger, without trusting a
+caller-supplied census count. The integrator must install/hold the exact
+declaration file and pass its descriptor; the pinned miniature seam remains
+synthetic. This cardinality check does not authenticate any individual row,
+eligibility, check receipt or oracle. Only then does the entry call
+`bq_retirement_correctness_begin`.
 Failure poisons a fresh gate and releases any descriptors acquired by this
 call; an already live holder is left alone. A successful holder stays open
 through all correctness work and subsequent dependent launches and must be

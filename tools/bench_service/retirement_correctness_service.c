@@ -5,7 +5,102 @@
  * separately authenticate Clang provenance and the complete #508/#509 facts.
  */
 #include "retirement_correctness_service.h"
+#include <stdlib.h>
 #include <string.h>
+
+#define BQ_RETIREMENT_SUPPORT_BYTES_CAP (128u * 1024u)
+#define BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT (12u * 2u * 2u * 4u)
+
+/* The profile pins the complete #508 support declaration, including every
+ * subject and control. Copy it once through a held read-only descriptor before
+ * counting; neither a request nor a B declaration can choose the population.
+ * The matrix dimensions are the current #508 target/frontend/PIC/allocator
+ * axes. The independent rows/validator replay remains the importer's job. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_support_object_rows(int file, String8 profile,
+    BqRetirementPrepared const* prepared)
+{
+    char pinned[SHA256_HEX_CAPACITY] = {0}, actual[SHA256_HEX_CAPACITY] = {0};
+    struct stat before = {0}, after = {0};
+    int descriptor = file >= 3 ? fcntl(file, F_GETFD) : -1;
+    int flags = descriptor >= 0 ? fcntl(file, F_GETFL) : -1;
+    bool ok = prepared && bq_retirement_profile_sha(profile, S8("support-declaration-sha256="), pinned) &&
+              !memcmp(prepared->support_sha256, pinned, SHA256_HEX_CAPACITY) &&
+              descriptor >= 0 && (descriptor & FD_CLOEXEC) &&
+              flags >= 0 && (flags & O_ACCMODE) == O_RDONLY &&
+              fstat(file, &before) == 0 && S_ISREG(before.st_mode) && before.st_nlink == 1 &&
+              (before.st_uid == 0 || before.st_uid == geteuid()) &&
+              !(before.st_mode & 0222) && before.st_size > 0 &&
+              (u64)before.st_size <= BQ_RETIREMENT_SUPPORT_BYTES_CAP;
+    u8* bytes = ok ? malloc((size_t)before.st_size) : NULL;
+    ok = ok && bytes != NULL;
+    u64 offset = 0;
+    while (ok && offset < (u64)before.st_size)
+    {
+        size_t wanted = (size_t)((u64)before.st_size - offset);
+        ssize_t count = pread(file, bytes + offset, wanted, (off_t)offset);
+        if (count < 0 && errno == EINTR) continue;
+        ok = count > 0;
+        if (ok) offset += (u64)count;
+    }
+    if (ok)
+    {
+        bq_digest(bytes, (u32)offset, (char8*)actual);
+        ok = !memcmp(actual, pinned, SHA256_HEX_CAPACITY) &&
+             fstat(file, &after) == 0 && bq_retirement_binary_stable(&before, &after);
+    }
+    u64 length = offset;
+    offset = 0;
+    u32 subjects = 0, inputs = 0;
+    String8 remaining = {(char8*)bytes, length}, line = {0}, previous = {0};
+    ok = ok && bq_next_line(remaining, &offset, &line) &&
+         string_equal(line, S8("path\trole\tcompile_obligation\tbytes\tsha256"));
+    while (ok && offset < remaining.length)
+    {
+        ok = bq_next_line(remaining, &offset, &line);
+        String8 fields[5] = {0};
+        u32 field = 0;
+        u64 start = 0;
+        for (u64 i = 0; ok && i <= line.length; i += 1)
+            if (i == line.length || line.pointer[i] == '\t')
+            {
+                ok = field < BUSTER_ARRAY_LENGTH(fields) && i > start;
+                if (ok) fields[field++] = (String8){line.pointer + start, i - start};
+                start = i + 1;
+            }
+        u64 size = 0;
+        bool subject = string_equal(fields[1], S8("subject"));
+        u64 common = previous.length < fields[0].length ? previous.length : fields[0].length;
+        int order = previous.length && fields[0].length ?
+                    memcmp(previous.pointer, fields[0].pointer, (size_t)common) : -1;
+        ok = ok && field == BUSTER_ARRAY_LENGTH(fields) &&
+             fields[0].length > 6 && fields[0].length <= BQ_PATH_CAP &&
+             !memcmp(fields[0].pointer, "tests/", 6) &&
+             (!previous.length || order < 0 || (!order && previous.length < fields[0].length)) &&
+             bq_retirement_number(fields[3], &size) && size > 0 &&
+             bq_retirement_hex(fields[4], 64) &&
+             (subject ? (string_equal(fields[2], S8("supported-object-zero-fallback")) ||
+                         string_equal(fields[2], S8("registered-non-object-control"))) :
+              ((string_equal(fields[1], S8("support-file")) &&
+                string_equal(fields[2], S8("dependency-only"))) ||
+               (string_equal(fields[1], S8("dormant-custom-language")) &&
+                string_equal(fields[2], S8("preserved-not-active"))) ||
+               (string_equal(fields[1], S8("negative-diagnostic-fixture")) &&
+                string_equal(fields[2], S8("registered-rejection-control")))));
+        if (ok)
+        {
+            previous = fields[0];
+            subjects += subject;
+            inputs += 1;
+            ok = inputs <= BQ_RETIREMENT_INVENTORY_CAP;
+        }
+    }
+    if (ok) ok = subjects && subjects <= BQ_RETIREMENT_CORRECTNESS_ROWS_CAP /
+                                       BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT &&
+                  prepared->object_rows == subjects * BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT &&
+                  prepared->rows >= prepared->object_rows + 2u;
+    free(bytes);
+    return ok;
+}
 
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_correctness_begin_service_pinned(BqQueue* queue, BqJob const* job,
     int installed, int workspaces, String8 profile, char const preparation_sha256[SHA256_HEX_CAPACITY],
@@ -74,7 +169,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_correctness_begin_service_built_pinned
 }
 
 BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job,
-    int installed, int workspaces, String8 workspace_root,
+    int installed, int workspaces, int support_declaration, String8 workspace_root,
     char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const record_sha256[SHA256_HEX_CAPACITY],
     char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementPrepared const* prepared,
@@ -84,11 +179,15 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
     BqRetirementHeldBinaries* held, BqRetirementCorrectness* gate)
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
-    BqError result = bq_retirement_correctness_begin_service_built_pinned(queue, job,
-        installed, workspaces, workspace_root, profile, BQ_RETIREMENT_BUILD_DRIVER,
-        BQ_RETIREMENT_TOOLCHAIN_ROOT,
-        preparation_sha256, record_sha256, build_record_sha256, prepared, rows, checks, check_count,
-        check_facts, facts, identity_workspace, identity_slots, census_workspace, census_slots,
-        held, gate);
+    bool fresh = gate && !gate->check_count && !gate->failed && !gate->finished;
+    BqError result = !fresh ? BQ_RECIPE_MISMATCH :
+        bq_retirement_support_object_rows(support_declaration, profile, prepared) ?
+        bq_retirement_correctness_begin_service_built_pinned(queue, job,
+            installed, workspaces, workspace_root, profile, BQ_RETIREMENT_BUILD_DRIVER,
+            BQ_RETIREMENT_TOOLCHAIN_ROOT, preparation_sha256, record_sha256, build_record_sha256,
+            prepared, rows, checks, check_count, check_facts, facts,
+            identity_workspace, identity_slots, census_workspace, census_slots, held, gate) :
+        BQ_SOURCE_MISMATCH;
+    if (result != BQ_OK && fresh) gate->failed = 1;
     return result;
 }
