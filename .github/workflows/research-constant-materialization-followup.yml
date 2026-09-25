@@ -1,0 +1,54 @@
+name: Research constant materialization follow-up
+on:
+  push:
+    branches: [research/constant-truth-boundary-20260925-astra]
+    paths: [.github/workflows/research-constant-materialization-followup.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: research-materialization-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  holdouts-and-diagnostic:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read immutable primary evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/buster14a/buster/actions/artifacts/10887515532/zip \
+            --output "$RUNNER_TEMP/primary.zip"
+          printf '%s  %s\n' 110be29138334215b3bb50e704034e8f14d7f0e140027c34d8eb3987d90412fa "$RUNNER_TEMP/primary.zip" | sha256sum -c -
+      - name: Adversarial holdouts and C type-safety controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/investigations/constant-materialization-followup-20260925/observe.py \
+            "$RUNNER_TEMP/primary.zip" "$GITHUB_WORKSPACE/materialization-evidence/holdouts" \
+            110be29138334215b3bb50e704034e8f14d7f0e140027c34d8eb3987d90412fa
+      - name: Fresh diagnostic builds with declared stdio
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/investigations/constant-materialization-followup-20260925/diagnose.py \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP/primary.zip" "$GITHUB_WORKSPACE/materialization-evidence/diagnostic"
+      - name: Preserve all follow-up attempts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: constant-materialization-followup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: materialization-evidence/
+          if-no-files-found: error
+          retention-days: 30
