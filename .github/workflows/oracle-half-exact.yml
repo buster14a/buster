@@ -1,0 +1,92 @@
+name: Exact half oracle probe
+on:
+  push:
+    branches: [codex/oracle-half-exact-ade6ac4b-20260925]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 8
+          persist-credentials: false
+      - name: Freeze inputs and verify independent detector
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/half-evidence"
+          cp tests/oracle_half_exact/*.c "$RUNNER_TEMP/half-evidence/"
+          clang --version | tee "$RUNNER_TEMP/half-evidence/clang-version.txt"
+          gcc --version | tee "$RUNNER_TEMP/half-evidence/gcc-version.txt"
+          clang -std=c11 -O1 -g -Wall -Wextra -Werror -Wpedantic -fsanitize=address,undefined tests/oracle_half_exact/half_oracle.c -o "$RUNNER_TEMP/half-oracle"
+          "$RUNNER_TEMP/half-oracle" self-test | tee "$RUNNER_TEMP/half-evidence/sensitivity.txt"
+          gcc -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic tests/oracle_half_exact/half_oracle.c -o "$RUNNER_TEMP/half-oracle-gcc"
+          "$RUNNER_TEMP/half-oracle-gcc" self-test | tee "$RUNNER_TEMP/half-evidence/sensitivity-gcc.txt"
+          "$RUNNER_TEMP/half-oracle" emit design "$RUNNER_TEMP/half-evidence/design.c"
+          "$RUNNER_TEMP/half-oracle" emit heldout "$RUNNER_TEMP/half-evidence/heldout.c"
+          sha256sum tests/oracle_half_exact/*.c "$RUNNER_TEMP/half-evidence/"*.c | tee "$RUNNER_TEMP/half-evidence/frozen-inputs.sha256"
+      - name: Isolated unmodified pinned compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/half-pinned" ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          cd "$RUNNER_TEMP/half-pinned"
+          test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git diff --exit-code
+          git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/half-evidence/compiler-identity.txt"
+          grep -n -A120 -B8 'c_test_float16_type' src/buster/tests/compiler/frontend/c/c_test.c | tee "$RUNNER_TEMP/half-evidence/existing-half-test.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/half-build"
+          "$RUNNER_TEMP/half-build" generate --cc clang 2>&1 | tee "$RUNNER_TEMP/half-evidence/configure.log"
+          "$RUNNER_TEMP/half-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/half-evidence/build.log"
+          sha256sum build/Release/ide | tee "$RUNNER_TEMP/half-evidence/compiler-binary.sha256"
+      - name: Independent reference control
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/half-evidence"
+          for family in design heldout; do
+            clang -std=gnu11 -O0 -ffloat16-excess-precision=none -c "$family.c" -o "$family.clang.o"
+            clang -std=gnu11 -O1 -Wall -Wextra -Werror observer.c "$family.clang.o" -o "$family.clang-observer"
+            "./$family.clang-observer" > "$family.clang.values"
+            "$RUNNER_TEMP/half-oracle" check "$family" "$family.clang.values" > "$family.clang.csv" 2> "$family.clang.summary"
+            cat "$family.clang.summary"
+          done
+      - name: Apply detector to pinned Buster
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/half-evidence"
+          result=0
+          for family in design heldout; do
+            status=2
+            if "$RUNNER_TEMP/half-pinned/build/Release/ide" cc -c "$family.c" -o "$family.buster.o" > "$family.buster-compile.log" 2>&1; then
+              if clang -std=gnu11 -O1 -Wall -Wextra -Werror observer.c "$family.buster.o" -o "$family.buster-observer" > "$family.link.log" 2>&1; then
+                if "./$family.buster-observer" > "$family.buster.values"; then
+                  set +e
+                  "$RUNNER_TEMP/half-oracle" check "$family" "$family.buster.values" > "$family.buster.csv" 2> "$family.buster.summary"
+                  status=$?
+                  set -e
+                  cat "$family.buster.summary"
+                  cat "$family.buster.csv"
+                fi
+              fi
+            fi
+            printf 'family=%s status=%s\n' "$family" "$status" | tee "$family.status"
+            cat "$family.buster-compile.log"
+            if [ "$status" -ne 0 ]; then result=1; fi
+          done
+          git -C "$RUNNER_TEMP/half-pinned" diff --exit-code
+          exit "$result"
+      - name: Retain every raw attempt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: exact-half-oracle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/half-evidence
+          if-no-files-found: error
+          retention-days: 7
