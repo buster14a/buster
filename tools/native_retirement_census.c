@@ -15,6 +15,8 @@
 BUSTER_GLOBAL_LOCAL String8 const nrc_allocators[] = {BUSTER_CODEGEN_ALLOCATORS(NRC_ALLOCATOR)};
 #undef NRC_ALLOCATOR
 
+#include "throughput/retirement_artifact.h"
+
 typedef struct NrcTarget NrcTarget;
 struct NrcTarget { String8 triple; String8 abi; String8 link_obligation; String8 execution_obligation; };
 BUSTER_GLOBAL_LOCAL NrcTarget const nrc_targets[] = {
@@ -1297,6 +1299,18 @@ BUSTER_GLOBAL_LOCAL void nrc_group(NrcSettings* settings, NrcInput input, u32 ta
             u64 identity_bytes = 0, identity_hash = 0;
             artifact = nrc_file_identity(temporary.arena, object, &identity_bytes, &identity_hash, &object_sha256) &&
                        identity_bytes == object_bytes && identity_hash == object_hash;
+        }
+        if (artifact)
+        {
+            FileMapRead map = file_map_read(temporary.arena, object, (FileReadOptions){.map_required = 1});
+            TpRetirementArtifact facts;
+            unsigned format = target_parse.target.os == OPERATING_SYSTEM_WINDOWS || target_parse.target.os == OPERATING_SYSTEM_UEFI ? 2u :
+                target_parse.target.os == OPERATING_SYSTEM_MACOS || target_parse.target.os == OPERATING_SYSTEM_IOS ? 4u : 1u;
+            artifact = map.mapped_pointer && tp_retirement_artifact(map.bytes.pointer, map.bytes.length, &facts) &&
+                !facts.executable && facts.format == format && facts.file_bytes == object_bytes &&
+                string_equal(string_from_pointer(facts.file_sha256), object_sha256) &&
+                facts.machine == (target_parse.target.cpu_arch == CPU_ARCH_X86_64 ? 1u : 2u);
+            file_map_unmap(map);
         }
         bool success = d_success(observed) && artifact && statistics.valid && target_valid && records_valid && statistics.fallbacks == 0 &&
                        d_verification(&child, &observed, (DConfig){.allocator = mode});

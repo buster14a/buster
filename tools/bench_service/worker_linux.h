@@ -19,6 +19,9 @@
 #define BQ_WORKER_BUNDLE_ENTRY_CAP 4096u
 #define BQ_WORKER_BUNDLE_FILE_CAP (64ull * 1024 * 1024)
 #define BQ_WORKER_BUNDLE_TOTAL_CAP (512ull * 1024 * 1024)
+/* The fixed retirement population needs millions of paired records. This is
+ * a separate bounded ceiling; the installed smoke recipe keeps its limit. */
+#define BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP (128ull * 1024 * 1024 * 1024)
 #define BQ_WORKER_BUNDLE_DEPTH_CAP 256u
 #define BQ_WORKER_BUNDLE_PATH_CAP BQ_PATH_CAP
 #define BQ_WORKER_BUNDLE_LINE_CAP 320u

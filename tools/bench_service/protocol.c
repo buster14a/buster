@@ -107,7 +107,7 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
                 u64 cursor = bq_u64(arguments + 80), next = bq_u64(data + 28), total = bq_u64(data + 36);
                 u32 count = bq_u32(data + 44);
                 valid = bq_u64(data + 4) == bq_u64(arguments) && bq_u64(data + 12) == bq_u64(arguments + 8) &&
-                        bq_u64(data + 20) == cursor && total && total <= BQ_EXPORT_TOTAL_CAP &&
+                        bq_u64(data + 20) == cursor && total && total <= BQ_EXPORT_RETIREMENT_TOTAL_CAP &&
                         bq_result_digest_valid(data + 48) && length == BQ_EXPORT_REPLY_HEADER + count;
                 if (valid && cursor == UINT64_MAX)
                 {
@@ -120,7 +120,9 @@ BUSTER_GLOBAL_LOCAL bool bq_public_response_valid(BqPacket const* request, BqPac
                             !memcmp(arguments + 16, data + BQ_EXPORT_REPLY_HEADER + 240, 64) &&
                             bq_u64(data + BQ_EXPORT_REPLY_HEADER + 8) == bq_u64(arguments) &&
                             bq_u64(data + BQ_EXPORT_REPLY_HEADER + 16) == bq_u64(arguments + 8) &&
-                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 24) == total;
+                            bq_u64(data + BQ_EXPORT_REPLY_HEADER + 24) == total &&
+                            (bq_u32(arguments + 88) == BQ_RECIPE_UNKNOWN ||
+                             bq_u32(arguments + 88) == bq_export_receipt_recipe(data + BQ_EXPORT_REPLY_HEADER));
 #endif
                 }
                 else if (valid)

@@ -1,0 +1,2208 @@
+/* Dedicated #1018 fixture. Compile against tools/throughput/shared.c; this
+ * intentionally does not change the shared service test registration owned by
+ * the #923 integrator. It uses the real descriptor-backed materializer.
+ */
+#define main bq_service_cli_main
+#include "main.c"
+#undef main
+#include "retirement_correctness.c"
+#include "retirement_correctness_service.c"
+#include <stdlib.h>
+#include <time.h>
+
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_tests;
+BUSTER_GLOBAL_LOCAL u32 bq_retirement_failures;
+#define BQ_PREP_CHECK(expr) do { bq_retirement_tests += 1; if (!(expr)) { \
+    bq_retirement_failures += 1; fprintf(stderr, "RETIREMENT_PREP failure line=%d: %s\n", __LINE__, #expr); \
+} } while (0)
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_write(char const* path, char const* text)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
+    bool ok = fd >= 0 && bq_write_all(fd, (u8 const*)text, (u32)strlen(text)) && fsync(fd) == 0;
+    if (fd >= 0 && close(fd) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_source(char const* installed, char const* revision, char const* contents,
+                                            BqRetirementSource* expected)
+{
+    char root[512], src[512], file[512], manifest[512], text[512];
+    int length = snprintf(root, sizeof(root), "%s/sources/%s", installed, revision);
+    bool ok = length > 0 && (u32)length < sizeof(root);
+    length = ok ? snprintf(src, sizeof(src), "%s/src", root) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(src);
+    length = ok ? snprintf(file, sizeof(file), "%s/main.c", src) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(file);
+    length = ok ? snprintf(manifest, sizeof(manifest), "%s/source.manifest", root) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(manifest);
+    ok = ok && mkdir(root, 0700) == 0 && mkdir(src, 0700) == 0 && bq_prep_test_write(file, contents);
+    char8 digest[SHA256_HEX_CAPACITY];
+    if (ok) bq_digest(contents, (u32)strlen(contents), digest);
+    length = ok ? snprintf(text, sizeof(text),
+                           "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n%.64s src/main.c\n",
+                           revision, digest) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(text) && bq_prep_test_write(manifest, text) &&
+         chmod(src, 0500) == 0 && chmod(root, 0500) == 0;
+    if (ok)
+    {
+        memcpy(expected->commit, revision, strlen(revision) + 1);
+        memset(expected->tree, revision[0] == 'a' ? 'c' : 'd', 40);
+        expected->tree[40] = 0;
+        bq_digest(text, (u32)length, (char8*)expected->manifest_sha256);
+        expected->entries = 1;
+        expected->bytes = strlen(contents);
+        expected->directories = 2;
+        expected->max_path = 10;
+        expected->max_depth = 2;
+        expected->manifest_bytes = (u32)length;
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_inventory(char const* installed, BqRetirementSource const subjects[2],
+                                                char profile[512])
+{
+    char inventory[1024], path[512];
+    int length = snprintf(inventory, sizeof(inventory),
+                          "BQ-RETIREMENT-INPUTS-V1\nrepository=buster14a/buster\n"
+                          "support-sha256=%.64s\ncontract-sha256=%.64s\n"
+                          "base=%s %s %s %u %" PRIu64 " %u %u %u\n"
+                          "candidate=%s %s %s %u %" PRIu64 " %u %u %u\n",
+                          "1111111111111111111111111111111111111111111111111111111111111111",
+                          "2222222222222222222222222222222222222222222222222222222222222222",
+                          subjects[0].commit, subjects[0].tree, subjects[0].manifest_sha256, subjects[0].entries,
+                          (uint64_t)subjects[0].bytes, subjects[0].directories, subjects[0].max_path, subjects[0].max_depth,
+                          subjects[1].commit, subjects[1].tree, subjects[1].manifest_sha256, subjects[1].entries,
+                          (uint64_t)subjects[1].bytes, subjects[1].directories, subjects[1].max_path, subjects[1].max_depth);
+    bool ok = length > 0 && (u32)length < sizeof(inventory);
+    char8 digest[SHA256_HEX_CAPACITY];
+    if (ok) bq_digest(inventory, (u32)length, digest);
+    length = ok ? snprintf(profile, 512,
+                           "schema=1\nrecipe=native-retirement-performance-v1\n"
+                           "support-declaration-sha256=%.64s\ncontract-sha256=%.64s\ninventory-sha256=%.64s\n",
+                           "1111111111111111111111111111111111111111111111111111111111111111",
+                           "2222222222222222222222222222222222222222222222222222222222222222", digest) : -1;
+    ok = ok && length > 0 && length < 512;
+    length = ok ? snprintf(path, sizeof(path), "%s/recipes/native-retirement-performance-v1.inventory", installed) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(path) && bq_prep_test_write(path, inventory);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_toolchain(char const* installed,
+                                                char digest[SHA256_HEX_CAPACITY])
+{
+    char parent[512], root[512], bin[512], path[512], manifest[1024];
+    int length = snprintf(parent, sizeof(parent), "%s/toolchain", installed);
+    bool ok = length > 0 && (size_t)length < sizeof(parent);
+    length = ok ? snprintf(root, sizeof(root), "%s/native-retirement-performance-v1", parent) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(root);
+    length = ok ? snprintf(bin, sizeof(bin), "%s/bin", root) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(bin) &&
+         mkdir(parent, 0700) == 0 && mkdir(root, 0700) == 0 && mkdir(bin, 0700) == 0;
+    char const* names[] = {"clang", "cmake", "ld", "ninja"};
+    char const* body = "fixture only\n";
+    char tool_digest[SHA256_HEX_CAPACITY];
+    bq_digest(body, (u32)strlen(body), (char8*)tool_digest);
+    u32 used = (u32)snprintf(manifest, sizeof(manifest),
+        "BQ-RETIREMENT-TOOLCHAIN-V1\nplatform=linux-x86_64\n");
+    ok = ok && used < sizeof(manifest);
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(names); index += 1)
+    {
+        length = snprintf(path, sizeof(path), "%s/%s", bin, names[index]);
+        ok = length > 0 && (size_t)length < sizeof(path) &&
+             bq_prep_test_write(path, body) && chmod(path, 0555) == 0;
+        length = ok ? snprintf(manifest + used, sizeof(manifest) - used,
+                               "%.64s bin/%s\n", tool_digest, names[index]) : -1;
+        ok = ok && length > 0 && (u32)length < sizeof(manifest) - used;
+        if (ok) used += (u32)length;
+    }
+    length = ok ? snprintf(path, sizeof(path), "%s/toolchain.manifest", root) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(path) &&
+         bq_prep_test_write(path, manifest) && chmod(path, 0444) == 0 &&
+         chmod(bin, 0555) == 0 && chmod(root, 0555) == 0 && chmod(parent, 0555) == 0;
+    if (ok) bq_digest(manifest, used, (char8*)digest);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_setup(char installed[80], char workspaces[80],
+                                            BqRetirementSource subjects[2], char profile[512], BqRequest* request)
+{
+    memcpy(installed, "/tmp/bq-retirement-installed-XXXXXX", sizeof("/tmp/bq-retirement-installed-XXXXXX"));
+    memcpy(workspaces, "/tmp/bq-retirement-workspaces-XXXXXX", sizeof("/tmp/bq-retirement-workspaces-XXXXXX"));
+    bool ok = mkdtemp(installed) != NULL && mkdtemp(workspaces) != NULL;
+    char sources[512], recipes[512];
+    int length = snprintf(sources, sizeof(sources), "%s/sources", installed);
+    ok = ok && length > 0 && (u32)length < sizeof(sources);
+    length = ok ? snprintf(recipes, sizeof(recipes), "%s/recipes", installed) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(recipes) && mkdir(sources, 0700) == 0 &&
+         mkdir(recipes, 0700) == 0;
+    char const* base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    char const* candidate = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    char toolchain_digest[SHA256_HEX_CAPACITY] = {0};
+    ok = ok && bq_prep_test_source(installed, base, "int a;\n", &subjects[0]) &&
+         bq_prep_test_source(installed, candidate, "int b;\n", &subjects[1]) &&
+         bq_prep_test_inventory(installed, subjects, profile) &&
+         bq_prep_test_toolchain(installed, toolchain_digest);
+    size_t used = strlen(profile);
+    length = ok ? snprintf(profile + used, 512 - used,
+                           "toolchain-manifest-sha256=%.64s\n", toolchain_digest) : -1;
+    ok = ok && length > 0 && (size_t)length < 512 - used &&
+         chmod(recipes, 0500) == 0 && chmod(sources, 0500) == 0 &&
+         chmod(installed, 0555) == 0 && chmod(workspaces, 02710) == 0;
+    String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("id"), S8("validate-buster-v1"),
+        string_from_pointer(base), string_from_pointer(candidate)};
+    ok = ok && bq_request_make(fields, request) == BQ_OK;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_prep_test_cleanup(char const* path)
+{
+    int root = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(root >= 0 && bq_remove_workspace_payload(root));
+    if (root >= 0) close(root);
+    BQ_PREP_CHECK(rmdir(path) == 0);
+}
+
+/* The production entry's first census boundary uses exact profile-pinned
+ * declaration bytes. The miniature B fixture uses the pinned test seam and
+ * cannot stand in for this derived 192-row-per-subject matrix. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_support_population(void)
+{
+    char directory[] = "/tmp/bq-retirement-support-XXXXXX";
+    char path[128], profile[128];
+    char const* ledger = "path\trole\tcompile_obligation\tbytes\tsha256\n"
+        "tests/a.c\tsubject\tsupported-object-zero-fallback\t4\t"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "tests/b.c\tsubject\tregistered-non-object-control\t5\t"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "tests/z.h\tsupport-file\tdependency-only\t3\t"
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n";
+    BQ_PREP_CHECK(mkdtemp(directory) != NULL);
+    int length = snprintf(path, sizeof(path), "%s/support.tsv", directory);
+    BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(path) && bq_prep_test_write(path, ledger));
+    BqRetirementPrepared prepared = {.rows = 386, .object_rows = 384};
+    bq_digest(ledger, (u32)strlen(ledger), (char8*)prepared.support_sha256);
+    length = snprintf(profile, sizeof(profile), "support-declaration-sha256=%.64s\n",
+                      prepared.support_sha256);
+    BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(profile));
+    int file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(file >= 3 && bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+    BqRetirementTrustedRow* rows = calloc(prepared.rows, sizeof(*rows));
+    BQ_PREP_CHECK(rows != NULL);
+    if (rows)
+    {
+        for (u32 i = 0; i < prepared.object_rows; i += 1)
+        {
+            rows[i].row = rows[i].census_row = i;
+            rows[i].stage = BQ_RETIREMENT_STAGE_OBJECT;
+            rows[i].target = bq_retirement_census_target_ids[(i % BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT) / 16u];
+            memset(rows[i].source_sha256, i < 192 ? 'a' : 'b', 64);
+        }
+        rows[384].row = 384;
+        rows[384].stage = BQ_RETIREMENT_STAGE_LINK;
+        rows[385].row = 385;
+        rows[385].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+        BQ_PREP_CHECK(bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[192].source_sha256[0] = 'a';
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[192].source_sha256[0] = 'b';
+        rows[16].target = rows[0].target;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[16].target = bq_retirement_census_target_ids[1];
+        rows[383].census_row = 382;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[383].census_row = 383;
+        rows[385].stage = BQ_RETIREMENT_STAGE_LINK;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[385].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+        rows[384].row = 0;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[384].row = 384;
+        rows[384].census_row = 384;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[384].census_row = 0;
+    }
+    free(rows);
+    prepared.object_rows = 192;
+    BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+    prepared.object_rows = 384;
+    prepared.rows = 385;
+    BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+    prepared.rows = 386;
+    char first = prepared.support_sha256[0];
+    prepared.support_sha256[0] = first == '0' ? '1' : '0';
+    BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+    prepared.support_sha256[0] = first;
+    BQ_PREP_CHECK(fcntl(file, F_SETFD, 0) == 0 &&
+                  !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL) &&
+                  fcntl(file, F_SETFD, FD_CLOEXEC) == 0);
+    BQ_PREP_CHECK(chmod(path, 0600) == 0 &&
+                  !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL) &&
+                  chmod(path, 0400) == 0);
+    char link[128];
+    length = snprintf(link, sizeof(link), "%s/alias", directory);
+    BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(link) && linkat(AT_FDCWD, path, AT_FDCWD, link, 0) == 0 &&
+                  !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL) &&
+                  unlink(link) == 0);
+    BQ_PREP_CHECK(close(file) == 0 && !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+    BQ_PREP_CHECK(chmod(path, 0600) == 0);
+    file = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(file >= 3 && !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+    BQ_PREP_CHECK(file >= 3 && pwrite(file, "x", 1, 6) == 1 && close(file) == 0 &&
+                  chmod(path, 0400) == 0);
+    file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(file >= 3 && !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+    if (file >= 3) BQ_PREP_CHECK(close(file) == 0);
+    BQ_PREP_CHECK(unlink(path) == 0);
+
+    /* Replay the repository's currently reviewed 559-input declaration too;
+     * the service receives a private read-only copy, never a mutable git file. */
+    char* actual = malloc(BQ_RETIREMENT_SUPPORT_BYTES_CAP + 1u);
+    u32 actual_bytes = 0;
+    int source = open("docs/native-retirement-support-v1.tsv", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(actual && source >= 3 &&
+                  bq_read_file(source, (u8*)actual, BQ_RETIREMENT_SUPPORT_BYTES_CAP, &actual_bytes));
+    if (source >= 3) BQ_PREP_CHECK(close(source) == 0);
+    if (actual && actual_bytes)
+    {
+        actual[actual_bytes] = 0;
+        length = snprintf(path, sizeof(path), "%s/actual.tsv", directory);
+        BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(path) &&
+                      bq_prep_test_write(path, actual));
+        prepared = (BqRetirementPrepared){.rows = 78914, .object_rows = 78912};
+        bq_digest(actual, actual_bytes, (char8*)prepared.support_sha256);
+        length = snprintf(profile, sizeof(profile), "support-declaration-sha256=%.64s\n",
+                          prepared.support_sha256);
+        BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(profile));
+        file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(file >= 3 &&
+                      bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+        BqRetirementTrustedRow* full = calloc(prepared.rows, sizeof(*full));
+        BQ_PREP_CHECK(full != NULL);
+        if (full)
+        {
+            String8 text = {(char8*)actual, actual_bytes}, line = {0};
+            u64 offset = 0;
+            u32 object = 0;
+            BQ_PREP_CHECK(bq_next_line(text, &offset, &line));
+            while (offset < text.length && bq_next_line(text, &offset, &line))
+            {
+                char8* tab = memchr(line.pointer, '\t', (size_t)line.length);
+                char8* next = tab ? memchr(tab + 1, '\t', (size_t)(line.pointer + line.length - tab - 1)) : NULL;
+                bool subject = next && (size_t)(next - tab - 1) == strlen("subject") &&
+                               !memcmp(tab + 1, "subject", strlen("subject"));
+                if (subject && line.length >= 64)
+                    for (u32 cell = 0; cell < BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT &&
+                                       object < prepared.object_rows; cell += 1)
+                    {
+                        full[object].row = full[object].census_row = object;
+                        full[object].target = bq_retirement_census_target_ids[cell / 16u];
+                        full[object].stage = BQ_RETIREMENT_STAGE_OBJECT;
+                        memcpy(full[object].source_sha256, line.pointer + line.length - 64, 64);
+                        object += 1;
+                    }
+            }
+            BQ_PREP_CHECK(object == prepared.object_rows);
+            if (object == prepared.object_rows && object)
+            {
+                full[object].row = object;
+                full[object].stage = BQ_RETIREMENT_STAGE_LINK;
+                full[object + 1].row = object + 1;
+                full[object + 1].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+                BQ_PREP_CHECK(bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, full));
+                full[object - 1].target -= 1;
+                BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, full));
+            }
+            free(full);
+        }
+        prepared.object_rows -= 192;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+        if (file >= 3) BQ_PREP_CHECK(close(file) == 0);
+        BQ_PREP_CHECK(unlink(path) == 0);
+    }
+    free(actual);
+    BQ_PREP_CHECK(rmdir(directory) == 0);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_prep_test_census_append(char* text, u32 capacity, u32* used,
+    BqRetirementTrustedRow* rows, u32 row, u32 target_index, u32 allocator,
+    char const* fixture, char const* fixture_recipe, char const* compile_obligation)
+{
+    u32 subject_row = row % BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT;
+    u32 within_target = subject_row % 16u;
+    u32 frontend = within_target / 8u;
+    u32 pic = (within_target % 8u) / 4u;
+    String8 lowering = frontend ? S8("direct-ssa") : S8("local-backed-canonical");
+    String8 pic_text = pic ? S8("1") : S8("0");
+    String8 execution = target_index == 8 ? S8("unavailable-platform-control") : S8("semantic-gate-509");
+    char line[512] = {0};
+    u32 group = row / BQ_RETIREMENT_CENSUS_ALLOCATOR_COUNT;
+    int length = snprintf(line, sizeof(line),
+        "%u\t%u\t%s\t%.*s\t%.*s\tbaseline\tfixture-features\t%.*s\t%.*s\t%.*s\t1\t%s\t%s\tsemantic-gate-509\t%.*s\tnone\tgroups/%u/%.*s.argv\n",
+        row, group, fixture,
+        (int)bq_retirement_census_targets[target_index].length, bq_retirement_census_targets[target_index].pointer,
+        (int)bq_retirement_census_target_abis[target_index].length, bq_retirement_census_target_abis[target_index].pointer,
+        (int)bq_retirement_census_allocators[allocator].length, bq_retirement_census_allocators[allocator].pointer,
+        (int)lowering.length, lowering.pointer, (int)pic_text.length, pic_text.pointer,
+        fixture_recipe, compile_obligation, (int)execution.length, execution.pointer, group,
+        (int)bq_retirement_census_allocators[allocator].length, bq_retirement_census_allocators[allocator].pointer);
+    bool ok = length > 0 && (u32)length < sizeof(line) &&
+              *used + (u32)length < capacity;
+    if (ok)
+    {
+        memcpy(text + *used, line, (size_t)length);
+        *used += (u32)length;
+        rows[row].row = row;
+        rows[row].census_row = row;
+        rows[row].target = bq_retirement_census_target_ids[target_index];
+        rows[row].stage = BQ_RETIREMENT_STAGE_OBJECT;
+        rows[row].compiler_eligible = strcmp(compile_obligation, "registered-non-object-control") != 0;
+        memset(rows[row].configuration_sha256, '3', 64);
+        rows[row].configuration_sha256[64] = 0;
+    }
+    BQ_PREP_CHECK(ok);
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_census_identity_sha256(String8 fields[17], char digest[65])
+{
+    char json[2048] = {0};
+    int length = snprintf(json, sizeof(json),
+        "{\"PIC\":\"%.*s\",\"allocator\":\"%.*s\",\"argv_evidence\":\"%.*s\","
+        "\"artifact_stage\":\"object\",\"compile_obligation\":\"%.*s\",\"cpu\":\"%.*s\","
+        "\"cpu_features\":\"%.*s\",\"diagnostic_obligation\":\"%.*s\","
+        "\"execution_obligation\":\"%.*s\",\"fixture\":\"%.*s\",\"fixture_recipe\":\"%.*s\","
+        "\"frontend_lowering\":\"%.*s\",\"link_obligation\":\"%.*s\",\"target\":\"%.*s\","
+        "\"target_abi\":\"%.*s\"}",
+        (int)fields[9].length, fields[9].pointer, (int)fields[7].length, fields[7].pointer,
+        (int)fields[16].length, fields[16].pointer, (int)fields[12].length, fields[12].pointer,
+        (int)fields[5].length, fields[5].pointer, (int)fields[6].length, fields[6].pointer,
+        (int)fields[15].length, fields[15].pointer, (int)fields[14].length, fields[14].pointer,
+        (int)fields[2].length, fields[2].pointer, (int)fields[11].length, fields[11].pointer,
+        (int)fields[8].length, fields[8].pointer, (int)fields[13].length, fields[13].pointer,
+        (int)fields[3].length, fields[3].pointer, (int)fields[4].length, fields[4].pointer);
+    bool ok = length > 0 && (u32)length < sizeof(json);
+    if (ok) bq_digest(json, (u32)length, (char8*)digest);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_write_bytes(char const* path, char const* bytes, u32 count)
+{
+    int file = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
+    bool ok = file >= 3 && bq_write_all(file, (u8 const*)bytes, count) && fsync(file) == 0;
+    if (file >= 3 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* Both #508 inputs.tsv and rows.tsv need pins independent of B's declaration.
+ * This fixture's input digest below is an independent known SHA-256 vector. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_raw_census_boundary(void)
+{
+    enum { subject_count = 3, object_rows = subject_count * BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT,
+           all_rows = object_rows + 2,
+           text_capacity = 1024 * 1024 };
+    char directory[] = "/tmp/bq-retirement-raw-census-XXXXXX";
+    char support_path[160] = {0}, inputs_path[160] = {0}, rows_path[160] = {0};
+    bool ok = mkdtemp(directory) != NULL;
+    int length = snprintf(support_path, sizeof(support_path), "%s/support.tsv", directory);
+    ok = ok && length > 0 && (size_t)length < sizeof(support_path);
+    length = ok ? snprintf(inputs_path, sizeof(inputs_path), "%s/inputs.tsv", directory) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(inputs_path);
+    length = ok ? snprintf(rows_path, sizeof(rows_path), "%s/rows.tsv", directory) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(rows_path);
+    char const* support = "path\trole\tcompile_obligation\tbytes\tsha256\n"
+        "tests/a.c\tsubject\tsupported-object-zero-fallback\t4\t"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "tests/basic_c_constexpr.c\tsubject\tsupported-object-zero-fallback\t5\t"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "tests/z-control.c\tsubject\tregistered-non-object-control\t6\t"
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n"
+        "tests/zz.h\tsupport-file\tdependency-only\t3\t"
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n";
+    char const* inputs = "path\trole\tcompile_obligation\tbytes\tbuster_hash_64\tsha256\tfixture_recipe\tfixture_flags\n"
+        "tests/a.c\tsubject\tsupported-object-zero-fallback\t4\t11\t"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcompiler-default\t\n"
+        "tests/basic_c_constexpr.c\tsubject\tsupported-object-zero-fallback\t5\t22\t"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tc23\t-std=c23\n"
+        "tests/z-control.c\tsubject\tregistered-non-object-control\t6\t33\t"
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\tcompiler-default\t\n"
+        "tests/zz.h\tsupport-file\tdependency-only\t3\t44\t"
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\tcompiler-default\t\n";
+    ok = ok && bq_prep_test_write(support_path, support) && bq_prep_test_write(inputs_path, inputs);
+    char* text = calloc(text_capacity, 1);
+    char* changed = calloc(text_capacity, 1);
+    BqRetirementTrustedRow* trusted = calloc(all_rows, sizeof(*trusted));
+    ok = ok && text && changed && trusted;
+    u32 used = 0;
+    static char const census_header[] = "row\tgroup\tfixture\ttarget\ttarget_abi\tcpu\tcpu_features\tallocator\tfrontend_lowering\tPIC\tselected\tfixture_recipe\tcompile_obligation\tlink_obligation\texecution_obligation\tdiagnostic_obligation\targv_evidence\n";
+    if (ok)
+    {
+        memcpy(text, census_header, sizeof(census_header) - 1);
+        used = sizeof(census_header) - 1;
+        for (u32 subject = 0; subject < subject_count; subject += 1)
+        {
+            char const* fixture = subject == 0 ? "tests/a.c" :
+                subject == 1 ? "tests/basic_c_constexpr.c" : "tests/z-control.c";
+            char const* fixture_recipe = subject == 1 ? "c23" : "compiler-default";
+            char const* obligation = subject == 2 ? "registered-non-object-control" :
+                "supported-object-zero-fallback";
+            for (u32 target = 0; target < 12; target += 1)
+                for (u32 frontend = 0; frontend < 2; frontend += 1)
+                    for (u32 pic = 0; pic < 2; pic += 1)
+                        for (u32 allocator = 0; allocator < BQ_RETIREMENT_CENSUS_ALLOCATOR_COUNT; allocator += 1)
+                        {
+                            u32 row = subject * BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT + target * 16u +
+                                      frontend * 8u + pic * 4u + allocator;
+                            bq_prep_test_census_append(text, text_capacity, &used, trusted, row, target,
+                                                       allocator, fixture, fixture_recipe, obligation);
+                        }
+        }
+        u64 offset = sizeof(census_header) - 1;
+        u32 census_row = 0;
+        String8 line = {0};
+        String8 text_view = {(char8*)text, used};
+        bool identities_ok = true;
+        while (identities_ok && offset < text_view.length)
+        {
+            identities_ok = bq_next_line(text_view, &offset, &line) && census_row < object_rows;
+            String8 fields[17] = {0};
+            char identity[SHA256_HEX_CAPACITY] = {0};
+            identities_ok = identities_ok && bq_retirement_census_line_fields(line, fields) &&
+                            bq_prep_test_census_identity_sha256(fields, identity);
+            if (identities_ok)
+            {
+                memcpy(trusted[census_row].identity_sha256, identity, SHA256_HEX_CAPACITY);
+                census_row += 1;
+            }
+        }
+        ok = ok && identities_ok && census_row == object_rows;
+        ok = used > sizeof(census_header) - 1 && used < text_capacity &&
+             bq_prep_test_write_bytes(rows_path, text, used);
+    }
+    BqRetirementPrepared prepared = {.rows = all_rows, .object_rows = object_rows, .native_target = 1};
+    if (ok)
+    {
+        bq_digest(support, (u32)strlen(support), (char8*)prepared.support_sha256);
+        bq_digest(text, used, (char8*)prepared.census_sha256);
+        memset(prepared.preparation_sha256, '1', 64);
+        prepared.preparation_sha256[64] = 0;
+        memset(prepared.aa_second_commands_sha256, '2', 64);
+        prepared.aa_second_commands_sha256[64] = 0;
+        for (u32 row = 0; row < object_rows; row += 1)
+        {
+            memcpy(trusted[row].source_sha256, row < BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT ?
+                   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" :
+                   row < 2 * BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT ?
+                   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :
+                   "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", 65);
+        }
+        trusted[object_rows].row = object_rows;
+        trusted[object_rows].census_row = 0;
+        trusted[object_rows].target = bq_retirement_census_target_ids[0];
+        trusted[object_rows].stage = BQ_RETIREMENT_STAGE_LINK;
+        trusted[object_rows + 1].row = object_rows + 1;
+        trusted[object_rows + 1].census_row = 0;
+        trusted[object_rows + 1].target = bq_retirement_census_target_ids[0];
+        trusted[object_rows + 1].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+        memcpy(trusted[object_rows].source_sha256, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 65);
+        memcpy(trusted[object_rows + 1].source_sha256, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 65);
+        String8 known_fields[17] = {
+            S8("0"), S8("0"), S8("tests/a.c"), S8("x86_64-unknown-linux-gnu"), S8("systemv-x86_64"),
+            S8("baseline"), S8("fixture-features"), S8("none"), S8("local-backed-canonical"), S8("0"),
+            S8("1"), S8("compiler-default"), S8("supported-object-zero-fallback"), S8("semantic-gate-509"),
+            S8("semantic-gate-509"), S8("none"), S8("groups/0/none.argv")
+        };
+        char expected_identity[SHA256_HEX_CAPACITY] = {0}, service_identity[SHA256_HEX_CAPACITY] = {0};
+        BQ_PREP_CHECK(bq_prep_test_census_identity_sha256(known_fields, expected_identity) &&
+                      bq_retirement_census_identity_sha256(known_fields, service_identity) &&
+                      !strcmp(expected_identity, "f87f6401cf1b60971613e1fd7f740e30828c1d93b29830b94e681b325433b6fb") &&
+                      !strcmp(expected_identity, service_identity));
+    }
+    static char const inputs_pin[] = "0e2ddd7a187c0aa3371021b5e4d3939440320ab41043ade4f3b087e4d8adb17c";
+    char profile[384] = {0};
+    int profile_length = ok ? snprintf(profile, sizeof(profile),
+        "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+        prepared.support_sha256, inputs_pin, prepared.census_sha256) : -1;
+    ok = ok && profile_length > 0 && (size_t)profile_length < sizeof(profile);
+    BQ_PREP_CHECK(ok);
+    int support_fd = ok ? open(support_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int inputs_fd = ok ? open(inputs_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int rows_fd = ok ? open(rows_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(support_fd >= 3 && inputs_fd >= 3 && rows_fd >= 3);
+    if (support_fd >= 3 && inputs_fd >= 3 && rows_fd >= 3)
+    {
+        char verified_inputs[SHA256_HEX_CAPACITY] = {0};
+        char verified_rows[SHA256_HEX_CAPACITY] = {0};
+        BQ_PREP_CHECK(bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                      string_from_pointer(profile), &prepared, trusted, verified_inputs, verified_rows) &&
+                      !memcmp(verified_inputs, inputs_pin, SHA256_HEX_CAPACITY) &&
+                      !memcmp(verified_rows, prepared.census_sha256, SHA256_HEX_CAPACITY));
+        char no_pin[256] = {0};
+        int no_pin_length = snprintf(no_pin, sizeof(no_pin),
+            "support-declaration-sha256=%.64s\ncensus-rows-sha256=%.64s\n",
+            prepared.support_sha256, prepared.census_sha256);
+        BQ_PREP_CHECK(no_pin_length > 0 && (size_t)no_pin_length < sizeof(no_pin) &&
+                      !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(no_pin), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        char altered_pin[65] = {0};
+        memcpy(altered_pin, inputs_pin, 64);
+        altered_pin[0] = altered_pin[0] == '0' ? '1' : '0';
+        char altered_pin_profile[384] = {0};
+        int altered_pin_length = snprintf(altered_pin_profile, sizeof(altered_pin_profile),
+            "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+            prepared.support_sha256, altered_pin, prepared.census_sha256);
+        BQ_PREP_CHECK(altered_pin_length > 0 && (size_t)altered_pin_length < sizeof(altered_pin_profile) &&
+                      !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(altered_pin_profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        char saved = prepared.census_sha256[0];
+        prepared.census_sha256[0] = saved == '0' ? '1' : '0';
+        BQ_PREP_CHECK(!bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        prepared.census_sha256[0] = saved;
+        saved = trusted[17].identity_sha256[0];
+        trusted[17].identity_sha256[0] = saved == '0' ? '1' : '0';
+        BQ_PREP_CHECK(!bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        trusted[17].identity_sha256[0] = saved;
+        BQ_PREP_CHECK(close(rows_fd) == 0);
+        rows_fd = open(rows_path, O_RDONLY | O_NOFOLLOW);
+        BQ_PREP_CHECK(rows_fd >= 3 &&
+                      !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+        rows_fd = open(rows_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(rows_fd >= 3);
+
+        BQ_PREP_CHECK(close(inputs_fd) == 0);
+        inputs_fd = open(inputs_path, O_RDONLY | O_NOFOLLOW);
+        BQ_PREP_CHECK(inputs_fd >= 3 &&
+                      !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        if (inputs_fd >= 3) BQ_PREP_CHECK(close(inputs_fd) == 0);
+        inputs_fd = open(inputs_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(inputs_fd >= 3);
+
+        char inputs_changed[2048] = {0};
+        u32 inputs_size = (u32)strlen(inputs);
+        memcpy(inputs_changed, inputs, inputs_size);
+        char* mutated_flag = strstr(inputs_changed, "-std=c23");
+        BQ_PREP_CHECK(mutated_flag != NULL);
+        if (mutated_flag) memcpy(mutated_flag, "-std=c99", strlen("-std=c99"));
+        char mutated_inputs_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(inputs_changed, inputs_size, (char8*)mutated_inputs_digest);
+        char input_mutation_path[160] = {0};
+        int input_mutation_length = snprintf(input_mutation_path, sizeof(input_mutation_path),
+                                             "%s/mutated-inputs.tsv", directory);
+        BQ_PREP_CHECK(mutated_flag && input_mutation_length > 0 &&
+                      (size_t)input_mutation_length < sizeof(input_mutation_path) &&
+                      bq_prep_test_write_bytes(input_mutation_path, inputs_changed, inputs_size));
+        if (mutated_flag && input_mutation_length > 0 &&
+            (size_t)input_mutation_length < sizeof(input_mutation_path))
+        {
+            int mutated_inputs_fd = open(input_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_inputs_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, mutated_inputs_fd, rows_fd,
+                                                           string_from_pointer(profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            char mutated_inputs_profile[384] = {0};
+            int mutated_profile_length = snprintf(mutated_inputs_profile, sizeof(mutated_inputs_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%.64s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, mutated_inputs_digest, prepared.census_sha256);
+            BQ_PREP_CHECK(mutated_profile_length > 0 &&
+                          (size_t)mutated_profile_length < sizeof(mutated_inputs_profile) &&
+                          mutated_inputs_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, mutated_inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_inputs_profile), &prepared,
+                                                           trusted, verified_inputs, verified_rows));
+            if (mutated_inputs_fd >= 3) BQ_PREP_CHECK(close(mutated_inputs_fd) == 0);
+            BQ_PREP_CHECK(unlink(input_mutation_path) == 0);
+        }
+
+        memcpy(inputs_changed, inputs, inputs_size);
+        char* mutated_source_sha = strstr(inputs_changed,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        BQ_PREP_CHECK(mutated_source_sha != NULL);
+        if (mutated_source_sha) memset(mutated_source_sha, 'e', 64);
+        bq_digest(inputs_changed, inputs_size, (char8*)mutated_inputs_digest);
+        input_mutation_length = snprintf(input_mutation_path, sizeof(input_mutation_path),
+                                         "%s/mutated-input-source.tsv", directory);
+        BQ_PREP_CHECK(mutated_source_sha && input_mutation_length > 0 &&
+                      (size_t)input_mutation_length < sizeof(input_mutation_path) &&
+                      bq_prep_test_write_bytes(input_mutation_path, inputs_changed, inputs_size));
+        if (mutated_source_sha && input_mutation_length > 0 &&
+            (size_t)input_mutation_length < sizeof(input_mutation_path))
+        {
+            int mutated_inputs_fd = open(input_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            char mutated_inputs_profile[384] = {0};
+            int mutated_profile_length = snprintf(mutated_inputs_profile, sizeof(mutated_inputs_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%.64s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, mutated_inputs_digest, prepared.census_sha256);
+            BQ_PREP_CHECK(mutated_profile_length > 0 &&
+                          (size_t)mutated_profile_length < sizeof(mutated_inputs_profile) &&
+                          mutated_inputs_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, mutated_inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_inputs_profile), &prepared,
+                                                           trusted, verified_inputs, verified_rows));
+            if (mutated_inputs_fd >= 3) BQ_PREP_CHECK(close(mutated_inputs_fd) == 0);
+            BQ_PREP_CHECK(unlink(input_mutation_path) == 0);
+        }
+
+        memcpy(changed, text, used);
+        char* allocator = strstr(changed + sizeof(census_header) - 1,
+                                 "\tbaseline\tfixture-features\tnone\t");
+        BQ_PREP_CHECK(allocator != NULL);
+        if (allocator) memcpy(allocator + strlen("\tbaseline\tfixture-features\t"), "fast", 4);
+        char allocator_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(changed, used, (char8*)allocator_digest);
+        char allocator_mutation_path[160];
+        int allocator_path_length = snprintf(allocator_mutation_path, sizeof(allocator_mutation_path),
+                                            "%s/mutated-allocator.tsv", directory);
+        BQ_PREP_CHECK(allocator && allocator_path_length > 0 &&
+                      (size_t)allocator_path_length < sizeof(allocator_mutation_path) &&
+                      bq_prep_test_write_bytes(allocator_mutation_path, changed, used));
+        if (allocator && allocator_path_length > 0 &&
+            (size_t)allocator_path_length < sizeof(allocator_mutation_path))
+        {
+            char mutated_profile[384] = {0};
+            int mutated_length = snprintf(mutated_profile, sizeof(mutated_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, inputs_pin, allocator_digest);
+            memcpy(prepared.census_sha256, allocator_digest, SHA256_HEX_CAPACITY);
+            rows_fd = open(allocator_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_length > 0 && (size_t)mutated_length < sizeof(mutated_profile) && rows_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+            bq_digest(text, used, (char8*)prepared.census_sha256);
+            BQ_PREP_CHECK(unlink(allocator_mutation_path) == 0);
+        }
+
+        memcpy(changed, text, used);
+        char* ordinal = strstr(changed + sizeof(census_header) - 1, "\n17\t4\t");
+        BQ_PREP_CHECK(ordinal != NULL);
+        if (ordinal) memcpy(ordinal + 1, "16", 2);
+        char ordinal_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(changed, used, (char8*)ordinal_digest);
+        char ordinal_mutation_path[160];
+        int ordinal_path_length = snprintf(ordinal_mutation_path, sizeof(ordinal_mutation_path),
+                                           "%s/mutated-ordinal.tsv", directory);
+        BQ_PREP_CHECK(ordinal && ordinal_path_length > 0 &&
+                      (size_t)ordinal_path_length < sizeof(ordinal_mutation_path) &&
+                      bq_prep_test_write_bytes(ordinal_mutation_path, changed, used));
+        if (ordinal && ordinal_path_length > 0 && (size_t)ordinal_path_length < sizeof(ordinal_mutation_path))
+        {
+            char mutated_profile[384] = {0};
+            int mutated_length = snprintf(mutated_profile, sizeof(mutated_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, inputs_pin, ordinal_digest);
+            memcpy(prepared.census_sha256, ordinal_digest, SHA256_HEX_CAPACITY);
+            rows_fd = open(ordinal_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_length > 0 && (size_t)mutated_length < sizeof(mutated_profile) && rows_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+            bq_digest(text, used, (char8*)prepared.census_sha256);
+            BQ_PREP_CHECK(unlink(ordinal_mutation_path) == 0);
+        }
+
+        memcpy(changed, text, used);
+        char* row_recipe = strstr(changed + sizeof(census_header) - 1, "\tcompiler-default\t");
+        BQ_PREP_CHECK(row_recipe != NULL);
+        if (row_recipe) row_recipe[strlen("\tcompiler-default") - 1] = 'x';
+        char row_recipe_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(changed, used, (char8*)row_recipe_digest);
+        char row_recipe_path[160] = {0};
+        int row_recipe_path_length = snprintf(row_recipe_path, sizeof(row_recipe_path),
+                                               "%s/mutated-row-recipe.tsv", directory);
+        BQ_PREP_CHECK(row_recipe && row_recipe_path_length > 0 &&
+                      (size_t)row_recipe_path_length < sizeof(row_recipe_path) &&
+                      bq_prep_test_write_bytes(row_recipe_path, changed, used));
+        if (row_recipe && row_recipe_path_length > 0 &&
+            (size_t)row_recipe_path_length < sizeof(row_recipe_path))
+        {
+            char mutated_profile[384] = {0};
+            int mutated_length = snprintf(mutated_profile, sizeof(mutated_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, inputs_pin, row_recipe_digest);
+            memcpy(prepared.census_sha256, row_recipe_digest, SHA256_HEX_CAPACITY);
+            rows_fd = open(row_recipe_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_length > 0 && (size_t)mutated_length < sizeof(mutated_profile) && rows_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+            bq_digest(text, used, (char8*)prepared.census_sha256);
+            BQ_PREP_CHECK(unlink(row_recipe_path) == 0);
+        }
+
+        memcpy(changed, text, used);
+        char* fixture = strstr(changed + sizeof(census_header) - 1, "tests/a.c");
+        BQ_PREP_CHECK(fixture != NULL);
+        if (fixture) memcpy(fixture, "tests/b.c", strlen("tests/b.c"));
+        char source_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(changed, used, (char8*)source_digest);
+        char source_mutation_path[160];
+        int source_mutation_length = snprintf(source_mutation_path, sizeof(source_mutation_path),
+                                               "%s/mutated-source.tsv", directory);
+        BQ_PREP_CHECK(fixture && source_mutation_length > 0 &&
+                      (size_t)source_mutation_length < sizeof(source_mutation_path) &&
+                      bq_prep_test_write_bytes(source_mutation_path, changed, used));
+        if (fixture && source_mutation_length > 0 &&
+            (size_t)source_mutation_length < sizeof(source_mutation_path))
+        {
+            char mutated_profile[384] = {0};
+            int mutated_length = snprintf(mutated_profile, sizeof(mutated_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, inputs_pin, source_digest);
+            memcpy(prepared.census_sha256, source_digest, SHA256_HEX_CAPACITY);
+            rows_fd = open(source_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_length > 0 && (size_t)mutated_length < sizeof(mutated_profile) && rows_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+            bq_digest(text, used, (char8*)prepared.census_sha256);
+            BQ_PREP_CHECK(unlink(source_mutation_path) == 0);
+        }
+        BQ_PREP_CHECK(close(inputs_fd) == 0);
+        BQ_PREP_CHECK(close(support_fd) == 0);
+    }
+    else
+    {
+        if (support_fd >= 3) close(support_fd);
+        if (inputs_fd >= 3) close(inputs_fd);
+        if (rows_fd >= 3) close(rows_fd);
+    }
+    free(trusted);
+    free(changed);
+    free(text);
+    if (support_path[0]) BQ_PREP_CHECK(unlink(support_path) == 0);
+    if (inputs_path[0]) BQ_PREP_CHECK(unlink(inputs_path) == 0);
+    if (rows_path[0]) BQ_PREP_CHECK(unlink(rows_path) == 0);
+    BQ_PREP_CHECK(rmdir(directory) == 0);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_prep_test_large_manifest(void)
+{
+    char root[80] = "/tmp/bq-retirement-large-XXXXXX";
+    char const* revision = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    bool ok = mkdtemp(root) != NULL;
+    char sources[256], snapshot[256], src[256], copied[256], manifest_path[256];
+    int length = snprintf(sources, sizeof(sources), "%s/sources", root);
+    ok = ok && length > 0 && (u32)length < sizeof(sources);
+    length = ok ? snprintf(snapshot, sizeof(snapshot), "%s/%s", sources, revision) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(snapshot);
+    length = ok ? snprintf(src, sizeof(src), "%s/src", snapshot) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(src);
+    length = ok ? snprintf(copied, sizeof(copied), "%s/copied", root) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(copied);
+    length = ok ? snprintf(manifest_path, sizeof(manifest_path), "%s/source.manifest", snapshot) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(manifest_path) &&
+         mkdir(sources, 0700) == 0 && mkdir(snapshot, 0700) == 0 &&
+         mkdir(src, 0700) == 0 && mkdir(copied, 0700) == 0;
+    char text[128u * 1024u] = {0};
+    length = ok ? snprintf(text, sizeof(text), "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n", revision) : -1;
+    ok = ok && length > 0 && (u32)length < sizeof(text);
+    u32 used = ok ? (u32)length : 0;
+    char8 digest[SHA256_HEX_CAPACITY];
+    bq_digest("x", 1, digest);
+    for (u32 index = 0; ok && index < 1024; index += 1)
+    {
+        char file[256];
+        int named = snprintf(file, sizeof(file), "%s/f%04u.c", src, index);
+        ok = named > 0 && (u32)named < sizeof(file) && bq_prep_test_write(file, "x");
+        int line = ok ? snprintf(text + used, sizeof(text) - used, "%.64s src/f%04u.c\n", digest, index) : -1;
+        ok = ok && line > 0 && (u32)line < sizeof(text) - used;
+        if (ok) used += (u32)line;
+    }
+    ok = ok && used > BQ_SOURCE_MANIFEST_CAP && used < BQ_RETIREMENT_SOURCE_MANIFEST_CAP &&
+         bq_prep_test_write(manifest_path, text) && chmod(src, 0500) == 0 &&
+         chmod(snapshot, 0500) == 0 && chmod(sources, 0500) == 0;
+    BQ_PREP_CHECK(ok);
+    if (ok)
+    {
+        int installed = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int destination = open(copied, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(installed >= 0 && destination >= 0 &&
+                      !bq_copy_manifest(installed, destination, string_from_pointer(revision), BQ_SOURCE_MANIFEST_CAP));
+        BQ_PREP_CHECK(bq_copy_manifest(installed, destination, string_from_pointer(revision),
+                                       BQ_RETIREMENT_SOURCE_MANIFEST_CAP));
+        BqRetirementSource observed = {0};
+        BQ_PREP_CHECK(bq_make_sources_read_only(destination) &&
+                      bq_retirement_scan(destination, ".source-manifest", string_from_pointer(revision),
+                                         &observed, true) &&
+                      observed.entries == 1024 && observed.bytes == 1024 &&
+                      observed.directories == 2 && observed.max_path == 11 && observed.max_depth == 2 &&
+                      observed.manifest_bytes == used);
+        /* Readback must not consume the caller's directory cursor: the same
+         * held source is used by verification and later evidence consumers. */
+        BqRetirementSource repeated = {0};
+        BQ_PREP_CHECK(bq_retirement_scan(destination, ".source-manifest", string_from_pointer(revision),
+                                         &repeated, true) &&
+                      bq_retirement_same_source(&observed, &repeated) &&
+                      !memcmp(observed.installed_identity_sha256, repeated.installed_identity_sha256, 64));
+        if (installed >= 0) close(installed);
+        if (destination >= 0) close(destination);
+    }
+    if (root[0] && ok) bq_prep_test_cleanup(root);
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_binary(int directory, char const* name, char const* bytes)
+{
+    int file = openat(directory, name, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+    bool ok = file >= 0 && bq_write_all(file, (u8 const*)bytes, (u32)strlen(bytes)) &&
+              fchmod(file, 0500) == 0 && fsync(file) == 0;
+    if (file >= 0 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* A real service readback joins the B gate here. The remaining one-row #508
+ * declaration is synthetic and cannot authorize a timing campaign. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_correctness_join(BqQueue* queue, BqJob const* job,
+    int installed, int workspaces, String8 profile, char const* preparation_digest,
+    char const* record_digest, BqRetirementBinaries const* observed,
+    String8 workspace_root, char const* fixed_driver, char const* fixed_toolchain,
+    char const* build_record_digest)
+{
+    BqRetirementPrepared prepared = {.rows = 1, .object_rows = 1, .native_target = 1};
+    memcpy(prepared.preparation_sha256, preparation_digest, SHA256_HEX_CAPACITY);
+    memset(prepared.support_sha256, '1', 64);
+    memset(prepared.census_sha256, 'b', 64);
+    memset(prepared.aa_second_commands_sha256, 'c', 64);
+    for (u32 side = 0; side < 2; side += 1)
+    {
+        memcpy(prepared.source_sha256[side], observed->source_sha256[side], SHA256_HEX_CAPACITY);
+        memcpy(prepared.binary_sha256[side], observed->binary_sha256[side], SHA256_HEX_CAPACITY);
+    }
+    BqRetirementTrustedRow row = {.row = 0, .census_row = 0, .target = 1,
+                                  .stage = BQ_RETIREMENT_STAGE_OBJECT, .classification = 1,
+                                  .compiler_eligible = 1};
+    memset(row.identity_sha256, '1', 64);
+    memset(row.source_sha256, '2', 64);
+    memset(row.configuration_sha256, '3', 64);
+    memset(row.compiler_command_sha256[0], '4', 64);
+    memset(row.compiler_command_sha256[1], '5', 64);
+    BqRetirementRequiredCheck required[BQ_RETIREMENT_CHECK_COUNT - 1u] = {0};
+    BqRetirementCheckResult checked[BQ_RETIREMENT_CHECK_COUNT - 1u] = {0};
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(required); i += 1)
+    {
+        required[i].kind = i + 1;
+        required[i].rows = 1;
+        memset(required[i].command_sha256, (int)('a' + i), 64);
+        memset(required[i].configuration_sha256, (int)('1' + i), 64);
+        memset(required[i].receipt_sha256, (int)('a' + i), 64);
+    }
+    BqRetirementRowFact fact = {0};
+    u32 identities[3] = {0};
+    u8 census[1] = {0};
+    BqRetirementHeldBinaries held = {0};
+    BqRetirementCorrectness gate = {0};
+    BqError begin = build_record_digest ? bq_retirement_correctness_begin_service_built_pinned(
+        queue, job, installed, workspaces, workspace_root, profile, fixed_driver,
+        fixed_toolchain,
+        preparation_digest, record_digest, build_record_digest, &prepared, &row, required,
+        BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+        census, BUSTER_ARRAY_LENGTH(census), &held, &gate) :
+        bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+        profile, preparation_digest, record_digest, &prepared, &row, required,
+        BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+        census, BUSTER_ARRAY_LENGTH(census), &held, &gate);
+    BQ_PREP_CHECK(begin == BQ_OK &&
+                  held.owned == 1 && held.descriptors[0] >= 3 && held.descriptors[1] >= 3 &&
+                  !strcmp(gate.prepared.binary_sha256[0], observed->binary_sha256[0]) &&
+                  !bq_retirement_correctness_ready(&gate));
+    int live = held.descriptors[0];
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_RECIPE_MISMATCH &&
+                  held.descriptors[0] == live && fcntl(live, F_GETFD) >= 0);
+    bq_retirement_binaries_release(&held);
+
+    char wrong_record[SHA256_HEX_CAPACITY];
+    memcpy(wrong_record, record_digest, SHA256_HEX_CAPACITY);
+    wrong_record[0] = wrong_record[0] == '0' ? '1' : '0';
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, wrong_record, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_CORRUPT &&
+                  gate.failed && !held.owned);
+
+    char saved = prepared.binary_sha256[0][0];
+    prepared.binary_sha256[0][0] = saved == '0' ? '1' : '0';
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_SOURCE_MISMATCH &&
+                  gate.failed && !held.owned && held.descriptors[0] == -1 && held.descriptors[1] == -1);
+    prepared.binary_sha256[0][0] = saved;
+    saved = prepared.source_sha256[1][0];
+    prepared.source_sha256[1][0] = saved == '0' ? '1' : '0';
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_SOURCE_MISMATCH &&
+                  gate.failed && !held.owned);
+    prepared.source_sha256[1][0] = saved;
+    prepared.support_sha256[0] = '2';
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_SOURCE_MISMATCH &&
+                  gate.failed && !held.owned);
+    prepared.support_sha256[0] = '1';
+    prepared.census_sha256[0] = 0;
+    gate = (BqRetirementCorrectness){0};
+    BQ_PREP_CHECK(bq_retirement_correctness_begin_service_pinned(queue, job, installed, workspaces,
+                  profile, preparation_digest, record_digest, &prepared, &row, required,
+                  BUSTER_ARRAY_LENGTH(required), checked, &fact, identities, BUSTER_ARRAY_LENGTH(identities),
+                  census, BUSTER_ARRAY_LENGTH(census), &held, &gate) == BQ_RECIPE_MISMATCH &&
+                  gate.failed && !held.owned);
+}
+
+/* The miniature frozen files exercise the service's output record/importer,
+ * not the trusted Clang build or complete toolchain provenance. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_binary_handoff(BqQueue* queue, BqJob const* job,
+    int installed, int workspaces, int attempt, char const* profile, char const* preparation_digest,
+    BqRetirementPreparation const* prepared, char record_digest[SHA256_HEX_CAPACITY])
+{
+    record_digest[0] = 0;
+    BqRetirementBinaries imported = {0};
+    String8 pinned = string_from_pointer(profile);
+    BQ_PREP_CHECK(mkdirat(attempt, "trusted-build", 0700) == 0);
+    int directory = openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(directory >= 0 && bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_record_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest) == BQ_SOURCE_MISMATCH && !record_digest[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  bq_prep_test_binary(directory, "candidate-ide", "compiler B\n") &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  &imported) == BQ_NOT_FOUND && !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(bq_retirement_binaries_record_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest) == BQ_OK && strlen(record_digest) == 64);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK &&
+                  !strcmp(imported.preparation_sha256, preparation_digest) &&
+                  !strcmp(imported.source_sha256[0], prepared->subjects[0].manifest_sha256) &&
+                  !strcmp(imported.source_sha256[1], prepared->subjects[1].manifest_sha256) &&
+                  strcmp(imported.binary_sha256[0], imported.binary_sha256[1]) &&
+                  strlen(imported.directory_identity_sha256) == 64 &&
+                  strlen(imported.binary_identity_sha256[0]) == 64);
+    /* The same two binaries with an unlisted file cannot be frozen as a
+     * complete trusted-build output closure. Repeated scans are independent. */
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  bq_prep_test_binary(directory, "unlisted", "other\n") && fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  unlinkat(directory, "unlisted", 0) == 0 && fchmod(directory, 0500) == 0 &&
+                  bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  renameat(attempt, "trusted-build", attempt, "held-trusted-build") == 0 &&
+                  mkdirat(attempt, "trusted-build", 0700) == 0);
+    int replacement_directory = openat(attempt, "trusted-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(replacement_directory >= 0 &&
+                  renameat(directory, "base-ide", replacement_directory, "base-ide") == 0 &&
+                  renameat(directory, "candidate-ide", replacement_directory, "candidate-ide") == 0 &&
+                  fchmod(replacement_directory, 0500) == 0 && fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(replacement_directory >= 0 && fchmod(replacement_directory, 0700) == 0 &&
+                  fchmod(directory, 0700) == 0 &&
+                  renameat(replacement_directory, "base-ide", directory, "base-ide") == 0 &&
+                  renameat(replacement_directory, "candidate-ide", directory, "candidate-ide") == 0 &&
+                  unlinkat(attempt, "trusted-build", AT_REMOVEDIR) == 0 &&
+                  renameat(attempt, "held-trusted-build", attempt, "trusted-build") == 0 &&
+                  fchmod(directory, 0500) == 0 &&
+                  bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    if (replacement_directory >= 0) close(replacement_directory);
+    bq_prep_test_correctness_join(queue, job, installed, workspaces, pinned,
+                                   preparation_digest, record_digest, &imported,
+                                   (String8){0}, NULL, NULL, NULL);
+    char wrong[SHA256_HEX_CAPACITY];
+    memcpy(wrong, record_digest, sizeof(wrong));
+    wrong[0] = wrong[0] == 'a' ? 'b' : 'a';
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, wrong, &imported) == BQ_CORRUPT && !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  wrong, record_digest, &imported) == BQ_RECIPE_MISMATCH && !imported.preparation_sha256[0]);
+    BqJob stale = *job;
+    stale.token += 1;
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, &stale, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) != BQ_OK && !imported.preparation_sha256[0]);
+    char second[SHA256_HEX_CAPACITY];
+    BQ_PREP_CHECK(bq_retirement_binaries_record_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, second) != BQ_OK && !second[0]);
+
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  renameat(directory, "base-ide", attempt, "held-base-ide") == 0 &&
+                  bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  unlinkat(directory, "base-ide", 0) == 0 &&
+                  renameat(attempt, "held-base-ide", directory, "base-ide") == 0 &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  renameat(directory, "candidate-ide", attempt, "held-candidate-ide") == 0 &&
+                  symlinkat("base-ide", directory, "candidate-ide") == 0 && fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  unlinkat(directory, "candidate-ide", 0) == 0 &&
+                  renameat(attempt, "held-candidate-ide", directory, "candidate-ide") == 0 &&
+                  fchmod(directory, 0500) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    int binary = directory >= 0 ? openat(directory, "candidate-ide", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(binary >= 0 && fchmod(binary, 0700) == 0);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                  !imported.preparation_sha256[0]);
+    int modified = directory >= 0 ? openat(directory, "candidate-ide", O_WRONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(modified >= 0 && pwrite(modified, "X", 1, 0) == 1 &&
+                  fchmod(modified, 0500) == 0);
+    if (modified >= 0) close(modified);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    BQ_PREP_CHECK(binary >= 0 && fchmod(binary, 0700) == 0);
+    modified = directory >= 0 ? openat(directory, "candidate-ide", O_WRONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(modified >= 0 && pwrite(modified, "compiler B\n", 11, 0) == 11 &&
+                  fchmod(modified, 0500) == 0);
+    if (modified >= 0) close(modified);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    int record = openat(queue->directory_fd, "binaries-1", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(record >= 0 && fchmod(record, 0600) == 0);
+    if (record >= 0) close(record);
+    record = openat(queue->directory_fd, "binaries-1", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(record >= 0 && pwrite(record, "X", 1, 0) == 1 && fchmod(record, 0400) == 0);
+    if (record >= 0) close(record);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    record = openat(queue->directory_fd, "binaries-1", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(record >= 0 && fchmod(record, 0600) == 0);
+    if (record >= 0) close(record);
+    record = openat(queue->directory_fd, "binaries-1", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    BQ_PREP_CHECK(record >= 0 && pwrite(record, "B", 1, 0) == 1 && fchmod(record, 0400) == 0);
+    if (record >= 0) close(record);
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_OK);
+    pid_t child = fork();
+    if (child == 0)
+    {
+        (void)close(STDIN_FILENO);
+        char bytes[SHA256_HEX_CAPACITY] = {0}, identity[SHA256_HEX_CAPACITY] = {0};
+        int pinned_binary = -1;
+        bool ready = bq_retirement_frozen_binary_open(directory, "base-ide", bytes, identity,
+                                                       &pinned_binary) && pinned_binary >= 3 &&
+                     !strcmp(bytes, imported.binary_sha256[0]) &&
+                     (fcntl(pinned_binary, F_GETFD) & FD_CLOEXEC) != 0;
+        if (pinned_binary >= 0) close(pinned_binary);
+        _exit(ready ? 0 : 1);
+    }
+    int child_status = 0;
+    BQ_PREP_CHECK(child > 0 && waitpid(child, &child_status, 0) == child &&
+                  WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0);
+    int witnesses[2] = {-1, -1};
+    BQ_PREP_CHECK(pipe(witnesses) == 0);
+    BqRetirementHeldBinaries empty = {0};
+    empty.descriptors[0] = witnesses[0];
+    empty.descriptors[1] = witnesses[1];
+    bq_retirement_binaries_release(&empty);
+    BQ_PREP_CHECK(empty.descriptors[0] == -1 && empty.descriptors[1] == -1 &&
+                  fcntl(witnesses[0], F_GETFD) >= 0 && fcntl(witnesses[1], F_GETFD) >= 0);
+    if (witnesses[0] >= 0) close(witnesses[0]);
+    if (witnesses[1] >= 0) close(witnesses[1]);
+    BqRetirementHeldBinaries held = {.descriptors = {-1, -1}};
+    BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &held) == BQ_OK &&
+                  held.owned == 1 && held.descriptors[0] >= 3 && held.descriptors[1] >= 3 &&
+                  !strcmp(held.verified.binary_sha256[0], imported.binary_sha256[0]) &&
+                  (fcntl(held.descriptors[0], F_GETFD) & FD_CLOEXEC) != 0);
+    int live_descriptor = held.descriptors[0];
+    BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &held) == BQ_RECIPE_MISMATCH &&
+                  held.descriptors[0] == live_descriptor && fcntl(live_descriptor, F_GETFD) >= 0);
+    struct stat pinned_info = {0}, after_swap = {0};
+    BQ_PREP_CHECK(held.descriptors[0] >= 0 && fstat(held.descriptors[0], &pinned_info) == 0 &&
+                  directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  renameat(directory, "base-ide", attempt, "held-base-ide") == 0 &&
+                  bq_prep_test_binary(directory, "base-ide", "compiler A\n") &&
+                  fchmod(directory, 0500) == 0);
+    char original[12] = {0};
+    BQ_PREP_CHECK(held.descriptors[0] >= 0 && fstat(held.descriptors[0], &after_swap) == 0 &&
+                  pinned_info.st_dev == after_swap.st_dev && pinned_info.st_ino == after_swap.st_ino &&
+                  pread(held.descriptors[0], original, 11, 0) == 11 && !strcmp(original, "compiler A\n"));
+    BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &imported) == BQ_CORRUPT &&
+                  !imported.preparation_sha256[0]);
+    BqRetirementHeldBinaries refused = {.descriptors = {-1, -1}};
+    BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &refused) == BQ_CORRUPT &&
+                  refused.owned == 0 && refused.descriptors[0] == -1 && refused.descriptors[1] == -1 &&
+                  !refused.verified.preparation_sha256[0]);
+    BQ_PREP_CHECK(directory >= 0 && fchmod(directory, 0700) == 0 &&
+                  unlinkat(directory, "base-ide", 0) == 0 &&
+                  renameat(attempt, "held-base-ide", directory, "base-ide") == 0 &&
+                  fchmod(directory, 0500) == 0);
+    int old_descriptor = held.descriptors[0];
+    bq_retirement_binaries_release(&held);
+    BQ_PREP_CHECK(held.owned == 0 && held.descriptors[0] == -1 && held.descriptors[1] == -1 &&
+                  !held.verified.preparation_sha256[0] &&
+                  fcntl(old_descriptor, F_GETFD) == -1 && errno == EBADF);
+    BQ_PREP_CHECK(bq_retirement_binaries_acquire_pinned(queue, job, installed, workspaces, pinned,
+                  preparation_digest, record_digest, &held) == BQ_OK);
+    bq_retirement_binaries_release(&held);
+    if (binary >= 0) close(binary);
+    if (directory >= 0) close(directory);
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_compile_driver(char const* driver_path)
+{
+    pid_t child = fork();
+    if (child == 0)
+    {
+        char* const argv[] = {"/usr/bin/cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+            "tools/bench_service/retirement_matched_build_fixture.c", "-o", (char*)driver_path, NULL};
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    pid_t waited = -1;
+    do { if (child > 0) waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    bool ok = waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+              chmod(driver_path, 0500) == 0;
+    return ok;
+}
+
+/* Execute verified driver and source FDs after replacing both pathnames. A
+ * deliberately inheritable parent FD must not reach the exec'd driver. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_held_exec_fd(BqRetirementMatchedBuild* build,
+    char const* driver_path, char const* workspace_path,
+    int attempt, BqRetirementBuildStage const* command, bool reject_source)
+{
+    char held[512], probe[512], digest[SHA256_HEX_CAPACITY] = {0};
+    int held_length = snprintf(held, sizeof(held), "%s/held-driver", workspace_path);
+    int probe_length = snprintf(probe, sizeof(probe), "%s/driver-exec-probe", workspace_path);
+    bool ok = held_length > 0 && (size_t)held_length < sizeof(held) &&
+        probe_length > 0 && (size_t)probe_length < sizeof(probe) &&
+        fcntl(90, F_GETFD) < 0 && errno == EBADF;
+    int executable = ok ? open(driver_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && bq_retirement_build_driver_fd_sha(executable, digest) &&
+        !memcmp(build->driver_sha256, digest, SHA256_HEX_CAPACITY);
+    int source = ok ? bq_retirement_build_source_fd(build) : -1;
+    ok = ok && source >= 3;
+    int parent = ok ? openat(attempt, "base", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat parent_info = {0};
+    bool parent_valid = parent >= 3 && fstat(parent, &parent_info) == 0;
+    ok = ok && parent_valid;
+    int writer = ok ? openat(attempt, "driver-probe-log",
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    ok = ok && writer >= 3;
+    int input = ok ? open("/dev/null", O_RDONLY | O_CLOEXEC) : -1;
+    ok = ok && input >= 3 && dup2(input, 90) == 90;
+    if (input >= 0) close(input);
+    bool moved = false, replaced = false, source_moved = false, source_replaced = false;
+    if (ok) moved = rename(driver_path, held) == 0;
+    ok = ok && moved;
+    if (ok) replaced = symlink("/missing-retirement-driver", driver_path) == 0;
+    ok = ok && replaced;
+    if (ok) ok = fchmod(parent, (parent_info.st_mode & 07777) | S_IWUSR) == 0;
+    if (ok) source_moved = renameat(parent, "source", parent, "held-source") == 0;
+    ok = ok && source_moved;
+    if (ok) source_replaced = symlinkat("/missing-retirement-source", parent, "source") == 0;
+    ok = ok && source_replaced;
+    if (parent_valid && fchmod(parent, parent_info.st_mode & 07777) != 0) ok = false;
+    BqRetirementBuildStage stage = *command;
+    stage.argv[3] = probe;
+    sigset_t blocked = {0}, prior_mask = {0};
+    struct sigaction ignore_pipe = {.sa_handler = SIG_IGN}, prior_pipe = {0};
+    bool masked = ok && sigemptyset(&blocked) == 0 && sigaddset(&blocked, SIGTERM) == 0 &&
+                  sigaddset(&blocked, SIGINT) == 0 &&
+                  sigprocmask(SIG_BLOCK, &blocked, &prior_mask) == 0;
+    bool ignored = masked && sigemptyset(&ignore_pipe.sa_mask) == 0 &&
+                   sigaction(SIGPIPE, &ignore_pipe, &prior_pipe) == 0;
+    mode_t prior_umask = umask(0000);
+    ok = ok && masked && ignored;
+    pid_t child = ok ? fork() : -1;
+    if (child == 0) bq_retirement_build_exec_fd(executable, writer, attempt, source, &stage);
+    umask(prior_umask);
+    if (ignored && sigaction(SIGPIPE, &prior_pipe, NULL) != 0) ok = false;
+    if (masked && sigprocmask(SIG_SETMASK, &prior_mask, NULL) != 0) ok = false;
+    int status = 0;
+    pid_t waited = -1;
+    do { if (child > 0) waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    ok = ok && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (fcntl(90, F_GETFD) >= 0 && close(90) != 0) ok = false;
+    if (executable >= 0 && close(executable) != 0) ok = false;
+    if (source >= 0 && close(source) != 0) ok = false;
+    if (writer >= 0 && close(writer) != 0) ok = false;
+    if (replaced && unlink(driver_path) != 0) ok = false;
+    if (moved && rename(held, driver_path) != 0) ok = false;
+    if (ok && reject_source)
+    {
+        BqRetirementBuildProcess unlaunched = {0};
+        struct stat absent = {0};
+        ok = !bq_retirement_matched_build_launch(build, &unlaunched) && build->failed &&
+            !unlaunched.state && fstatat(attempt, "build-log-0", &absent, AT_SYMLINK_NOFOLLOW) < 0 &&
+            errno == ENOENT;
+    }
+    if (parent_valid && fchmod(parent, (parent_info.st_mode & 07777) | S_IWUSR) != 0) ok = false;
+    if (source_replaced && unlinkat(parent, "source", 0) != 0) ok = false;
+    if (source_moved && renameat(parent, "held-source", parent, "source") != 0) ok = false;
+    if (parent_valid && fchmod(parent, parent_info.st_mode & 07777) != 0) ok = false;
+    if (parent >= 3 && close(parent) != 0) ok = false;
+    int reader = writer >= 0 ? openat(attempt, "driver-probe-log", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    char output[64] = {0};
+    ssize_t count = reader >= 3 ? pread(reader, output, sizeof(output) - 1, 0) : -1;
+    ok = ok && count == (ssize_t)strlen("fixture generated\n") &&
+        !memcmp(output, "fixture generated\n", (size_t)count);
+    if (reader >= 0 && close(reader) != 0) ok = false;
+    if (writer >= 0 && unlinkat(attempt, "driver-probe-log", 0) != 0) ok = false;
+    if (waited == child && rmdir(probe) != 0) ok = false;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_run_stage(BqRetirementMatchedBuild* build,
+    BqRetirementBuildProcess* process, int* exit_code)
+{
+    bool ok = bq_retirement_matched_build_launch(build, process);
+    if (ok)
+    {
+        BQ_PREP_CHECK(process->state == BQ_RETIREMENT_BUILD_RUNNING && process->process > 0);
+        bq_retirement_matched_build_abort(process);
+        BQ_PREP_CHECK(process->state == BQ_RETIREMENT_BUILD_RUNNING && process->process > 0);
+    }
+    int result = ok ? 0 : -1;
+    while (result == 0)
+    {
+        result = bq_retirement_matched_build_poll(process);
+        if (!result)
+        {
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
+    }
+    *exit_code = process->state == BQ_RETIREMENT_BUILD_REAPED ? process->exit_code : -1;
+    ok = ok && process->state == BQ_RETIREMENT_BUILD_REAPED;
+    return ok;
+}
+
+/* Preserve the produced executable inode while replacing the configured build
+ * root. A path-only freeze would otherwise accept the same bytes from a root
+ * that the reaped child never used. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_swap_build_root(int attempt)
+{
+    bool ok = renameat(attempt, "matched-build", attempt, "held-build") == 0 &&
+              mkdirat(attempt, "matched-build", 0700) == 0;
+    int held = ok ? openat(attempt, "held-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int replacement = ok ? openat(attempt, "matched-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && held >= 3 && replacement >= 3 && mkdirat(replacement, "Release", 0700) == 0;
+    int old_release = ok ? openat(held, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int new_release = ok ? openat(replacement, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && old_release >= 3 && new_release >= 3 &&
+         linkat(old_release, "ide", new_release, "ide", 0) == 0 &&
+         unlinkat(old_release, "ide", 0) == 0;
+    if (new_release >= 0 && close(new_release) != 0) ok = false;
+    if (old_release >= 0 && close(old_release) != 0) ok = false;
+    if (replacement >= 0 && close(replacement) != 0) ok = false;
+    if (held >= 0 && close(held) != 0) ok = false;
+    return ok;
+}
+
+/* Check the freeze's held output against the name and metadata the child
+ * produced. These changes leave the held descriptor valid while invalidating
+ * the pathname or rewriting the file without changing its size. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_build_output_stability(int root)
+{
+    int release = root >= 3 ? openat(root, "Release",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int input = release >= 3 ? openat(release, "ide", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat first = {0};
+    bool ok = release >= 3 && input >= 3 && fstat(input, &first) == 0 &&
+              bq_retirement_build_output_stable(root, release, input, &first);
+    BQ_PREP_CHECK(ok);
+    if (ok)
+    {
+        bool moved = renameat(root, "Release", root, "held-release") == 0;
+        bool refused = moved && !bq_retirement_build_output_stable(root, release, input, &first);
+        bool restored = moved && renameat(root, "held-release", root, "Release") == 0;
+        BQ_PREP_CHECK(moved && refused && restored &&
+            bq_retirement_build_output_stable(root, release, input, &first));
+        ok = restored;
+    }
+    if (ok)
+    {
+        int copy = openat(release, "ide-replacement",
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        bool copied = copy >= 3;
+        u8 bytes[16384];
+        u64 offset = 0;
+        while (copied && offset < (u64)first.st_size)
+        {
+            size_t wanted = (u64)first.st_size - offset < sizeof(bytes) ?
+                            (size_t)((u64)first.st_size - offset) : sizeof(bytes);
+            ssize_t count = pread(input, bytes, wanted, (off_t)offset);
+            if (count < 0 && errno == EINTR) continue;
+            copied = count > 0 && bq_write_all(copy, bytes, (u32)count);
+            if (copied) offset += (u64)count;
+        }
+        copied = copied && fchmod(copy, first.st_mode & 07777) == 0;
+        if (copy >= 0 && close(copy) != 0) copied = false;
+        bool moved = copied && renameat(release, "ide", release, "held-ide") == 0;
+        bool replaced = moved && renameat(release, "ide-replacement", release, "ide") == 0;
+        bool refused = replaced && !bq_retirement_build_output_stable(root, release, input, &first);
+        bool removed = replaced && renameat(release, "ide", release, "ide-replacement") == 0;
+        bool restored = moved && renameat(release, "held-ide", release, "ide") == 0;
+        bool refreshed = restored && fstat(input, &first) == 0;
+        BQ_PREP_CHECK(copied && moved && replaced && refused && removed && refreshed &&
+            bq_retirement_build_output_stable(root, release, input, &first));
+        ok = refreshed && unlinkat(release, "ide-replacement", 0) == 0;
+        BQ_PREP_CHECK(ok);
+    }
+    if (ok)
+    {
+        u8 original = 0, changed = 0;
+        int writer = openat(release, "ide", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        bool writable = writer >= 3 && pread(input, &original, 1, 0) == 1;
+        changed = original ^ 0xffu;
+        struct timespec timestamp[2] = {
+            {.tv_nsec = UTIME_OMIT}, {.tv_sec = first.st_mtime == 1 ? 2 : 1, .tv_nsec = 0}};
+        bool rewritten = writable && pwrite(writer, &changed, 1, 0) == 1 &&
+            futimens(writer, timestamp) == 0;
+        struct stat after = {0};
+        bool refused = rewritten && fstat(input, &after) == 0 &&
+            after.st_size == first.st_size && after.st_ino == first.st_ino &&
+            !bq_retirement_build_output_stable(root, release, input, &first);
+        bool restored = rewritten && pwrite(writer, &original, 1, 0) == 1;
+        if (writer >= 0 && close(writer) != 0) restored = false;
+        struct stat fresh = {0};
+        BQ_PREP_CHECK(writable && rewritten && refused && restored &&
+            fstat(input, &fresh) == 0 &&
+            bq_retirement_build_output_stable(root, release, input, &fresh));
+    }
+    if (input >= 0) close(input);
+    if (release >= 0) close(release);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const* original,
+    int installed, int workspaces, char const* installed_path, char const* workspace_path,
+    char const* original_profile,
+    BqRetirementPreparation const* original_preparation)
+{
+    char driver_path[256];
+    int driver_length = snprintf(driver_path, sizeof(driver_path), "%s/fixture-driver", workspace_path);
+    BQ_PREP_CHECK(driver_length > 0 && (u32)driver_length < sizeof(driver_path) &&
+                  bq_prep_test_compile_driver(driver_path));
+    char driver_digest[SHA256_HEX_CAPACITY] = {0};
+    BQ_PREP_CHECK(bq_retirement_build_driver_sha(driver_path, driver_digest));
+    char toolchain_root[BQ_RETIREMENT_TOOLCHAIN_PATH_CAP];
+    int root_length = snprintf(toolchain_root, sizeof(toolchain_root),
+        "%s/toolchain/native-retirement-performance-v1", installed_path);
+    BqRetirementToolchain checked = {0};
+    BQ_PREP_CHECK(root_length > 0 && (size_t)root_length < sizeof(toolchain_root) &&
+        bq_retirement_toolchain_verify(installed, string_from_pointer(original_profile),
+            toolchain_root, &checked) == BQ_OK && checked.entries == 4 &&
+        bq_retirement_toolchain_recheck(&checked));
+    char wrong_pin[512];
+    memcpy(wrong_pin, original_profile, strlen(original_profile) + 1);
+    char* pin = strstr(wrong_pin, "toolchain-manifest-sha256=");
+    if (pin) pin[26] = pin[26] == 'a' ? 'b' : 'a';
+    BqRetirementToolchain refused = {0};
+    BQ_PREP_CHECK(pin && bq_retirement_toolchain_verify(installed,
+        string_from_pointer(wrong_pin), toolchain_root, &refused) == BQ_CONFIGURATION_MISMATCH &&
+        !refused.manifest_sha256[0]);
+    BQ_PREP_CHECK(bq_retirement_toolchain_verify(installed,
+        S8("schema=1\n"), toolchain_root, &refused) == BQ_RECIPE_MISMATCH &&
+        bq_retirement_toolchain_verify(installed, string_from_pointer(original_profile),
+            workspace_path, &refused) == BQ_CONFIGURATION_MISMATCH);
+    char tool_bin[512], extra[512];
+    int bin_length = snprintf(tool_bin, sizeof(tool_bin), "%s/bin", toolchain_root);
+    int extra_length = snprintf(extra, sizeof(extra), "%s/unlisted", tool_bin);
+    BQ_PREP_CHECK(bin_length > 0 && (size_t)bin_length < sizeof(tool_bin) &&
+        extra_length > 0 && (size_t)extra_length < sizeof(extra) &&
+        chmod(tool_bin, 0700) == 0 && bq_prep_test_write(extra, "extra\n") &&
+        chmod(tool_bin, 0555) == 0 && !bq_retirement_toolchain_recheck(&checked));
+    BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(extra) == 0 &&
+        symlink("/etc/passwd", extra) == 0 && chmod(tool_bin, 0555) == 0 &&
+        !bq_retirement_toolchain_recheck(&checked));
+    BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(extra) == 0 &&
+        chmod(tool_bin, 0555) == 0 && bq_retirement_toolchain_recheck(&checked));
+    char clang_path[512];
+    int clang_length = snprintf(clang_path, sizeof(clang_path), "%s/clang", tool_bin);
+    char held_tool[512];
+    int held_length = snprintf(held_tool, sizeof(held_tool), "%s/held-tool-clang", workspace_path);
+    BQ_PREP_CHECK(clang_length > 0 && (size_t)clang_length < sizeof(clang_path) &&
+        held_length > 0 && (size_t)held_length < sizeof(held_tool) &&
+        chmod(tool_bin, 0700) == 0 &&
+        rename(clang_path, held_tool) == 0 &&
+        bq_prep_test_write(clang_path, "fixture only\n") &&
+        chmod(clang_path, 0555) == 0 && chmod(tool_bin, 0555) == 0);
+    BqRetirementToolchain replacement = {0};
+    BQ_PREP_CHECK(bq_retirement_toolchain_verify(installed,
+        string_from_pointer(original_profile), toolchain_root, &replacement) == BQ_OK &&
+        strcmp(replacement.identity_sha256, checked.identity_sha256) &&
+        !bq_retirement_toolchain_recheck(&checked));
+    /* The old inode is outside the bundle. A byte-equal replacement verifies
+     * under a fresh pin but must fail this job's previously held identity. */
+    BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 &&
+        unlink(clang_path) == 0 && rename(held_tool, clang_path) == 0 &&
+        chmod(tool_bin, 0555) == 0 && bq_retirement_toolchain_recheck(&checked));
+    char profile[640];
+    int length = snprintf(profile, sizeof(profile), "%sbuild-driver-sha256=%.64s\n",
+                          original_profile, driver_digest);
+    BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(profile));
+    for (u32 trial = 0; trial < 18; trial += 1)
+    {
+        BqJob job = *original;
+        job.id = 30 + trial;
+        job.token = 40 + trial;
+        BqRetirementPreparation prepared = *original_preparation;
+        char name[64];
+        bool ok = bq_workspace_name(name, job.id, job.token) &&
+                  mkdirat(workspaces, name, 0700) == 0;
+        int attempt = ok ? openat(workspaces, name,
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        ok = ok && attempt >= 0;
+        for (u32 side = 0; ok && side < 2; side += 1)
+        {
+            char const* subject_name = side ? "candidate" : "base";
+            ok = mkdirat(attempt, subject_name, 0700) == 0;
+            int subject = ok ? openat(attempt, subject_name,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+            ok = ok && subject >= 0 && mkdirat(subject, "source", 02750) == 0;
+            int source = ok ? openat(subject, "source",
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+            if (ok)
+            {
+                ok = source >= 0 && bq_copy_manifest(installed, source,
+                    bq_field(&job.request, 3 + side), BQ_RETIREMENT_SOURCE_MANIFEST_CAP) &&
+                    bq_make_sources_read_only(source) &&
+                    bq_retirement_verify_subject(installed, subject, source,
+                        bq_field(&job.request, 3 + side), &prepared.subjects[side]);
+            }
+            if (source >= 0) close(source);
+            if (subject >= 0) close(subject);
+        }
+        BQ_PREP_CHECK(ok && bq_retirement_preparation_record(queue, &job, &prepared, BQ_OK, 2));
+        char preparation_digest[SHA256_HEX_CAPACITY] = {0};
+        String8 pinned = string_from_pointer(profile);
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(queue, &job, installed, workspaces,
+                      pinned, preparation_digest, NULL) == BQ_OK);
+        BqRetirementMatchedBuild build = {0};
+        BQ_PREP_CHECK(bq_retirement_matched_build_begin_pinned(queue, &job, installed, workspaces,
+            string_from_pointer(workspace_path), pinned, driver_path, toolchain_root,
+            preparation_digest, true,
+            &build) == BQ_OK);
+        if (trial == 1)
+        {
+            char wrong_profile[640];
+            memcpy(wrong_profile, profile, strlen(profile) + 1);
+            char* pin = strstr(wrong_profile, "build-driver-sha256=");
+            if (pin) pin[20] = pin[20] == 'a' ? 'b' : 'a';
+            BqRetirementMatchedBuild refused = {0};
+            BQ_PREP_CHECK(pin && bq_retirement_matched_build_begin_pinned(queue, &job,
+                installed, workspaces, string_from_pointer(workspace_path),
+                string_from_pointer(wrong_profile), driver_path, toolchain_root, preparation_digest,
+                true, &refused) == BQ_CONFIGURATION_MISMATCH && !refused.preparation_sha256[0]);
+        }
+        BqRetirementBuildStage command = {0};
+        BQ_PREP_CHECK(bq_retirement_matched_build_stage(&build, &command) &&
+            command.argc == 16 && !strcmp(command.argv[7], "clang") &&
+            !strcmp(command.argv[3], build.build) && !strcmp(command.cwd, build.source[0]) &&
+            !strcmp(command.env[0], checked.path) && command.file_umask == 0077);
+        if (trial == 1 || trial == 6)
+            BQ_PREP_CHECK(bq_prep_test_held_exec_fd(&build, driver_path, workspace_path,
+                attempt, &command, trial == 6) &&
+                (trial == 6 ? build.failed && !bq_retirement_matched_build_stage(&build, &command) :
+                              bq_retirement_matched_build_stage(&build, &command)));
+        if (trial == 6)
+        {
+            BqRetirementBuildProcess unlaunched = {0};
+            BQ_PREP_CHECK(bq_retirement_matched_build_poll(&unlaunched) == -1 &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &unlaunched, geteuid(), &build) ==
+                    BQ_WORKER_FAILED && build.failed && !build.next);
+        }
+        if (trial == 7)
+        {
+            BqRetirementBuildProcess live = {0};
+            BQ_PREP_CHECK(bq_retirement_matched_build_launch(&build, &live) &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &live, geteuid(), &build) ==
+                    BQ_WORKER_FAILED && build.failed && live.state == BQ_RETIREMENT_BUILD_RUNNING &&
+                    live.process > 0 && live.writer >= 3);
+            int observed = 0;
+            while (observed == 0)
+            {
+                observed = bq_retirement_matched_build_poll(&live);
+                if (!observed)
+                {
+                    struct timespec pause = {0, 1000000};
+                    nanosleep(&pause, NULL);
+                }
+            }
+            bq_retirement_matched_build_abort(&live);
+            BQ_PREP_CHECK(!live.state && !live.process && !live.writer);
+        }
+        if (trial == 8)
+        {
+            BqRetirementBuildProcess stolen = {0};
+            BQ_PREP_CHECK(bq_retirement_matched_build_launch(&build, &stolen));
+            int status = 0;
+            pid_t waited = -1;
+            do { if (stolen.process > 0) waited = waitpid(stolen.process, &status, 0); }
+            while (waited < 0 && errno == EINTR);
+            BQ_PREP_CHECK(waited > 0 && bq_retirement_matched_build_poll(&stolen) == -1 &&
+                stolen.state == BQ_RETIREMENT_BUILD_WAIT_FAILED && !stolen.process &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &stolen, geteuid(), &build) == BQ_WORKER_FAILED &&
+                build.failed && !stolen.state);
+        }
+        if (trial == 9)
+        {
+            BqRetirementBuildProcess flooded = {0};
+            int exit_code = -1;
+            BQ_PREP_CHECK(bq_prep_test_run_stage(&build, &flooded, &exit_code) &&
+                exit_code == 0 && flooded.log_eof && flooded.log_overflow &&
+                !flooded.capture_failed && flooded.log_bytes == BQ_RETIREMENT_BUILD_LOG_CAP);
+            struct stat bounded = {0};
+            BQ_PREP_CHECK(flooded.writer >= 3 && fstat(flooded.writer, &bounded) == 0 &&
+                bounded.st_size == BQ_RETIREMENT_BUILD_LOG_CAP &&
+                bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &flooded, geteuid(), &build) ==
+                    BQ_WORKER_FAILED && build.failed && !build.next && !flooded.state);
+        }
+        for (u32 stage = 0; ok && stage < (trial ? 4u : 1u); stage += 1)
+        {
+            if (trial >= 6 && trial < 10) break;
+            if (trial == 3 && stage == 2)
+            {
+                BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 &&
+                    bq_prep_test_write(extra, "unlisted after build\n") &&
+                    chmod(tool_bin, 0555) == 0 &&
+                    !bq_retirement_matched_build_stage(&build, &command) && build.failed);
+                BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(extra) == 0 &&
+                    chmod(tool_bin, 0555) == 0 && bq_retirement_toolchain_recheck(&checked));
+                break;
+            }
+            if (trial && trial != 16 && stage == 2)
+                ok = renameat(attempt, "matched-build", attempt, "old-build") == 0;
+            if ((trial == 10 && stage == 1) || (trial == 11 && stage == 3))
+            {
+                int root = bq_open_absolute_directory(string_from_pointer(build.build));
+                BQ_PREP_CHECK(root >= 3 && mkdirat(root, "Release", 0700) == 0);
+                int release = root >= 3 ? openat(root, "Release",
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                int stale = release >= 3 ? openat(release, "ide",
+                    O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0500) : -1;
+                BQ_PREP_CHECK(stale >= 3 &&
+                    bq_write_all(stale, (u8 const*)"stale executable\n", 17));
+                if (stale >= 0) close(stale);
+                if (release >= 0) close(release);
+                if (root >= 0) close(root);
+                BqRetirementBuildProcess refused = {0};
+                BQ_PREP_CHECK(!bq_retirement_matched_build_launch(&build, &refused) &&
+                    build.failed && !refused.process && !refused.state);
+                char log_name[32];
+                snprintf(log_name, sizeof(log_name), "build-log-%u", stage);
+                struct stat log_stat = {0};
+                BQ_PREP_CHECK(fstatat(attempt, log_name, &log_stat, AT_SYMLINK_NOFOLLOW) != 0 &&
+                    errno == ENOENT);
+                break;
+            }
+            if ((trial == 14 && stage == 1) || (trial == 15 && stage == 3))
+            {
+                int held = build.generated_root;
+                struct stat previous = {0}, replacement = {0};
+                BQ_PREP_CHECK(held >= 3 && fstat(held, &previous) == 0 &&
+                    renameat(attempt, "matched-build", attempt, "held-generated") == 0 &&
+                    mkdirat(attempt, "matched-build", 0700) == 0);
+                int substituted = openat(attempt, "matched-build",
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                BQ_PREP_CHECK(substituted >= 3 && fstat(substituted, &replacement) == 0 &&
+                    (previous.st_dev != replacement.st_dev || previous.st_ino != replacement.st_ino));
+                if (substituted >= 0) close(substituted);
+                BqRetirementBuildProcess refused = {0};
+                BQ_PREP_CHECK(!bq_retirement_matched_build_launch(&build, &refused) &&
+                    build.failed && build.generated_root == -1 &&
+                    !refused.state && !refused.process &&
+                    fcntl(held, F_GETFD) < 0 && errno == EBADF);
+                char log_name[32];
+                snprintf(log_name, sizeof(log_name), "build-log-%u", stage);
+                struct stat absent = {0};
+                BQ_PREP_CHECK(fstatat(attempt, log_name, &absent, AT_SYMLINK_NOFOLLOW) != 0 &&
+                    errno == ENOENT);
+                break;
+            }
+            BqRetirementBuildStage current = {0};
+            ok = ok && bq_retirement_matched_build_stage(&build, &current) &&
+                 !strcmp(current.argv[3], command.argv[3]) &&
+                 current.file_umask == (stage < 2 ? 0077 : 0007);
+            BqRetirementBuildProcess process = {0};
+            int exit_code = -1;
+            if (ok) ok = bq_prep_test_run_stage(&build, &process, &exit_code);
+            BQ_PREP_CHECK(ok && (trial ? exit_code == 0 : exit_code == 5));
+            if (ok)
+            {
+                int held_root = process.build_root;
+                int held_generated = build.generated_root;
+                if (trial == 1 && stage == 1)
+                    bq_prep_test_build_output_stability(held_root);
+                if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
+                {
+                    struct stat original = {0}, replacement_stat = {0};
+                    BQ_PREP_CHECK(held_root >= 3 && fstat(held_root, &original) == 0 &&
+                        bq_prep_test_swap_build_root(attempt));
+                    int replacement = openat(attempt, "matched-build",
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                    BQ_PREP_CHECK(replacement >= 3 && fstat(replacement, &replacement_stat) == 0 &&
+                        (original.st_dev != replacement_stat.st_dev ||
+                         original.st_ino != replacement_stat.st_ino) &&
+                        fstat(held_root, &original) == 0);
+                    if (replacement >= 0) close(replacement);
+                }
+                if (trial == 4) process.command_sha256[0] ^= 1;
+                if (trial == 5)
+                {
+                    int replacement = -1;
+                    BQ_PREP_CHECK(renameat(attempt, process.name, attempt, "held-build-log") == 0);
+                    replacement = openat(attempt, process.name,
+                        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+                    BQ_PREP_CHECK(replacement >= 3 && fchmod(replacement, 0400) == 0);
+                    if (replacement >= 0) close(replacement);
+                }
+                uid_t candidate = ((trial == 2 && stage == 3) ||
+                                   (trial == 17 && stage == 2)) ? geteuid() + 1 : geteuid();
+                BqError expected = !trial ? BQ_WORKER_FAILED :
+                                   trial == 4 || trial == 5 ? BQ_WORKER_FAILED :
+                                   ((trial == 2 || trial == 13) && stage == 3) ||
+                                   (trial == 12 && stage == 1) ||
+                                   ((trial == 16 || trial == 17) && stage == 2) ?
+                                   BQ_SOURCE_MISMATCH : BQ_OK;
+                BQ_PREP_CHECK(bq_retirement_matched_build_complete_pinned(queue, &job,
+                    installed, workspaces, pinned, &process, candidate, &build) == expected &&
+                    !process.state && !process.process);
+                struct stat generated_after = {0};
+                if (expected == BQ_OK && !(stage & 1u))
+                    BQ_PREP_CHECK(build.generated_root >= 3 &&
+                        fstat(build.generated_root, &generated_after) == 0 &&
+                        (u64)generated_after.st_dev == build.generated_device &&
+                        (u64)generated_after.st_ino == build.generated_inode);
+                if (stage & 1u)
+                    BQ_PREP_CHECK(build.generated_root == -1 &&
+                        fcntl(held_generated, F_GETFD) < 0 && errno == EBADF);
+                if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
+                    BQ_PREP_CHECK(fcntl(held_root, F_GETFD) < 0 && errno == EBADF);
+            }
+            bq_retirement_matched_build_abort(&process);
+            if (trial == 4 || trial == 5 || (trial == 12 && stage == 1) ||
+                ((trial == 16 || trial == 17) && stage == 2)) break;
+        }
+        BQ_PREP_CHECK(ok);
+        if (trial != 1)
+        {
+            char record_name[48], bytes[16];
+            u32 size = 0;
+            BQ_PREP_CHECK(build.failed && build.next == (trial == 3 || trial == 16 || trial == 17 ? 2u :
+                                                    trial == 2 || trial == 11 || trial == 13 || trial == 15 ? 3u :
+                                                    trial == 10 || trial == 12 || trial == 14 ? 1u : 0u) &&
+                !build.binary_record_sha256[0] &&
+                !bq_retirement_matched_build_stage(&build, &command) &&
+                bq_record_name(record_name, "binaries", job.id) &&
+                bq_record_read(queue, record_name, (u8*)bytes, sizeof(bytes), &size) == BQ_NOT_FOUND &&
+                (build.stage_receipt_sha256[0][0] != 0) == (trial < 4 || trial >= 10));
+            BQ_PREP_CHECK(!build.build_record_sha256[0]);
+            BqRetirementCorrectness gate = {0};
+            BqRetirementHeldBinaries held = {0};
+            char const missing[SHA256_HEX_CAPACITY] =
+                "0000000000000000000000000000000000000000000000000000000000000000";
+            BQ_PREP_CHECK(bq_retirement_correctness_begin_service_built_pinned(
+                queue, &job, installed, workspaces, string_from_pointer(workspace_path),
+                pinned, driver_path, toolchain_root, preparation_digest, missing, missing,
+                NULL, NULL, NULL, 0, NULL, NULL, NULL, 0, NULL, 0, &held, &gate) != BQ_OK &&
+                gate.failed && !held.owned && !bq_retirement_correctness_ready(&gate));
+        }
+        else
+        {
+            BqRetirementBinaries imported = {0};
+            BqRetirementMatchedBuild observed = {0};
+            BQ_PREP_CHECK(build.next == 4 && !build.failed && build.build_record_sha256[0] &&
+                !bq_retirement_matched_build_stage(&build, &command) &&
+                build.binary_record_sha256[0] &&
+                bq_retirement_binaries_import_pinned(queue, &job, installed, workspaces,
+                    pinned, preparation_digest, build.binary_record_sha256, &imported) == BQ_OK &&
+                strcmp(imported.binary_sha256[0], imported.binary_sha256[1]) &&
+                strcmp(build.command_sha256[0], build.command_sha256[2]));
+            BQ_PREP_CHECK(bq_retirement_matched_build_import_pinned(queue, &job,
+                installed, workspaces, string_from_pointer(workspace_path), pinned,
+                driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
+                build.build_record_sha256, &observed) == BQ_OK && observed.next == 4 &&
+                !strcmp(observed.stage_receipt_sha256[3], build.stage_receipt_sha256[3]));
+            BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 &&
+                rename(clang_path, held_tool) == 0 &&
+                bq_prep_test_write(clang_path, "fixture only\n") &&
+                chmod(clang_path, 0555) == 0 && chmod(tool_bin, 0555) == 0);
+            BQ_PREP_CHECK(bq_retirement_matched_build_import_pinned(queue, &job,
+                installed, workspaces, string_from_pointer(workspace_path), pinned,
+                driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
+                build.build_record_sha256, &observed) == BQ_CORRUPT &&
+                !observed.preparation_sha256[0]);
+            BQ_PREP_CHECK(chmod(tool_bin, 0700) == 0 && unlink(clang_path) == 0 &&
+                rename(held_tool, clang_path) == 0 && chmod(tool_bin, 0555) == 0 &&
+                bq_retirement_matched_build_import_pinned(queue, &job,
+                    installed, workspaces, string_from_pointer(workspace_path), pinned,
+                    driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
+                    build.build_record_sha256, &observed) == BQ_OK);
+            bq_prep_test_correctness_join(queue, &job, installed, workspaces, pinned,
+                preparation_digest, build.binary_record_sha256, &imported,
+                string_from_pointer(workspace_path), driver_path, toolchain_root,
+                build.build_record_sha256);
+            char record_name[48];
+            BQ_PREP_CHECK(bq_record_name(record_name, "matched-log-2", job.id));
+            int tampered = openat(queue->directory_fd, record_name,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(tampered >= 0 && fchmod(tampered, 0600) == 0);
+            if (tampered >= 0) close(tampered);
+            tampered = openat(queue->directory_fd, record_name, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(tampered >= 0 && pwrite(tampered, "X", 1, 0) == 1 &&
+                fchmod(tampered, 0400) == 0);
+            if (tampered >= 0) close(tampered);
+            BQ_PREP_CHECK(bq_retirement_matched_build_import_pinned(queue, &job,
+                installed, workspaces, string_from_pointer(workspace_path), pinned,
+                driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
+                build.build_record_sha256, &observed) == BQ_CORRUPT && !observed.preparation_sha256[0]);
+        }
+        BQ_PREP_CHECK(bq_retirement_matched_build_release(&build) && build.generated_root == -1);
+        if (attempt >= 0) close(attempt);
+    }
+}
+
+/* Exercise the service's durable producer/readback boundary through the real
+ * source copier. This internal test request cannot be submitted: the public
+ * registry still rejects the blocked retirement descriptor. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspaces,
+    char const* installed_path, char const* workspaces_path,
+    BqRetirementPreparation* prepared, char const* profile)
+{
+    char queue_path[80] = "/tmp/bq-retirement-queue-XXXXXX";
+    bool ok = mkdtemp(queue_path) != NULL;
+    BqQueue queue = {.directory_fd = -1, .lock_fd = -1, .journal_fd = -1};
+    if (ok) ok = bq_open(&queue, queue_path) == BQ_OK;
+    BQ_PREP_CHECK(ok);
+    BqJob job = {.id = 1, .token = 2};
+    String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("handoff"),
+        S8("native-retirement-performance-v1"),
+        string_from_pointer(prepared->subjects[0].commit),
+        string_from_pointer(prepared->subjects[1].commit)};
+    for (u32 i = 0; ok && i < BQ_FIELD_COUNT; ++i)
+    {
+        ok = fields[i].length <= BQ_REQUEST_CAP - job.request.size - 4;
+        if (ok)
+        {
+            bq_put32(job.request.bytes + job.request.size, (u32)fields[i].length);
+            job.request.size += 4;
+            memcpy(job.request.bytes + job.request.size, fields[i].pointer, (size_t)fields[i].length);
+            job.request.size += (u32)fields[i].length;
+        }
+    }
+    if (ok) bq_request_digest(&job.request, job.digest);
+    char attempt[64];
+    if (ok) ok = bq_workspace_name(attempt, job.id, job.token) && mkdirat(workspaces, attempt, 0700) == 0;
+    int root = ok ? openat(workspaces, attempt, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && root >= 0;
+    for (u32 side = 0; ok && side < 2; ++side)
+    {
+        char const* name = side ? "candidate" : "base";
+        ok = mkdirat(root, name, 0700) == 0;
+        int parent = ok ? openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        ok = ok && parent >= 0 && mkdirat(parent, "source", 02750) == 0;
+        int source = ok ? openat(parent, "source", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        if (ok)
+        {
+            ok = source >= 0 && bq_copy_manifest(installed, source, fields[3 + side],
+                                                   BQ_RETIREMENT_SOURCE_MANIFEST_CAP) &&
+                 bq_make_sources_read_only(source) &&
+                 bq_retirement_verify_subject(installed, parent, source, fields[3 + side],
+                                              &prepared->subjects[side]);
+        }
+        if (source >= 0) close(source);
+        if (parent >= 0) close(parent);
+    }
+    BQ_PREP_CHECK(ok);
+    if (ok)
+    {
+        char digest[SHA256_HEX_CAPACITY];
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest, NULL) == BQ_NOT_FOUND && !digest[0]);
+        BQ_PREP_CHECK(bq_retirement_preparation_record(&queue, &job, prepared, BQ_OK, 2) &&
+                      bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), digest, NULL) == BQ_OK && strlen(digest) == 64);
+        BqRetirementPreparation imported = {0};
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest, &imported) == BQ_OK &&
+                      !strcmp(imported.inventory_sha256, prepared->inventory_sha256) &&
+                      !strcmp(imported.subjects[0].installed_identity_sha256,
+                              prepared->subjects[0].installed_identity_sha256) &&
+                      !strcmp(imported.subjects[1].installed_identity_sha256,
+                              prepared->subjects[1].installed_identity_sha256) &&
+                      !strcmp(imported.subjects[0].materialized_identity_sha256,
+                              prepared->subjects[0].materialized_identity_sha256) &&
+                      !strcmp(imported.subjects[1].materialized_identity_sha256,
+                              prepared->subjects[1].materialized_identity_sha256) &&
+                      !strcmp(imported.subjects[0].manifest_sha256, prepared->subjects[0].manifest_sha256) &&
+                      imported.source_reservation_bytes == prepared->source_reservation_bytes);
+        bq_prep_test_matched_build(&queue, &job, installed, workspaces, installed_path,
+                                   workspaces_path,
+                                   profile, prepared);
+        char binary_digest[SHA256_HEX_CAPACITY];
+        bq_prep_test_binary_handoff(&queue, &job, installed, workspaces, root, profile, digest,
+                                    prepared, binary_digest);
+        char altered_digest[SHA256_HEX_CAPACITY];
+        memcpy(altered_digest, digest, sizeof(altered_digest));
+        altered_digest[0] = altered_digest[0] == 'a' ? 'b' : 'a';
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), altered_digest, &imported) == BQ_RECIPE_MISMATCH &&
+                      !imported.inventory_sha256[0]);
+        char invalid_digest[SHA256_HEX_CAPACITY] = "invalid";
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), invalid_digest, &imported) == BQ_RECIPE_MISMATCH &&
+                      !imported.inventory_sha256[0]);
+        BqJob other = job;
+        other.token += 1;
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &other, installed, workspaces,
+                      string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
+        other = job;
+        other.digest[0] = other.digest[0] == 'a' ? 'b' : 'a';
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &other, installed, workspaces,
+                      string_from_pointer(profile), digest, NULL) == BQ_RECIPE_MISMATCH && !digest[0]);
+        char wrong_profile[512];
+        memcpy(wrong_profile, profile, strlen(profile) + 1);
+        char* pin = strstr(wrong_profile, "inventory-sha256=");
+        if (pin) pin[17] = pin[17] == 'a' ? 'b' : 'a';
+        BQ_PREP_CHECK(pin && bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(wrong_profile), digest, NULL) == BQ_RECIPE_MISMATCH && !digest[0]);
+        char copied_path[128];
+        int length = snprintf(copied_path, sizeof(copied_path), "%s/base/source/src", attempt);
+        int copied = length > 0 && (u32)length < sizeof(copied_path) ?
+                     bq_open_directory_path(workspaces, string_from_pointer(copied_path)) : -1;
+        /* Exercise directory closure at the durable consumer, not only at
+         * preflight. Failure must not damage the immutable preparation record. */
+        char original_digest[SHA256_HEX_CAPACITY];
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), original_digest, NULL) == BQ_OK);
+        char installed_path[128];
+        int installed_length = snprintf(installed_path, sizeof(installed_path), "sources/%s/src",
+                                        prepared->subjects[0].commit);
+        int installed_source = installed_length > 0 && (u32)installed_length < sizeof(installed_path) ?
+                               bq_open_directory_path(installed, string_from_pointer(installed_path)) : -1;
+        /* Keep the old inode outside the installed tree while substituting a
+         * byte-identical file. The current inventory and manifest still pass. */
+        bool moved = installed_source >= 0 && fchmod(installed_source, 0700) == 0 &&
+                     renameat(installed_source, "main.c", workspaces, "held-installed-main.c") == 0;
+        int replacement = moved ? openat(installed_source, "main.c", O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC |
+                                         O_NOFOLLOW, 0600) : -1;
+        bool swapped = replacement >= 0 && bq_write_all(replacement, (u8 const*)"int a;\n", 7) &&
+                       fchmod(replacement, 0400) == 0 && fchmod(installed_source, 0500) == 0;
+        if (replacement >= 0) close(replacement);
+        BQ_PREP_CHECK(swapped);
+        if (swapped)
+        {
+            BqRetirementPreparation rescanned = {0};
+            BQ_PREP_CHECK(bq_retirement_preflight_pinned_impl(installed, workspaces, &job.request,
+                          string_from_pointer(profile), &rescanned, false) == BQ_OK &&
+                          !strcmp(rescanned.subjects[0].manifest_sha256,
+                                  prepared->subjects[0].manifest_sha256) &&
+                          strcmp(rescanned.subjects[0].installed_identity_sha256,
+                                 prepared->subjects[0].installed_identity_sha256));
+            BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
+            BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), original_digest, &imported) == BQ_CORRUPT &&
+                          !imported.inventory_sha256[0]);
+            BqRetirementBinaries binaries = {0};
+            BQ_PREP_CHECK(bq_retirement_binaries_import_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), original_digest, binary_digest,
+                          &binaries) == BQ_CORRUPT && !binaries.preparation_sha256[0]);
+        }
+        bool restored = installed_source >= 0 && fchmod(installed_source, 0700) == 0;
+        if (restored && moved && replacement >= 0)
+            restored = unlinkat(installed_source, "main.c", 0) == 0;
+        if (restored && moved)
+            restored = renameat(workspaces, "held-installed-main.c", installed_source, "main.c") == 0;
+        if (installed_source >= 0 && fchmod(installed_source, 0500) != 0) restored = false;
+        BQ_PREP_CHECK(restored);
+        if (installed_source >= 0) close(installed_source);
+        BQ_PREP_CHECK(restored && bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest, NULL) == BQ_OK &&
+                      !strcmp(digest, original_digest));
+        BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 && mkdirat(copied, "unlisted", 0500) == 0 &&
+                      fchmod(copied, 0500) == 0);
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest, NULL) == BQ_SOURCE_MISMATCH && !digest[0]);
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), original_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                      !imported.inventory_sha256[0]);
+        BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
+                      unlinkat(copied, "unlisted", AT_REMOVEDIR) == 0 && fchmod(copied, 0500) == 0);
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest, NULL) == BQ_OK && !strcmp(digest, original_digest));
+        BQ_PREP_CHECK(copied >= 0 && fchmod(copied, 0700) == 0 &&
+                      renameat(copied, "main.c", copied, "old.c") == 0);
+        if (copied >= 0)
+        {
+            int replacement = openat(copied, "main.c", O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+            BQ_PREP_CHECK(replacement >= 0 && bq_write_all(replacement, (u8 const*)"int a;\n", 7) &&
+                          fchmod(replacement, 0400) == 0 && unlinkat(copied, "old.c", 0) == 0 &&
+                          fchmod(copied, 0500) == 0);
+            if (replacement >= 0) close(replacement);
+            BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), digest, NULL) == BQ_SOURCE_MISMATCH && !digest[0]);
+            BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                          string_from_pointer(profile), original_digest, &imported) == BQ_SOURCE_MISMATCH &&
+                          !imported.inventory_sha256[0]);
+            close(copied);
+        }
+        int record = openat(queue.directory_fd, "preparation-1", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(record >= 0 && fchmod(record, 0600) == 0);
+        if (record >= 0) close(record);
+        record = openat(queue.directory_fd, "preparation-1", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(record >= 0 && pwrite(record, "X", 1, 0) == 1 && fchmod(record, 0400) == 0);
+        if (record >= 0) close(record);
+        BQ_PREP_CHECK(bq_retirement_preparation_ready_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), digest, NULL) == BQ_CORRUPT && !digest[0]);
+        BQ_PREP_CHECK(bq_retirement_preparation_import_pinned(&queue, &job, installed, workspaces,
+                      string_from_pointer(profile), original_digest, &imported) == BQ_CORRUPT &&
+                      !imported.inventory_sha256[0]);
+    }
+    if (root >= 0) close(root);
+    bq_close(&queue);
+    if (queue_path[0] && ok) bq_prep_test_cleanup(queue_path);
+}
+
+#include "retirement_campaign_service_tests.h"
+
+int main(void)
+{
+    bq_prep_test_support_population();
+    bq_prep_test_raw_census_boundary();
+    char installed[80] = {0}, workspaces[80] = {0}, profile[512] = {0};
+    BqRetirementSource subjects[2] = {0};
+    BqRequest request = {0};
+    bool setup = bq_prep_test_setup(installed, workspaces, subjects, profile, &request);
+    BQ_PREP_CHECK(setup);
+    if (setup)
+    {
+        int input = open(installed, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int output = open(workspaces, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BqRetirementPreparation preparation = {0};
+        String8 pinned = string_from_pointer(profile);
+        BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, output, &request, pinned, &preparation) == BQ_OK);
+        BqRetirementSource verified_base = preparation.subjects[0];
+        BQ_PREP_CHECK(preparation.subjects[0].entries == 1 && preparation.subjects[1].entries == 1 &&
+                      preparation.source_reservation_bytes > BQ_RETIREMENT_COPY_OVERHEAD);
+        struct statvfs filesystem = {0};
+        u64 reservation = 0, block = 0;
+        BQ_PREP_CHECK(fstatvfs(output, &filesystem) == 0);
+        block = filesystem.f_frsize > filesystem.f_bsize ? filesystem.f_frsize : filesystem.f_bsize;
+        if (block < 8192u) block = 8192u;
+        BQ_PREP_CHECK(bq_retirement_source_reservation(&preparation, block, &reservation) &&
+                      reservation == preparation.source_reservation_bytes);
+        u64 payload = preparation.subjects[0].bytes + preparation.subjects[1].bytes +
+                      preparation.subjects[0].manifest_bytes + preparation.subjects[1].manifest_bytes;
+        u64 nodes = BQ_RETIREMENT_EXTRA_METADATA_NODES +
+                    preparation.subjects[0].entries + preparation.subjects[1].entries +
+                    preparation.subjects[0].directories + preparation.subjects[1].directories + 2u;
+        BQ_PREP_CHECK(reservation == 2u * payload + 2u * nodes * block + BQ_RETIREMENT_COPY_OVERHEAD);
+        u64 blocks = reservation / filesystem.f_frsize + (reservation % filesystem.f_frsize != 0);
+        BQ_PREP_CHECK(blocks > 0 && bq_retirement_source_capacity(reservation, filesystem.f_frsize, blocks) &&
+                      !bq_retirement_source_capacity(reservation, filesystem.f_frsize, blocks - 1u) &&
+                      !bq_retirement_source_capacity(reservation, 0, UINT64_MAX));
+        BQ_PREP_CHECK(!bq_retirement_source_reservation(&preparation, UINT64_MAX, &reservation));
+        BqRetirementPreparation oversized = preparation;
+        oversized.subjects[0].bytes = UINT64_MAX;
+        BQ_PREP_CHECK(!bq_retirement_source_reservation(&oversized, block, &reservation));
+        oversized = preparation;
+        oversized.subjects[1].manifest_bytes = 0;
+        BQ_PREP_CHECK(!bq_retirement_source_reservation(&oversized, block, &reservation));
+        char same_tree_inventory[1024];
+        int duplicate_length = snprintf(same_tree_inventory, sizeof(same_tree_inventory),
+                          "BQ-RETIREMENT-INPUTS-V1\nrepository=buster14a/buster\n"
+                          "support-sha256=%.64s\ncontract-sha256=%.64s\n"
+                          "base=%s %s %s %u %" PRIu64 " %u %u %u\n"
+                          "candidate=%s %s %s %u %" PRIu64 " %u %u %u\n",
+                          "1111111111111111111111111111111111111111111111111111111111111111",
+                          "2222222222222222222222222222222222222222222222222222222222222222",
+                          subjects[0].commit, subjects[0].tree, subjects[0].manifest_sha256,
+                          subjects[0].entries, (uint64_t)subjects[0].bytes, subjects[0].directories,
+                          subjects[0].max_path, subjects[0].max_depth,
+                          subjects[1].commit, subjects[0].tree, subjects[1].manifest_sha256,
+                          subjects[1].entries, (uint64_t)subjects[1].bytes, subjects[1].directories,
+                          subjects[1].max_path, subjects[1].max_depth);
+        BqRetirementPreparation refused = {0};
+        BQ_PREP_CHECK(duplicate_length > 0 && (u32)duplicate_length < sizeof(same_tree_inventory) &&
+                      !bq_retirement_inventory(string_from_pointer(same_tree_inventory), pinned,
+                                               &request, &refused));
+        BQ_PREP_CHECK(bq_retirement_campaign_service_test(input, output, &preparation, profile));
+        bq_prep_test_ready_handoff(input, output, installed, workspaces, &preparation, profile);
+
+        char wrong_profile[512];
+        memcpy(wrong_profile, profile, sizeof(wrong_profile));
+        char* pin = strstr(wrong_profile, "inventory-sha256=");
+        BQ_PREP_CHECK(pin != NULL);
+        if (pin) pin[17] = pin[17] == 'a' ? 'b' : 'a';
+        BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, output, &request,
+                       string_from_pointer(wrong_profile), &preparation) == BQ_RECIPE_MISMATCH);
+        BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, -1, &request, pinned,
+                       &preparation) == BQ_RESOURCE_MISMATCH);
+        BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, output, &request, pinned, &preparation) == BQ_OK);
+
+        char changed_inventory[1024];
+        int manifest_length = snprintf(changed_inventory, sizeof(changed_inventory),
+                                      "base=%s %s %s 4097 7 2 10 2", subjects[0].commit,
+                                      subjects[0].tree, subjects[0].manifest_sha256);
+        BqRetirementSource ignored = {0};
+        BQ_PREP_CHECK(manifest_length > 0 && !bq_retirement_subject_line(string_from_pointer(changed_inventory),
+                                                                          S8("base="), &ignored));
+        String8 fields[BQ_FIELD_COUNT] = {S8("fixture"), S8("other"), S8("validate-buster-v1"),
+                                         S8("cccccccccccccccccccccccccccccccccccccccc"),
+                                         S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
+        BqRequest overridden = {0};
+        BQ_PREP_CHECK(bq_request_make(fields, &overridden) == BQ_OK &&
+                      bq_retirement_preflight_pinned(input, output, &overridden, pinned,
+                                                     &preparation) == BQ_RECIPE_MISMATCH);
+
+        BQ_PREP_CHECK(mkdirat(output, "base", 02750) == 0);
+        int subject = openat(output, "base", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(subject >= 0 && mkdirat(subject, "source", 02750) == 0);
+        int source = openat(subject, "source", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(source >= 0 && bq_copy_manifest(input, source, string_from_pointer(subjects[0].commit),
+                                                       BQ_RETIREMENT_SOURCE_MANIFEST_CAP));
+        BQ_PREP_CHECK(bq_make_sources_read_only(source) &&
+                      bq_retirement_verify_subject(input, subject, source, string_from_pointer(subjects[0].commit),
+                                                   &verified_base));
+        struct stat info = {0};
+        BQ_PREP_CHECK(fstatat(subject, "verification-source", &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT);
+
+        int copied_src = source >= 0 ? openat(source, "src", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        BQ_PREP_CHECK(copied_src >= 0 && fchmod(copied_src, 0700) == 0);
+        int planted = copied_src >= 0 ? openat(copied_src, "extra.c", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400) : -1;
+        BQ_PREP_CHECK(planted >= 0 && close(planted) == 0 && fchmod(copied_src, 0500) == 0 &&
+                      !bq_retirement_verify_subject(input, subject, source,
+                                                    string_from_pointer(subjects[0].commit), &verified_base));
+        BQ_PREP_CHECK(copied_src >= 0 && fchmod(copied_src, 0700) == 0 &&
+                      unlinkat(copied_src, "extra.c", 0) == 0 && fchmod(copied_src, 0500) == 0);
+        if (copied_src >= 0) close(copied_src);
+
+        char source_path[512], directory_path[512], old_path[512], manifest_path[512];
+        int length = snprintf(source_path, sizeof(source_path), "%s/sources/%s/src/main.c", installed, subjects[0].commit);
+        BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(source_path));
+        length = snprintf(directory_path, sizeof(directory_path), "%s/sources/%s/src", installed, subjects[0].commit);
+        BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(directory_path));
+        length = snprintf(old_path, sizeof(old_path), "%s/sources/%s/src/old.c", installed, subjects[0].commit);
+        BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(old_path));
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && rename(source_path, old_path) == 0 &&
+                      bq_prep_test_write(source_path, "int a;\n") && chmod(directory_path, 0500) == 0);
+        BQ_PREP_CHECK(!bq_retirement_verify_subject(input, subject, source,
+                                                    string_from_pointer(subjects[0].commit), &verified_base));
+        BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && unlink(old_path) == 0 &&
+                      chmod(directory_path, 0500) == 0);
+        BQ_PREP_CHECK(bq_retirement_preflight_pinned(input, output, &request, pinned, &preparation) == BQ_OK);
+
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && bq_prep_test_write(old_path, "extra") &&
+                      chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && unlink(old_path) == 0 &&
+                      chmod(directory_path, 0500) == 0);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && mkdir(old_path, 0500) == 0 &&
+                      chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && rmdir(old_path) == 0 &&
+                      symlink("main.c", old_path) == 0 && chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && unlink(old_path) == 0 &&
+                      chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned, &preparation) == BQ_OK);
+
+        BQ_PREP_CHECK(chmod(source_path, 0600) == 0);
+        int altered = open(source_path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(altered >= 0 && write(altered, "changed", 7) == 7);
+        if (altered >= 0) close(altered);
+        BQ_PREP_CHECK(chmod(source_path, 0400) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+        BQ_PREP_CHECK(chmod(directory_path, 0700) == 0 && unlink(source_path) == 0 &&
+                      chmod(directory_path, 0500) == 0 &&
+                      bq_retirement_preflight_pinned(input, output, &request, pinned,
+                                                     &preparation) == BQ_SOURCE_MISMATCH);
+
+        length = snprintf(manifest_path, sizeof(manifest_path), "%s/sources/%s/source.manifest", installed,
+                          subjects[0].commit);
+        BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(manifest_path));
+        char8 source_digest[SHA256_HEX_CAPACITY];
+        bq_digest("int a;\n", 7, source_digest);
+        char duplicate[512];
+        length = snprintf(duplicate, sizeof(duplicate),
+                          "BQ-SOURCE-V1\nrepository=buster14a/buster\nrevision=%s\n"
+                          "%.64s src/main.c\n%.64s src/main.c\n",
+                          subjects[0].commit, source_digest, source_digest);
+        BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(duplicate) && chmod(manifest_path, 0600) == 0);
+        int manifest_fd = open(manifest_path, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(manifest_fd >= 0 && bq_write_all(manifest_fd, (u8 const*)duplicate, (u32)length));
+        if (manifest_fd >= 0) close(manifest_fd);
+        int source_root = openat(input, "sources", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int snapshot = source_root >= 0 ? openat(source_root, subjects[0].commit,
+                                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        BqRetirementSource observed = {0};
+        BQ_PREP_CHECK(chmod(manifest_path, 0400) == 0 && snapshot >= 0 &&
+                      !bq_retirement_scan(snapshot, "source.manifest", string_from_pointer(subjects[0].commit),
+                                          &observed, true));
+        if (snapshot >= 0) close(snapshot);
+        if (source_root >= 0) close(source_root);
+
+        if (source >= 0) close(source);
+        if (subject >= 0) close(subject);
+        if (input >= 0) close(input);
+        if (output >= 0) close(output);
+        bq_prep_test_cleanup(workspaces);
+        bq_prep_test_cleanup(installed);
+    }
+    bq_prep_test_large_manifest();
+    printf("RETIREMENT_PREP_TEST assertions=%u failures=%u\n", bq_retirement_tests, bq_retirement_failures);
+    int result = bq_retirement_failures ? 1 : 0;
+    return result;
+}

@@ -103,13 +103,15 @@ returns without dereferencing or reserving one.
 
 A successful result is not committed across an unchecked signal window.
 Cancellation is sampled after each durable success-phase transition and after
-physical workspace removal. TERM/INT are masked at a checked boundary
-immediately before the final journal append; that boundary is the completion
-linearization point. A cancellation ordered before it makes the terminal
-outcome `cancelled` on replay. If the success bundle was already published,
-the terminal cancellation retains and binds that exact success bundle/digest
-and publishes a separate cancellation outcome record; replay never replaces
-or loses the durable artifact.
+physical workspace removal. The supervisor validates and binds the retained
+result bundle while TERM/INT are masked, then checks for pending signals at
+the terminal journal boundary, consumes and records any pending cancellation,
+and keeps them masked through the terminal append. A cancellation ordered
+before that checked boundary makes the terminal outcome `cancelled` on replay.
+If the success bundle was already published, the terminal cancellation
+retains and binds that exact success bundle/digest and publishes a separate
+cancellation outcome record; replay never replaces or loses the durable
+artifact.
 
 ## Result bundle and retained evidence
 
@@ -117,8 +119,11 @@ The trusted recipe writes a `BQ-BUNDLE-V1` index beside the final manifest.
 Every non-control result file is listed as `sha256 size relative/path`; the
 worker reopens and hashes every listed file, rejects unlisted regular files,
 symlinks, traversal components and non-private directories, and enforces
-4,096 entries, 512 MiB total bytes, 64 MiB per file, 256 directory levels and
-192-byte relative paths. The index itself is bounded to 8 MiB. The final
+4,096 entries, 512 MiB total bytes for the admitted smoke recipe, 64 MiB per
+file, 256 directory levels and 192-byte relative paths. A separate 128 GiB
+ceiling is reserved for the still-blocked retirement recipe's full population;
+it grants no execution or performance admission. The index itself is bounded
+to 8 MiB. The final
 manifest, bundle and failure/cancellation outcome record are separately bound
 control records, so later retrieval does not change the measured bundle. A
 failed, cancelled, or interrupted recipe publishes a digest-bound
@@ -172,6 +177,55 @@ populated-descendant cleanup leaves the active job reconciliation-required.
 OOM, runtime timeout, ordinary execution failure and cancellation retain
 distinct evidence/outcomes.
 
+The real systemd worker retains the authenticated lease-handoff socket as a
+private phase channel (`phase_channel.h`). The build driver marks it CLOEXEC
+before constructing any child and waits for four ordered acknowledgements:
+preparing, settling, measuring, and measurement finished. The supervisor also binds
+the absolute monotonic execution deadline to its lease response and the
+recipient's acknowledgement. It rejects a missing, expired, or altered deadline;
+the unit checks it again after resuming from `SIGSTOP`, then reopens the lease
+pathname and verifies that the held lock still names the same inode before
+executing the installed recipe. A missing or replaced lease, or a deadline
+that expires during the pause, prevents recipe exec. The forked unit-entry
+fixture counts zero attempted execs on those cases as well as malformed lease
+responses; it uses the admitted smoke entry, not a timed retirement campaign.
+The still-blocked retirement path receives that deadline as
+a private recipe argument for its future bounded phase exchanges. The admitted
+smoke recipe retains its six-value interface.
+The supervisor binds
+each message to the job/attempt and an increasing monotonic timestamp, writes
+an exclusive durable queue record and a read-only `worker-phase-N` result
+receipt, and advances the settling/measuring journal boundary before replying.
+Final validation compares the exported receipts with the queue's authoritative
+copies. Unknown, duplicate, oversized, stale, descriptor-bearing or partial
+messages cannot advance the protocol.
+
+While waiting between phase messages, the production supervisor blocks on the
+private channel and the launcher's Linux pidfd. It performs no periodic waitpid
+polling or manager queries. Operator signals and the fixed deadline still
+interrupt this wait; the existing unit/cgroup cleanup and lease reconciliation
+remain mandatory. A missing final acknowledgement or restart from measuring
+cannot produce success or permit another reservation. Linux pidfd support is
+required for this path. Receipt publication and journal errors are fatal before
+acknowledgement, and partial evidence is retained.
+
+The smoke recipe exercises these boundaries around its existing throughput
+stage. It does not settle or qualify the machine for retirement acceptance;
+the retirement descriptor remains blocked pending its full correctness,
+sampling, host-qualification and replay integration. The six-argument direct
+recipe test seam remains available; the installed worker supplies the seventh,
+private channel descriptor itself. No public request selects a descriptor.
+
+The fixed worker budget is one hour and starts before materialization. The
+historical 60-pair arithmetic capacity model in [EXPORT.md](EXPORT.md) has
+35,463,936 compiler invocations before its separately modeled runtime
+invocations; it is not the current support population or a measured host-rate
+bound. Those compiler calls alone would have to average under 101.5
+microseconds across the whole job, leaving no budget for preparation,
+validation, cleanup or manager overhead. No measured end-to-end bound
+establishes that the full population fits this worker budget, so the blocked
+recipe is not admitted on a capacity assumption.
+
 The production systemd path is Linux-only. Windows and macOS return
 `unsupported`; those builds still compile the bounded codec and portable
 manifest record. Injected tests cover fixed argv/resource/sandbox propagation,
@@ -207,6 +261,13 @@ throughput, sanitizer and workflow gates are retained. `shared.c` is the same
 foundation linkage used by the throughput tool. There is no new dependency,
 measurement loop or general-purpose testing framework.
 
+On Linux, both service self-test commands also build and run the private
+retirement preparation, correctness and durable-store fixtures, plus the
+offline export/replay Python test. The throughput self-test registers the
+fixed-campaign child fixture. These tests check the combined adapters; they do
+not replace a complete service-owned producer, authenticated receipt handoff,
+physical A/A qualification or an admitted retirement recipe.
+
 Linux supervisor deadline coverage lives in `worker_deadline_tests.c`. Timed
 commands use explicit `exec` so the test retains an owned direct child rather
 than depending on PID 1 to reap an orphaned shell descendant. The observed
@@ -217,6 +278,12 @@ diagnostics retain individual results, elapsed time, PID/group identity and
 process state before bounded cleanup. The 20 ms command deadline, 1,000 ms
 test bound and production cleanup policy are unchanged, including treating
 unreaped zombies as present group members.
+
+`phase_channel_tests.h` exercises the production protocol with real socketpairs
+and child pidfds, including a materialized build-driver round trip, durable
+receipt visibility before acknowledgement, malformed/duplicate messages,
+ancillary-fd disposal, publication collisions, interruption, deadline,
+cancellation, receipt replacement and journal-reopen admission fencing.
 
 The normal native executable is `build/bench-service-tools/service` (`.exe` on
 Windows). The fixed-recipe self-test is a Linux build-driver command; it uses
@@ -365,8 +432,10 @@ journal and control schema numbers.
 registry entry. `profiles/native-retirement-performance-v1.blocked` pins the
 landed performance contract, support declaration, binding validator and
 statistics implementation by SHA-256 and records the remaining execution
-requirements. It has no executable command, is not an installed `.recipe`, and
-is rejected by request validation and `worker-unit`. This prevents the one-pair
+requirements. It has no admitted executable command or installed `.recipe`, and
+is rejected by request validation and `worker-unit`. Its private build-driver
+parser accepts the lease-bound preparation digest, phase descriptor and deadline
+but deliberately builds no timed-child graph. This prevents the one-pair
 smoke recipe from being relabelled as a retirement result while preserving a
 machine-visible identity for the future admitted implementation.
 

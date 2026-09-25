@@ -605,9 +605,9 @@ intervals. An equal-mixture median lies between its component medians, so this
 inner union bound is distribution-free and costs no more than the declared
 pooled tail allocation. An unattainable finite endpoint is honestly reported as
 zero or infinity. The exact partition supports 300,000 metric cells per scope.
-The binding currently fixes 19,296 support groups, 77,184 required object
-rows, and at least 77,186 rows after the required link and self-host stages. The
-100,000-cell cap therefore leaves explicit room for admitted real-workload rows,
+The current full census replay retains 78,912 canonical rows, of which 72,672
+are compiler eligible and 6,240 are untimed. The 100,000-cell cap therefore
+leaves explicit room for admitted real-workload rows,
 and the 300,000-member cap is exactly three variable metrics for that maximum
 population in each scope. These caps do not reduce resamples or authorize excluding a
 required cell. The caller derives the bootstrap count from one scope's explicit
@@ -634,6 +634,137 @@ quantile answers and exercises unchanged data, true regressions, broad
 intervals, disagreeing rounds, both family corrections, aggregates, malformed
 declarations, fixed sample counts, and supported caps. This software test is not
 dedicated-host A/A admission and issues no #36 performance verdict.
+
+### Native-retirement invocation evidence
+
+`retirement_execution.h` supplies the native cursor and bounded invocation
+encoder for the existing performance binding's execution transcript. The cursor
+uses `tp_retirement_block_schedule` directly, includes two warmups per variant,
+and exhausts both rounds of compiler invocations before the native-runtime
+campaign. The service supplies the independently authenticated eligible-row
+projection in canonical census order. The cursor copies that sparse row-ID map
+and the runtime subset at initialization; it schedules only eligible compiler
+rows while retaining their original IDs in the invocation transcript and
+result-input records. A duplicate, unsorted, or out-of-range ID is rejected.
+A failed commit
+permanently invalidates the attempt; there is no skip or resume operation. The
+complete population's result-input capacity permits at most 254 pairs per round,
+so this collection boundary rejects 256 even though the statistics kernel can
+analyze that count for a smaller population. It does not change statistical
+limits, family construction, or decisions.
+
+Linux `tp_process_observe` captures a fresh child's PID and `/proc/PID/stat`
+start token while that child is waiting for launch permission. It records the
+same monotonic interval used for wall time, and retains ordinary wait status,
+timeout and RSS evidence. Other Unix platforms reject requested process
+observations as unsupported. The existing `tp_process` entry point retains its
+ordinary throughput behavior and does not read process identity. Diagnostic PMU
+collection remains separate.
+
+`retirement_measurement.h` provides the Linux observation boundary for an
+already verified service plan. It hashes a read-only executable once before
+timing, retains its open descriptor and metadata identity, and launches that
+descriptor with `fexecve`. The command digest covers canonical ASCII JSON with
+the keys `argv`, `cwd`, and `environment`; arguments and sorted, unique
+`NAME=value` entries have a combined 64 KiB bound. There are at most 256
+arguments and 128 environment entries. The inherited environment is excluded.
+The supplied cwd descriptor must match the named working directory; its source
+tree still requires the service's independent immutable-closure verification.
+
+The optional `TpProcessInputs` path uses the existing process observer with PMU
+disabled, an empty service-owned log, explicit environment and null stdin.
+Linux `close_range(CLOSE_RANGE_CLOEXEC)` prevents unrelated supervisor handles
+from reaching the child, including handles the caller forgot to mark CLOEXEC.
+A kernel that cannot perform that operation fails the invocation. This does
+not install the service sandbox or acquire its lease.
+
+Before compiler launch, the artifact must be absent from the service-opened
+private output directory. Afterwards, the producer opens it relative to that
+descriptor without following links. Runtime output is read from the actual
+child's log descriptor. Both paths hash a regular, single-link file, bounded to
+1 GiB, with identity/size/metadata checks around the read. The observed digest
+must equal the independently prepared oracle. After timing, an independent
+reader in `retirement_artifact.h` parses each compiler artifact and checks the
+code count and digest against the frozen plan. Correct whole-file hashes cannot
+authorize incorrect code metrics. This structural check does not establish
+semantic correctness or native-runtime eligibility.
+
+The reader handles little-endian x86-64/AArch64 ELF64 objects and executables,
+COFF objects, PE32+ images and Mach-O64 objects and images. It counts ELF
+`SHF_EXECINSTR`, COFF/PE code or executable sections, and Mach-O instruction or
+symbol-stub sections. Code digests concatenate payloads in ascending file-offset
+order. PE file-alignment padding beyond a nonzero virtual size is excluded;
+headers, relocations and data sections are excluded in every format. Zero code
+bytes remain an explicit empty-code fact. Unsupported formats, missing section
+tables, truncated/overflowing ranges, overlapping payloads or metadata, and
+executable zero-fill sections fail closed. Parsing has a 1 GiB artifact limit
+and 65,535-section limit, uses bounded iteration without recursion, and reads
+descriptor input into owned memory so truncation cannot fault a mapping. Census
+validation uses the same reader and additionally checks object format and CPU
+against the declared target before accepting a supported row.
+
+Only successful execution and output verification advance the attached sample
+collector. `TpRetirementMeasurementResult` retains the process identity, wait
+status, timeout, observed output digest/size and failure stage for the service's
+failure recorder. A failure poisons the attempt. The helper does not delete
+logs or artifacts; the service must retain failures, retire successful scratch
+files before reuse, and seal evidence durably. It also owns cancellation,
+descendant absence proof and quiet-phase scheduling; these local observations
+are not authenticated service receipts.
+
+The native regression runs a complete one-row fixture through 488 fresh
+compiler/runtime child processes (two warmups and two 60-pair rounds per
+variant), then writes 120 numeric records. These deterministic fixture
+programs are functional tests, not compiler-performance measurements. Python
+independently checks canonical command hashes, every output identity, the
+schedule, process instances, and all numeric joins. Failure controls cover
+nonzero exit, timeout, wrong/missing compiler and runtime output, stale output,
+symlinks/hard links, changed binaries, command/cwd mismatch, inherited handles,
+ambient environment, and retry after failure.
+Artifact cases also reject incorrect code sizes/digests and malformed output
+whose whole-file hash nevertheless matches the supplied oracle. Format tests
+cover both architectures, every truncated fixture prefix, reversed section
+order, overlap, empty code, PE padding and the actual host test executable.
+Independent Python checks decode the saved fixtures without this C reader.
+For a parsed zero-byte candidate section, the invocation retains the empty
+SHA-256 and the paired numeric record retains `0` against a positive baseline.
+If the baseline has zero code bytes, both parsed code observations remain in
+the invocation transcript but the numeric code ratio is absent because it has
+no denominator. Native fixtures exercise both cases with actual child output.
+
+The encoder emits the existing canonical JSONL invocation schema in at most
+8,192 bytes. It checks successful child status, required hashes, exact interval
+agreement, compiler RSS, and code-section applicability before emitting bytes.
+Nanosecond serialization uses integer operations and a bounded decimal domain;
+missing runtime RSS is `null`. The native regression fixture is read unchanged
+by the production Python transcript validator, including the sample join:
+
+```sh
+./build.sh bench_throughput self-test
+python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests
+./build.sh bench_throughput self-test --sanitize
+python3 -W error::ResourceWarning tools/throughput/retirement_execution_test.py build/throughput-tool-tests-sanitized
+```
+
+`TpRetirementTranscript` couples a successful checked write to advancement of
+that cursor. Shards contain 32,768 records, except for the last shard, and are
+bounded to 64 MiB each and 4,096 shards overall. A shortened intermediate shard,
+overlapping interval, duplicate observation, write/flush error, or premature
+completion permanently invalidates the transcript. A descriptor is returned
+only after the shard's stream flush succeeds. The caller owns file creation,
+fsync, no-replace publication and final immutable revalidation; a returned
+SHA-256 descriptor establishes local byte integrity, not receipt authority.
+After complete collection, `tp_retirement_transcript_receipt` writes the
+canonical bounded invocation receipt once, joining the frozen plan and context
+digests to every published shard descriptor. A failed or repeated write poisons
+the attempt. Its returned digest needs separate, authenticated publication by
+the service; the result bundle cannot supply its own trust anchor.
+
+These primitives are not an admitted service recipe or an authenticated receipt.
+The service must still own the immutable plan, launch isolation, independent
+output checks, shard publication, lifecycle and receipt authority. The
+`native-retirement-performance-v1` descriptor remains blocked until that complete
+producer is integrated; `validate-buster-v1` continues to produce smoke evidence.
 
 ## Result bundle
 
@@ -737,6 +868,58 @@ identity, physical isolation, instruction throughput or a compiler speedup.
 nonregression. #346's optional macro/aggregate workloads remain separate; no
 preprocessing/debug-specific case or default corpus expansion is added here.
 
+
+### Native-retirement paired numeric samples
+
+`retirement_samples.h` extends the invocation writer with an explicitly attached
+`TpRetirementSamples` collector. Initialize it with a fresh exclusive seekable
+spool, per-row workspace, and immutable code/runtime applicability. All
+invocations, including warmups, must advance through its append operation;
+advancing the transcript independently invalidates collection. Runtime
+applicability must match the cursor's copied row map. Caller flags are not an
+admission surface: the eventual installed recipe must derive these facts from
+the independently verified full support population.
+
+Collection preserves the approved execution order, but replay requires numeric
+samples in row/round/pair order. A private 72-byte-per-pair spool bridges these
+orders without allocating the entire experiment. It stores exact nanoseconds,
+RSS, code bytes, runtime and variant order as little-endian integers. It is
+scratch storage, **not a second published result schema**. Per-row in-memory
+compiler/runtime hash states bind observed values to the actual exported bytes;
+positive-value mutation, including a mutation after a shard boundary within the
+same row, prevents successful completion. RAM is proportional to rows, while
+the bounded spool is proportional to rows times rounds times pairs.
+
+Export begins only after the complete invocation transcript finishes. Each
+numeric shard contains 32,768 canonical existing result-input records, except
+for the final short shard. Optional metrics are omitted exactly when
+inapplicable; unavailable mandatory observations never become zero. Descriptors
+are emitted only after a successful flush, and an ordered descriptor digest
+binds the complete shard inventory. The writer emits full-cap 16,777,216-record
+manifest partitions, with only the final partition shortened. Each partition
+retains the result reader's 16 GiB bound; the complete collector rejects more
+than 39,518,208 records. No statistical threshold or pinned statistics source
+changes.
+
+The native tests write both transcript and numeric sample fixtures. The Python
+replay imports the C-written numeric records through the production sample
+consumer, joins them to every authenticated invocation, and verifies the
+manifest through the production no-follow result reader on POSIX. A real
+32,768-record boundary, deterministic second collection, copied applicability,
+partial collection, bypass, stale state, missing metrics, spool mutation,
+truncation, nonempty destinations, descriptor replacement and buffered disk-full
+failures are covered. The commands above run this coverage in the existing
+native/sanitized harness lanes; Windows does not claim the POSIX-only result
+reader gate.
+
+These are collection primitives, not service admission. The caller still owns
+exclusive file identities, correctness and output-oracle gates, live quiet-phase
+coordination, cancellation, durable publication and independent rehash/replay.
+Ordinary throughput does not use this collector. In particular, its spool and
+transcript writes are not proof of a quiet-phase retention policy: the installed
+recipe must implement and validate that integration before admission. The
+performance descriptor remains blocked; neither synthetic fixtures nor an
+integrity-only manifest establishes a performance verdict.
 
 ### QUALITY scratch/work census
 

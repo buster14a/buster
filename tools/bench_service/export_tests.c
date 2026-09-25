@@ -122,6 +122,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
         job = bq_job(&queue->state, id);
         BqPacket request, response, repeated;
         bq_test_export_request(&request, job, UINT64_MAX, NULL);
+        BQ_CHECK(bq_transport_response_wait(request.bytes, request.size) == (int)BQ_EXPORT_PREPARE_MILLISECONDS + 5000);
         BQ_CHECK(bq_transport_dispatch(queue, request.bytes, request.size, &response) == BQ_EXPORT_NOT_FINALIZED);
         BQ_CHECK(bq_real_advance(queue, job, BQ_FINISHED, outcome) == BQ_OK);
         job = bq_job(&queue->state, id);
@@ -135,11 +136,41 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
             BQ_CHECK(queue->state.sequence == sequence && queue->bytes == journal_bytes &&
                      bq_worker_result_binding_validate(job) == BQ_OK);
         }
+        char id_text[32], token_text[32];
+        snprintf(id_text, sizeof(id_text), "%llu", (unsigned long long)id);
+        snprintf(token_text, sizeof(token_text), "%llu", (unsigned long long)token);
+        char* hinted[] = {"export", id_text, token_text, job->result_full_digest, "validate-buster-v1"};
+        BqPacket typed;
+        u32 operation = 0;
+        BQ_CHECK(bq_client_arguments(5, hinted, true, &typed, &operation) && operation == BQ_OP_EXPORT &&
+                 bq_u32(typed.bytes + BQ_CONTROL_HEADER + 88) == BQ_RECIPE_VALIDATE_BUSTER &&
+                 bq_transport_public_request(typed.bytes, typed.size) == BQ_OK &&
+                 bq_transport_response_wait(typed.bytes, typed.size) == (int)BQ_EXPORT_PREPARE_MILLISECONDS + 5000);
+        hinted[4] = "fake-success-v1";
+        BQ_CHECK(!bq_client_arguments(5, hinted, true, &typed, &operation));
+        hinted[4] = "native-retirement-performance-v1";
+        BQ_CHECK(bq_client_arguments(5, hinted, true, &typed, &operation) &&
+                 bq_transport_response_wait(typed.bytes, typed.size) ==
+                     (int)BQ_EXPORT_RETIREMENT_PREPARE_MILLISECONDS + 5000 &&
+                 bq_transport_dispatch(queue, typed.bytes, typed.size, &response) == BQ_CONFLICT &&
+                 queue->state.sequence == sequence && queue->bytes == journal_bytes);
+        bq_put32(typed.bytes + BQ_CONTROL_HEADER + 88, BQ_RECIPE_FAKE_SUCCESS);
+        BQ_CHECK(bq_transport_public_request(typed.bytes, typed.size) == BQ_BAD_REQUEST);
+        bq_put32(typed.bytes + BQ_CONTROL_HEADER + 88, BQ_RECIPE_VALIDATE_BUSTER);
+        typed.bytes[BQ_CONTROL_HEADER + 92] = 1;
+        BQ_CHECK(bq_transport_public_request(typed.bytes, typed.size) == BQ_BAD_REQUEST);
+        typed.bytes[BQ_CONTROL_HEADER + 92] = 0;
+        BQ_CHECK(bq_transport_dispatch(queue, typed.bytes, typed.size, &response) == BQ_OK &&
+                 bq_public_response_valid(&typed, &response));
+        bq_put32(typed.bytes + BQ_CONTROL_HEADER + 88, BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
+        BQ_CHECK(!bq_public_response_valid(&typed, &response));
         BqError prepared = bq_transport_dispatch(queue, request.bytes, request.size, &response);
         if (prepared != BQ_OK) fprintf(stderr, "EXPORT_TEST prepare=%s\n", bq_error_name(prepared));
         BQ_CHECK(prepared == BQ_OK && bq_public_response_valid(&request, &response));
+        u64 full_index_checks = bq_export_index_full_checks;
         BQ_CHECK(bq_transport_dispatch(queue, request.bytes, request.size, &repeated) == BQ_OK &&
-                 response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size));
+                 response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size) &&
+                 bq_export_index_full_checks == full_index_checks);
         char published[80], pending[80];
         BQ_CHECK(bq_export_name(published, id, token, false) && bq_export_name(pending, id, token, true) &&
                  linkat(queue->directory_fd, published, queue->directory_fd, pending, 0) == 0 &&
@@ -147,6 +178,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
                  response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size));
         u8 receipt[BQ_EXPORT_RECEIPT_CAP];
         memcpy(receipt, response.bytes + BQ_CONTROL_HEADER + BQ_EXPORT_REPLY_HEADER, sizeof(receipt));
+        u8 oversized[BQ_EXPORT_RECEIPT_CAP];
+        memcpy(oversized, receipt, sizeof(oversized));
+        bq_put64(oversized + 24, BQ_EXPORT_TOTAL_CAP + 1);
+        BQ_CHECK(bq_export_receipt_recipe(receipt) == BQ_RECIPE_VALIDATE_BUSTER &&
+                 !bq_export_receipt_valid(oversized));
         char digest[SHA256_HEX_CAPACITY];
         bq_digest(receipt, sizeof(receipt), digest);
         u64 total = bq_u64(receipt + 24);
@@ -159,10 +195,15 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
         for (u64 cursor = 0; file && cursor < total;)
         {
             bq_test_export_request(&request, job, cursor, digest);
+            BQ_CHECK(bq_transport_response_wait(request.bytes, request.size) == BQ_TRANSPORT_CLIENT_MILLISECONDS);
             BQ_CHECK(bq_transport_dispatch(queue, request.bytes, request.size, &response) == BQ_OK &&
                      bq_public_response_valid(&request, &response));
+            /* Recovery of a pending export may replace spool metadata once;
+             * the immediately repeated read must reuse its verified index. */
+            full_index_checks = bq_export_index_full_checks;
             BQ_CHECK(bq_transport_dispatch(queue, request.bytes, request.size, &repeated) == BQ_OK &&
-                     response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size));
+                     response.size == repeated.size && !memcmp(response.bytes, repeated.bytes, response.size) &&
+                     bq_export_index_full_checks == full_index_checks);
             u8 const* body = response.bytes + BQ_CONTROL_HEADER;
             u32 count = bq_u32(body + 44);
             BQ_CHECK(count > 0 && count <= BQ_EXPORT_CHUNK_CAP && response.size <= BQ_PACKET_CAP);
@@ -249,6 +290,17 @@ BUSTER_GLOBAL_LOCAL void bq_test_export(bool success)
 
 BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
 {
+    BqRecipeFiles smoke = {0}, retirement = {0};
+    BQ_CHECK(bq_recipe_files(BQ_RECIPE_VALIDATE_BUSTER, &smoke) &&
+             bq_recipe_files(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED, &retirement) &&
+             bq_worker_bundle_total_cap(&smoke) == BQ_WORKER_BUNDLE_TOTAL_CAP &&
+             bq_worker_bundle_total_cap(&retirement) == BQ_WORKER_RETIREMENT_BUNDLE_TOTAL_CAP &&
+             bq_export_total_cap(BQ_RECIPE_VALIDATE_BUSTER) == BQ_EXPORT_TOTAL_CAP &&
+             bq_export_data_offset(BQ_RECIPE_VALIDATE_BUSTER) == BQ_EXPORT_DATA_OFFSET &&
+             bq_export_total_cap(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) > UINT64_C(8720640) * 180 &&
+             bq_export_data_offset(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) > BQ_EXPORT_DATA_OFFSET &&
+             bq_export_prepare_milliseconds(BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) >
+                 BQ_EXPORT_PREPARE_MILLISECONDS);
     char path[BQ_PATH_CAP + 1] = "/tmp/bq-export-paths-XXXXXX";
     BQ_CHECK(bq_test_mkdtemp_physical(path, sizeof(path)));
     int root = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -259,20 +311,20 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
     if (root >= 0 && inventory != MAP_FAILED)
     {
         int file = openat(root, "regular", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        BQ_CHECK(file >= 0 && write(file, "a", 1) == 1 && bq_export_inventory(root, inventory, deadline) == BQ_OK &&
+        BQ_CHECK(file >= 0 && write(file, "a", 1) == 1 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_OK &&
                  inventory->files == 1 && inventory->bytes == 1 && bq_export_inventory_unchanged(root, inventory));
         BQ_CHECK(pwrite(file, "b", 1, 0) == 1 && !bq_export_inventory_unchanged(root, inventory));
-        BQ_CHECK(bq_export_inventory(root, inventory, deadline) == BQ_OK);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_OK);
         BQ_CHECK(renameat(root, "regular", root, "replacement") == 0 && !bq_export_inventory_unchanged(root, inventory));
         BQ_CHECK(renameat(root, "replacement", root, "regular") == 0);
-        BQ_CHECK(linkat(root, "regular", root, "alias", 0) == 0 && bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(linkat(root, "regular", root, "alias", 0) == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "alias", 0) == 0);
         BQ_CHECK(ftruncate(file, (off_t)BQ_WORKER_BUNDLE_FILE_CAP + 1) == 0 &&
-                 bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_OVERSIZED);
+                 bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
         BQ_CHECK(ftruncate(file, 1) == 0);
-        BQ_CHECK(symlinkat("../outside", root, "alias") == 0 && bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(symlinkat("../outside", root, "alias") == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "alias", 0) == 0);
-        BQ_CHECK(mkfifoat(root, "fifo", 0600) == 0 && bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_CORRUPT);
+        BQ_CHECK(mkfifoat(root, "fifo", 0600) == 0 && bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_CORRUPT);
         BQ_CHECK(unlinkat(root, "fifo", 0) == 0);
         u8 byte = 0;
         BQ_CHECK(bq_export_io(file, &byte, 1, 0, false, 0) == BQ_EXPORT_TIMEOUT);
@@ -287,7 +339,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
             directory = child;
         }
         if (directory >= 0) close(directory);
-        BQ_CHECK(bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_OVERSIZED);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
         BQ_CHECK(bq_remove_workspace_payload(root));
         for (u32 i = 0; i <= BQ_WORKER_BUNDLE_ENTRY_CAP; i += 1)
         {
@@ -297,7 +349,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_export_inventory(void)
             BQ_CHECK(fd >= 0);
             if (fd >= 0) close(fd);
         }
-        BQ_CHECK(bq_export_inventory(root, inventory, deadline) == BQ_EXPORT_OVERSIZED);
+        BQ_CHECK(bq_export_inventory(root, inventory, BQ_EXPORT_TOTAL_CAP, deadline) == BQ_EXPORT_OVERSIZED);
         /* The generic worker cleanup intentionally has the same entry cap. */
         for (u32 i = 0; i <= BQ_WORKER_BUNDLE_ENTRY_CAP; i += 1)
         {

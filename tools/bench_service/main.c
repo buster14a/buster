@@ -71,12 +71,16 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
             memcpy(body, submission.bytes, size);
         }
     }
-    else if ((argc == 4 || argc == 6) &&
-             ((!strcmp(argv[0], "export") && argc == 4) || (!strcmp(argv[0], "export-chunk") && argc == 6)))
+    else if ((argc == 4 || argc == 5 || argc == 6) &&
+             ((!strcmp(argv[0], "export") && (argc == 4 || argc == 5)) ||
+              (!strcmp(argv[0], "export-chunk") && argc == 6)))
     {
         u64 token = 0, cursor = UINT64_MAX;
+        BqRecipe expected_recipe = argc == 5 ? bq_recipe_from_name(string_from_pointer(argv[4])) : BQ_RECIPE_UNKNOWN;
         valid = bq_decimal(argv[1], true, &id) && bq_decimal(argv[2], true, &token) && strlen(argv[3]) == 64 &&
-                bq_result_digest_valid((u8 const*)argv[3]);
+                bq_result_digest_valid((u8 const*)argv[3]) &&
+                (argc != 5 || expected_recipe == BQ_RECIPE_VALIDATE_BUSTER ||
+                 expected_recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
         if (valid && argc == 6) valid = bq_decimal(argv[4], false, &cursor) && cursor != UINT64_MAX &&
                                      cursor % BQ_EXPORT_CHUNK_CAP == 0 && strlen(argv[5]) == 64 &&
                                      bq_result_digest_valid((u8 const*)argv[5]);
@@ -88,6 +92,7 @@ BUSTER_GLOBAL_LOCAL bool bq_client_arguments(int argc, char** argv, bool gateway
             memcpy(body + 16, argv[3], 64);
             bq_put64(body + 80, cursor);
             if (argc == 6) memcpy(body + 88, argv[5], 64);
+            if (argc == 5) bq_put32(body + 88, (u32)expected_recipe);
             size = BQ_EXPORT_REQUEST_CAP;
         }
     }
@@ -444,7 +449,7 @@ BUSTER_GLOBAL_LOCAL int bq_cli(int argc, char** argv, FILE* input, FILE* output,
                     "client SOCKET capabilities/submit/status/result/cancel/logs ... | "
                     "gateway capabilities | gateway submit KEY BASE_SHA CANDIDATE_SHA | "
                     "gateway status/result/cancel JOB | gateway logs JOB [AFTER_SEQUENCE] | "
-                    "gateway export JOB TOKEN FULL_SHA | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
+                    "gateway export JOB TOKEN FULL_SHA [EXPECTED_RECIPE] | gateway export-chunk JOB TOKEN FULL_SHA CURSOR RECEIPT_SHA | "
                     "unpack-export ARCHIVE NEW_ABSOLUTE_DIRECTORY RECEIPT_SHA | "
                     "serve DIR SOCKET INSTALLED_ROOT WORKSPACE_ROOT LEASE_FILE CPU\n");
         }
