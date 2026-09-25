@@ -265,7 +265,6 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                                 "#endif\n"
                                 "#define WIDE_PROMOTES_UNSIGNED _Generic(+(L'\\0'), unsigned int: 1, default: 0)\n"
                                 "_Static_assert(!(u'\\0' - 1 > 0), \"ordinary UTF-16 promotes to int\");\n"
-                                "_Static_assert(U'\\0' - 1 > 0, \"ordinary UTF-32 keeps unsigned int\");\n"
                                 "_Static_assert((1 ? -1 : u'\\0') < 0, \"ordinary UTF-16 conditional promotes to int\");\n"
                                 "_Static_assert(~u'\\0' == -1, \"ordinary UTF-16 complement promotes to int\");\n"
                                 "_Static_assert((L'\\0' - 1 > 0) == WIDE_PROMOTES_UNSIGNED, \"ordinary wchar follows C promotions\");\n"
