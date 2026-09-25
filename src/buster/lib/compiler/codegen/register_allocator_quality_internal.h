@@ -33,6 +33,22 @@ BUSTER_F_DECL void machine_quality_heap_sift(MachineQualityInterval* heap, u32 c
 // returned by the preceding query. UINT32_MAX also reports exhaustion.
 BUSTER_F_DECL u32 machine_quality_region_next(MachineQualityTraffic const* traffic, u32 count, u32 previous_region);
 
+// One candidate's nonzero traffic inside one merged region. A candidate's
+// entries form a contiguous row.
+typedef struct MachineQualityRegionTraffic MachineQualityRegionTraffic;
+struct MachineQualityRegionTraffic
+{
+    MachineQualityTraffic traffic;
+    u32 region;
+    u32 reserved;
+};
+
+// Orders a row exactly as successive machine_quality_region_next queries
+// over the equivalent dense row: entries naming one region are summed, zero
+// traffic is dropped, then descending traffic with ascending region ties.
+// Returns the ordered entry count.
+BUSTER_F_DECL u32 machine_quality_region_row_build(MachineQualityRegionTraffic* entries, u32 count);
+
 // Private QUALITY work census. The existing allocation-instrumented compiler
 // supplies these counters to its source-metrics file; ordinary compilers have
 // neither storage nor recorder calls. Counts are cumulative on the calling OS
