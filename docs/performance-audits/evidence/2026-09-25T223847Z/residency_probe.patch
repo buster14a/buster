@@ -203,10 +203,10 @@ index 210d33e..b681eef 100644
      file_map_unmap(source_file);
      return result;
 diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
-index f5c127b..fd528c5 100644
+index f5c127b..4040cbc 100644
 --- a/src/buster/lib/compiler/frontend/c/c_parse.c
 +++ b/src/buster/lib/compiler/frontend/c/c_parse.c
-@@ -4225,6 +4225,38 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
+@@ -4225,6 +4225,66 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
      c_type_parse_frame_complete(machine, last, end, true);
  }
  
@@ -215,9 +215,9 @@ index f5c127b..fd528c5 100644
 +#include <stdio.h>
 +typedef struct ProbeKeyTable ProbeKeyTable;
 +struct ProbeKeyTable { u64* keys; u32* counts; u64 capacity; u64 unique; u64 calls; u64 repeat_calls; u64 tokens; u64 repeat_tokens; };
-+static ProbeKeyTable probe_tables[10];
-+static char const* probe_table_names[10] = {"type_query_all", "type_query_top_nonmemo", "type_query_nested", "infer_array_count_core",
-+                                           "initializer_expression_constraint", "type_query_memo_eligible", "type_query_memo_hit", "validate_initializer_shape", "type_query_relaxed_no_checked_bit", "infer_array_count_no_diagnostic_bit"};
++static ProbeKeyTable probe_tables[12];
++static char const* probe_table_names[12] = {"type_query_all", "type_query_top_nonmemo", "type_query_nested", "infer_array_count_core",
++                                           "initializer_expression_constraint", "type_query_memo_eligible", "type_query_memo_hit", "validate_initializer_shape", "type_query_relaxed_no_checked_bit", "infer_array_count_no_diagnostic_bit", "infer_array_count_range_only", "infer_array_count_range_element"};
 +static void probe_key(u32 table_index, u64 a, u64 b, u64 c, u64 tokens)
 +{
 +    ProbeKeyTable* t = &probe_tables[table_index];
@@ -230,10 +230,38 @@ index f5c127b..fd528c5 100644
 +    else { t->repeat_calls += 1; t->repeat_tokens += tokens; }
 +    t->counts[slot] += 1;
 +}
++// Direction census on the key with the CHECKED bit removed. Bit 0: a checked
++// answer was computed before; bit 1: an unchecked one was. Split by where the
++// root query ran: 0 = no per-body memo (file scope), 1 = inside a memo window.
++typedef struct ProbeDirection ProbeDirection;
++struct ProbeDirection { u64* keys; u8* seen; u64 capacity; u64 calls[2]; u64 first[2]; u64 same_mode_repeat[2]; u64 checked_then_unchecked[2]; u64 unchecked_then_checked[2]; };
++static ProbeDirection probe_direction_table;
++static void probe_direction(u32 window, u64 a, u64 b, bool checked)
++{
++    ProbeDirection* t = &probe_direction_table;
++    if (!t->keys) { t->capacity = (u64)1 << 23; t->keys = calloc(t->capacity, 8); t->seen = calloc(t->capacity, 1); }
++    u64 key = (a * 0x9E3779B97F4A7C15ull) ^ (b * 0xC2B2AE3D27D4EB4Full) ^ ((u64)window * 0x165667B19E3779F9ull) ^ 1;
++    u64 slot = (key >> 17) & (t->capacity - 1);
++    while (t->keys[slot] && t->keys[slot] != key) { slot = (slot + 1) & (t->capacity - 1); }
++    u8 bit = checked ? 1 : 2;
++    t->calls[window] += 1;
++    if (!t->keys[slot]) { t->keys[slot] = key; t->first[window] += 1; }
++    else if (t->seen[slot] & bit) { t->same_mode_repeat[window] += 1; }
++    else if (checked) { t->unchecked_then_checked[window] += 1; }
++    else { t->checked_then_unchecked[window] += 1; }
++    t->seen[slot] |= bit;
++}
 +void buster_probe_frontend_dump(FILE* file);
 +void buster_probe_frontend_dump(FILE* file)
 +{
-+    for (u32 i = 0; i < 10; i += 1)
++    for (u32 w = 0; w < 2; w += 1)
++    {
++        ProbeDirection* t = &probe_direction_table;
++        fprintf(file, "FRONTEND\tdirection_%s\tcalls=%lu\tfirst=%lu\tsame_mode_repeat=%lu\tchecked_then_unchecked=%lu\tunchecked_then_checked=%lu\n",
++                w ? "memo_window" : "no_memo", (unsigned long)t->calls[w], (unsigned long)t->first[w], (unsigned long)t->same_mode_repeat[w],
++                (unsigned long)t->checked_then_unchecked[w], (unsigned long)t->unchecked_then_checked[w]);
++    }
++    for (u32 i = 0; i < 12; i += 1)
 +    {
 +        ProbeKeyTable* t = &probe_tables[i];
 +        u32 max = 0;
@@ -245,7 +273,7 @@ index f5c127b..fd528c5 100644
  BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine, Arena* arena, CPreprocessResult preprocess, CParseResult* result,
                                                         CScopeId scope, u32 start, u32 end, CTypeId* type_out)
  {
-@@ -4237,10 +4269,16 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
+@@ -4237,10 +4297,17 @@ BUSTER_C_INTERNAL bool c_parse_expression_type_query(CTypeParseMachine* machine,
          (machine->runtime_expression_constraints ? C_PARSE_EXPRESSION_QUERY_RUNTIME : 0u) |
          (machine->semantic_constant_queries ? C_PARSE_EXPRESSION_QUERY_CONSTANT : 0u);
      bool valid;
@@ -254,6 +282,7 @@ index f5c127b..fd528c5 100644
 +    if (machine->frame_count) probe_key(2, ((u64)start << 32) | end, ((u64)scope.value << 32) | flags, 0, end - start);
 +    else if (!query) probe_key(1, ((u64)start << 32) | end, ((u64)scope.value << 32) | flags, 0, end - start);
 +    else probe_key(5, ((u64)start << 32) | end, ((u64)scope.value << 32) | flags, 0, end - start);
++    if (!machine->frame_count) probe_direction(query != 0, ((u64)start << 32) | end, ((u64)scope.value << 32) | (flags & ~(u32)C_PARSE_EXPRESSION_QUERY_CHECKED), (flags & C_PARSE_EXPRESSION_QUERY_CHECKED) != 0);
      if (query && query->end == end && query->scope.value == scope.value &&
          (query->flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) == (flags & ~C_PARSE_EXPRESSION_QUERY_CHECKED) &&
          (query->flags & flags) == flags && query->type.value < result->type_count)
@@ -262,16 +291,18 @@ index f5c127b..fd528c5 100644
          *type_out = query->type;
          valid = true;
      }
-@@ -6141,6 +6179,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+@@ -6141,6 +6208,10 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                                                                      CTypeId element_type, u32 start, u32 end, u64* count_out,
                                                                      CTypeId aggregate_type, CParseInitializerDiagnostic* diagnostic)
  {
 +    probe_key(3, ((u64)start << 32) | end, ((u64)element_type.value << 32) | aggregate_type.value, diagnostic != 0, end - start);
 +    probe_key(9, ((u64)start << 32) | end, ((u64)element_type.value << 32) | aggregate_type.value, 0, end - start);
++    probe_key(10, ((u64)start << 32) | end, 0, 0, end - start);
++    probe_key(11, ((u64)start << 32) | end, element_type.value, 0, end - start);
      if (start >= end)
      {
          return false;
-@@ -19648,6 +19688,7 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* ma
+@@ -19648,6 +19719,7 @@ BUSTER_C_INTERNAL String8 c_parse_validate_alignment_range(CTypeParseMachine* ma
  BUSTER_C_INTERNAL bool c_parse_initializer_expression_constraint(CTypeParseMachine* machine, CParseResult* result,
      CPreprocessResult preprocess, CScopeId scope, CTypeId destination, u32 start, u32 end, CParseInitializerDiagnostic* diagnostic)
  {
@@ -279,7 +310,7 @@ index f5c127b..fd528c5 100644
      while (start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE) &&
             c_parse_matching_delimiter_indexed(result, preprocess, start) + 1 == end)
      {
-@@ -19674,6 +19715,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
+@@ -19674,6 +19746,7 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
                                                                                   CPreprocessResult preprocess, CScopeId scope,
                                                                                   CTypeId type, u32 start, u32 end)
  {
