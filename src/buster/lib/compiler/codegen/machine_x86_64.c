@@ -4680,8 +4680,8 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
     IrIdUnderlying index = value_id.value;
 
     bool value_valid = (index < function->value_count) & (instruction->result.value != IR_ID_UNDERLYING_INVALID);
-    IrType* loaded_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
-    if (instruction->opcode == IR_OPCODE_LOAD && index < function->value_count && loaded_type && loaded_type->kind == IR_TYPE_VOID)
+    IrType* void_load_type = ir_type_from_id(&selector->program->types, instruction->canonical_type);
+    if (instruction->opcode == IR_OPCODE_LOAD && index < function->value_count && void_load_type && void_load_type->kind == IR_TYPE_VOID)
     {
         // An expression such as *void_pointer evaluates its address but has no
         // object bytes to read. Its address-producing rows have already been
