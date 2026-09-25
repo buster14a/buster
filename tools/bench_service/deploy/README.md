@@ -21,7 +21,8 @@ lease inode live under `/var/lib/buster-bench`; the frozen recipe/source store
 lives at `/opt/buster-bench/installed`. The new-installation lease path is
 `/var/lib/buster-bench/lease/host.lock`, with a private `lease` parent. The state
 parent is group-traversable and the workspace root is SGID to the candidate
-group; the queue, lease parent and durable results remain service-private.
+group; the queue and lease parents allow traversal by the service group only,
+while their files and durable result leaves remain service-private.
 Never move or replace an existing lease as part of applying this reference.
 State is provisioned once under the dedicated account; installed executables
 must be operator-owned and immutable to service/candidate/runner users. Paths
@@ -32,11 +33,26 @@ build and throughput services use the candidate account as both their explicit
 UID and primary GID and never receive the service account's queue or lease
 group.
 
+The broker instance keeps UID 0 with empty capability sets, takes the service
+group as its primary group and the candidate group as a supplementary group.
+The fixed queue and lease parents are `0710` service:service; the stable lease
+is `0640`, and broker-readable worker records are `0440`. The results parent
+is `0710` service:service, but each result leaf remains `0700`. No candidate or
+runner identity belongs to the service group. The broker traverses the
+candidate-group workspace ancestry and checks exact owner, group and mode
+before reading the fixed manifests; it cannot list the private result leaf.
+
 The fixed recipe handoff additionally expects the reviewed build driver at
 `/usr/local/libexec/buster-bench-build` and the native throughput harness at
 `/usr/local/libexec/buster-bench-throughput`. The service supplies only the
 six recipe identities documented in the service README; those two executable
 paths and every build/throughput option remain build-policy constants.
+The installed build driver must have a nonexecutable ELF stack (a `GNU_STACK`
+program header with `RW`, without `E`). The reference transient sandbox keeps
+`MemoryDenyWriteExecute=yes`; a TCC bootstrap executable without that header
+cannot spawn recipe stages there. Build and hash a reviewed Clang driver from
+the same `build.c` source for this installed path. The ordinary `build.sh`
+bootstrap remains TCC based.
 
 The example CPU (`2`) and budgets are review fixtures, not portable defaults.
 CPU 2 is also compiled into `build.c::BENCH_SERVICE_RECIPE_CPU`; changing only
@@ -55,6 +71,14 @@ workspace is the only writable tree, and `ProtectSystem=strict`,
 and the fixed system-service syscall filter are enabled. The build driver
 locks baseline/candidate build trees before throughput and retains result
 bundle plus failure/cancellation outcome evidence for retrieval.
+The worker compares the manager's expanded `SystemCallFilter` with the
+reviewed long-lived service's effective filter and accepts the manager's
+numeric `SystemCallErrorNumber=1` spelling for `EPERM`. An active unit with
+`Result=success` is still running until its active state and cgroup prove exit.
+After exit, systemd may clear `ControlGroup` or collect the unit entirely.
+The worker then requires the recorded invocation where available and proof
+that the original cgroup leaf is absent. For a collected unit, it uses the
+bounded `systemd-run --wait` process status for the outcome before finalizing.
 
 Recipe stages use deterministic sibling service names and bind their lifetime
 to the outer worker with `PartOf=`, `BindsTo=` and `After=` and are collected

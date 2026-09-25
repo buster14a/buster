@@ -40,6 +40,7 @@
 #define BQ_BROKER_LEASE "/var/lib/buster-bench/lease/host.lock"
 #define BQ_BROKER_LEASE_RECEIPT "/etc/buster-bench/systemd-broker-lease.identity"
 #define BQ_BROKER_WORKSPACES "/var/lib/buster-bench/workspaces"
+#define BQ_BROKER_CGROUP_SLICE "/buster.slice/buster-bench.slice"
 #define BQ_BROKER_INSTALLED "/opt/buster-bench/installed"
 #define BQ_BROKER_SERVICE "/usr/local/libexec/buster-bench-service"
 #define BQ_BROKER_BUILD "/usr/local/libexec/buster-bench-build"
@@ -53,7 +54,7 @@
 enum { BQ_BROKER_START = 1, BQ_BROKER_SIGNAL = 2 };
 enum { BQ_BROKER_OUTER = 0, BQ_BROKER_BASE_GENERATE = 1, BQ_BROKER_BASE_BUILD = 2,
        BQ_BROKER_CANDIDATE_GENERATE = 3, BQ_BROKER_CANDIDATE_BUILD = 4, BQ_BROKER_THROUGHPUT_STAGE = 5 };
-enum { BQ_BROKER_TERM = 1, BQ_BROKER_KILL = 2 };
+enum { BQ_BROKER_TERM = 1, BQ_BROKER_KILL = 2, BQ_BROKER_CONT = 3 };
 
 typedef struct BqBrokerRequest
 {
@@ -150,7 +151,8 @@ static bool bq_broker_request_valid(BqBrokerRequest const* request)
              bq_broker_revision(request->candidate);
     if (ok && signal)
     {
-        ok = (request->signal_number == BQ_BROKER_TERM || request->signal_number == BQ_BROKER_KILL);
+        ok = request->signal_number == BQ_BROKER_TERM || request->signal_number == BQ_BROKER_KILL ||
+             (request->signal_number == BQ_BROKER_CONT && request->stage == BQ_BROKER_OUTER);
         for (unsigned index = 0; ok && index < sizeof(request->base); index += 1)
             ok = request->base[index] == 0 && request->candidate[index] == 0;
     }
@@ -379,7 +381,8 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerCommand* c
         bq_broker_add(command, BQ_BROKER_CTL);
         bq_broker_add(command, "kill");
         bq_broker_add(command, "--kill-whom=all");
-        bq_broker_add(command, request->signal_number == BQ_BROKER_TERM ? "--signal=TERM" : "--signal=KILL");
+        bq_broker_add(command, request->signal_number == BQ_BROKER_TERM ? "--signal=TERM" :
+                       request->signal_number == BQ_BROKER_KILL ? "--signal=KILL" : "--signal=CONT");
         bq_broker_add_format(command, "%s", paths.unit);
     }
     ok = ok && command->valid;
@@ -389,7 +392,7 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerCommand* c
 
 static int bq_broker_open_directory(char const* path)
 {
-    int current = path && path[0] == '/' ? open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    int current = path && path[0] == '/' ? open("/", O_PATH | O_DIRECTORY | O_CLOEXEC) : -1;
     size_t offset = 1;
     while (current >= 0 && path[offset])
     {
@@ -405,7 +408,7 @@ static int bq_broker_open_directory(char const* path)
         {
             memcpy(name, path + offset, length);
             name[length] = 0;
-            next = openat(current, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+            next = openat(current, name, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         }
         close(current);
         current = next;
@@ -425,14 +428,26 @@ static bool bq_broker_directory(char const* path, uid_t owner, bool writable)
     return ok;
 }
 
-static bool bq_broker_regular(char const* parent, char const* name, uid_t owner,
-                              bool writable, unsigned char* output, size_t capacity, size_t* size)
+static bool bq_broker_private_directory(char const* path, uid_t owner, gid_t group, mode_t mode)
+{
+    int descriptor = bq_broker_open_directory(path);
+    struct stat info = {0};
+    bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISDIR(info.st_mode) &&
+              info.st_uid == owner && info.st_gid == group && (info.st_mode & 07777) == mode;
+    if (descriptor >= 0) close(descriptor);
+    return ok;
+}
+
+static bool bq_broker_regular(char const* parent, char const* name, uid_t owner, gid_t group,
+                              mode_t mode, bool writable, unsigned char* output, size_t capacity, size_t* size)
 {
     int directory = bq_broker_open_directory(parent);
     int descriptor = directory >= 0 ? openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
     struct stat info = {0};
     bool ok = descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) &&
-              info.st_uid == owner && info.st_nlink == 1 && (info.st_mode & 0022) == 0 &&
+              info.st_uid == owner && (group == (gid_t)-1 || info.st_gid == group) &&
+              (mode == 0 || (info.st_mode & 07777) == mode) &&
+              info.st_nlink == 1 && (info.st_mode & 0022) == 0 &&
               info.st_size >= 0 && (uint64_t)info.st_size <= capacity;
     if (ok && !writable) ok = (info.st_mode & 0200) == 0;
     size_t used = 0;
@@ -468,15 +483,16 @@ static bool bq_broker_boot_matches(unsigned char const* record, size_t length, s
 }
 
 static bool bq_broker_worker_record(BqBrokerRequest const* request, BqBrokerPaths const* paths,
-                                    uid_t service_uid, bool instance)
+                                    uid_t service_uid, gid_t service_gid, bool instance)
 {
     char name[64];
     unsigned char record[544] = {0};
     size_t size = 0;
     bool ok = bq_broker_format(name, sizeof(name), instance ? "worker-instance-%" PRIu64 : "worker-%" PRIu64,
                                request->job) &&
-              bq_broker_directory(BQ_BROKER_QUEUE, service_uid, true) &&
-              bq_broker_regular(BQ_BROKER_QUEUE, name, service_uid, true, record, sizeof(record), &size);
+              bq_broker_private_directory(BQ_BROKER_QUEUE, service_uid, service_gid, 0710) &&
+              bq_broker_regular(BQ_BROKER_QUEUE, name, service_uid, service_gid, 0440,
+                                true, record, sizeof(record), &size);
     if (ok)
     {
         ok = size == (instance ? 544u : 232u) &&
@@ -499,12 +515,12 @@ static bool bq_broker_worker_record(BqBrokerRequest const* request, BqBrokerPath
     return ok;
 }
 
-static bool bq_broker_lease_held(uid_t service_uid)
+static bool bq_broker_lease_held(uid_t service_uid, gid_t service_gid)
 {
     unsigned char receipt[128] = {0};
     size_t receipt_size = 0;
     bool receipt_ok = bq_broker_directory("/etc/buster-bench", 0, false) &&
-                      bq_broker_regular("/etc/buster-bench", "systemd-broker-lease.identity", 0, false,
+                      bq_broker_regular("/etc/buster-bench", "systemd-broker-lease.identity", 0, (gid_t)-1, 0, false,
                                         receipt, sizeof(receipt) - 1, &receipt_size);
     uint64_t device = 0, inode = 0;
     if (receipt_ok)
@@ -516,11 +532,13 @@ static bool bq_broker_lease_held(uid_t service_uid)
                      bq_broker_format(expected, sizeof(expected), "device=%" PRIu64 "\ninode=%" PRIu64 "\n",
                                       device, inode) && !strcmp((char const*)receipt, expected);
     }
-    int directory = bq_broker_open_directory("/var/lib/buster-bench/lease");
+    bool parent_ok = bq_broker_private_directory("/var/lib/buster-bench/lease", service_uid, service_gid, 0710);
+    int directory = parent_ok ? bq_broker_open_directory("/var/lib/buster-bench/lease") : -1;
     int descriptor = directory >= 0 ? openat(directory, "host.lock", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat info = {0};
     bool ok = receipt_ok && descriptor >= 0 && fstat(descriptor, &info) == 0 && S_ISREG(info.st_mode) &&
-              info.st_uid == service_uid && info.st_nlink == 1 && (info.st_mode & 0777) == 0600 &&
+              info.st_uid == service_uid && info.st_gid == service_gid &&
+              info.st_nlink == 1 && (info.st_mode & 07777) == 0640 &&
               (uint64_t)info.st_dev == device && (uint64_t)info.st_ino == inode;
     if (ok)
     {
@@ -543,10 +561,10 @@ static bool bq_broker_manifest(BqBrokerRequest const* request, BqBrokerPaths con
     size_t source_size = 0, copy_size = 0;
     bool ok = bq_broker_format(installed, sizeof(installed), "%s/sources/%s", BQ_BROKER_INSTALLED, revision) &&
               bq_broker_directory(installed, 0, false) &&
-              bq_broker_regular(installed, "source.manifest", 0, false, source_bytes,
+              bq_broker_regular(installed, "source.manifest", 0, (gid_t)-1, 0, false, source_bytes,
                                 sizeof(source_bytes), &source_size) &&
               bq_broker_directory(workspace, service_uid, false) &&
-              bq_broker_regular(workspace, ".source-manifest", service_uid, false, copy_bytes,
+              bq_broker_regular(workspace, ".source-manifest", service_uid, (gid_t)-1, 0, false, copy_bytes,
                                 sizeof(copy_bytes), &copy_size);
     char header[128];
     if (ok)
@@ -578,16 +596,19 @@ static bool bq_broker_installed_binary(char const* path)
     return ok;
 }
 
-static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid)
+static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid,
+                            gid_t service_gid, gid_t candidate_gid)
 {
     BqBrokerPaths paths;
     bool ok = bq_broker_paths(request, &paths) &&
-              bq_broker_directory(BQ_BROKER_WORKSPACES, service_uid, true) &&
-              bq_broker_directory(paths.result, service_uid, true) &&
-              bq_broker_worker_record(request, &paths, service_uid, false) &&
-              bq_broker_lease_held(service_uid);
+              bq_broker_private_directory("/var/lib/buster-bench", service_uid, candidate_gid, 0710) &&
+              bq_broker_private_directory(BQ_BROKER_WORKSPACES, service_uid, candidate_gid, 02710) &&
+              bq_broker_private_directory(BQ_BROKER_WORKSPACES "/results", service_uid, service_gid, 0710) &&
+              bq_broker_private_directory(paths.result, service_uid, service_gid, 0700) &&
+              bq_broker_worker_record(request, &paths, service_uid, service_gid, false) &&
+              bq_broker_lease_held(service_uid, service_gid);
     if (ok && (request->stage != BQ_BROKER_OUTER || request->operation == BQ_BROKER_SIGNAL))
-        ok = bq_broker_worker_record(request, &paths, service_uid, true);
+        ok = bq_broker_worker_record(request, &paths, service_uid, service_gid, true);
     if (ok && request->operation == BQ_BROKER_START)
     {
         ok = bq_broker_manifest(request, &paths, service_uid, false) &&
@@ -781,7 +802,7 @@ static bool bq_broker_signal_identity(BqBrokerRequest const* request)
     char cgroup[256];
     char output[8192];
     bool ok = bq_broker_paths(request, &paths) &&
-              bq_broker_format(cgroup, sizeof(cgroup), "/buster-bench.slice/%s", paths.unit) &&
+              bq_broker_format(cgroup, sizeof(cgroup), BQ_BROKER_CGROUP_SLICE "/%s", paths.unit) &&
               bq_broker_show(paths.unit, output) &&
               bq_broker_field_equals(output, "Id", paths.unit) &&
               bq_broker_field_equals(output, "LoadState", "loaded") &&
@@ -803,8 +824,8 @@ static bool bq_broker_signal_identity(BqBrokerRequest const* request)
         size_t size = 0;
         struct passwd* service = getpwnam("buster-bench");
         ok = service && bq_broker_format(name, sizeof(name), "worker-instance-%" PRIu64, request->job) &&
-             bq_broker_regular(BQ_BROKER_QUEUE, name, service->pw_uid,
-                               true, record, sizeof(record), &size) && size == sizeof(record) &&
+             bq_broker_regular(BQ_BROKER_QUEUE, name, service->pw_uid, service->pw_gid,
+                               0440, true, record, sizeof(record), &size) && size == sizeof(record) &&
              !memcmp(record, "BQINSTANCE000002", 16) &&
              bq_broker_u64(record + 16) == request->job &&
              bq_broker_u64(record + 24) == request->attempt &&
@@ -947,17 +968,35 @@ static int bq_broker_execute(BqBrokerCommand const* command, int connection, boo
     return result == 126 ? 1 : 0;
 }
 
+static bool bq_broker_groups_valid(gid_t service_gid, gid_t candidate_gid)
+{
+    gid_t groups[8];
+    int count = getgroups((int)(sizeof(groups) / sizeof(groups[0])), groups);
+    bool candidate = false;
+    bool ok = count >= 0;
+    for (int index = 0; ok && index < count; index += 1)
+    {
+        candidate |= groups[index] == candidate_gid;
+        ok = groups[index] == 0 || groups[index] == service_gid || groups[index] == candidate_gid;
+    }
+    return ok && candidate;
+}
+
 static int bq_broker_server(void)
 {
     struct ucred peer = {0};
     socklen_t peer_size = sizeof(peer);
     struct passwd* account = getpwnam("buster-bench");
     uid_t service_uid = account ? account->pw_uid : (uid_t)-1;
+    gid_t service_gid = account ? account->pw_gid : (gid_t)-1;
     account = getpwnam("buster-bench-candidate");
     uid_t candidate_uid = account ? account->pw_uid : (uid_t)-1;
+    gid_t candidate_gid = account ? account->pw_gid : (gid_t)-1;
     account = getpwnam("buster-github-runner");
     uid_t runner_uid = account ? account->pw_uid : (uid_t)-1;
     bool ok = geteuid() == 0 && service_uid != (uid_t)-1 && service_uid != 0 &&
+              service_gid != (gid_t)-1 && candidate_gid != (gid_t)-1 && service_gid != candidate_gid &&
+              getegid() == service_gid && bq_broker_groups_valid(service_gid, candidate_gid) &&
               candidate_uid != (uid_t)-1 && candidate_uid != service_uid &&
               runner_uid != (uid_t)-1 && runner_uid != service_uid && runner_uid != candidate_uid &&
               getsockopt(STDIN_FILENO, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) == 0 &&
@@ -973,7 +1012,7 @@ static int bq_broker_server(void)
     ssize_t received = ok ? recvmsg(STDIN_FILENO, &message, 0) : -1;
     ok = ok && received == sizeof(request) && !(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) &&
          bq_broker_request_valid(&request);
-    if (ok) ok = bq_broker_state(&request, service_uid);
+    if (ok) ok = bq_broker_state(&request, service_uid, service_gid, candidate_gid);
     if (ok && request.operation == BQ_BROKER_SIGNAL) ok = bq_broker_signal_identity(&request);
     BqBrokerCommand command;
     if (ok) ok = bq_broker_command(&request, &command);
@@ -1079,8 +1118,9 @@ static bool bq_broker_cli(int argc, char** argv, BqBrokerRequest* request)
     else if (argc == 4 && !strcmp(argv[1], "signal"))
     {
         ok = bq_broker_unit_from_text(argv[2], request) &&
-             (!strcmp(argv[3], "TERM") || !strcmp(argv[3], "KILL"));
-        if (ok) request->signal_number = !strcmp(argv[3], "TERM") ? BQ_BROKER_TERM : BQ_BROKER_KILL;
+             (!strcmp(argv[3], "TERM") || !strcmp(argv[3], "KILL") || !strcmp(argv[3], "CONT"));
+        if (ok) request->signal_number = !strcmp(argv[3], "TERM") ? BQ_BROKER_TERM :
+                                         !strcmp(argv[3], "KILL") ? BQ_BROKER_KILL : BQ_BROKER_CONT;
     }
     ok = ok && bq_broker_request_valid(request);
     return ok;
@@ -1183,7 +1223,14 @@ static int bq_broker_self_test(void)
     BQ_BROKER_CHECK(bq_broker_command(&request, &command) &&
                     bq_broker_has_argument(&command, "--signal=TERM") &&
                     !bq_broker_has_argument(&command, "--signal=KILL"));
-    request.signal_number = 3;
+    request.signal_number = BQ_BROKER_CONT;
+    BQ_BROKER_CHECK(bq_broker_command(&request, &command) &&
+                    bq_broker_has_argument(&command, "--signal=CONT") &&
+                    !bq_broker_has_argument(&command, "--signal=KILL"));
+    request.stage = BQ_BROKER_BASE_BUILD;
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    request.stage = BQ_BROKER_OUTER;
+    request.signal_number = 4;
     BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
     BqBrokerRequest parsed;
     BQ_BROKER_CHECK(bq_broker_unit_from_text("buster-bench-1-2-throughput.service", &parsed) &&
@@ -1249,9 +1296,10 @@ static int bq_broker_self_test(void)
         unsigned char buffer[8];
         size_t size = 0;
         BQ_BROKER_CHECK(created && link(manifest, hardlink) == 0 &&
-                        !bq_broker_regular(source, "manifest", geteuid(), true, buffer, sizeof(buffer), &size));
+                        !bq_broker_regular(source, "manifest", geteuid(), (gid_t)-1, 0,
+                                           true, buffer, sizeof(buffer), &size));
         if (paths) unlink(hardlink);
-        BQ_BROKER_CHECK(created && bq_broker_regular(source, "manifest", geteuid(), true,
+        BQ_BROKER_CHECK(created && bq_broker_regular(source, "manifest", geteuid(), (gid_t)-1, 0, true,
                                                      buffer, sizeof(buffer), &size) && size == 2);
         if (paths)
         {

@@ -81,22 +81,24 @@ units as well as the long-lived unit.
 | Object | Required new-installation contract |
 | --- | --- |
 | `/usr/local/libexec/buster-bench-service` | Reviewed service binary; operator-owned, executable, not writable by any service/candidate/runner identity |
-| `/usr/local/libexec/buster-bench-build` | Reviewed native `build.c` driver; same executable ownership rule |
+| `/usr/local/libexec/buster-bench-build` | Reviewed Clang-built native `build.c` driver with a nonexecutable `GNU_STACK` program header (`RW`, no `E`); same executable ownership rule |
 | `/usr/local/libexec/buster-bench-throughput` | Reviewed prebuilt native harness; same executable ownership rule |
 | `/opt/buster-bench/installed` | Root/service-owned, no write bits, service-readable, no symlink components |
 | `installed/recipes/validate-buster-v1.recipe` | Exact repository recipe bytes, read-only regular single-link file |
 | `installed/sources/REVISION/source.manifest` | Exact `BQ-SOURCE-V1` manifest and reviewed source closure; read-only |
 | `/var/lib/buster-bench` | `buster-bench:buster-bench-candidate`, `0710`; candidate traversal only |
-| `/var/lib/buster-bench/queue` | `buster-bench:buster-bench`, `0700`; local durable filesystem |
-| `/var/lib/buster-bench/lease` | `buster-bench:buster-bench`, `0700`; private final lease parent |
-| `/var/lib/buster-bench/lease/host.lock` | Pre-provision once, `0600`, service-owned, regular, one link; record device/inode; never truncate, unlink, replace or age it |
+| `/var/lib/buster-bench/queue` | `buster-bench:buster-bench`, `0710`; service-group traversal only, local durable filesystem |
+| `queue/worker-JOB`, `queue/worker-instance-JOB` | `buster-bench:buster-bench`, `0440`; broker-readable single-link records |
+| `/var/lib/buster-bench/lease` | `buster-bench:buster-bench`, `0710`; service-group traversal only |
+| `/var/lib/buster-bench/lease/host.lock` | Pre-provision once, `0640`, `buster-bench:buster-bench`, regular, one link; record device/inode; never truncate, unlink, replace or age it |
 | `/var/lib/buster-bench/workspaces` | `buster-bench:buster-bench-candidate`, `02710`; SGID and candidate traversal, no group write |
 | `workspaces/job-JOB-attempt-TOKEN` | Materializer-owned; disjoint base/candidate source/build trees, candidate staging only |
-| `workspaces/results/job-JOB-attempt-TOKEN` | Service-private durable evidence; outside removable attempt tree |
+| `workspaces/results` | `buster-bench:buster-bench`, `0710`; service-group traversal only |
+| `workspaces/results/job-JOB-attempt-TOKEN` | `buster-bench:buster-bench`, `0700`; service-private durable evidence outside removable attempt tree |
 | `/run/buster-bench/control.sock` | Service-created Unix seqpacket endpoint under systemd-owned runtime directory, `0700`, service UID/GID |
 
-The private lease subdirectory is deliberate: candidate traversal of the state
-parent must not weaken the worker's private-final-lease-parent check. A `0700`
+The service-group-only lease subdirectory is deliberate: candidate traversal
+of the state parent must not expose the lease. A `0700`
 workspace without SGID fails `bq_workspace_root_directory`; a `0700` state
 parent blocks candidate traversal even if the workspace itself is correct.
 Do not grant candidate write permission to either parent to fix an access error.
@@ -106,6 +108,15 @@ directories, `02750` source directories and `02700` build directories. The
 trusted driver must likewise inherit `02770` for candidate staging and
 throughput output. Exact owner, candidate-group identity and mode checks must
 pass without requesting SGID in `mkdir` or `chmod`; a mismatch stops admission.
+
+The broker template uses root UID, service primary GID, candidate
+supplementary GID and empty capability sets. Read back those exact groups and
+the queue, result and lease modes before starting the socket. A TCC bootstrap
+driver with no `GNU_STACK` header cannot run inside the transient unit's
+`MemoryDenyWriteExecute=yes` sandbox: glibc's stage `posix_spawn` requests a
+writable and executable stack and fails with `EACCES`. The installed recipe
+driver must be independently built and reviewed from the selected source with
+Clang; verify its `GNU_STACK` header is `RW` without `E` before installation.
 
 The long-lived reference uses `Type=exec` and `serve`, with `Restart=no`.
 `RuntimeDirectory` manages only the socket directory. It does not reconcile

@@ -22,6 +22,24 @@ require root-owned installed executables. Signals first inspect the exact unit,
 slice, identity, executable, resource settings and, for the outer unit, the
 recorded invocation and cgroup. A mismatch denies the request. The coordinator
 continues to own the complete cleanup, quarantine and recursive cgroup proof.
+For `Slice=buster-bench.slice`, the effective control-group path is nested
+under `/buster.slice/buster-bench.slice`; both broker and worker verify that
+actual hierarchy.
+The only resume signal is `CONT` for the exact outer instance; stage units
+accept `TERM` or `KILL` only.
+
+The template retains root UID with empty capability sets. Its primary group
+is `buster-bench` and its supplementary group is `buster-bench-candidate`.
+Systemd may also retain root's group 0 in the effective supplementary set;
+the server permits only group 0 and those two fixed groups and requires the
+candidate group to be present. Read back the effective set during review.
+The broker can traverse the service-group-only queue, lease and results
+parents and the candidate-group workspace ancestry. Worker records are
+`0440` service:service, the stable lease is `0640` service:service, and each
+durable result leaf remains `0700` service:service. The broker opens private
+directory components with `O_PATH`, checks the exact owner/group/mode, and
+reads only the named records and manifests. Candidate and runner accounts
+have neither service-group membership nor access to the socket.
 
 ## Build and review
 
@@ -31,16 +49,46 @@ launches and exercises malformed request rejection without manager access.
 Review the broker source, this packet, the socket/template service, tmpfiles,
 and the changed service/build-driver call sites as one transition. Build the
 installed service, build driver, throughput tool and broker from one selected
-protected-main commit. Record SHA-256 of all binaries, dependencies, units and
+protected-main commit. Compile the installed `build.c` recipe driver with
+Clang and check that its ELF `GNU_STACK` program header is `RW` without `E`.
+The TCC bootstrap driver has no such header and fails at stage `posix_spawn`
+under `MemoryDenyWriteExecute=yes` with `EACCES`; it is not an installable
+recipe driver. Record SHA-256 of all binaries, dependencies, units and
 the complete immutable source inventory. The broker must be root-owned,
 executable and unwritable by service, candidate and runner accounts.
+
+One reviewed local build of the installable driver is:
+
+```sh
+clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+  -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o build/buster-bench-build
+readelf -W -l build/buster-bench-build
+```
+
+Read back the `GNU_STACK` line as `RW` with no `E`, then hash the binary that
+is actually installed. This command produces an installation candidate; it
+does not replace the TCC bootstrap used by `build.sh`.
+
+`./build.sh bench_service_broker self-test` also builds
+`build/bench-service-tools/systemd-broker-live-test` from
+`tools/bench_service/systemd_broker_live_test.c` with the broker's warning and
+integer flags. In a disposable, provisioned real-systemd
+container, start the reviewed service, submit one exact fixed-recipe job, and
+run that test as root while its outer unit is active with
+`BUSTER_BROKER_LIVE_TEST=1` and arguments `JOB ATTEMPT BASE_REVISION
+CANDIDATE_REVISION`. It starts the constrained broker socket and makes an
+exact outer `CONT` request. It checks queue/result/lease modes and records,
+then rejects candidate and runner peers, wrong instance, wrong source and
+unlisted signal requests. Its container and environment gates prevent an
+ordinary host test invocation. The regular broker `self-test` remains the
+argument-construction test and cannot replace this live regression.
 
 ## Host installation boundary
 
 Keep dispatch false, the long-lived service stopped and all prior outer/stage
 units and cgroups absent while installing. Preserve the existing lease file;
 never recreate, truncate, rename or replace it. After a fresh no-follow `stat`
-of the single-link service-owned `0600` lease, install a root-owned `0444`
+of the single-link service-owned `0640` lease, install a root-owned `0444`
 regular, single-link `/etc/buster-bench/systemd-broker-lease.identity` in a
 root-owned non-writable directory with exactly these two lines, using the
 host's actual decimal values:
@@ -59,8 +107,9 @@ lease replacement; investigate and quarantine instead.
 Install `buster-bench-systemd-broker.socket` and
 `buster-bench-systemd-broker@.service` with the exact reviewed bytes. The
 runtime directory is `root:buster-bench` `0710`; the socket is
-`buster-bench:buster-bench` `0600`. The template process runs as root with empty
-capability sets, no new privileges, a read-only filesystem view and only local
+`buster-bench:buster-bench` `0600`. The template process runs as root with
+service primary group, candidate supplementary group, empty capability sets,
+no new privileges, a read-only filesystem view and only local
 Unix sockets. The long-lived service requires the broker socket. Apply the
 runtime tmpfiles rule only to the new `/run/buster-bench-systemd-broker`
 directory; do not reapply the state/lease rules to a live queue. Do not enable

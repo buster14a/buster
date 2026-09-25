@@ -936,7 +936,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         BQ_CHECK(stat(fixture.workspaces, &workspace_root_info) == 0 && stat(workspace, &workspace_info) == 0 &&
                  workspace_info.st_gid == workspace_root_info.st_gid);
         BQ_CHECK(stat(base_source, &base) == 0 && stat(candidate_source, &candidate) == 0 && base.st_ino != candidate.st_ino);
-        BQ_CHECK((base.st_mode & 0222) == 0 && (candidate.st_mode & 0222) == 0);
+        BQ_CHECK((base.st_mode & 07777) == 0440 && (candidate.st_mode & 07777) == 0440);
         struct stat attempt_info = {0}, base_subject = {0}, candidate_subject = {0};
         char base_subject_path[1024], candidate_subject_path[1024], base_source_dir[1024], candidate_source_dir[1024];
         snprintf(base_subject_path, sizeof(base_subject_path), "%s/base", workspace);
@@ -964,7 +964,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_materialization_and_recovery(void)
         BQ_CHECK(chmod(base_source, 0400) == 0);
         char copied_manifest[1024];
         snprintf(copied_manifest, sizeof(copied_manifest), "%s/base/source/.source-manifest", workspace);
-        BQ_CHECK(stat(copied_manifest, &base) == 0 && (base.st_mode & 0222) == 0);
+        BQ_CHECK(stat(copied_manifest, &base) == 0 && (base.st_mode & 07777) == 0440);
         char identity[1024];
         snprintf(identity, sizeof(identity), "%s/.identity", workspace);
         BQ_CHECK(stat(identity, &base) == 0 && (base.st_mode & 0222) == 0);
@@ -2622,6 +2622,8 @@ typedef struct BqWorkerFake
     bool argv_valid;
     bool start_error;
     bool skip_inherited_lease;
+    bool drain_on_join;
+    bool collect_on_join;
     bool replace_slice_on_cleanup_join;
     bool launcher_cleanup_failure;
 } BqWorkerFake;
@@ -2659,7 +2661,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
         bq_test_worker_probe_locked(fixture->lease);
     fake->inherited_lease = -1;
     snprintf(fake->observed.unit, sizeof(fake->observed.unit), "buster-bench-%s-%s.service", argv[2], argv[3]);
-    snprintf(fake->observed.cgroup, sizeof(fake->observed.cgroup), "/buster-bench.slice/%s", fake->observed.unit);
+    snprintf(fake->observed.cgroup, sizeof(fake->observed.cgroup), "/buster.slice/buster-bench.slice/%s", fake->observed.unit);
     fake->observed.unit_found = true;
     fake->observed.active = true;
     fake->observed.populated = true;
@@ -2722,7 +2724,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_replace_slice(BqWorkerFake* fake)
 {
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     char slice[768], old[768];
-    snprintf(slice, sizeof(slice), "%s/buster-bench.slice", fixture->root);
+    snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", fixture->root);
     snprintf(old, sizeof(old), "%s/retired.slice", fixture->root);
     return rename(slice, old) == 0 && bq_test_worker_limits(fixture->root, fake->observed.unit);
 }
@@ -2800,7 +2802,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_reap(BqWorkerFake* fake)
     fake->observed.populated = false;
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     char events[1024];
-    snprintf(events, sizeof(events), "%s/buster-bench.slice/%s/cgroup.events",
+    snprintf(events, sizeof(events), "%s/buster.slice/buster-bench.slice/%s/cgroup.events",
              fixture->root, fake->observed.unit);
     if (fake->observed.unit[0] && chmod(events, 0600) == 0)
     {
@@ -2879,6 +2881,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* s
     fake->observed.active = false;
     fake->observed.populated = fake->detached > 0;
     fake->observed.result = fake->completion;
+    if (fake->drain_on_join && !fake->observed.populated && fake->observed.cgroup[0])
+    {
+        BQ_CHECK(bq_test_worker_remove_cgroup(fixture->root, fake->observed.unit));
+        fake->observed.cgroup[0] = 0;
+    }
+    if (fake->collect_on_join && !fake->observed.populated) fake->observed.unit_found = false;
     if (fake->detached <= 0 && fake->inherited_lease >= 0)
     {
         close(fake->inherited_lease);
@@ -2886,7 +2894,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* s
     }
     if (fake->replace_slice_on_cleanup_join && fake->joins == 2)
         BQ_CHECK(bq_test_worker_replace_slice(fake));
-    *status = 0;
+    *status = fake->collect_on_join && fake->completion != BQ_WORKER_SUCCEEDED ? 1 << 8 : 0;
     return error;
 }
 
@@ -2925,20 +2933,23 @@ BUSTER_GLOBAL_LOCAL u64 bq_test_worker_clock(BqWorkerBackend* backend)
 
 BUSTER_GLOBAL_LOCAL bool bq_test_worker_limits(char const* root, char const* unit)
 {
-    char slice[512], leaf[768], path[1024];
-    snprintf(slice, sizeof(slice), "%s/buster-bench.slice", root);
+    char parent[512], slice[768], leaf[1024], path[1152];
+    snprintf(parent, sizeof(parent), "%s/buster.slice", root);
+    snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", root);
     snprintf(leaf, sizeof(leaf), "%s/%s", slice, unit);
-    bool ok = (mkdir(slice, 0700) == 0 || errno == EEXIST) && mkdir(leaf, 0700) == 0;
-    char const* directories[] = {slice, leaf};
+    bool ok = (mkdir(parent, 0700) == 0 || errno == EEXIST) &&
+              (mkdir(slice, 0700) == 0 || errno == EEXIST) && mkdir(leaf, 0700) == 0;
+    char const* directories[] = {parent, slice, leaf};
     char const* names[] = {"cpuset.cpus.effective", "memory.max", "memory.swap.max", "pids.max"};
-    char const* parent[] = {"0-7\n", "max\n", "max\n", "max\n"};
+    char const* ancestor_limits[] = {"0-7\n", "max\n", "max\n", "max\n"};
     char const* child[] = {"2\n", "8589934592\n", "0\n", "256\n"};
-    for (u32 directory = 0; ok && directory < 2; directory += 1)
+    for (u32 directory = 0; ok && directory < BUSTER_ARRAY_LENGTH(directories); directory += 1)
     {
         for (u32 file = 0; ok && file < BUSTER_ARRAY_LENGTH(names); file += 1)
         {
             snprintf(path, sizeof(path), "%s/%s", directories[directory], names[file]);
-            ok = access(path, F_OK) == 0 || bq_test_write_path(path, directory ? child[file] : parent[file], 0400);
+            ok = access(path, F_OK) == 0 ||
+                 bq_test_write_path(path, directory == 2 ? child[file] : ancestor_limits[file], 0400);
         }
     }
     snprintf(path, sizeof(path), "%s/cgroup.events", leaf);
@@ -2948,11 +2959,13 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_limits(char const* root, char const* uni
 BUSTER_GLOBAL_LOCAL bool bq_test_worker_remove_cgroup(char const* root, char const* unit)
 {
     int root_fd = bq_open_absolute_directory(string_from_pointer(root));
-    int slice = root_fd >= 0 ? openat(root_fd, "buster-bench.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int parent = root_fd >= 0 ? openat(root_fd, "buster.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int slice = parent >= 0 ? openat(parent, "buster-bench.slice", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     int leaf = slice >= 0 ? openat(slice, unit, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     bool ok = leaf >= 0 && bq_remove_workspace_payload(leaf) && unlinkat(slice, unit, AT_REMOVEDIR) == 0;
     if (leaf >= 0) close(leaf);
     if (slice >= 0) close(slice);
+    if (parent >= 0) close(parent);
     if (root_fd >= 0) close(root_fd);
     return ok;
 }
@@ -3075,7 +3088,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_bind(BqWorkerFixture* fixture, BqJob* jo
 {
     snprintf(fixture->fake.observed.unit, sizeof(fixture->fake.observed.unit), "%s", fixture->unit);
     snprintf(fixture->fake.observed.cgroup, sizeof(fixture->fake.observed.cgroup),
-             "/buster-bench.slice/%s", fixture->unit);
+             "/buster.slice/buster-bench.slice/%s", fixture->unit);
     fixture->fake.observed.unit_found = true;
     fixture->fake.observed.active = true;
     fixture->fake.observed.populated = true;
@@ -3163,6 +3176,54 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_success_and_tree_cleanup(void)
     }
 }
 
+BUSTER_GLOBAL_LOCAL void bq_test_worker_drained_unit(void)
+{
+    BqWorkerFixture fixture;
+    for (u32 collected = 0; collected < 3; collected += 1)
+    {
+        BqWorkerResult completion = collected == 2 ? BQ_WORKER_EXECUTION_FAILED : BQ_WORKER_SUCCEEDED;
+        if (bq_test_worker_begin(&fixture, completion, false))
+        {
+            BqRequest request = bq_test_real_request(146 + collected);
+            u64 id = 0;
+            fixture.fake.drain_on_join = true;
+            fixture.fake.collect_on_join = collected != 0;
+            BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK &&
+                     bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_OK);
+            BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+            BqOutcome expected = collected == 2 ? BQ_FAILED : BQ_SUCCEEDED;
+            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == expected &&
+                     fixture.fake.joins >= 2 && !fixture.fake.observed.cgroup[0] &&
+                     fixture.fake.observed.unit_found == (collected == 0));
+            bq_test_worker_end(&fixture);
+        }
+    }
+    if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
+    {
+        BqWorkerObserved identity = fixture.fake.observed;
+        snprintf(identity.unit, sizeof(identity.unit), "%s", fixture.unit);
+        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
+        identity.unit_found = true;
+        identity.active = true;
+        identity.populated = true;
+        BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false));
+        BqWorkerObserved drained = identity;
+        drained.active = false;
+        drained.populated = false;
+        drained.result = BQ_WORKER_SUCCEEDED;
+        drained.cgroup[0] = 0;
+        BQ_CHECK(bq_test_worker_remove_cgroup(fixture.root, fixture.unit) &&
+                 bq_worker_instance_matches(&fixture.config, &identity, &drained));
+        snprintf(drained.invocation_id, sizeof(drained.invocation_id), "%s",
+                 "ffffffffffffffffffffffffffffffff");
+        BQ_CHECK(!bq_worker_instance_matches(&fixture.config, &identity, &drained));
+        snprintf(drained.invocation_id, sizeof(drained.invocation_id), "%s", identity.invocation_id);
+        BQ_CHECK(bq_test_worker_limits(fixture.root, fixture.unit) &&
+                 !bq_worker_instance_matches(&fixture.config, &identity, &drained));
+        bq_test_worker_end(&fixture);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL void bq_test_worker_term_grace(void)
 {
     BqWorkerFixture fixture;
@@ -3190,7 +3251,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_child_survives_parent_kill(void)
         snprintf(fixture.fake.child.unit, sizeof(fixture.fake.child.unit),
                  "buster-bench-1-2-throughput.service");
         snprintf(fixture.fake.child.cgroup, sizeof(fixture.fake.child.cgroup),
-                 "/buster-bench.slice/%s", fixture.fake.child.unit);
+                 "/buster.slice/buster-bench.slice/%s", fixture.fake.child.unit);
         snprintf(fixture.fake.child.invocation_id, sizeof(fixture.fake.child.invocation_id),
                  "%s", "fedcba9876543210fedcba9876543210");
         snprintf(fixture.fake.child.part_of, sizeof(fixture.fake.child.part_of), "%s", fixture.unit);
@@ -3475,14 +3536,14 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_instance_reuse(void)
     {
         BqWorkerObserved identity = fixture.fake.observed;
         snprintf(identity.unit, sizeof(identity.unit), "%s", fixture.unit);
-        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster-bench.slice/%s", fixture.unit);
+        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
         identity.unit_found = true;
         identity.active = true;
         identity.populated = true;
         BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false));
         char leaf[1024], old[1024];
-        snprintf(leaf, sizeof(leaf), "%s/buster-bench.slice/%s", fixture.root, fixture.unit);
-        snprintf(old, sizeof(old), "%s/buster-bench.slice/replaced.scope", fixture.root);
+        snprintf(leaf, sizeof(leaf), "%s/buster.slice/buster-bench.slice/%s", fixture.root, fixture.unit);
+        snprintf(old, sizeof(old), "%s/buster.slice/buster-bench.slice/replaced.scope", fixture.root);
         BQ_CHECK(rename(leaf, old) == 0 && bq_test_worker_limits(fixture.root, fixture.unit));
         BqWorkerObserved replacement = identity;
         replacement.cgroup_device = 0;
@@ -3494,11 +3555,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_instance_reuse(void)
     {
         BqWorkerObserved identity = fixture.fake.observed;
         snprintf(identity.unit, sizeof(identity.unit), "%s", fixture.unit);
-        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster-bench.slice/%s", fixture.unit);
+        snprintf(identity.cgroup, sizeof(identity.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
         identity.unit_found = true;
         BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false));
         char slice[768], old[768];
-        snprintf(slice, sizeof(slice), "%s/buster-bench.slice", fixture.root);
+        snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", fixture.root);
         snprintf(old, sizeof(old), "%s/foreign.slice", fixture.root);
         BQ_CHECK(bq_test_worker_remove_cgroup(fixture.root, fixture.unit) &&
                  rename(slice, old) == 0 && mkdir(slice, 0700) == 0 &&
@@ -3521,21 +3582,21 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_instance_reuse(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_cgroup_paths(void)
 {
-    char const* invalid[] = {"/buster-bench.slice/../foreign.scope", "/buster-bench.slice/./x.scope",
-                             "/buster-bench.slice//x.scope", "/buster-bench.slice/x.scope/",
-                             "/buster-bench.slice/x.scope\nforeign"};
+    char const* invalid[] = {"/buster.slice/buster-bench.slice/../foreign.scope", "/buster.slice/buster-bench.slice/./x.scope",
+                             "/buster.slice/buster-bench.slice//x.scope", "/buster.slice/buster-bench.slice/x.scope/",
+                             "/buster.slice/buster-bench.slice/x.scope\nforeign"};
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
         BQ_CHECK(!bq_worker_cgroup_path_valid(invalid[index]));
     BqWorkerFixture fixture;
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
     {
         char slice[1024], real[1024];
-        snprintf(slice, sizeof(slice), "%s/buster-bench.slice", fixture.root);
+        snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", fixture.root);
         snprintf(real, sizeof(real), "%s/real.slice", fixture.root);
         BQ_CHECK(rename(slice, real) == 0 && symlink("real.slice", slice) == 0);
         BqWorkerObserved observed = fixture.fake.observed;
         snprintf(observed.unit, sizeof(observed.unit), "%s", fixture.unit);
-        snprintf(observed.cgroup, sizeof(observed.cgroup), "/buster-bench.slice/%s", fixture.unit);
+        snprintf(observed.cgroup, sizeof(observed.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
         observed.unit_found = true;
         BQ_CHECK(!bq_worker_observed(&fixture.config, observed.boot_id, observed.unit, &observed, false));
         bq_test_worker_end(&fixture);
@@ -3563,7 +3624,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_cgroup_paths(void)
         linked.cgroup_root = string_from_pointer(link);
         BqWorkerObserved observed = fixture.fake.observed;
         snprintf(observed.unit, sizeof(observed.unit), "%s", fixture.unit);
-        snprintf(observed.cgroup, sizeof(observed.cgroup), "/buster-bench.slice/%s", fixture.unit);
+        snprintf(observed.cgroup, sizeof(observed.cgroup), "/buster.slice/buster-bench.slice/%s", fixture.unit);
         observed.unit_found = true;
         BQ_CHECK(!bq_worker_observed(&linked, observed.boot_id, observed.unit, &observed, false));
         char dotdot_root[768];
@@ -3576,7 +3637,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_cgroup_paths(void)
                  bq_worker_lease_acquire(fixture.lease, &lease) != 0 &&
                  !bq_worker_observed(&fixture.config, observed.boot_id, observed.unit, &observed, false));
         char slice[768];
-        snprintf(slice, sizeof(slice), "%s/buster-bench.slice", fixture.root);
+        snprintf(slice, sizeof(slice), "%s/buster.slice/buster-bench.slice", fixture.root);
         BQ_CHECK(chmod(fixture.root, 01777) == 0 &&
                  !bq_worker_observed(&fixture.config, observed.boot_id, observed.unit, &observed, false));
         BQ_CHECK(chmod(fixture.root, 0700) == 0 && chmod(slice, 0777) == 0 &&
@@ -3603,6 +3664,16 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_deploy_policy(void)
     BQ_CHECK(read);
     for (u32 index = 0; read && index < BUSTER_ARRAY_LENGTH(required); index += 1)
         BQ_CHECK(strstr(service, required[index]) != NULL);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_systemd_results(void)
+{
+    BQ_CHECK(bq_worker_systemd_result("success", true) == BQ_WORKER_RUNNING);
+    BQ_CHECK(bq_worker_systemd_result("success", false) == BQ_WORKER_SUCCEEDED);
+    BQ_CHECK(bq_worker_systemd_result("oom-kill", true) == BQ_WORKER_OOM);
+    BQ_CHECK(bq_worker_systemd_result("timeout", false) == BQ_WORKER_TIMED_OUT);
+    BQ_CHECK(bq_worker_systemd_result("canceled", false) == BQ_WORKER_CANCELLED_RESULT);
+    BQ_CHECK(bq_worker_systemd_result("exit-code", true) == BQ_WORKER_EXECUTION_FAILED);
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_outcomes(void)
@@ -3713,7 +3784,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_ancestor_budget(void)
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
     {
         char path[768];
-        snprintf(path, sizeof(path), "%s/buster-bench.slice/memory.max", fixture.root);
+        snprintf(path, sizeof(path), "%s/buster.slice/buster-bench.slice/memory.max", fixture.root);
         BQ_CHECK(chmod(path, 0600) == 0);
         int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
         char const tighter[] = "4096\n";
@@ -4771,6 +4842,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lease_handoff_cleanup_failure(2);
     bq_test_worker_lease_handoff_cleanup_failure(3);
     bq_test_worker_success_and_tree_cleanup();
+    bq_test_worker_drained_unit();
     bq_test_worker_term_grace();
     bq_test_worker_child_survives_parent_kill();
     bq_test_worker_late_cancel();
@@ -4782,6 +4854,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_instance_reuse();
     bq_test_worker_cgroup_paths();
     bq_test_worker_deploy_policy();
+    bq_test_worker_systemd_results();
     bq_test_worker_outcomes();
     bq_test_worker_quarantine_and_recovery();
     bq_test_worker_ancestor_budget();

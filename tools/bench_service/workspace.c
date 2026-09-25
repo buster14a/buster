@@ -436,7 +436,8 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_verified_file(int source_root, int destination_
     }
     char8 digest[SHA256_HEX_CAPACITY];
     sha256_finish_hex(&hash, digest);
-    ok = ok && copied == (u64)info.st_size && expected.length == 64 && !memcmp(digest, expected.pointer, 64) && fsync(destination) == 0;
+    ok = ok && copied == (u64)info.st_size && expected.length == 64 && !memcmp(digest, expected.pointer, 64) &&
+         fchmod(destination, 0440) == 0 && fsync(destination) == 0;
     if (ok)
     {
         *total += copied;
@@ -493,7 +494,8 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     int copy = ok ? openat(destination, ".source-manifest", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0440) : -1;
     if (ok)
     {
-        ok = copy >= 0 && bq_write_all(copy, manifest_bytes, manifest_size) && fsync(copy) == 0;
+        ok = copy >= 0 && bq_write_all(copy, manifest_bytes, manifest_size) &&
+             fchmod(copy, 0440) == 0 && fsync(copy) == 0;
     }
     if (copy >= 0)
     {
@@ -842,13 +844,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8*
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8 const* bytes, u32 size, bool existing_ok)
+BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* name, u8 const* bytes,
+                                                  u32 size, bool existing_ok, mode_t mode)
 {
     int fd = openat(queue->directory_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
     BqError error = BQ_IO;
     if (fd >= 0)
     {
-        if (bq_write_all(fd, bytes, size) && fsync(fd) == 0 && fsync(queue->directory_fd) == 0)
+        if (bq_write_all(fd, bytes, size) && fchmod(fd, mode) == 0 &&
+            fsync(fd) == 0 && fsync(queue->directory_fd) == 0)
         {
             error = BQ_OK;
         }
@@ -859,11 +863,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8
         u8 actual[640];
         u32 actual_size = 0;
         error = bq_record_read(queue, name, actual, sizeof(actual), &actual_size);
+        struct stat info = {0};
+        if (error == BQ_OK &&
+            (fstatat(queue->directory_fd, name, &info, AT_SYMLINK_NOFOLLOW) != 0 ||
+             (info.st_mode & 07777) != mode)) error = BQ_CORRUPT;
         if (error == BQ_OK && (actual_size != size || memcmp(actual, bytes, size)))
         {
             error = BQ_CORRUPT;
         }
     }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8 const* bytes, u32 size, bool existing_ok)
+{
+    BqError error = bq_record_write_mode(queue, name, bytes, size, existing_ok, 0400);
     return error;
 }
 

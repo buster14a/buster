@@ -756,8 +756,14 @@ BqError bq_open(BqQueue* queue, char const* existing_private_directory)
         queue->directory_fd = open(existing_private_directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     }
     struct stat info;
-    if (queue->directory_fd >= 0 && fstat(queue->directory_fd, &info) == 0 && S_ISDIR(info.st_mode) &&
-        info.st_uid == geteuid() && (info.st_mode & 077) == 0)
+    /* The fixed systemd broker can look up worker records through this one
+     * directory. Other queues retain the fully private mode. */
+    bool broker_queue = path_valid && !strcmp(existing_private_directory, "/var/lib/buster-bench/queue");
+    bool directory_valid = queue->directory_fd >= 0 && fstat(queue->directory_fd, &info) == 0 &&
+                           S_ISDIR(info.st_mode) && info.st_uid == geteuid();
+    if (directory_valid && (broker_queue ?
+        ((info.st_mode & 07777) == 0710 && info.st_gid == getegid()) :
+        ((info.st_mode & 077) == 0)))
     {
         queue->lock_fd = openat(queue->directory_fd, "writer.lock", O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (queue->lock_fd >= 0 && bq_private_regular(queue->lock_fd))
