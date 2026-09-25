@@ -50,8 +50,6 @@ static struct Limits from_compound(long low, long high)
     };
 }
 
-static int check_designator_continuation(void);
-
 int main(void)
 {
     // The shape setrlimit.c writes: two subscript designators and two plain
@@ -131,119 +129,5 @@ int main(void)
         return 8;
     }
 
-    return check_designator_continuation();
-}
-
-// C17 6.7.9p17-20: after a chained designator, the next item continues
-// within its innermost selected aggregate before advancing outward.
-struct Tail
-{
-    int values[2];
-    int tail;
-};
-
-struct Two
-{
-    int values[2];
-};
-
-struct Pair
-{
-    int first;
-    int second;
-};
-
-struct Named
-{
-    struct Pair pair;
-    int tail;
-};
-
-struct ContinuationGrid
-{
-    int rows[2][2];
-    int tail;
-};
-
-struct Promoted
-{
-    struct
-    {
-        int values[2];
-    };
-    int tail;
-};
-
-struct UnionOuter
-{
-    union
-    {
-        struct Pair pair;
-        int raw;
-    } choice;
-    int tail;
-};
-
-static struct Tail static_tail = {.values[0] = 1, 2};
-static struct Two static_two = {.values[0] = 3, 4};
-static struct Named static_named = {.pair.first = 5, 6, 7};
-static struct ContinuationGrid static_grid = {.rows[0][0] = 8, 9, 10, 11, 12};
-static int static_root_array[2][2] = {[0][0] = 19, 20, 21, 22};
-static struct Promoted static_promoted = {.values[0] = 13, 14, 15};
-static struct UnionOuter static_union = {.choice.pair.first = 16, 17, 18};
-
-static int check_designator_continuation(void)
-{
-    int result = 0;
-    struct Tail wrong_field = {.values[0] = 1, 2};
-    if (wrong_field.values[0] != 1 || wrong_field.values[1] != 2 || wrong_field.tail != 0) result = 1;
-
-    struct Two no_outer_field = {.values[0] = 3, 4};
-    if (no_outer_field.values[0] != 3 || no_outer_field.values[1] != 4) result = 2;
-
-    struct Named named = {.pair.first = 5, 6, 7};
-    if (named.pair.first != 5 || named.pair.second != 6 || named.tail != 7) result = 3;
-
-    struct ContinuationGrid grid = {.rows[0][0] = 8, 9, 10, 11, 12};
-    if (grid.rows[0][0] != 8 || grid.rows[0][1] != 9 || grid.rows[1][0] != 10 || grid.rows[1][1] != 11 || grid.tail != 12) result = 4;
-
-    int root_array[2][2] = {[0][0] = 19, 20, 21, 22};
-    if (root_array[0][0] != 19 || root_array[0][1] != 20 || root_array[1][0] != 21 || root_array[1][1] != 22) result = 5;
-
-    struct Promoted promoted = {.values[0] = 13, 14, 15};
-    if (promoted.values[0] != 13 || promoted.values[1] != 14 || promoted.tail != 15) result = 6;
-
-    struct UnionOuter union_member = {.choice.pair.first = 16, 17, 18};
-    if (union_member.choice.pair.first != 16 || union_member.choice.pair.second != 17 || union_member.tail != 18) result = 7;
-
-    struct Tail end_of_inner = {.values[1] = 23, 24};
-    if (end_of_inner.values[0] != 0 || end_of_inner.values[1] != 23 || end_of_inner.tail != 24) result = 8;
-
-    struct Tail reset_designator = {.values[0] = 25, .tail = 26};
-    if (reset_designator.values[0] != 25 || reset_designator.values[1] != 0 || reset_designator.tail != 26) result = 9;
-
-    struct Tail braced = {.values = {27, 28}, 29};
-    if (braced.values[0] != 27 || braced.values[1] != 28 || braced.tail != 29) result = 10;
-
-    // Disjoint deferred braces and omitted zero members remain intact.
-    struct Tail deferred_disjoint = {.values = {34, 35}, .tail = 36};
-    struct Tail omitted_zero = {.values = {37}, .tail = 38};
-    if (deferred_disjoint.values[0] != 34 || deferred_disjoint.values[1] != 35 || deferred_disjoint.tail != 36 ||
-        omitted_zero.values[0] != 37 || omitted_zero.values[1] != 0 || omitted_zero.tail != 38) result = 13;
-
-    struct Tail literal = (struct Tail){.values[0] = 30, 31};
-    struct Two literal_two = (struct Two){.values[0] = 32, 33};
-    if (literal.values[0] != 30 || literal.values[1] != 31 || literal.tail != 0 || literal_two.values[0] != 32 ||
-        literal_two.values[1] != 33) result = 11;
-
-    if (static_tail.values[0] != 1 || static_tail.values[1] != 2 || static_tail.tail != 0 ||
-        static_two.values[0] != 3 || static_two.values[1] != 4 ||
-        static_named.pair.first != 5 || static_named.pair.second != 6 || static_named.tail != 7 ||
-        static_grid.rows[0][0] != 8 || static_grid.rows[0][1] != 9 || static_grid.rows[1][0] != 10 ||
-        static_grid.rows[1][1] != 11 || static_grid.tail != 12 ||
-        static_root_array[0][0] != 19 || static_root_array[0][1] != 20 || static_root_array[1][0] != 21 || static_root_array[1][1] != 22 ||
-        static_promoted.values[0] != 13 || static_promoted.values[1] != 14 || static_promoted.tail != 15 ||
-        static_union.choice.pair.first != 16 || static_union.choice.pair.second != 17 || static_union.tail != 18) result = 12;
-
-    return result;
+    return 0;
 }

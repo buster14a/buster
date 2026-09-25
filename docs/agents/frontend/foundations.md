@@ -305,9 +305,10 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   advances outward only when that container is exhausted. Named members may
   cross anonymous structs or unions; `c_ir_nested_initializer_field_cursors`
   records each emitted field edge, while array steps record their selected
-  index directly. `basic_c_designated_subscript_initializer.c` checks automatic and
-  file-static values, compound literals, and outward continuation across both
-  frontend forms and all native allocators (GitHub #1206).
+  index directly. The driver's `c_designator_continuation_source` checks
+  automatic and file-static values, compound literals, and outward
+  continuation across both frontend forms and all native allocators (GitHub
+  #1206).
 - `c_parse_index_scope_children` stores siblings in token-interval order.
   Source-ordered rows keep a linear construction path; synthesized rows use
   iterative merging with the finished CSR cursor storage as scratch.
