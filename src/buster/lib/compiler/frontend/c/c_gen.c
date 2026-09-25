@@ -49139,8 +49139,15 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                         definition_rejection = member_rejection;
                         definition_rejection_member = field_index;
                     }
+                    // The semantic parse evaluated the width where the member
+                    // was declared (CMember.bit_width); the IR layout takes
+                    // that number, so a folded sizeof and the object it sizes
+                    // cannot disagree about it. Only a width the parse could
+                    // not fold still reaches the lowering evaluator: a
+                    // temporary bridge that keeps every accepted program
+                    // accepted until the semantic phase owns the rejection.
                     u32 member_bit_width = member->bit_width;
-                    if (member->is_bit_field && member->bit_width_token_count)
+                    if (member->is_bit_field && !member->bit_width_resolved && member->bit_width_token_count)
                     {
                         u64 evaluated_width = 0;
                         if (!c_ir_array_bound_evaluate(&constant_builder, (CArrayBound){
@@ -49161,10 +49168,9 @@ CIRLowerResult c_lower_to_ir_with_options(Arena* arena, String8 source_path, CPr
                     // but the request to move the next member to a boundary
                     // that the layout below performs. Accepted, the named
                     // spelling laid out a member occupying no bits that could
-                    // still be assigned and read back. The check sits here,
-                    // where the constant expression has just been folded, so
-                    // `int b : 1 - 1;` is refused with the literal `int b : 0;`
-                    // rather than only the spelling the parse fast path folds.
+                    // still be assigned and read back. The check reads the
+                    // evaluated width the layout uses, so `int b : 1 - 1;` is
+                    // refused with the literal `int b : 0;`.
                     // The layout below still runs, the same way a rejected
                     // alignment specifier still hands back an alignment: the
                     // definition finishes and the program hears about the

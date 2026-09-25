@@ -804,6 +804,13 @@ struct CMember
     CTypeId type;
     u32 alignment_start;
     u32 alignment_count;
+    // The value of the width expression, evaluated once where the member is
+    // declared, by the typed evaluator enumerators use. Every reader -- the
+    // sizeof folding in c_parse.c, bit-field promotion, the zero-width check
+    // and the IR layout in c_gen.c -- asks bit_width_resolved and reads this
+    // number; none re-evaluates [bit_width_token_start, +count), which remain
+    // only for diagnostics. An unresolved width holds a layout unresolved
+    // rather than reading as zero.
     u32 bit_width;
     u32 bit_width_token_start;
     u32 bit_width_token_count;
@@ -813,7 +820,8 @@ struct CMember
     // placed at byte alignment, which also stops it from raising the
     // aggregate's own alignment.
     bool is_packed;
-    u8 reserved[2];
+    bool bit_width_resolved;
+    u8 reserved;
 };
 
 // One `_Alignas(...)` or GNU `aligned(...)` request, as either the type it

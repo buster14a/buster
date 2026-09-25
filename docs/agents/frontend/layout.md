@@ -79,10 +79,19 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   **A zero width belongs to the *unnamed* bit-field alone**: C requires a named
   one to be at least one bit wide (C23 6.7.3.2p4) and both reference compilers
   refuse `int b : 0;`, where accepting it laid out a member that occupies no
-  bits and can still be assigned and read back (issue #710). The width is
-  checked in `c_lower_to_ir` where the constant expression is folded, so the
-  expression spelling `int b : 1 - 1;` is refused with the literal one rather
-  than only the spelling the parse fast path folds. The report shares the
+  bits and can still be assigned and read back (issue #710). **A width is
+  evaluated once, where the member is declared**: `c_parse.c` folds anything
+  but a plain decimal literal through `c_parse_typed_integer_constant`, the
+  evaluator enumerators use, and stores it on `CMember.bit_width` with
+  `bit_width_resolved`. The sizeof folding, bit-field promotion, the zero-width
+  check and the IR layout all read that number, so `int b : (5)`, an
+  enumerator, a cast, `0x5` or `sizeof(int) * 8 - 7` lays out identically in a
+  folded `sizeof`/`offsetof` and in the object; the folding used to read only a
+  single decimal token and took every other spelling for a zero-width field.
+  An unresolved width holds the layout unresolved instead of reading as zero;
+  lowering still evaluates such a width itself as a temporary bridge.
+  `c_test_bit_field_width_authority` pins clang's answers for each spelling.
+  `int b : 1 - 1;` is refused like the literal `int b : 0;`. The report shares the
   one-diagnostic-per-type budget with the rejected alignment specifier -- they
   are one `definition_rejection` slot whose kind travels with the message --
   and the definition still lays out, the way a rejected alignment specifier
