@@ -1668,8 +1668,9 @@ static int tp_run(TpConfig config)
 
 #ifdef __linux__
 /* The fixed service is a member of the candidate group but has no DAC
- * override. Publish group-readable output only after all measurements and
- * comparison files are closed. Reject links and cross-device replacements. */
+ * override. Publish group-readable files and group-writable directories
+ * only after measurements and comparison close their files. Reject links
+ * and cross-device replacements. */
 static int tp_share_service_output(char const* path)
 {
     enum { depth_cap = 256, entry_cap = 4096 };
@@ -1699,7 +1700,7 @@ static int tp_share_service_output(char const* path)
         if (!entry)
         {
             ok = errno == 0 && parent >= 0;
-            if (ok && (depth > 1 || root_info.st_uid == geteuid())) ok = fchmod(parent, 0750) == 0;
+            if (ok && (depth > 1 || root_info.st_uid == geteuid())) ok = fchmod(parent, 0770) == 0;
             if (ok) ok = fsync(parent) == 0;
             if (closedir(stream) != 0) ok = 0;
             stack[depth - 1] = NULL;

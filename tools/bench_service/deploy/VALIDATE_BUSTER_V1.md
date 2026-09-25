@@ -243,8 +243,9 @@ acknowledgment; never change the key to hide a failed or unknown attempt.
    candidate script or a root-run probe.
 3. The harness invocation remains exactly the recipe's `--profile smoke
    --mode all --pairs 1 --warmups 1 --no-guard --service-output` selection.
-   The final option makes completed candidate-owned output readable by the
-   trusted service's candidate-group membership before private result copying.
+   The final option makes completed candidate-owned output readable and its
+   directories removable through the trusted service's candidate-group
+   membership before private result copying and workspace cleanup.
    This recipe builds Release `ide` with tests disabled; it does not run the
    compiler correctness suite or self-host fixed point. Record those as
    checks of the exact revision,

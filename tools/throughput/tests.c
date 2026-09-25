@@ -39,8 +39,8 @@ static void test_service_output_share(char const* root)
               chmod(file, 0600) == 0 && tp_share_service_output(directory));
         struct stat root_info = {0}, nested_info = {0}, file_info = {0};
         CHECK(stat(directory, &root_info) == 0 && stat(nested, &nested_info) == 0 &&
-              stat(file, &file_info) == 0 && (root_info.st_mode & 07777) == 0750 &&
-              (nested_info.st_mode & 07777) == 0750 && (file_info.st_mode & 07777) == 0640);
+              stat(file, &file_info) == 0 && (root_info.st_mode & 07777) == 0770 &&
+              (nested_info.st_mode & 07777) == 0770 && (file_info.st_mode & 07777) == 0640);
         CHECK(chmod(directory, 0700) == 0 && symlink("artifacts/result.log", link) == 0 &&
               !tp_share_service_output(directory));
         CHECK(unlink(link) == 0 && chmod(nested, 0700) == 0 && unlink(file) == 0 &&

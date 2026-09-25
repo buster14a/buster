@@ -634,7 +634,7 @@ BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload(int workspace)
     memset(frames, 0, sizeof(frames));
     int root = openat(workspace, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     struct stat root_info;
-    bool ok = root >= 0 && fstat(root, &root_info) == 0;
+    bool ok = root >= 0 && fstat(root, &root_info) == 0 && root_info.st_uid == geteuid();
     frames[0].stream = ok ? fdopendir(root) : NULL;
     if (!frames[0].stream && root >= 0)
     {
@@ -673,15 +673,24 @@ BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload(int workspace)
                 {
                     ok = depth < BQ_CLEANUP_DEPTH_CAP && directories < BQ_DIRECTORY_CAP;
                     int child = ok ? openat(directory, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-                    struct stat child_info;
+                    struct stat child_info = {0};
                     ok = child >= 0 && fstat(child, &child_info) == 0 && child_info.st_dev == info.st_dev &&
-                         child_info.st_ino == info.st_ino;
+                         child_info.st_ino == info.st_ino && child_info.st_dev == root_info.st_dev;
                     DIR* stream = ok ? fdopendir(child) : NULL;
                     if (!stream && child >= 0)
                     {
                         close(child);
                     }
-                    ok = stream != NULL && fchmod(dirfd(stream), 0700) == 0;
+                    /* Candidate build directories inherit the attempt group.
+                     * The service can remove entries through group write, but
+                     * cannot chmod a foreign-owned directory without CAP_FOWNER. */
+                    mode_t mode = child_info.st_mode & 07777;
+                    bool trusted_owned = child_info.st_uid == geteuid();
+                    bool candidate_owned = child_info.st_uid != 0 &&
+                                           child_info.st_gid == root_info.st_gid &&
+                                           (mode == 0770 || mode == 02770);
+                    ok = stream != NULL && (trusted_owned ? fchmod(dirfd(stream), 0700) == 0 :
+                                            candidate_owned);
                     if (ok)
                     {
                         BqCleanupFrame* next = frames + depth;

@@ -106,8 +106,10 @@ the intended group without a request-controlled chown or path.
 The fixed throughput command includes `--service-output`. After measurement
 and comparison close their files, the candidate verifies the output tree has
 only same-device, single-link regular files and directories owned by its UID
-and group, then grants the trusted service group read/traverse access. The
-service still copies into its own private result leaf and validates the bundle.
+and group, then grants the trusted service group read access to files and
+read/write/traverse access to directories. The service copies into its own
+private result leaf, validates the bundle, and later removes candidate-owned
+staging directories through that group access without owner-only `chmod`.
 
 Do not enable the service yet. The broker socket, binary, root-owned lease
 identity and service dependencies must be installed and independently reviewed
