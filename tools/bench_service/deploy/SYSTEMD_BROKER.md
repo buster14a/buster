@@ -115,7 +115,13 @@ that exact file without creating, truncating or modifying it. Provision the
 payload as part of the disposable fixture before running either live or
 `--isolation-only`; the probe does not create it. A missing payload fails the
 fixture rather than counting as a denial. Only `EACCES`/`EPERM` counts as
-denial. Metadata-only `O_PATH` access to a leaf is not treated as traversal.
+denial. Remove the transient `payload` through the fixture owner after the
+probe and before worker finalization: the production result-bundle validator
+rejects unindexed extra files. If that cleanup cannot be proved while the
+outer unit is active, use a separate disposable attempt for this probe and
+do not count that attempt as a normal #880 qualification result. Never leave
+the fixture in a protected-host result. Metadata-only `O_PATH` access to a
+leaf is not treated as traversal.
 
 `BUSTER_BROKER_LIVE_TEST=1 systemd-broker-live-test --isolation-only JOB ATTEMPT`
 performs just the account/private-hierarchy checks in a disposable provisioned
