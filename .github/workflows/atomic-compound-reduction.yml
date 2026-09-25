@@ -1,0 +1,74 @@
+name: Atomic compound-assignment reductions
+on:
+  push:
+    branches: [research/atomic-compound-probe-20260925-astra]
+    paths: [.github/workflows/atomic-compound-reduction.yml, tools/investigations/atomic_compound_reduction.py]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  reduce:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      PROBE_OUT: /tmp/buster-atomic-reduction-evidence
+      BASELINE_OUT: /tmp/buster-atomic-baseline
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 8
+      - name: Freeze unchanged production tree and scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROBE_OUT"
+          git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/investigation-source.txt"
+          cp tools/investigations/atomic_compound_*.py "$RUNNER_TEMP/"
+          cp tools/investigations/atomic_compound_*.py "$PROBE_OUT/"
+          python3 -m py_compile "$RUNNER_TEMP/atomic_compound_reduction.py"
+          git checkout --detach 83c5f229288ecd8e23588c11b9ad19edc8bf4be2
+          test "$(git rev-parse HEAD^{tree})" = b310e6573e6c89c618f8466941be4b995021a410
+          git diff --exit-code
+          git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/production-source.txt"
+      - name: Retrieve and verify compiler from the first hosted experiment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/10865844012/zip" \
+            -o "$RUNNER_TEMP/atomic-baseline.zip"
+          echo "afeadb109b6efac0d0cdac3bbd7e9ce19f3f925fbd89b34c4ccdb32f7cfb054c  $RUNNER_TEMP/atomic-baseline.zip" | sha256sum -c -
+          mkdir -p "$BASELINE_OUT" build/Release
+          unzip -q "$RUNNER_TEMP/atomic-baseline.zip" -d "$BASELINE_OUT"
+          cmp "$BASELINE_OUT/production-source.txt" "$PROBE_OUT/production-source.txt"
+          echo "4a8e23e3dc4887df711b7a7fd96f4923de3307ee6c920490ccaf2e95a4602924  $BASELINE_OUT/compiler-ide" | sha256sum -c -
+          install -m 755 "$BASELINE_OUT/compiler-ide" build/Release/ide
+          cp "$BASELINE_OUT/compiler.sha256" "$PROBE_OUT/compiler.sha256"
+          cp "$BASELINE_OUT/producer.txt" "$PROBE_OUT/producer.txt"
+          printf '%s\n' 'Compiler reused from run 36140294322 artifact 10865844012; no new build claimed.' > "$PROBE_OUT/compiler-provenance.txt"
+      - name: Execute reductions, controls, corrected GCC references and IR observations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/atomic_compound_reduction.py" | tee "$PROBE_OUT/probe.log"
+      - name: Hash all raw outcomes
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if test -d "$PROBE_OUT"; then
+            cd "$PROBE_OUT"
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          fi
+      - name: Retain the complete experiment including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: atomic-reduction-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/buster-atomic-reduction-evidence
+          retention-days: 30
+          if-no-files-found: error
