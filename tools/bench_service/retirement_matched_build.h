@@ -56,6 +56,8 @@ typedef struct BqRetirementBuildProcess
     int directory, writer, reader;
     pid_t process;
     u64 directory_device, directory_inode, log_device, log_inode;
+    /* Build stages retain the configured root observed before child launch. */
+    u64 build_device, build_inode;
     u64 log_bytes;
     char name[32], command_sha256[SHA256_HEX_CAPACITY];
     u32 stage, state;

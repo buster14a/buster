@@ -690,6 +690,28 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_run_stage(BqRetirementMatchedBuild* build,
     return ok;
 }
 
+/* Preserve the produced executable inode while replacing the configured build
+ * root. A path-only freeze would otherwise accept the same bytes from a root
+ * that the reaped child never used. */
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_swap_build_root(int attempt)
+{
+    bool ok = renameat(attempt, "matched-build", attempt, "held-build") == 0 &&
+              mkdirat(attempt, "matched-build", 0700) == 0;
+    int held = ok ? openat(attempt, "held-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int replacement = ok ? openat(attempt, "matched-build", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && held >= 3 && replacement >= 3 && mkdirat(replacement, "Release", 0700) == 0;
+    int old_release = ok ? openat(held, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int new_release = ok ? openat(replacement, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    ok = ok && old_release >= 3 && new_release >= 3 &&
+         linkat(old_release, "ide", new_release, "ide", 0) == 0 &&
+         unlinkat(old_release, "ide", 0) == 0;
+    if (new_release >= 0 && close(new_release) != 0) ok = false;
+    if (old_release >= 0 && close(old_release) != 0) ok = false;
+    if (replacement >= 0 && close(replacement) != 0) ok = false;
+    if (held >= 0 && close(held) != 0) ok = false;
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const* original,
     int installed, int workspaces, char const* installed_path, char const* workspace_path,
     char const* original_profile,
@@ -757,7 +779,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
     int length = snprintf(profile, sizeof(profile), "%sbuild-driver-sha256=%.64s\n",
                           original_profile, driver_digest);
     BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(profile));
-    for (u32 trial = 0; trial < 12; trial += 1)
+    for (u32 trial = 0; trial < 14; trial += 1)
     {
         BqJob job = *original;
         job.id = 30 + trial;
@@ -925,6 +947,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             BQ_PREP_CHECK(ok && (trial ? exit_code == 0 : exit_code == 5));
             if (ok)
             {
+                if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
+                    BQ_PREP_CHECK(bq_prep_test_swap_build_root(attempt));
                 if (trial == 4) process.command_sha256[0] ^= 1;
                 if (trial == 5)
                 {
@@ -938,21 +962,22 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 uid_t candidate = trial == 2 ? geteuid() + 1 : geteuid();
                 BqError expected = !trial ? BQ_WORKER_FAILED :
                                    trial == 4 || trial == 5 ? BQ_WORKER_FAILED :
-                                   trial == 2 && stage == 3 ? BQ_SOURCE_MISMATCH : BQ_OK;
+                                   ((trial == 2 || trial == 13) && stage == 3) ||
+                                   (trial == 12 && stage == 1) ? BQ_SOURCE_MISMATCH : BQ_OK;
                 BQ_PREP_CHECK(bq_retirement_matched_build_complete_pinned(queue, &job,
                     installed, workspaces, pinned, &process, candidate, &build) == expected &&
                     !process.state && !process.process);
             }
             bq_retirement_matched_build_abort(&process);
-            if (trial == 4 || trial == 5) break;
+            if (trial == 4 || trial == 5 || (trial == 12 && stage == 1)) break;
         }
         BQ_PREP_CHECK(ok);
         if (trial != 1)
         {
             char record_name[48], bytes[16];
             u32 size = 0;
-            BQ_PREP_CHECK(build.failed && build.next == (trial == 3 ? 2u : trial == 2 || trial == 11 ? 3u :
-                                                    trial == 10 ? 1u : 0u) &&
+            BQ_PREP_CHECK(build.failed && build.next == (trial == 3 ? 2u : trial == 2 || trial == 11 ||
+                                                    trial == 13 ? 3u : trial == 10 || trial == 12 ? 1u : 0u) &&
                 !build.binary_record_sha256[0] &&
                 !bq_retirement_matched_build_stage(&build, &command) &&
                 bq_record_name(record_name, "binaries", job.id) &&
