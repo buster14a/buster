@@ -865,6 +865,8 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
     String8 architecture_option = {0};
     bool options_ended = false;
     bool action_seen = false;
+    String8 position_independent_executable_option = {0};
+    bool common_storage_requested = false;
     for (u64 argument_index = 0; argument_index < arguments.length && invocation.error == COMPILER_DRIVER_ERROR_NONE; argument_index += 1)
     {
         String8 argument = arguments.pointer[argument_index];
@@ -1370,6 +1372,11 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
             invocation.disable_target_local_promotion = string_equal(argument, S8("-fno-target-local-promotion"));
             continue;
         }
+        if (string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")))
+        {
+            common_storage_requested = string_equal(argument, S8("-fcommon"));
+            continue;
+        }
         // Register allocation is independent of source-level optimization:
         // like LLVM, -O0 still uses the low-latency allocator. QUALITY stays
         // out of the optimization-level mapping because it does not yet beat
@@ -1543,16 +1550,18 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         // an offset from the thread pointer, and it decides how every other
         // reference to an interposable symbol is spelled: through the GOT for
         // an address and the PLT for a direct call. -fno-pic asks for the
-        // rip-relative forms back. -fPIE/-fpie stay accepted and inert on
-        // purpose -- a position-independent executable's own thread-local
-        // block is still the initial one, its own definitions are not
-        // interposable, its references to another image's data are what the
-        // linker's copy relocation is for, and every reference this compiler
-        // emits is already rip-relative, so that model asks for no code this
-        // one does not already produce.
+        // rip-relative forms back. PIE-specific reference selection is not
+        // implemented for x86-64 ELF, so -fPIE/-fpie are rejected there
+        // instead of being silently ignored; other targets keep their prior
+        // accepted no-op behavior.
         if (string_equal(argument, S8("-fPIC")) || string_equal(argument, S8("-fpic")))
         {
             invocation.position_independent = true;
+            continue;
+        }
+        if (string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")))
+        {
+            position_independent_executable_option = argument;
             continue;
         }
         if (string_equal(argument, S8("-fno-pic")))
@@ -1570,10 +1579,9 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         }
         bool compatible_codegen_option =
             string_equal(argument, S8("-pipe")) || string_equal(argument, S8("-pthread")) ||
-            string_equal(argument, S8("-fPIE")) || string_equal(argument, S8("-fpie")) ||
             string_equal(argument, S8("-fno-pie")) || string_equal(argument, S8("-fno-builtin")) ||
             string_equal(argument, S8("-fwrapv")) || string_equal(argument, S8("-fno-strict-aliasing")) || string_equal(argument, S8("-funsigned-char")) ||
-            string_equal(argument, S8("-fsigned-char")) || string_equal(argument, S8("-fcommon")) || string_equal(argument, S8("-fno-common")) ||
+            string_equal(argument, S8("-fsigned-char")) ||
             // Buster emits no stack-protector prologue, so the disabling
             // spelling is already what it does. A libc asks for it on the
             // translation units that run before thread-local storage exists,
@@ -1605,6 +1613,19 @@ CompilerDriverInvocation compiler_driver_parse_arguments(Arena* arena, SliceStri
         {
             compiler_driver_resolve_native_target(arena, &invocation, architecture_option, feature_overrides, feature_override_count);
         }
+    }
+    // No canonical object field carries common-storage intent. Reject only an
+    // effective request when this invocation will emit a code-generation artifact;
+    // preprocessing and syntax-only checks have no storage representation to lose.
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && common_storage_requested &&
+        invocation.action != COMPILER_DRIVER_ACTION_PREPROCESS && invocation.action != COMPILER_DRIVER_ACTION_SYNTAX_ONLY)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), S8("-fcommon"));
+    }
+    if (invocation.error == COMPILER_DRIVER_ERROR_NONE && position_independent_executable_option.length && !invocation.has_gpu_target &&
+        invocation.target.cpu_arch == CPU_ARCH_X86_64 && object_format_for_target(invocation.target) == OBJECT_FORMAT_ELF64)
+    {
+        compiler_driver_argument_error(arena, &invocation, S8("unsupported option: {S8}"), position_independent_executable_option);
     }
     if (invocation.error == COMPILER_DRIVER_ERROR_NONE && invocation.emit_llvm_bitcode &&
         (invocation.action == COMPILER_DRIVER_ACTION_PREPROCESS || invocation.action == COMPILER_DRIVER_ACTION_ASSEMBLY ||
@@ -3697,8 +3718,9 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
         if (mir_trace.invalid_mir)
         {
             result.error = COMPILER_DRIVER_ERROR_IR;
-            result.diagnostic = string_format(arena, S8("bootstrap MIR validation failed in '{S8}': error {u32}, block {u32}, instruction {u32}, operand {u32}"),
-                                              mir_trace.invalid_function, (u32)mir_trace.invalid_validation.error, mir_trace.invalid_validation.block,
+            result.diagnostic = string_format(arena, S8("bootstrap MIR validation failed in '{S8}': error {u32} ({S8}), block {u32}, instruction {u32}, operand {u32}"),
+                                              mir_trace.invalid_function, (u32)mir_trace.invalid_validation.error,
+                                              machine_verify_error_name(mir_trace.invalid_validation.error), mir_trace.invalid_validation.block,
                                               mir_trace.invalid_validation.instruction, mir_trace.invalid_validation.operand);
             goto end;
         }
@@ -3775,7 +3797,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             .code = compiler_driver_codegen_error_name(code.error), .backend = &backend,
             .primary = compiler_driver_backend_location(lowered.program, module, code.failed_function, code.failed_instruction),
         };
-        diagnostic.message = backend.reason.length
+        diagnostic.message = code.failed_machine_verification.error != MACHINE_VERIFY_NONE
+            ? string_format(arena,
+                S8("C code generation refused: kind={S8} target={S8} allocator={S8} function='{S8}' opcode={S8} verifier={S8} error={S8} ({u32}) block={u32} instruction={u32} operand={u32}"),
+                diagnostic.code, backend.target, backend.allocator, backend.function, backend.opcode,
+                code.failed_machine_scheduled ? S8("scheduled-mir") : S8("selected-mir"), backend.reason,
+                (u32)code.failed_machine_verification.error, code.failed_machine_verification.block,
+                code.failed_machine_verification.instruction, code.failed_machine_verification.operand)
+            : backend.reason.length
             ? string_format(arena, S8("{S8} (in function '{S8}')"), backend.reason, backend.function)
             : string_format(arena,
                 S8("C code generation refused: kind={S8} target={S8} allocator={S8} function='{S8}' opcode={S8} operation={S8}"),

@@ -167,7 +167,10 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Split storage pieces also retain the original place's `volatile` flag on
   every load and store. Casting the access address to an unsigned piece
   pointer must not erase that semantic qualification. The regression
-  checks both volatile accesses and a nonvolatile packed control.
+  checks both volatile accesses and a nonvolatile packed control. After
+  reassembly, the read has the same unqualified value type as a single-unit
+  bit-field load; the qualified place must not leak into arithmetic, returns,
+  or call arguments.
   **Integer promotion uses the bit-field width, not its storage width.** An
   `unsigned int : 3` promotes to `int`, while an `unsigned int : 32` remains
   unsigned. `c_ir_mark_unsigned_bit_field_value` keeps this distinction in a

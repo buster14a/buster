@@ -65,6 +65,10 @@ incoming values, forwarding through single-predecessor chains. Trivial
 parameters and unused parameter cycles are removed. Disconnected empty label
 blocks have no outgoing edge. Publication includes **every** predecessor edge,
 including parameter-free destinations; selectors must never see a partial CFG.
+Condition lowering resolves a literal left operand of `||` or `&&` before
+allocating a block for its right operand. A short-circuited arm must not
+become a disconnected source block that joins a value defined only on another
+path; selected MIR enforces dominance in unreachable code too.
 Nested GNU statement-expression body walks reuse the function's label block at
 the same source token. Allocating a second block leaves the predeclared label
 unterminated and separates ordinary goto from label-address provenance. The
@@ -174,13 +178,12 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   across batch pushes that may grow the array. An ENABLE marker remains below
   its replacement batch, and refused identifiers retain `no_expand` on rescans.
   Output nodes and source-stamp ownership are independent of task storage.
-  Ordinary paste-free/stringify-free replacements produce tokens directly into
-  a reserved batch only after every argument continuation finishes. Builtins and
-  pragma-like definitions retain materialization. The fill must not expand,
-  allocate spellings, intern symbols, or push tasks: it writes logical token `i`
-  at `base + count - i`, preserves argument no-expand painting and spacing, and
-  publishes the disabled bit and completed task count last. Empty replacements
-  still publish ENABLE. Never reserve a batch across argument expansion.
+  A non-builtin definition without `#` or `##` is written straight into its
+  reserved batch by `c_macro_produce_plain_tasks` (exact size from
+  `plain_count` and per-parameter use counts); builtins, stringify and paste
+  still stage a `CPpToken` list in `c_macro_replacement_tokens` and push it
+  with `c_macro_expansion_tasks_push`. Both orders must stay identical:
+  `c_test_macro_plain_production` compares them token for token.
 - Macro placemarkers survive the entire `##` sequence. The replacement loop
   compacts into its existing materialized buffer and removes placemarkers only
   when emitting the rescan tokens. Only the explicitly marked GNU
@@ -222,8 +225,13 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
   `&&`, `||` and `?:` propagate faults only from evaluated operands; the
   conditional's common unsigned type still depends on both arms. Syntax
-  validation remains unconditional. `c_test_preprocessor_short_circuit` covers
-  generated `#if`/`#elif`, live-fault and malformed-dead-operand controls;
+  validation remains unconditional. Character constants obtain their
+  preprocessing signedness from the decoded target scalar type, including
+  target-dependent `L` and C23 `u8` literals. Parse-side constant folds retain
+  ordinary C promotions and do not inherit this `intmax_t`/`uintmax_t` widening.
+  `c_macro_conditional_tests` covers those character types alongside ordinary C
+  controls; `c_test_preprocessor_short_circuit` covers generated `#if`/`#elif`,
+  live-fault and malformed-dead-operand controls;
   `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
   allocator matrix (GitHub #147, #258).
 - A folded conditional expression converts its selected value to the common
@@ -260,6 +268,14 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   over the 32-bit key. The one temporary row buffer is rewound before origin
   recovery and publication; the original region array remains authoritative.
   Do not restore displacement-dependent insertion sorting for `#line` splits.
+  Publish lookup keys before C23 respelling so its origin queries can read the
+  existing prefix. `c_source_map_publish_appended` rebuilds keys afterwards only
+  if that append-only phase added regions; without an append, keep the original
+  keys and sentinel. Count equality is not a general mutation-cache contract.
+  Respelling may move the region array, but must not invalidate the published
+  key prefix while querying it. Neither publication rewinds the TU arena:
+  canonical lowering copies the map's pointers into `IrProgram.source_map`,
+  whose diagnostic, DWARF and CodeView consumers still borrow their storage.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be

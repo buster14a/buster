@@ -6,14 +6,18 @@ from __future__ import annotations
 import ast
 import copy
 import importlib.util
+import io
 import json
 from pathlib import Path
+import socket
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
+import urllib.error
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -408,6 +412,260 @@ class MergeConflictPreflightTest(unittest.TestCase):
         self.assertEqual(match.group("main"), main)
         self.assertEqual(match.group("head"), head)
         self.assertLessEqual(len(description), 140)
+
+
+class GitHubTransportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.api = PREFLIGHT.GitHubApi("buster14a/buster", "test", "https://api.example.invalid")
+
+    @staticmethod
+    def http_error(code: int, headers=None, message: str = "Unexpected error"):
+        return urllib.error.HTTPError(
+            "https://api.example.invalid/test", code, "test", headers or {},
+            io.BytesIO(json.dumps({"message": message}).encode("utf-8")))
+
+    @staticmethod
+    def response(body: bytes = b'{"ok": true}'):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body
+        return response
+
+    def test_get_500_recovers_but_repeated_500_exhausts_three_attempts(self):
+        with (mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                side_effect=[self.http_error(500), self.response()]) as urlopen,
+              mock.patch.object(PREFLIGHT.time, "sleep") as sleep,
+              mock.patch.object(PREFLIGHT.sys, "stderr", new_callable=io.StringIO) as log):
+            self.assertEqual(self.api._request("GET", "/test"), {"ok": True})
+            self.assertEqual(urlopen.call_count, 2)
+            sleep.assert_called_once_with(1.0)
+            self.assertIn("recovered GitHub API GET /test after 2 attempts", log.getvalue())
+        with (mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                side_effect=[self.http_error(500) for _ in range(3)]) as urlopen,
+              mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
+            with self.assertRaises(PREFLIGHT.ApiRequestError) as caught:
+                self.api._request("GET", "/test")
+            self.assertEqual(caught.exception.attempts, 3)
+            self.assertTrue(caught.exception.retryable)
+            self.assertTrue(caught.exception.retry_exhausted)
+            self.assertFalse(caught.exception.systemic)
+            self.assertIn("after 3 attempt(s)", str(caught.exception))
+            self.assertEqual(urlopen.call_count, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 2.0])
+
+    def test_selected_timeout_and_temporary_dns_retry_but_permanent_dns_does_not(self):
+        transient = (urllib.error.URLError(socket.timeout()),
+                     urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, "try again")))
+        for error in transient:
+            with (self.subTest(error=error),
+                  mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                    side_effect=[error, self.response()]) as urlopen,
+                  mock.patch.object(PREFLIGHT.time, "sleep")):
+                self.assertEqual(self.api._request("GET", "/test"), {"ok": True})
+                self.assertEqual(urlopen.call_count, 2)
+        with (mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                side_effect=urllib.error.URLError(
+                                    socket.gaierror(socket.EAI_NONAME, "unknown host"))) as urlopen,
+              mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
+            with self.assertRaises(PREFLIGHT.ApiRequestError) as caught:
+                self.api._request("GET", "/test")
+            self.assertFalse(caught.exception.retryable)
+            self.assertEqual(urlopen.call_count, 1)
+            sleep.assert_not_called()
+
+    def test_rate_limit_honors_guidance_and_stops_without_safe_delay(self):
+        with (mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                side_effect=[self.http_error(429, {"Retry-After": "3"}),
+                                             self.response()]) as urlopen,
+              mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
+            self.assertEqual(self.api._request("GET", "/test"), {"ok": True})
+            self.assertEqual(urlopen.call_count, 2)
+            sleep.assert_called_once_with(3.0)
+        with (mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                side_effect=[self.http_error(403, {
+                                    "Retry-After": "1", "X-RateLimit-Remaining": "0",
+                                    "X-RateLimit-Reset": "1010"}),
+                                             self.response()]) as urlopen,
+              mock.patch.object(PREFLIGHT.time, "sleep") as sleep,
+              mock.patch.object(PREFLIGHT.time, "time", return_value=1000)):
+            self.assertEqual(self.api._request("GET", "/test"), {"ok": True})
+            self.assertEqual(urlopen.call_count, 2)
+            sleep.assert_called_once_with(10.0)
+        for headers in ({}, {"Retry-After": "120"}):
+            with (self.subTest(headers=headers),
+                  mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                    side_effect=self.http_error(429, headers)) as urlopen,
+                  mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
+                with self.assertRaises(PREFLIGHT.ApiRequestError) as caught:
+                    self.api._request("GET", "/test")
+                self.assertTrue(caught.exception.systemic)
+                self.assertEqual(urlopen.call_count, 1)
+                sleep.assert_not_called()
+
+    def test_permissions_invalid_json_and_post_are_never_retried(self):
+        for method, error in (("GET", self.http_error(403, message="Resource not accessible")),
+                              ("GET", self.http_error(422)),
+                              ("POST", self.http_error(500)),
+                              ("POST", urllib.error.URLError(socket.timeout()))):
+            with (self.subTest(method=method, error=error),
+                  mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                    side_effect=error) as urlopen,
+                  mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
+                with self.assertRaises(PREFLIGHT.ApiRequestError) as caught:
+                    self.api._request(method, "/test", {"state": "success"} if method == "POST" else None)
+                self.assertEqual(caught.exception.attempts, 1)
+                self.assertFalse(caught.exception.retryable)
+                self.assertEqual(urlopen.call_count, 1)
+                sleep.assert_not_called()
+        with (mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                return_value=self.response(b"{bad json")) as urlopen,
+              mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
+            with self.assertRaisesRegex(PREFLIGHT.PreflightError, "invalid JSON"):
+                self.api._request("GET", "/test")
+            self.assertEqual(urlopen.call_count, 1)
+            sleep.assert_not_called()
+
+    def test_retry_wait_cannot_consume_the_refresh_budget(self):
+        self.api.deadline = 10
+        with (mock.patch.object(PREFLIGHT.time, "monotonic", return_value=8),
+              mock.patch.object(PREFLIGHT.urllib.request, "urlopen",
+                                side_effect=self.http_error(500, {"Retry-After": "3"})) as urlopen,
+              mock.patch.object(PREFLIGHT.time, "sleep") as sleep):
+            with self.assertRaises(PREFLIGHT.ApiRequestError) as caught:
+                self.api._request("GET", "/test")
+            self.assertEqual(caught.exception.attempts, 1)
+            self.assertEqual(urlopen.call_count, 1)
+            sleep.assert_not_called()
+
+
+class PushRefreshTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="buster-merge-preflight-sweep-")
+        self.root = Path(self.temporary.name)
+        self.repo = Repository(self.root)
+        self.repo.write("src/base.c", "base\n")
+        self.repo.write("src/head.c", "base\n")
+        base = self.repo.commit("base")
+        self.repo.branch("candidate", base)
+        self.repo.write("src/head.c", "candidate\n")
+        self.head = self.repo.commit("candidate")
+        self.report = PREFLIGHT.analyze(self.root, base, self.head)
+        self.output = self.root / "reports"
+        self.summary = self.root / "summary.md"
+        self.event = {"repository": {"default_branch": "main"}}
+        self.api = mock.Mock()
+        self.api.open_pull_requests.return_value = [
+            {"number": number, "head": {"sha": self.head}, "base": {"ref": "main"}}
+            for number in (1, 2, 3)
+        ]
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def refresh(self) -> tuple[int, dict]:
+        outcome = PREFLIGHT._github_push_event(
+            self.root, self.api, self.event, self.output, self.summary,
+            PREFLIGHT.STATUS_CONTEXT)
+        return outcome, json.loads((self.output / "refresh.json").read_text())
+
+    def test_failed_middle_pull_preserves_evidence_and_refreshes_later_pull(self):
+        self.api.publish_status.return_value = None
+        with mock.patch.object(PREFLIGHT, "_analyze_stable_pull", side_effect=[
+            (self.report, self.head),
+            PREFLIGHT.ApiRequestError("GET /pulls/2 HTTP 500", 3, True, False),
+            (self.report, self.head),
+        ]) as analyze:
+            incomplete, refresh = self.refresh()
+        self.assertEqual(incomplete, 2)
+        self.assertEqual(analyze.call_count, 3)
+        self.assertEqual(len(refresh["completed"]), 2)
+        self.assertEqual([row["pull_request"] for row in refresh["completed"]], [1, 3])
+        self.assertEqual(len(refresh["failed"]), 1)
+        self.assertEqual(refresh["failed"][0]["error"]["attempts"], 3)
+        self.assertTrue(refresh["failed"][0]["error"]["retry_exhausted"])
+        self.assertEqual(refresh["not_attempted"], [])
+        self.assertFalse(refresh["coverage_complete"])
+        self.assertEqual(self.api.publish_status.call_count, 2)
+        self.assertTrue((self.output / f"pr-1-{self.head}.json").is_file())
+        self.assertTrue((self.output / f"pr-3-{self.head}.json").is_file())
+        error = json.loads((self.output / "pr-2-error.json").read_text())
+        self.assertFalse(error["authoritative_for_exact_identities"])
+        self.assertEqual(error["status_publication"], "none")
+        self.assertIn("completed 2, failed 1, not attempted 0", self.summary.read_text())
+
+    def test_systemic_limit_stops_following_pulls_without_publishing_success(self):
+        with mock.patch.object(PREFLIGHT, "_analyze_stable_pull", side_effect=[
+            (self.report, self.head),
+            PREFLIGHT.ApiRequestError("HTTP 429 rate limit", 1, True, True),
+        ]) as analyze:
+            incomplete, refresh = self.refresh()
+        self.assertEqual(incomplete, 2)
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(refresh["not_attempted"], [3])
+        self.assertEqual(self.api.publish_status.call_count, 1)
+        self.assertIn("not attempted 1", self.summary.read_text())
+
+    def test_budget_before_next_pull_accounts_for_remaining_work(self):
+        with (mock.patch.object(PREFLIGHT.time, "monotonic", side_effect=[0, 241]),
+              mock.patch.object(PREFLIGHT, "_analyze_stable_pull") as analyze):
+            incomplete, refresh = self.refresh()
+        self.assertEqual(incomplete, 2)
+        self.assertEqual(refresh["not_attempted"], [1, 2, 3])
+        analyze.assert_not_called()
+
+    def test_unavailable_inventory_reports_unknown_coverage(self):
+        self.api.open_pull_requests.side_effect = PREFLIGHT.ApiRequestError(
+            "GET /pulls HTTP 500", 3, True, False)
+        incomplete, refresh = self.refresh()
+        self.assertEqual(incomplete, 2)
+        self.assertFalse(refresh["inventory_complete"])
+        self.assertIsNone(refresh["listed_pull_requests"])
+        self.assertIn("not attempted unknown", self.summary.read_text())
+        self.assertTrue((self.output / "inventory-error.json").is_file())
+        self.api.publish_status.assert_not_called()
+
+    def test_ambiguous_post_is_recorded_without_a_retry_or_clean_claim(self):
+        self.api.publish_status.side_effect = [
+            None, PREFLIGHT.ApiRequestError("POST /statuses timed out", 1, False, False),
+            None,
+        ]
+        with mock.patch.object(PREFLIGHT, "_analyze_stable_pull",
+                               return_value=(self.report, self.head)):
+            status, refresh = self.refresh()
+        self.assertEqual(status, 2)
+        self.assertEqual(self.api.publish_status.call_count, 3)
+        self.assertEqual([row["pull_request"] for row in refresh["completed"]], [1, 3])
+        self.assertEqual(refresh["failed"][0]["status_publication"], "unknown")
+        self.assertTrue((self.output / f"pr-2-{self.head}.json").is_file())
+
+    def test_complete_refresh_remains_green_when_one_pr_has_a_content_conflict(self):
+        blocking_report = copy.deepcopy(self.report)
+        blocking_report["outcome"]["blocking"] = True
+        with mock.patch.object(PREFLIGHT, "_analyze_stable_pull", side_effect=[
+            (blocking_report, self.head), (self.report, self.head), (self.report, self.head),
+        ]):
+            status, refresh = self.refresh()
+        self.assertEqual(status, 0)
+        self.assertTrue(refresh["coverage_complete"])
+        self.assertEqual(refresh["blocking_count"], 1)
+        self.assertEqual(self.api.publish_status.call_count, 3)
+
+    def test_recovered_read_still_rejects_moved_main_before_publication(self):
+        self.repo.switch("main")
+        self.repo.write("src/base.c", "advanced main\n")
+        advanced = self.repo.commit("advanced main")
+        pull = {"number": 1, "head": {"sha": self.head}, "base": {"ref": "main"}}
+        self.api.pull_request.return_value = pull
+        self.api.previous_status.return_value = None
+        with mock.patch.object(PREFLIGHT, "_fetch_ref", side_effect=[
+            self.report["main"]["sha"], self.head, advanced,
+            advanced, self.head, advanced,
+        ]) as fetch:
+            report, head = PREFLIGHT._analyze_stable_pull(
+                self.root, self.api, 1, PREFLIGHT.STATUS_CONTEXT)
+        self.assertEqual(fetch.call_count, 6)
+        self.assertEqual(head, self.head)
+        self.assertEqual(report["main"]["sha"], advanced)
+        self.assertNotEqual(report["main"]["sha"], self.report["main"]["sha"])
 
 
 if __name__ == "__main__":

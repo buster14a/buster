@@ -80,11 +80,47 @@ memory, atomic, call, cast, arithmetic, comparison, branch, switch, return,
 and unreachable forms used by the current C frontend. Scoped dynamic stack
 allocation maps canonical stack saves and restores to LLVM's `llvm.stacksave`
 and `llvm.stackrestore` intrinsics, preserving the block position of each
-operation and the lifetime of outer allocations. Canonical operations that do
-not yet have an LLVM record mapping, including instruction-cache clearing,
-slice/reverse helpers, variadic
-intrinsics, inline assembly, SIMD, label addresses, indirect branches, and
-debug traps, are deliberate diagnostics.
+operation and the lifetime of outer allocations.
+
+Canonical scalar integer leading-zero count, trailing-zero count, and
+population count emit overloaded `llvm.ctlz.iN`, `llvm.cttz.iN`, and
+`llvm.ctpop.iN` declarations for widths 1 through 64. The first two pass
+`is_zero_poison = true`: canonical zero inputs are undefined, as with the native
+builtins; population count of zero remains zero. Wider integer-count operations
+produce an explicit diagnostic. Repeated operations reuse declarations, with
+stable type, constant, and value IDs. The canonical regression covers each
+width from 1 through 64, rejection at 128, and mixed-width declarations in one
+module, with independent LLVM compilation at widths 1, 8, 16, 32, and 64. The C
+fixture executes 32/64-bit builtins against a separately compiled caller at
+LLVM consumer `-O0` and `-O2`, including guarded zero for count-leading/trailing
+and unguarded zero for population count.
+
+Canonical operations that do not yet have an LLVM record mapping, including
+instruction-cache clearing, slice/reverse helpers, inline assembly, SIMD,
+label addresses, indirect branches, and debug traps, are deliberate diagnostics.
+
+Scalar `va_start`, `va_copy`, `va_end`, and `va_arg` are admitted only for
+x86-64 Linux (System V) and x86-64 Windows (Win64) variadic definitions using
+the target's public `va_list` layout. `va_arg` accepts promoted 32- or 64-bit
+integers, `double`, and pointers. The list operations preserve separate cursor
+storage for copies; the writer declares `llvm.va_start`, `llvm.va_copy`, and
+`llvm.va_end` as needed and emits LLVM's typed `va_arg` instruction. Calls to
+variadic declarations with scalar anonymous arguments remain supported. Win64
+32-bit integer reads consume an eight-byte variadic slot before truncation.
+
+| Target of `-emit-llvm` | List operations | `va_arg` types |
+|---|---|---|
+| x86-64 Linux, System V | Start, copy, end | i32, i64, double, pointer |
+| x86-64 Windows, Win64 | Start, copy, end | i32, i64, double, pointer |
+| Other targets, or mismatched explicit calling convention | Diagnostic | None |
+
+Use `va_arg(ap, int)` and `va_arg(ap, double)` for arguments promoted from
+narrow integer and float expressions. Smaller integer/floating types, 128-bit
+integers, wide floats, aggregates and other unsupported reads receive an
+explicit diagnostic. Aggregate anonymous call arguments remain a separate
+unsupported boundary. The consumer regression compiles the other side of
+calls and public-list exchanges with Clang at `-O0` and `-O2` on admitted
+native hosts; cross-target object validation does not substitute for execution.
 
 Aggregate storage preserves canonical field offsets, packing, and tail padding.
 Global pointer initializers may reference data or function symbols with a

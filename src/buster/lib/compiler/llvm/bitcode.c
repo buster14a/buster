@@ -78,6 +78,7 @@ enum
     LLVM_BC_FUNC_PHI = 16,
     LLVM_BC_FUNC_ALLOCA = 19,
     LLVM_BC_FUNC_LOAD = 20,
+    LLVM_BC_FUNC_VAARG = 23,
     LLVM_BC_FUNC_EXTRACTVAL = 26,
     LLVM_BC_FUNC_INSERTVAL = 27,
     LLVM_BC_FUNC_INDIRECTBR = 31,
@@ -128,6 +129,11 @@ enum
 
     LLVM_BC_LINKAGE_EXTERNAL = 0,
     LLVM_BC_LINKAGE_INTERNAL = 3,
+
+    LLVM_BC_VA_START = 0,
+    LLVM_BC_VA_COPY = 1,
+    LLVM_BC_VA_END = 2,
+    LLVM_BC_VA_INTRINSIC_COUNT = 3,
 };
 
 #define LLVM_BC_INVALID_ID UINT32_MAX
@@ -245,6 +251,8 @@ struct LlvmBcFunction
     u32 final_value_id;
     bool declaration;
     bool synthetic;
+    IrUnaryOperation intrinsic_operation;
+    u32 intrinsic_width;
 };
 
 typedef struct LlvmBcString LlvmBcString;
@@ -308,6 +316,7 @@ struct LlvmBcContext
     u32* symbol_value_ids;
     u8* symbol_seen;
     u32 module_value_count;
+    u32 va_intrinsic_ids[LLVM_BC_VA_INTRINSIC_COUNT];
     bool constants_locked;
 };
 
@@ -1570,6 +1579,65 @@ static bool llvm_bc_add_stack_intrinsic(LlvmBcContext* context, bool save)
     return result;
 }
 
+static bool llvm_bc_is_integer_count(IrUnaryOperation operation)
+{
+    return operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS || operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ||
+           operation == IR_UNARY_INTEGER_POPULATION_COUNT;
+}
+
+static LlvmBcFunction* llvm_bc_find_integer_count(LlvmBcContext* context, IrUnaryOperation operation, u32 width)
+{
+    LlvmBcFunction* result = 0;
+    for (u32 index = 0; index < context->function_count; index += 1)
+    {
+        LlvmBcFunction* function = context->functions + index;
+        if (function->synthetic && function->intrinsic_operation == operation && function->intrinsic_width == width)
+        {
+            result = function;
+            break;
+        }
+    }
+    return result;
+}
+
+static bool llvm_bc_add_integer_count(LlvmBcContext* context, IrFunction* function, IrInstruction* instruction)
+{
+    IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+    u32 width = type && type->kind == IR_TYPE_INTEGER ? type->bit_width : 0;
+    if (!width || width > 64)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION,
+                     llvm_bc_s8("LLVM scalar integer-count intrinsics require an integer width from 1 to 64"), function, 0, instruction,
+                     IR_SYMBOL_ID_INVALID);
+    }
+    else if (!llvm_bc_find_integer_count(context, instruction->unary_operation, width))
+    {
+        char8 const* prefix = instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ? "llvm.ctlz.i"
+                              : instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS ? "llvm.cttz.i" : "llvm.ctpop.i";
+        String8 name = llvm_bc_generated_name(context, prefix, width);
+        if (!llvm_bc_name_available(context, name, 0))
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM intrinsic name conflicts with a source symbol"),
+                         function, 0, instruction, IR_SYMBOL_ID_INVALID);
+        }
+        else
+        {
+            u32 integer_type = context->ir_type_ids[type->id.value];
+            u64 operands[4] = {0, integer_type, integer_type, context->i1_type_id};
+            u32 operand_count = instruction->unary_operation == IR_UNARY_INTEGER_POPULATION_COUNT ? 3 : 4;
+            u32 function_type = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, operands, operand_count);
+            llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
+                                sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
+            context->functions[context->function_count++] = (LlvmBcFunction){
+                .name = name, .canonical_type = IR_TYPE_ID_INVALID, .value_id = LLVM_BC_INVALID_ID,
+                .type_id = function_type, .declaration = true, .synthetic = true,
+                .intrinsic_operation = instruction->unary_operation, .intrinsic_width = width,
+            };
+        }
+    }
+    return !llvm_bc_failed(context);
+}
+
 static bool llvm_bc_collect_entities(LlvmBcContext* context)
 {
     u32 symbol_count = context->program->symbols.count;
@@ -1713,6 +1781,71 @@ static bool llvm_bc_collect_entities(LlvmBcContext* context)
         (needs_stack_restore && !llvm_bc_add_stack_intrinsic(context, false)))
     {
         return false;
+    }
+
+    // Intrinsic declarations are module values too. Discover them before
+    // assigning any value IDs, in a fixed order independent of IR traversal.
+    bool needed[LLVM_BC_VA_INTRINSIC_COUNT] = {0};
+    for (u32 index = 0; index < context->function_count; index += 1)
+    {
+        IrFunction* function = context->functions[index].function;
+        if (function && !context->functions[index].declaration)
+        {
+            for (u32 instruction = 0; instruction < function->instruction_count; instruction += 1)
+            {
+                IrOpcode opcode = function->instructions[instruction].opcode;
+                needed[LLVM_BC_VA_START] |= opcode == IR_OPCODE_VA_START;
+                needed[LLVM_BC_VA_COPY] |= opcode == IR_OPCODE_VA_COPY;
+                needed[LLVM_BC_VA_END] |= opcode == IR_OPCODE_VA_END;
+            }
+        }
+    }
+    String8 names[LLVM_BC_VA_INTRINSIC_COUNT] = {S8("llvm.va_start"), S8("llvm.va_copy"), S8("llvm.va_end")};
+    for (u32 index = 0; index < LLVM_BC_VA_INTRINSIC_COUNT; index += 1)
+    {
+        context->va_intrinsic_ids[index] = LLVM_BC_INVALID_ID;
+        if (needed[index])
+        {
+            if (!llvm_bc_name_available(context, names[index], 0))
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_DUPLICATE_SYMBOL, llvm_bc_s8("LLVM variadic intrinsic name conflicts with a symbol"),
+                             0, 0, 0, IR_SYMBOL_ID_INVALID);
+                return false;
+            }
+            u64 types[4] = {0, context->void_type_id, context->pointer_type_id, context->pointer_type_id};
+            u32 type_id = llvm_bc_add_type_record(context, LLVM_BC_TYPE_FUNCTION, types, index == LLVM_BC_VA_COPY ? 4 : 3);
+            llvm_bc_vec_reserve(context->arena, (void**)&context->functions, &context->function_capacity, context->function_count + 1,
+                                sizeof(*context->functions), BUSTER_ALIGN_OF(LlvmBcFunction));
+            context->functions[context->function_count] = (LlvmBcFunction){.name = names[index], .type_id = type_id,
+                                                                            .canonical_type = IR_TYPE_ID_INVALID,
+                                                                            .declaration = true, .synthetic = true};
+            context->va_intrinsic_ids[index] = context->function_count;
+            context->function_count += 1;
+        }
+    }
+
+    // Declarations precede constants and local values. Visit canonical rows
+    // in stable order, sharing one overloaded declaration per operation/width.
+    for (u32 module_index = 0; module_index < context->module_count; module_index += 1)
+    {
+        IrModule* module = context->modules + module_index;
+        for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+            {
+                IrInstruction* instruction = function->instructions + instruction_index;
+                if (instruction->opcode == IR_OPCODE_UNARY && llvm_bc_is_integer_count(instruction->unary_operation) &&
+                    !llvm_bc_add_integer_count(context, function, instruction))
+                {
+                    return false;
+                }
+            }
+        }
     }
 
     u32 value_id = 0;
@@ -2281,6 +2414,11 @@ static bool llvm_bc_collect_instruction_constants(LlvmBcContext* context)
                 {
                     llvm_bc_all_ones_constant(context, type);
                 }
+                else if (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                         instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS)
+                {
+                    llvm_bc_integer_constant_for_type_id(context, context->i1_type_id, 1, 1);
+                }
                 break;
             case IR_OPCODE_ARRAY:
             case IR_OPCODE_AGGREGATE:
@@ -2451,6 +2589,62 @@ static bool llvm_bc_cast_is_alias(LlvmBcContext* context, IrFunction* function, 
     return source != LLVM_BC_INVALID_ID && source == destination;
 }
 
+BUSTER_GLOBAL_LOCAL bool llvm_bc_va_shape_supported(LlvmBcContext* context, IrFunction* function, IrBlock* block, IrInstruction* instruction)
+{
+    bool supported = context->abi_target_valid && context->abi_target.cpu_arch == CPU_ARCH_X86_64 &&
+                     (context->abi_target.os == OPERATING_SYSTEM_LINUX || context->abi_target.os == OPERATING_SYSTEM_WINDOWS);
+    IrType* signature = llvm_bc_ir_type(context, function->canonical_type);
+    IrCallingConvention convention = signature ? signature->calling_convention : IR_CALLING_CONVENTION_COUNT;
+    supported &= convention == IR_CALLING_CONVENTION_C ||
+                 (convention == IR_CALLING_CONVENTION_SYSTEMV && context->abi_target.os == OPERATING_SYSTEM_LINUX) ||
+                 (convention == IR_CALLING_CONVENTION_WIN64 && context->abi_target.os == OPERATING_SYSTEM_WINDOWS);
+    if (!supported)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION,
+                     llvm_bc_s8("LLVM va_list operations require x86-64 Linux SysV or Windows Win64"), function, block, instruction,
+                     instruction->symbol);
+    }
+    else
+    {
+        IrType* list = 0;
+        if (instruction->opcode == IR_OPCODE_VA_START)
+        {
+            list = llvm_bc_ir_type(context, instruction->canonical_type);
+        }
+        else
+        {
+            IrType* pointer = llvm_bc_ir_type(context, function->values[instruction->operands[0].value].canonical_type);
+            list = llvm_bc_ir_type(context, pointer->element_type);
+        }
+        u32 size = context->abi_target.os == OPERATING_SYSTEM_LINUX ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 8;
+        supported = list && list->kind == IR_TYPE_VA_LIST && list->layout.resolved && list->layout.size == size &&
+                    list->layout.alignment == 8;
+        if (instruction->opcode == IR_OPCODE_VA_COPY)
+        {
+            IrType* result = llvm_bc_ir_type(context, instruction->canonical_type);
+            supported &= result && result->kind == IR_TYPE_VA_LIST && result->layout.size == size;
+        }
+        if (!supported)
+        {
+            llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE,
+                         llvm_bc_s8("LLVM va_list layout does not match the target ABI"), function, block, instruction, instruction->symbol);
+        }
+        else if (instruction->opcode == IR_OPCODE_VA_ARG)
+        {
+            IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+            supported = type && ((type->kind == IR_TYPE_INTEGER && (type->bit_width == 32 || type->bit_width == 64)) ||
+                                 (type->kind == IR_TYPE_FLOAT && type->bit_width == 64) || type->kind == IR_TYPE_POINTER);
+            if (!supported)
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE,
+                             llvm_bc_s8("LLVM va_arg requires a promoted i32/i64, double, or pointer scalar"), function, block,
+                             instruction, instruction->symbol);
+            }
+        }
+    }
+    return supported;
+}
+
 static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction* function, IrBlock* block, IrInstruction* instruction)
 {
     switch (instruction->opcode)
@@ -2519,15 +2713,15 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
         case IR_UNARY_VECTOR_INTEGER_NEGATE:
         case IR_UNARY_VECTOR_FLOAT_NEGATE:
         case IR_UNARY_VECTOR_INTEGER_BITWISE_NOT:
-            return 1;
         case IR_UNARY_INTEGER_COUNT_LEADING_ZEROS:
         case IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS:
         case IR_UNARY_INTEGER_POPULATION_COUNT:
+            return 1;
         case IR_UNARY_COUNT:
             break;
         }
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION,
-                     llvm_bc_s8("LLVM bitcode integer-count intrinsics are not implemented"), function, block, instruction, IR_SYMBOL_ID_INVALID);
+                     llvm_bc_s8("invalid LLVM unary operation"), function, block, instruction, IR_SYMBOL_ID_INVALID);
         return LLVM_BC_INVALID_ID;
     case IR_OPCODE_BINARY:
         if (instruction->binary_operation == IR_BINARY_RANGE || instruction->binary_operation >= IR_BINARY_COUNT)
@@ -2594,21 +2788,22 @@ static u32 llvm_bc_instruction_emitted_count(LlvmBcContext* context, IrFunction*
                      instruction, instruction->symbol);
         return LLVM_BC_INVALID_ID;
     case IR_OPCODE_VA_START:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode va_start is not implemented"), function, block,
-                     instruction, instruction->symbol);
-        return LLVM_BC_INVALID_ID;
     case IR_OPCODE_VA_COPY:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode va_copy is not implemented"), function, block, instruction,
-                     instruction->symbol);
-        return LLVM_BC_INVALID_ID;
+        return llvm_bc_va_shape_supported(context, function, block, instruction) ? 2 : LLVM_BC_INVALID_ID;
     case IR_OPCODE_VA_END:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode va_end is not implemented"), function, block, instruction,
-                     instruction->symbol);
-        return LLVM_BC_INVALID_ID;
+        return llvm_bc_va_shape_supported(context, function, block, instruction) ? 0 : LLVM_BC_INVALID_ID;
     case IR_OPCODE_VA_ARG:
-        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode va_arg is not implemented"), function, block, instruction,
-                     instruction->symbol);
-        return LLVM_BC_INVALID_ID;
+    {
+        u32 count = LLVM_BC_INVALID_ID;
+        if (llvm_bc_va_shape_supported(context, function, block, instruction))
+        {
+            IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+            // Generic Win64 VAARG advances by the LLVM result size; a C int
+            // still occupies a full eight-byte slot in the Win64 argument area.
+            count = context->abi_target.os == OPERATING_SYSTEM_WINDOWS && type->kind == IR_TYPE_INTEGER && type->bit_width == 32 ? 2 : 1;
+        }
+        return count;
+    }
     case IR_OPCODE_INLINE_ASSEMBLY:
         llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION, llvm_bc_s8("LLVM bitcode inline assembly is not implemented"), function, block,
                      instruction, instruction->symbol);
@@ -3438,6 +3633,67 @@ static bool llvm_bc_emit_call(LlvmBcContext* context, LlvmBcFunction* record, Ir
     return !llvm_bc_failed(context);
 }
 
+BUSTER_GLOBAL_LOCAL void llvm_bc_emit_va_instruction(LlvmBcContext* context, LlvmBcFunction* record, IrInstruction* instruction,
+                                                     u32* current_value_id)
+{
+    u32 source = LLVM_BC_INVALID_ID;
+    if (instruction->operand_count)
+    {
+        source = llvm_bc_function_value_id(context, record, instruction->operands[0]);
+    }
+    if (instruction->opcode == IR_OPCODE_VA_ARG)
+    {
+        IrType* type = llvm_bc_ir_type(context, instruction->canonical_type);
+        bool win64_int = context->abi_target.os == OPERATING_SYSTEM_WINDOWS && type->kind == IR_TYPE_INTEGER && type->bit_width == 32;
+        u32 read_type = win64_int ? context->i64_type_id : context->ir_type_ids[instruction->canonical_type.value];
+        u64 operands[3] = {context->pointer_type_id, (u32)(*current_value_id - source), read_type};
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_VAARG, operands, 3);
+        *current_value_id += 1;
+        if (win64_int)
+        {
+            u64 cast[4];
+            u32 count = 0;
+            llvm_bc_push_value_and_type(cast, &count, *current_value_id, *current_value_id - 1, read_type);
+            cast[count++] = context->ir_type_ids[instruction->canonical_type.value];
+            cast[count++] = LLVM_BC_CAST_TRUNC;
+            llvm_bc_record(&context->stream, LLVM_BC_FUNC_CAST, cast, count);
+            *current_value_id += 1;
+        }
+    }
+    else
+    {
+        bool produces_list = instruction->opcode != IR_OPCODE_VA_END;
+        u32 destination = LLVM_BC_INVALID_ID;
+        if (produces_list)
+        {
+            LlvmBcAbiValue storage = {.storage_type_id = context->ir_type_ids[instruction->canonical_type.value], .alignment = 8};
+            destination = llvm_bc_abi_temporary(context, storage, current_value_id);
+        }
+        u32 intrinsic = instruction->opcode == IR_OPCODE_VA_START ? LLVM_BC_VA_START :
+                        instruction->opcode == IR_OPCODE_VA_COPY ? LLVM_BC_VA_COPY : LLVM_BC_VA_END;
+        LlvmBcFunction* declaration = context->functions + context->va_intrinsic_ids[intrinsic];
+        u64 operands[7];
+        u32 count = 0;
+        operands[count++] = 0; // No parameter attributes or bundles.
+        operands[count++] = LLVM_BC_CALL_EXPLICIT_TYPE;
+        operands[count++] = declaration->type_id;
+        llvm_bc_push_value_and_type(operands, &count, *current_value_id, declaration->value_id, context->pointer_type_id);
+        if (produces_list)
+        {
+            llvm_bc_push_relative(operands, &count, *current_value_id, destination);
+        }
+        if (source != LLVM_BC_INVALID_ID)
+        {
+            llvm_bc_push_relative(operands, &count, *current_value_id, source);
+        }
+        llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
+        if (produces_list)
+        {
+            llvm_bc_abi_load(context, destination, context->ir_type_ids[instruction->canonical_type.value], 8, current_value_id);
+        }
+    }
+}
+
 static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* record, IrBlock* block, IrInstruction* instruction,
                                      u32* current_value_id)
 {
@@ -3708,6 +3964,12 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
             return false;
         }
         break;
+    case IR_OPCODE_VA_START:
+    case IR_OPCODE_VA_COPY:
+    case IR_OPCODE_VA_END:
+    case IR_OPCODE_VA_ARG:
+        llvm_bc_emit_va_instruction(context, record, instruction, current_value_id);
+        break;
     case IR_OPCODE_CAST:
         if (!llvm_bc_cast_is_alias(context, function, instruction))
         {
@@ -3733,7 +3995,28 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
         u32 source = llvm_bc_function_value_id(context, record, instruction->operands[0]);
         u32 source_type = llvm_bc_function_value_type_id(context, record, instruction->operands[0]);
         IrType* result_type = llvm_bc_ir_type(context, instruction->canonical_type);
-        if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE || instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE)
+        if (llvm_bc_is_integer_count(instruction->unary_operation))
+        {
+            LlvmBcFunction* intrinsic = llvm_bc_find_integer_count(context, instruction->unary_operation, result_type->bit_width);
+            if (!intrinsic)
+            {
+                llvm_bc_fail(context, LLVM_BITCODE_ERROR_VALUE_NUMBERING, llvm_bc_s8("missing LLVM integer-count declaration"),
+                             function, block, instruction, IR_SYMBOL_ID_INVALID);
+                return false;
+            }
+            operands[count++] = 0; // no parameter attributes
+            operands[count++] = LLVM_BC_CALL_EXPLICIT_TYPE;
+            operands[count++] = intrinsic->type_id;
+            llvm_bc_push_value_and_type(operands, &count, *current_value_id, intrinsic->value_id, context->pointer_type_id);
+            llvm_bc_push_relative(operands, &count, *current_value_id, source);
+            if (instruction->unary_operation != IR_UNARY_INTEGER_POPULATION_COUNT)
+            {
+                u32 zero_poison = llvm_bc_integer_constant_for_type_id(context, context->i1_type_id, 1, 1);
+                llvm_bc_push_relative(operands, &count, *current_value_id, zero_poison);
+            }
+            llvm_bc_record(&context->stream, LLVM_BC_FUNC_CALL, operands, count);
+        }
+        else if (instruction->unary_operation == IR_UNARY_FLOAT_NEGATE || instruction->unary_operation == IR_UNARY_VECTOR_FLOAT_NEGATE)
         {
             llvm_bc_push_value_and_type(operands, &count, *current_value_id, source, source_type);
             operands[count++] = 0;
@@ -3842,10 +4125,6 @@ static bool llvm_bc_emit_instruction(LlvmBcContext* context, LlvmBcFunction* rec
     case IR_OPCODE_CLEAR_INSTRUCTION_CACHE:
     case IR_OPCODE_SLICE:
     case IR_OPCODE_REVERSE:
-    case IR_OPCODE_VA_START:
-    case IR_OPCODE_VA_COPY:
-    case IR_OPCODE_VA_END:
-    case IR_OPCODE_VA_ARG:
     case IR_OPCODE_INLINE_ASSEMBLY:
     case IR_OPCODE_SIMD:
     case IR_OPCODE_LABEL_ADDRESS:

@@ -49,7 +49,16 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Test merge-parent preservation guard
+        shell: bash
+        run: python3 -B tools/merge_parent_preservation_test.py -v
+      - name: Check candidate merge history
+        shell: bash
+        env:
+          MERGE_PARENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '' }}
+        run: python3 -B tools/merge_parent_preservation.py --candidate "$GITHUB_SHA" --base "$MERGE_PARENT_BASE_SHA" --event-name "$GITHUB_EVENT_NAME"
       - name: Validate approved action references
         shell: bash
         run: |
@@ -268,6 +277,7 @@ jobs:
           run_suite tools/native_producer_profile_test.py native-producer-profile.log
           run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
           run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
+          run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
           run_suite tools/ci_native_observation_test.py native-observation-test.log
           printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
             "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -756,10 +766,21 @@ jobs:
           Copy-Item 'tools/fixtures/msvc_reference_subject.c' $Subject
           Copy-Item 'tools/fixtures/msvc_reference_caller.c' $Caller
           $Output = Join-Path $Root 'msvc reference with spaces'
+          if ($env:VS_ARCH -eq 'arm64') {
+            $TimeoutControlLog = Join-Path $Root 'msvc-timeout-control.log'
+            & $Driver test_differential --self-test --reference-timeout 1 2>&1 | Tee-Object -FilePath $TimeoutControlLog
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if (-not (Select-String -Quiet -LiteralPath $TimeoutControlLog -Pattern 'DIFFERENTIAL_TIMEOUT_CONTROL reference_timeout_seconds=1 result=timeout')) {
+              throw 'MSVC one-second timeout control did not observe a timeout'
+            }
+          }
           $MsvcArgs = @('test_differential', '--ide', 'build/Release/ide.exe', '--cc', 'cl.exe',
             '--reference-dialect', 'msvc', '--source', $Subject, '--host', $Caller,
             '--include', $Include, '--library-path', $Libraries, '--minimize', '0',
-            '--strict-mir', '--out', $Output)
+            '--reference-timeout', '60', '--strict-mir', '--out', $Output)
+          if ($env:VS_ARCH -eq 'arm64') {
+            $MsvcArgs += @('--reference-samples', '12')
+          }
           $ErrorActionPreference = 'Continue'
           & $Driver @MsvcArgs 2>&1 | Tee-Object -FilePath (Join-Path $Root 'msvc-reference.log')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1030,7 +1051,8 @@ jobs:
         run: python3 tools/ci_summary.py
 
       - name: Retain mobile logs
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        # Loading a local action requires checkout, not successful build/test steps.
         # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
         uses: ./.github/actions/native-artifact-upload
         with:
