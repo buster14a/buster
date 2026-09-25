@@ -15718,7 +15718,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
-    String8 c_flat_initializer_source = S8(
+    // Keep each embedded source literal below the C99 minimum supported
+    // string-literal length; the executed fixture spans both parts.
+    String8 c_flat_initializer_parts[] = {S8(
         "struct Pair\n"
         "{\n"
         "    int first;\n"
@@ -15828,7 +15830,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         "    return direct.pair.first != 79 || direct.pair.second != 83 || direct.tail != 89 || parenthesized.pair.first != 97 ||\n"
         "           parenthesized.pair.second != 101 || parenthesized.tail != 103;\n"
         "}\n"
-        "\n"
+        "\n"),
+        S8(
         "static int nested_overrides(void)\n"
         "{\n"
         "    struct NamedOuter leaf = {.pair = {1, 2}, .pair.first = 3};\n"
@@ -15859,7 +15862,8 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         "int main(void)\n"
         "{\n"
         "    return named_local() || named_literal() || anonymous_local() || array_local() || union_local() || aggregate_expression() || nested_overrides();\n"
-        "}\n");
+        "}\n")};
+    String8 c_flat_initializer_source = string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_flat_initializer_parts), false);
     String8 c_flat_initializer_frontends[] = {S8("-fno-frontend-ssa"), S8("-ffrontend-ssa")};
     String8 c_flat_initializer_optimizations[] = {S8("-O0"), S8("-O2")};
     for (u64 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
