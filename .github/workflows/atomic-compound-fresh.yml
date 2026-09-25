@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          fetch-depth: 16
+          fetch-depth: 20
       - name: Freeze current source and reconcile intervening VLA change
         shell: bash
         run: |
@@ -41,7 +41,16 @@ jobs:
           old = (Path(os.environ['RUNNER_TEMP']) / 'original-c_gen.c').read_text().splitlines()
           new = Path('src/buster/lib/compiler/frontend/c/c_gen.c').read_text().splitlines()
           def extract(lines, name):
-              start = next(i for i, line in enumerate(lines) if line.startswith('BUSTER_C_INTERNAL ') and name + '(' in line)
+              definitions = []
+              for index, line in enumerate(lines):
+                  if line.startswith('BUSTER_C_INTERNAL ') and name + '(' in line:
+                      body = index + 1
+                      while body < len(lines) and lines[body] != '{' and not lines[body - 1].rstrip().endswith(';'):
+                          body += 1
+                      if body < len(lines) and lines[body] == '{':
+                          definitions.append(index)
+              assert len(definitions) == 1, (name, definitions)
+              start = definitions[0]
               end = next(i for i in range(start + 1, len(lines)) if lines[i] == '}')
               text = '\n'.join(lines[start:end + 1]) + '\n'
               return {'line_start': start + 1, 'line_end': end + 1, 'sha256': hashlib.sha256(text.encode()).hexdigest()}
