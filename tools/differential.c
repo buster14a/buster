@@ -35,6 +35,8 @@ BUSTER_GLOBAL_LOCAL DCase const d_builtin_cases[] = {
 #if BUSTER_CPU_ARCH_X86_64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     {S8("sysv-va-list"), S8("tests/differential/sysv_va_list.c"), S8("tests/differential/sysv_va_list_host.c"), false, {0}, true, true},
     {S8("sysv-sseup"), S8("tests/basic_c_sysv_sseup.c"), S8("tests/host_sysv_sseup.c"), false, {0}, true, true},
+    {S8("x64-i128-float"), S8("tools/fixtures/x64_i128_float_differential.c"),
+     S8("tools/fixtures/x64_i128_float_differential_host.c"), false, {0}, true, true},
 #endif
     {S8("reject-type"), S8("tests/differential/reject_type.c"), {0}, true},
     {S8("reject-syntax"), S8("tests/differential/reject_syntax.c"), {0}, true},

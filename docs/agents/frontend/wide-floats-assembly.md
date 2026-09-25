@@ -128,7 +128,11 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   and an exact zero/2^63 correction at extended precision; it preserves all
   four rounding modes and restores the complete control word after truncation.
   The direct implementation is `codegen_canonical_x64_emit_f80_*` in
-  `codegen.c`; f80/i128 conversions remain unsupported by both backends.
+  `codegen.c`. The machine selector also lowers i128 casts to and from f80
+  through two frame limbs and closed x87 transactions. Its final addition
+  selects 24-, 53-, or 64-bit precision for one row, preserving the caller's
+  complete control word; f80-to-i128 extracts high and low unsigned limbs
+  at 64-bit precision before restoring a signed result.
   Preserve the caller's
   x87 control word: canonical truncate helpers and the MIR conversion row
   may temporarily change only rounding control for a C integer cast, then
