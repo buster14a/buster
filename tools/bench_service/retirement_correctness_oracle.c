@@ -303,22 +303,47 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_oracle_seal(
         static char const domain[] = "bq-retirement-independent-oracle-observed-v1";
         sha256_add(&hash, domain, sizeof(domain) - 1);
         sha256_add(&hash, spec_sha256, 64);
-        for (uint32_t i = 0; ok && i < ledger->count; i += 1)
+        uint32_t matched = 0;
+        for (uint32_t i = 0; ok && i < ledger->prepared.rows; i += 1)
         {
-            BqRetirementOracleReference const* reference = ledger->references + i;
-            BqRetirementTrustedRow const* row = ledger->rows + reference->row;
-            ok = row->row == reference->row &&
-                row->census_row == reference->census_row &&
-                row->target == reference->target &&
-                !strcmp(row->source_sha256, reference->source_sha256) &&
-                !strcmp(row->configuration_sha256, reference->configuration_sha256) &&
-                bq_retirement_oracle_hex(row->independent_oracle_sha256);
+            BqRetirementTrustedRow const* row = ledger->rows + i;
+            bool runtime = row->compiler_eligible && row->execution_obligation &&
+                row->stage != BQ_RETIREMENT_STAGE_OBJECT &&
+                row->target == ledger->prepared.native_target;
+            ok = row->row == i;
+            if (ok && runtime)
+            {
+                BqRetirementOracleReference const* reference =
+                    matched < ledger->count ? ledger->references + matched : NULL;
+                ok = reference && reference->row == i &&
+                    row->census_row == reference->census_row &&
+                    row->target == reference->target &&
+                    !strcmp(row->source_sha256, reference->source_sha256) &&
+                    !strcmp(row->configuration_sha256,
+                        reference->configuration_sha256) &&
+                    bq_retirement_oracle_hex(row->independent_oracle_sha256);
+                if (ok) matched += 1;
+            }
+            else if (ok) ok = bq_retirement_oracle_empty(
+                row->independent_oracle_sha256);
             if (ok)
             {
-                bq_retirement_oracle_number(&hash, reference->row);
-                sha256_add(&hash, row->independent_oracle_sha256, 64);
+                bq_retirement_oracle_number(&hash, row->row);
+                bq_retirement_oracle_number(&hash, row->census_row);
+                bq_retirement_oracle_number(&hash, row->target);
+                bq_retirement_oracle_number(&hash, row->stage);
+                bq_retirement_oracle_number(&hash, row->classification);
+                bq_retirement_oracle_number(&hash, row->compiler_eligible);
+                bq_retirement_oracle_number(&hash, row->code_obligation);
+                bq_retirement_oracle_number(&hash, row->execution_obligation);
+                sha256_add(&hash, row->identity_sha256, 65);
+                sha256_add(&hash, row->source_sha256, 65);
+                sha256_add(&hash, row->configuration_sha256, 65);
+                sha256_add(&hash, row->skip_proof_sha256, 65);
+                sha256_add(&hash, row->independent_oracle_sha256, 65);
             }
         }
+        if (ok) ok = matched == ledger->count;
         if (ok) sha256_finish_hex(&hash, digest);
     }
     if (!ok && digest) digest[0] = 0;

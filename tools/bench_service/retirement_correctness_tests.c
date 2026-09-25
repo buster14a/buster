@@ -931,6 +931,10 @@ static void test_independent_oracle(char const* executable)
             CHECK(!bq_retirement_oracle_ready(&ledger));
             references[1].command_sha256[0] ^= 1;
             CHECK(bq_retirement_oracle_ready(&ledger));
+            fixture.trusted[0].compiler_eligible ^= 1;
+            CHECK(!bq_retirement_oracle_ready(&ledger));
+            fixture.trusted[0].compiler_eligible ^= 1;
+            CHECK(bq_retirement_oracle_ready(&ledger));
             /* The B gate compares both measured sides to the newly observed
              * reference bytes. A changed candidate output never reaches a
              * timed-start decision in this private fixture. */
