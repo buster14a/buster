@@ -1,0 +1,33 @@
+name: Issue 1162 exact-source isolated systemd slice
+
+on:
+  push:
+    branches: [codex/1162-exact-systemd-slice-20260925]
+    paths:
+      - .github/workflows/issue1162-exact-systemd-slice.yml
+      - .github/scripts/issue1162_exact_systemd_slice.sh
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-slice:
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/1162-exact-systemd-slice-20260925'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run pinned source in disposable real systemd guest
+        shell: bash
+        run: bash .github/scripts/issue1162_exact_systemd_slice.sh
+      - name: Retain all isolated diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue1162-exact-systemd-slice
+          path: ${{ runner.temp }}/issue1162-exact-slice-evidence
+          if-no-files-found: warn
+          retention-days: 7
