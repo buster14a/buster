@@ -1535,11 +1535,6 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
 {
     static String8 const app_header = S8_INITIALIZER("row\tgroup\tfixture\ttarget\tcpu\tfrontend\tallocator\tPIC\tapplicability\tadmission\tdisposition\treason\townership\tcandidate_failure\treference_failure\tacceptance_failure");
     static String8 const skips_header = S8_INITIALIZER("row\tgroup\tfixture\ttarget\tallocator\tapplicability\treason");
-    static String8 const report_classes[5] = {
-        S8_INITIALIZER("admitted-supported"), S8_INITIALIZER("retained-control"),
-        S8_INITIALIZER("retained-reference"), S8_INITIALIZER("platform-inapplicable"),
-        S8_INITIALIZER("unavailable")
-    };
     bool ok = report.pointer && report_sha256.length == 64 && applicability.pointer && skips_text.pointer &&
               raw_rows && subjects && subject_count > 0 && ledger && ledger_count <= BQ_RETIREMENT_VALIDATOR_LEDGER_RECORD_CAP &&
               row_count > 0 && projection;
@@ -1693,6 +1688,11 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
     int report_file, int applicability_file, int skips_file,
     String8 profile, BqRetirementValidatorEligibility* projection)
 {
+    static String8 const report_classes[5] = {
+        S8_INITIALIZER("admitted-supported"), S8_INITIALIZER("retained-control"),
+        S8_INITIALIZER("retained-reference"), S8_INITIALIZER("platform-inapplicable"),
+        S8_INITIALIZER("unavailable")
+    };
     u8 *support_bytes = NULL, *source_ledger_bytes = NULL, *inputs_bytes = NULL, *rows_bytes = NULL, *manifest_bytes = NULL;
     u8 *report_bytes = NULL, *applicability_bytes = NULL, *skips_bytes = NULL;
     u64 support_length = 0, source_ledger_length = 0, inputs_length = 0, rows_length = 0, manifest_length = 0;
