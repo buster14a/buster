@@ -15857,6 +15857,43 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // A chained designator resumes at the innermost selected aggregate.
+    // Check both frontend forms, every native allocator, and O0/O2 so a
+    // wrong destination or valid-source rejection fails this registered gate.
+    String8 c_designator_optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
+    {
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            for (u32 optimization_index = 0; optimization_index < BUSTER_ARRAY_LENGTH(c_designator_optimizations); optimization_index += 1)
+            {
+                TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+                String8 fixture_path = buster_test_temporary_path(
+                    fixture_temporary.arena, S8("buster-c-designator-continuation"),
+                    string_format(fixture_temporary.arena, S8("-{u32}-{u32}-{u32}"), frontend_index, allocator_index, optimization_index));
+                String8 fixture_command_line[] = {
+                    S8("-std=c17"), c_flat_initializer_frontends[frontend_index], c_lz4_regression_allocators[allocator_index],
+                    c_designator_optimizations[optimization_index], S8("-fverify-codegen"), S8("-fno-machine-fallback"),
+                    S8("-o"), fixture_path, S8("tests/basic_c_designated_subscript_initializer.c"),
+                };
+                CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                    fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+                BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+                if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 fixture_arguments[] = {fixture_path};
+                    ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0},
+                                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                    if (fixture_spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(fixture_temporary);
+            }
+        }
+    }
     // #792: on a PE target that fixture used to be unlinkable.  `atexit` and
     // `at_quick_exit` are not ucrtbase.dll exports -- UCRT keeps them in its
     // import library as one call apiece to `_crt_atexit` and
