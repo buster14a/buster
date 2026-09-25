@@ -580,6 +580,61 @@ class NativeObservationTest(unittest.TestCase):
         self.assertIn("uses: ./.github/actions/native-artifact-upload", primary_upload)
 
 
+    def test_desktop_log_upload_reuses_bounded_action_for_all_shards(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        workflow = (repository_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        desktop = workflow.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
+        lanes = re.search(r"(?m)^        lane: \[([^\]]+)\]$", desktop)
+        shards = re.search(r"(?m)^        shard: \[([^\]]+)\]$", desktop)
+        self.assertIsNotNone(lanes)
+        self.assertIsNotNone(shards)
+        self.assertEqual(lanes.group(1).split(", "), [
+            "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64",
+            "windows-x86_64", "windows-aarch64",
+        ])
+        self.assertEqual(shards.group(1).split(", "), ["release", "checks"])
+        steps = dict(re.findall(
+            r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - name:|\Z)", desktop,
+        ))
+        upload = steps["Retain desktop logs"]
+        self.assertIn("id: checkout", steps["Checkout"])
+        self.assertLess(desktop.index("      - name: Checkout"), desktop.index("      - name: Retain desktop logs"))
+        self.assertIn("if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}", upload)
+        self.assertIn("uses: ./.github/actions/native-artifact-upload", upload)
+        self.assertIn("label: desktop", upload)
+        self.assertIn("label_title: Desktop", upload)
+        self.assertIn(
+            "name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}",
+            upload,
+        )
+        self.assertIn("path: ${{ runner.temp }}/buster-ci/", upload)
+        self.assertIn("compression-level: 6", upload)
+        self.assertIn("if-no-files-found: ignore", upload)
+        self.assertIn("retention-days: 7", upload)
+        self.assertNotIn("uses: actions/upload-artifact@", upload)
+        self.assertNotRegex(desktop, r"(?m)^\s*continue-on-error:")
+        # The caller runs after failed builds, but never loads a local action
+        # without checkout or retries after cancellation.
+        condition = re.search(r"(?m)^        if: \$\{\{ (.+) \}\}$", upload)
+        self.assertIsNotNone(condition)
+        terms = condition.group(1).split(" && ")
+        for checkout, cancelled, earlier_failure, expected in (
+            ("success", False, None, True),
+            ("success", False, "build", True),
+            ("success", False, "test", True),
+            ("success", False, "summary", True),
+            ("failure", False, "checkout", False),
+            ("skipped", False, "checkout", False),
+            ("success", True, "test", False),
+        ):
+            with self.subTest(checkout=checkout, cancelled=cancelled, earlier_failure=earlier_failure):
+                values = {
+                    "!cancelled()": not cancelled,
+                    "steps.checkout.outcome == 'success'": checkout == "success",
+                }
+                self.assertEqual(set(terms), set(values))
+                self.assertEqual(all(values[term] for term in terms), expected)
+
     def test_mobile_log_upload_reuses_bounded_action_for_all_matrix_entries(self):
         repository_root = Path(__file__).resolve().parents[1]
         workflow = (repository_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
