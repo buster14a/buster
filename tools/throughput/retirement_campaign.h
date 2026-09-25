@@ -209,7 +209,7 @@ static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows,
  * from the trusted service for this job. Missing bounds, overflow, an
  * inconsistent capacity record or a sum above the fixed one-hour job budget
  * rejects before timing; fixture bounds are not authority. */
-static int tp_retirement_campaign_preflight(TpRetirementCampaignCapacity const* capacity,
+static inline int tp_retirement_campaign_preflight(TpRetirementCampaignCapacity const* capacity,
     TpRetirementCampaignDurationBounds const* bounds, TpRetirementCampaignPreflight* preflight)
 {
     uint64_t expected_invocations = 0, settling_ns = 0, export_ns = 0;
