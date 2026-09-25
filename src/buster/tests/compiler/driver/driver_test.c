@@ -5798,7 +5798,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_i128_float(UnitTestA
         buster_test_temporary_path(arguments->arena, S8("buster-x64-i128-long-double-source"), S8(".c"));
     BUSTER_TEST(arguments, file_write(long_double_fixture, BUSTER_SLICE_TO_BYTE_SLICE(long_double_source)));
     String8 fixtures[] = {S8("tests/basic_c_aarch64_i128_to_float.c"), S8("tests/basic_c_aarch64_float_to_i128.c"),
-                          long_double_fixture};
+                          long_double_fixture, S8("tests/basic_c_x64_i128_fenv.c")};
     for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
@@ -5813,19 +5813,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x64_i128_float(UnitTestA
                                          S8("-fverify-codegen"), S8("-o"), output, fixtures[fixture]};
                     CompilerDriverInvocation invocation =
                         compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = mode != 0;
                     CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
                     String8 description = string_format(temporary.arena, S8("x64 i128/float {S8} {S8} {S8} {S8}: {S8}"),
                                                         targets[target], modes[mode], frontends[frontend], fixtures[fixture], compiled.diagnostic);
                     BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object, description);
+                    if (mode != 0)
+                    {
+                        BUSTER_TEST_RAW(arguments, compiled.codegen_statistics.fallback_function_count == 0, description);
+                    }
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
                     bool native_target = (target == 0 && BUSTER_LINUX) || (target == 1 && BUSTER_MACOS) || (target == 2 && BUSTER_WINDOWS);
-                    if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    // The retained direct NONE oracle does not promise x87
+                    // precision-independent signed directed rounding. The
+                    // control-word fixture exercises the new MIR path only.
+                    if (native_target && compiled.error == COMPILER_DRIVER_ERROR_NONE && (fixture != 3 || mode != 0))
                     {
                         String8 executable = buster_test_temporary_path(temporary.arena, S8("buster-x64-i128-float-run"), S8(".exe"));
                         String8 native_command[] = {modes[mode], frontends[frontend], S8("-fverify-codegen"), S8("-o"), executable,
                                                     fixtures[fixture]};
                         CompilerDriverInvocation native_invocation = compiler_driver_parse_arguments(
                             temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(native_command));
+                        native_invocation.reject_machine_fallback = mode != 0;
                         CompilerDriverResult native = compiler_driver_execute_invocation(temporary.arena, native_invocation);
                         BUSTER_TEST_RAW(arguments, native.error == COMPILER_DRIVER_ERROR_NONE, native.diagnostic);
                         if (native.error == COMPILER_DRIVER_ERROR_NONE)
