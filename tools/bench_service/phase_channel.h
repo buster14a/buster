@@ -2,7 +2,9 @@
  * supplies the connected socket; no pathname, environment or request opens it.
  * The recipe waits for each durable acknowledgement before proceeding. Children
  * must never inherit this socket. This protocol proves supervisor quiescence;
- * workload admission and the harness's own quiet behavior remain separate gates.
+ * its fixed phase/timestamp messages carry no retirement receipt or acceptance
+ * authority. Workload admission and the harness's own quiet behavior remain
+ * separate gates.
  */
 #ifndef BUSTER_BENCH_SERVICE_PHASE_CHANNEL_H
 #define BUSTER_BENCH_SERVICE_PHASE_CHANNEL_H

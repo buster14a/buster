@@ -7,11 +7,60 @@
 #define BQ_TEST_WORKER_BOUND_MILLISECONDS 1000u
 
 BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_test_alarm_count;
+BUSTER_GLOBAL_LOCAL volatile sig_atomic_t bq_test_worker_cancel_delivery_count;
 
 BUSTER_GLOBAL_LOCAL void bq_test_alarm_handler(int signal_number)
 {
     (void)signal_number;
     bq_test_alarm_count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_cancel_delivery_handler(int signal_number)
+{
+    (void)signal_number;
+    bq_test_worker_cancel_delivery_count += 1;
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_worker_pending_cancel_delivery(void)
+{
+    struct sigaction action = {0}, prior_term = {0}, prior_interrupt = {0};
+    sigset_t both, prior_mask;
+    sigemptyset(&action.sa_mask);
+    action.sa_handler = bq_test_worker_cancel_delivery_handler;
+    sigemptyset(&both);
+    sigaddset(&both, SIGTERM);
+    sigaddset(&both, SIGINT);
+    bool mask_saved = sigprocmask(SIG_SETMASK, NULL, &prior_mask) == 0;
+    bool term_installed = sigaction(SIGTERM, &action, &prior_term) == 0;
+    bool interrupt_installed = term_installed && sigaction(SIGINT, &action, &prior_interrupt) == 0;
+    bool ready = mask_saved && interrupt_installed && sigprocmask(SIG_UNBLOCK, &both, NULL) == 0;
+    BQ_CHECK(ready);
+    if (ready)
+    {
+        int signals[] = {SIGTERM, SIGINT};
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(signals); index += 1)
+        {
+            sigset_t one, pending, remaining;
+            sigemptyset(&one);
+            bool blocked = sigaddset(&one, signals[index]) == 0 && sigprocmask(SIG_BLOCK, &one, NULL) == 0;
+            bq_worker_cancel_signal = 0;
+            bq_worker_shutdown_signal = 0;
+            bq_test_worker_cancel_delivery_count = 0;
+            bool raised = blocked && raise(signals[index]) == 0 && sigpending(&pending) == 0 &&
+                          sigismember(&pending, signals[index]) == 1;
+            BQ_CHECK(raised);
+            BqError consumed = raised ? bq_worker_consume_pending_cancel(&pending) : BQ_IO;
+            bool drained = sigpending(&remaining) == 0 && sigismember(&remaining, signals[index]) == 0;
+            BQ_CHECK(consumed == BQ_OK && drained && bq_worker_cancel_signal && bq_worker_shutdown_signal);
+            bool unblocked = sigprocmask(SIG_UNBLOCK, &one, NULL) == 0;
+            BQ_CHECK(unblocked && bq_test_worker_cancel_delivery_count == 0);
+        }
+    }
+    if (mask_saved) BQ_CHECK(sigprocmask(SIG_SETMASK, &prior_mask, NULL) == 0);
+    if (interrupt_installed) BQ_CHECK(sigaction(SIGINT, &prior_interrupt, NULL) == 0);
+    if (term_installed) BQ_CHECK(sigaction(SIGTERM, &prior_term, NULL) == 0);
+    bq_worker_cancel_signal = 0;
+    bq_worker_shutdown_signal = 0;
 }
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_process_state(pid_t pid)
@@ -175,6 +224,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_group_reaping(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_deadlines(void)
 {
+    bq_test_worker_pending_cancel_delivery();
     u64 absolute = 0;
     BQ_CHECK(!bq_worker_execution_deadline(1, 0, &absolute));
     BQ_CHECK(!bq_worker_execution_deadline(UINT64_MAX, 1, &absolute));

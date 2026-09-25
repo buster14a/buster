@@ -5,41 +5,37 @@
 does not change the blocked recipe descriptor. The importer and the production
 caller have not yet been wired to this child branch.
 
-`retirement_correctness_service.{h,c}` provides the private service entry
-point for the first A→B join. Its public entry now imports the same-attempt
-preparation, matched-build receipts and binary record using service-held
-installed/workspace descriptors and authenticated record digests. It opens
-both verified frozen binaries, checks
-the independently supplied B declaration's preparation, source and binary
-digests against that readback. Before the build import, the public entry reads
-a private, read-only, single-link support declaration descriptor, verifies the
-exact bytes against the compiled profile SHA-256 pin, and counts actual subject
-rows (including registered non-object controls). The 12-target, 2-frontend,
-2-PIC, 4-allocator #508 matrix requires 192 object rows per subject. It rejects
-a B declaration with a different `object_rows` count or fewer than two additional
-link/self-host stage rows. This independently establishes the current 78,912
-object-row count from the reviewed 411-subject ledger, without trusting a
-caller-supplied census count. For every declared object row, the public entry
-also joins its unique #508 census ordinal to the pinned subject's source SHA-256
-and twelve-target matrix position, including source-bound non-object controls.
-It requires at least one link and one self-host stage row. An omitted, duplicated,
-misnumbered, source-swapped or wrong-target object row fails before the build
-import. The integrator must install/hold the exact
-declaration file and pass its descriptor; the pinned miniature seam remains
-synthetic. This projection join does not independently authenticate the
-remaining row identity/configuration fields, applicability and eligibility,
-check receipts or oracles; those require the full census/validator replay.
-Only then does the entry call
-`bq_retirement_correctness_begin`.
+`retirement_correctness_service.{h,c}` provides a partial private service entry
+for the first A→B join. It imports the same-attempt preparation, matched-build
+receipts and binary record using service-held installed/workspace descriptors
+and authenticated record digests. It opens both verified frozen binaries and
+checks the caller-supplied B declaration's preparation, source and binary
+digests against that readback. Before the build import, the entry reads a
+private, read-only, single-link support declaration descriptor and verifies
+its exact bytes against the compiled profile SHA-256 pin. It counts subject
+rows, including registered non-object controls, and computes the expected
+matrix object-row count: the 12-target, 2-frontend, 2-PIC, 4-allocator matrix
+requires 192 object rows per subject. It checks the supplied declaration's
+`object_rows` count and requires at least two additional link/self-host stage
+rows. For each supplied object row, it joins the declared census ordinal to
+the pinned subject source digest and target position; omitted, duplicated,
+misnumbered, source-swapped or wrong-target object rows fail before build
+import. This is a partial support projection, not a raw census importer. Its
+support declaration pin and matrix-derived expected count do not authenticate
+all census rows or establish full-population authority. The B raw census
+importer, complete row/validator replay, applicability and eligibility checks,
+and check/oracle receipt authentication remain separate integration work.
+The pinned miniature seam is synthetic. Only after this partial join does the
+entry call `bq_retirement_correctness_begin`.
 Failure poisons a fresh gate and releases any descriptors acquired by this
 call; an already live holder is left alone. A successful holder stays open
 through all correctness work and subsequent dependent launches and must be
 released by the caller. The #923 integrator must compile this private module
 after the A and B implementations and call the public entry point from the
-actual service producer. Its pinned test seam also checks the B row join after
-four real miniature host-compiled process stages and readback; the one-row B
-declaration remains synthetic. Neither fixture provides a trusted Clang build,
-full population, oracle receipt or timed invocation.
+actual service producer. Its pinned test seam checks the support-projection
+join after four real miniature host-compiled process stages and readback; that
+join uses a synthetic one-row B declaration. Neither fixture provides a
+trusted Clang build, full population, oracle receipt or timed invocation.
 
 `retirement_artifact_service.{h,c}` provides the B-side artifact observation
 around each service-owned compiler process and before `row`. Before launch,
@@ -92,19 +88,21 @@ deadlines, cancellation, complete semantic receipts and the independent oracle.
 
 ## Trusted inputs
 
-The service must first verify the complete #1018 preparation and independently
-replay the #508/#929 support, census, validator-report and sparse eligibility
-projection. It supplies a contiguous canonical row array, including every
-untimed control and inapplicable row, and derives `object_rows` from that
-independently checked inventory. The gate uses caller-provided identity hash
-slots (at least `2 * rows + 1`) and a census bitmap (`object_rows` bytes) to
+The eventual production caller must first verify the complete #1018
+preparation and independently replay the #508/#929 support, raw census,
+validator-report and sparse eligibility projection. The D handoff in this
+branch does not provide that replay. The caller supplies a contiguous
+canonical row array, including every untimed control and inapplicable row, and
+derives `object_rows` from that independently checked inventory. The gate uses
+caller-provided identity hash slots (at least `2 * rows + 1`) and a census
+bitmap (`object_rows` bytes) to
 reject duplicate identities or missing/duplicate object census rows. A
 `retained-control` label alone does not exclude a row. The importer derives
 each skip proof, source, configuration,
 target, stage and execution obligation from those authenticated inputs. No
 candidate output, manifest or request may select these values.
 
-The production gate takes population counts from the independently replayed
+The production gate must take population counts from the independently replayed
 current support/census authority. It checks the complete object join, the
 eligible count in the required matrix and no-fallback checks, and the bounded
 row array; historical dimensions do not authorize a population. The importer
@@ -160,16 +158,42 @@ the frozen plan independently of candidate or request supplied values.
    the same identities across lane D's frozen commands and gate its first timed
    invocation. A later mutation removes structural readiness.
 
-`retirement_campaign_binding.h` captures the finished seal when it freezes
-lane D. Its private `bq_retirement_campaign_run` must be the service's path
-for every timed invocation: it rejects a changed seal on each call and rehashes
-the whole gate before the first A/A and first A/B child. A failed check poisons
-the campaign and both sample streams before launch. The service must keep the
-gate, underlying row/check arrays and authenticated inputs immutable through
-collection; rehashing all 78,912 object rows before each of millions of child
-launches is deliberately avoided. The focused real-child fixture verifies zero
-launches when a fact changes after freeze, including a newly computed seal.
-The production worker has not yet been wired to this adapter.
+`retirement_campaign_binding.h` contains the tested held-binary binding seam.
+`bq_retirement_campaign_bind_held` expects the upstream service to have already
+reimported the durable A and binary records and acquired their read-only files
+with `bq_retirement_binaries_acquire`. It compares the held record's
+preparation, source and binary digests to the ready gate, recomputes each
+held-descriptor identity, and initializes the campaign executables from those
+descriptors. It derives the private transcript label `job-<id>` from its
+numeric job-ID argument and checks that label and the supplied attempt token
+against both A/A and A/B transcripts. The caller must obtain that ID and token
+from the active authenticated queue job; this lower-level seam does not read
+queue state or reimport records itself.
+
+`bq_retirement_campaign_run` rejects bindings without held service descriptors
+and rechecks the held record, gate join and transcript identity before launch.
+It checks the gate seal on each call and rehashes all gate facts before the
+first A/A and first A/B child. Held descriptor records must remain live and
+immutable for the campaign, and the production measurement path must launch
+the exact held descriptors and check their identities around each child. A
+failed binding check poisons the campaign and both sample streams before
+launch. A queue-aware service wrapper that reimports same-attempt A and binary
+records and rechecks queue ownership before each launch remains a producer
+integration step; the production worker has no caller for this seam.
+Rehashing all 78,912 object rows before each of millions of child launches is
+deliberately avoided.
+
+The D handoff only checks `bq_retirement_correctness_ready` and joins its
+structural facts to held binary readback. This branch does not authenticate the
+B producer's raw census rows or establish complete-population authority; that
+producer evidence is not integrated here. The recipe remains blocked.
+
+The focused real-child fixture exercises descriptor-backed binding and checks
+same-source/same-binary cross-job, cross-attempt, and changed-source rejection
+before any launch. Its held-binary record is synthetic; it does not test durable
+queue reimport, queue ownership checks, or trusted Clang output. The production
+worker has no caller for this seam, and no full-corpus or performance claim
+follows from these tests.
 
 `sealed_sha256` is a private in-process integrity check, not publication,
 service authority, or a performance verdict. The integration owner must make
