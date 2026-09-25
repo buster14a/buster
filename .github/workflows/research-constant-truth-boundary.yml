@@ -1,0 +1,38 @@
+name: Research constant truth boundary
+on:
+  push:
+    branches: [research/constant-truth-boundary-20260925-astra]
+    paths:
+      - .github/workflows/research-constant-truth-boundary.yml
+      - tools/investigations/constant-truth-boundary-20260925/**
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: research-constant-truth-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  compare:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Read exact research transport
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare baseline, local repair and checked truth
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/investigations/constant-truth-boundary-20260925/observe.py "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/truth-evidence"
+      - name: Preserve every attempt, patch, source and result
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: constant-truth-boundary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: truth-evidence/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 6
