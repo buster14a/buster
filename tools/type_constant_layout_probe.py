@@ -11,7 +11,8 @@ program per case that prints, from the same binary,
 
 and runs the same source through a reference compiler. A row whose pf and ir
 differ is an internal disagreement; a row whose ir differs from the reference
-is an ABI divergence. A compile the reference accepts and Buster rejects is
+is an ABI divergence; a folded value (including _Alignof) that differs from the
+reference while the object agrees is a folding defect. A compile the reference accepts and Buster rejects is
 reported separately.
 
 Run on a correctness executor only. No timing, PMU, service access or
@@ -59,6 +60,7 @@ TARGETED = {
     "align_sizeof": "typedef struct { char c; int x __attribute__((aligned(sizeof(double)))); } T;",
     "pack_caps_aligned": "#pragma pack(push, 2)\ntypedef struct { char c; int x __attribute__((aligned(8))); } T;\n#pragma pack(pop)",
     "pack_caps_alignas": "#pragma pack(push, 2)\ntypedef struct { char c; _Alignas(8) int x; } T;\n#pragma pack(pop)",
+    "qualified_packed_copy": "struct __attribute__((packed)) P { char c; int i; char x; }; typedef const struct P T;",
     "control_literal_width": "typedef struct { char c; int b : 5; char x; } T;",
     "control_literal_bound": "typedef struct { char c; char x[3]; } T;",
     "control_literal_aligned": "typedef struct { char c; int x __attribute__((aligned(8))); } T;",
@@ -128,6 +130,42 @@ def aggregate(rng: random.Random, index: int, families: set[str], enumerators: s
     return tag, [member[2] for member in members if member[0] == "field"], "\n".join(lines)
 
 
+# Whole programs for shapes that need a block scope or must be rejected. Each
+# prints the same rows as targeted_program, from inside a function.
+BLOCK_REPORT = ('  enum { PS = sizeof(T), PA = _Alignof(T), PO = offsetof(T, x) }; static T o[2];\n'
+                '  printf("T size pf=%d ir=%td align pf=%d\\n", PS, (char*)&o[1] - (char*)&o[0], PA);\n'
+                '  printf("T.x offset pf=%d ir=%td\\n", PO, (char*)&o[0].x - (char*)&o[0]);\n')
+TARGETED_BLOCK = {
+    # A block-scope enumerator shadows a file-scope one of the same name.
+    "width_shadowed_enumerator": ("enum { W = 3 };", "enum { W = 12 }; typedef struct { char c; unsigned b : W; char x; } T;"),
+    "bound_shadowed_enumerator": ("enum { N = 3 };", "enum { N = 5 }; typedef struct { char a[N]; char x; } T;"),
+    # An enumerator shadowing a file-scope typedef is not a cast: (K) + 5 is 10.
+    "bound_enumerator_shadows_typedef": ("typedef int K;", "enum { K = 5 }; typedef struct { char a[(K) + 5]; char x; } T;"),
+    "width_enumerator_shadows_typedef": ("typedef int K;", "enum { K = 5 }; typedef struct { unsigned b : (K) + 5; char x; } T;"),
+    # Invalid: the width overflows int before it is narrowed.
+    "width_shift_overflow": ("", "typedef struct { char c; unsigned b : (1 << 40) + 3; char x; } T;"),
+}
+
+
+# Complete programs whose own output is compared with the reference. A width
+# evaluated inside the member's type parse must not define, complete or
+# redefine a tag as a side effect.
+TARGETED_RAW = {
+    # Valid: a _Generic controlling type completes a forward-declared tag.
+    "width_generic_completes_tag": "#include <stdio.h>\nstruct F;\nstruct S { int a; unsigned b : _Generic((struct F { char x[40]; } *)0,"
+                                   " struct F *: 9, default: 3); unsigned pad : 7; char m; };\nint main(void) { struct F f; struct S s = {0};"
+                                   " s.b = ~0u; printf(\"%zu %zu b=%u\\n\", sizeof(struct S), sizeof f, s.b); return 0; }\n",
+    # Invalid: a cast in the width redefines the aggregate being defined.
+    "width_cast_redefines_tag": "#include <stdio.h>\nstruct S { int a; unsigned b : (struct S { int q; } *)0 != 0 ? 1 : 3; char m; };\n"
+                                "int main(void) { printf(\"%zu\\n\", sizeof(struct S)); return 0; }\n",
+}
+
+
+def block_program(file_scope: str, body: str) -> str:
+    return ("#include <stdio.h>\n#include <stddef.h>\n" + file_scope + "\nint run(void)\n{\n  " + body + "\n" + BLOCK_REPORT +
+            "  return 0;\n}\nint main(void) { return run(); }\n")
+
+
 def random_program(seed: int, count: int, families: set[str]) -> str:
     rng = random.Random(seed)
     enumerators: set[tuple[str, int]] = set()
@@ -175,7 +213,8 @@ def build_and_run(compiler: list[str], source: Path, binary: Path) -> dict:
 
 
 def compare(buster: dict, reference: dict) -> dict:
-    result = {"rows": 0, "internal": [], "abi": [], "rejected_valid": not buster["compiled"] and reference["compiled"]}
+    result = {"rows": 0, "internal": [], "abi": [], "folded": [], "rejected_valid": not buster["compiled"] and reference["compiled"],
+              "accepted_invalid": buster["compiled"] and not reference["compiled"]}
     if not buster["compiled"] or not reference["compiled"]:
         return result
     for mine, theirs in zip(buster["rows"], reference["rows"]):
@@ -183,9 +222,12 @@ def compare(buster: dict, reference: dict) -> dict:
         values = dict(re.findall(r"(pf|ir)=(-?\d+)", mine.split(" align ")[0]))
         if len(set(values.values())) > 1:
             result["internal"].append(mine)
-        if re.findall(r"ir=(-?\d+)", mine) != re.findall(r"ir=(-?\d+)", theirs) or \
-           re.findall(r"align pf=(\d+)", mine) != re.findall(r"align pf=(\d+)", theirs):
+        # Only the emitted object is an ABI fact; a folded value that differs
+        # from the reference while the object agrees is a folding defect.
+        if re.findall(r"ir=(-?\d+)", mine) != re.findall(r"ir=(-?\d+)", theirs):
             result["abi"].append(f"{mine} || reference {theirs}")
+        elif mine != theirs:
+            result["folded"].append(f"{mine} || reference {theirs}")
     return result
 
 
@@ -206,10 +248,12 @@ def main() -> int:
     buster = [str(arguments.ide), "cc"]
     reference = [arguments.reference, "-w"]
     cases = [] if arguments.no_targeted else [(name, targeted_program(body)) for name, body in TARGETED.items()]
+    cases += [] if arguments.no_targeted else [(name, block_program(*shape)) for name, shape in TARGETED_BLOCK.items()]
+    cases += [] if arguments.no_targeted else list(TARGETED_RAW.items())
     cases += [(f"random-{'-'.join(sorted(families))}-{seed}", random_program(seed, arguments.count, families))
               for seed in range(1, arguments.seeds + 1)]
     report = {"ide": str(arguments.ide), "reference": arguments.reference, "families": sorted(families), "cases": {}}
-    totals = {"rows": 0, "internal": 0, "abi": 0, "rejected_valid": 0}
+    totals = {"rows": 0, "internal": 0, "abi": 0, "folded": 0, "rejected_valid": 0, "accepted_invalid": 0}
     for name, program in cases:
         source = arguments.out / f"{name}.c"
         source.write_text(program)
@@ -220,10 +264,15 @@ def main() -> int:
         totals["rows"] += outcome["rows"]
         totals["internal"] += len(outcome["internal"])
         totals["abi"] += len(outcome["abi"])
+        totals["folded"] += len(outcome["folded"])
         totals["rejected_valid"] += int(outcome["rejected_valid"])
-        if name in TARGETED:
+        totals["accepted_invalid"] += int(outcome["accepted_invalid"])
+        if name in TARGETED or name in TARGETED_BLOCK or name in TARGETED_RAW:
             state = "REJECTED " + " ".join(mine.get("diagnostic", [])) if outcome["rejected_valid"] else \
-                    ("INTERNAL " if outcome["internal"] else "") + ("ABI " if outcome["abi"] else "") or "ok"
+                    "ACCEPTED-INVALID (reference: " + " ".join(theirs.get("diagnostic", [])) + ")" if outcome["accepted_invalid"] else \
+                    "both reject" if not mine["compiled"] else \
+                    ("INTERNAL " if outcome["internal"] else "") + ("ABI " if outcome["abi"] else "") + \
+                    ("FOLDED " if outcome["folded"] and not outcome["internal"] else "") or "ok"
             print(f"{name:26} {state}")
     report["totals"] = totals
     (arguments.out / "report.json").write_text(json.dumps(report, indent=1))
