@@ -13096,10 +13096,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_type_prediction(UnitTestAr
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_UNUSED(arguments);
     TemporalArena temporary = scratch_begin(0, 0);
     CPreprocessResult tokens = c_preprocess(temporary.arena,
-                                            S8("static double object;\n"
+                                            S8("struct Bits { unsigned int one:1; unsigned short us:3; };\n"
+                                               "static double object;\n"
                                                "typedef __typeof__(*(double *)0) from_cast;\n"
                                                "typedef __typeof__(*(0 ? (double *)0 : (double *)0)) same_arms;\n"
                                                "typedef __typeof__(*(0 ? (double *)0 : (void *)!(1))) selected_true;\n"
@@ -13107,8 +13107,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
                                                "typedef __typeof__(*(0 ? (double *)0 : (char *)0)) mismatched;\n"
                                                "typedef __typeof__(0 ? (double *)0 : (char *)0) mismatched_pointer;\n"
                                                "typedef __typeof__(*(0 ? (const double *)0 : (double *)0)) qualified;\n"
-                                               "typedef __typeof__(&object) address;\n"),
-                                            (CPreprocessOptions){0});
+                                               "typedef __typeof__(&object) address;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->one) unary_plus_bit;\n"
+                                               "typedef __typeof__(-((struct Bits *)0)->one) unary_minus_bit;\n"
+                                               "typedef __typeof__(~((struct Bits *)0)->one) unary_complement_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->one + 0) binary_add_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->one << 1) left_shift_bit;\n"
+                                               "typedef __typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional_bit;\n"
+                                               "typedef __typeof__(+((struct Bits *)0)->us) unary_plus_short_bit;\n"),
+                                            (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU23});
     CParseResult parse = c_parse(temporary.arena, tokens);
     BUSTER_TEST(arguments, tokens.diagnostic_count == 0);
     BUSTER_TEST(arguments, parse.diagnostic_count == 0);
@@ -13138,6 +13145,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
         // selected.
         {S8("qualified"), C_TYPE_DOUBLE, C_TYPE_VOID},
         {S8("address"), C_TYPE_POINTER, C_TYPE_DOUBLE},
+        {S8("unary_plus_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("unary_minus_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("unary_complement_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("binary_add_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("left_shift_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("conditional_bit"), C_TYPE_INT, C_TYPE_VOID},
+        {S8("unary_plus_short_bit"), C_TYPE_INT, C_TYPE_VOID},
     };
     for (u32 expected_index = 0; expected_index < BUSTER_ARRAY_LENGTH(expected); expected_index += 1)
     {
@@ -13174,6 +13188,122 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typeof_conditional_type(UnitTestArgume
     CParseResult size_parse = c_parse(temporary.arena, sizes);
     BUSTER_TEST(arguments, sizes.diagnostic_count == 0);
     BUSTER_TEST(arguments, size_parse.diagnostic_count == 0);
+
+    // The semantic type attached to typeof must agree with the type carried
+    // by the raw function signature on both supported desktop ABIs and both
+    // lowering frontends.
+    String8 promotion_source = S8("struct Bits { unsigned int one:1; };\n"
+                                  "__typeof__(+((struct Bits *)0)->one) unary_plus(struct Bits *p) { return +p->one; }\n"
+                                  "__typeof__(((struct Bits *)0)->one + 0) binary_add(struct Bits *p) { return p->one + 0; }\n"
+                                  "__typeof__(((struct Bits *)0)->one << 1) left_shift(struct Bits *p) { return p->one << 1; }\n"
+                                  "__typeof__(((struct Bits *)0)->one ? ((struct Bits *)0)->one : ((struct Bits *)0)->one) conditional(struct Bits *p) { return p->one ? p->one : p->one; }\n");
+    Target promotion_targets[] = {target_native, target_native};
+    promotion_targets[0].cpu_arch = CPU_ARCH_X86_64;
+    promotion_targets[0].os = OPERATING_SYSTEM_LINUX;
+    promotion_targets[1].cpu_arch = CPU_ARCH_AARCH64;
+    promotion_targets[1].os = OPERATING_SYSTEM_LINUX;
+    String8 promotion_names[] = {S8("unary_plus"), S8("binary_add"), S8("left_shift"), S8("conditional")};
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(promotion_targets); target_index += 1)
+    {
+        for (u32 frontend = 0; frontend < 2; frontend += 1)
+        {
+            TemporalArena lowered_temporary = scratch_begin(&arguments->arena, 1);
+            Target target = promotion_targets[target_index];
+            CPreprocessResult promotion_tokens = c_preprocess(lowered_temporary.arena, promotion_source, (CPreprocessOptions){
+                .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU23,
+            });
+            CParseResult promotion_parse = c_parse(lowered_temporary.arena, promotion_tokens);
+            BUSTER_TEST(arguments, promotion_tokens.diagnostic_count == 0);
+            BUSTER_TEST(arguments, promotion_parse.diagnostic_count == 0);
+            if (promotion_tokens.diagnostic_count == 0 && promotion_parse.diagnostic_count == 0)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(lowered_temporary.arena, S8("integer-promotion-typeof.c"),
+                    promotion_tokens, promotion_parse, target, (CIRLowerOptions){.disable_direct_ssa = frontend != 0});
+                BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+                BUSTER_TEST(arguments, lowered.program && lowered.program->module_count);
+                if (lowered.program && lowered.program->module_count)
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(promotion_names); name_index += 1)
+                    {
+                        IrFunction* function = c_test_find_ir_function(module, promotion_names[name_index]);
+                        BUSTER_TEST(arguments, function != 0);
+                        IrType* signature = function ? ir_type_from_id(&program->types, function->canonical_type) : 0;
+                        IrType* return_type = signature ? ir_type_from_id(&program->types, signature->return_type) : 0;
+                        BUSTER_TEST(arguments, return_type && return_type->kind == IR_TYPE_INTEGER &&
+                                                    return_type->bit_width == 32 && return_type->is_signed);
+                    }
+                }
+            }
+            scratch_end(lowered_temporary);
+        }
+    }
+
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    // Keep the runtime source in this registered test. New tracked runtime
+    // fixtures require a separate retirement-ledger policy transition.
+    String8 runtime_source = buster_test_temporary_path(arguments->arena, S8("typeof-integer-promotions"), S8(".c"));
+    String8 runtime_text = S8("#define IS_INT_TYPE(expression) _Generic((__typeof__(expression))0, int: 1, default: 0)\n"
+                              "#define IS_UINT_TYPE(expression) _Generic((__typeof__(expression))0, unsigned int: 1, default: 0)\n"
+                              "struct Bits { unsigned int one:1; unsigned short us:3; };\n"
+                              "int main(void) { struct Bits bits = {1, 5}; struct Bits *p = &bits;\n"
+                              " unsigned char uc = 7; short s = 7; _Bool b = 1; int result = 0;\n"
+                              " result |= !IS_UINT_TYPE(p->one);\n"
+                              " result |= !IS_INT_TYPE(+p->one);\n"
+                              " result |= !IS_INT_TYPE(-p->one);\n"
+                              " result |= !IS_INT_TYPE(~p->one);\n"
+                              " result |= !IS_INT_TYPE(p->one + 0);\n"
+                              " result |= !IS_INT_TYPE(p->one << 1);\n"
+                              " result |= !IS_INT_TYPE(p->one ? p->one : p->one);\n"
+                              " result |= !IS_INT_TYPE(+p->us);\n"
+                              " result |= !IS_INT_TYPE(+uc);\n"
+                              " result |= !IS_INT_TYPE(+s);\n"
+                              " result |= !IS_INT_TYPE(+b);\n"
+                              " result |= !IS_INT_TYPE(uc ? uc : uc);\n"
+                              " return result; }\n");
+    BUSTER_TEST(arguments, file_write(runtime_source, BUSTER_SLICE_TO_BYTE_SLICE(runtime_text)));
+    String8 allocator_modes[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                                 S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 runtime_dialects[] = {S8("-std=gnu17"), S8("-std=gnu23")};
+    String8 runtime_frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(runtime_dialects); dialect += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocator_modes); allocator += 1)
+        {
+            for (u32 frontend = 0; frontend < BUSTER_ARRAY_LENGTH(runtime_frontends); frontend += 1)
+            {
+                TemporalArena runtime_temporary = scratch_begin(&arguments->arena, 1);
+                String8 output = buster_test_temporary_path(runtime_temporary.arena, S8("typeof-integer-promotions-run"), S8(".exe"));
+                String8 command[] = {S8("-nostdinc"), runtime_dialects[dialect], allocator_modes[allocator], runtime_frontends[frontend],
+                                     S8("-fverify-codegen"), S8("-o"), output, runtime_source};
+                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(runtime_temporary.arena,
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                invocation.reject_machine_fallback = allocator != 0;
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(runtime_temporary.arena, invocation);
+                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                    string_format(runtime_temporary.arena, S8("typeof integer promotions {S8} {S8} {S8}: {S8}"),
+                        runtime_dialects[dialect], allocator_modes[allocator], runtime_frontends[frontend], compiled.diagnostic));
+                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 run[] = {output};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true});
+                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    {
+                        ProcessWaitResult execution = os_process_wait_deadline(runtime_temporary.arena, child, 30000000);
+                        BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                            string_format(runtime_temporary.arena, S8("typeof integer promotions runtime {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                runtime_dialects[dialect], allocator_modes[allocator], runtime_frontends[frontend],
+                                execution.platform_status, (u32)execution.timed_out));
+                    }
+                }
+                scratch_end(runtime_temporary);
+            }
+        }
+    }
+#endif
     scratch_end(temporary);
     return result;
 }
