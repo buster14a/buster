@@ -39198,6 +39198,10 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
             String8 command[] = {executable, S8("self-test")};
             *test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
                                  .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
+            ProcessRun* identities = run_add(arena, step_add(arena));
+            String8 identity_command[] = {S8("build/bench-service-tools/systemd-broker-live-test"), S8("--self-test")};
+            *identities = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(identity_command),
+                                      .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
         }
     }
 #else

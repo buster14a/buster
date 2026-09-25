@@ -5,12 +5,16 @@
  * record, result and locked lease. This test starts the socket, makes a valid
  * exact-instance request through the constrained template, and rejects peers
  * and identities that must not reach the manager. It never changes host state
- * outside the disposable container.
+ * outside the disposable container. --isolation-only checks the provisioned
+ * private hierarchy without manager calls; --self-test checks identity policy
+ * without privileges. bq_test_enter_identity preserves and reads back account
+ * groups; bq_test_private_access owns non-destructive DAC denial checks.
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
 #include <stdbool.h>
@@ -19,12 +23,223 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define BQ_TEST_BROKER "/usr/local/libexec/buster-bench-systemd-broker"
 #define BQ_TEST_STATE "/var/lib/buster-bench"
+#define BQ_TEST_GROUP_CAP 64
+
+typedef struct BqTestIdentity
+{
+    char const* name;
+    uid_t uid;
+    gid_t gid;
+    gid_t groups[BQ_TEST_GROUP_CAP];
+    int count;
+} BqTestIdentity;
+
+static bool bq_test_identity_load(char const* name, BqTestIdentity* identity)
+{
+    struct passwd* account = getpwnam(name);
+    *identity = (BqTestIdentity){.name = name, .uid = (uid_t)-1, .gid = (gid_t)-1,
+                                .count = BQ_TEST_GROUP_CAP};
+    bool ok = account != NULL;
+    if (ok)
+    {
+        identity->uid = account->pw_uid;
+        identity->gid = account->pw_gid;
+        ok = getgrouplist(name, identity->gid, identity->groups, &identity->count) >= 0 &&
+             identity->count > 0 && identity->count <= BQ_TEST_GROUP_CAP;
+    }
+    return ok;
+}
+
+static bool bq_test_group_member(BqTestIdentity const* identity, gid_t group)
+{
+    bool found = identity->gid == group;
+    for (int index = 0; index < identity->count && index < BQ_TEST_GROUP_CAP; index += 1)
+        found |= identity->groups[index] == group;
+    return found;
+}
+
+static bool bq_test_identity_isolated(BqTestIdentity const* identity, gid_t service_gid)
+{
+    bool ok = identity->uid != 0 && identity->uid != (uid_t)-1 &&
+              identity->gid != 0 && identity->gid != (gid_t)-1 &&
+              identity->count > 0 && identity->count <= BQ_TEST_GROUP_CAP &&
+              !bq_test_group_member(identity, service_gid) && !bq_test_group_member(identity, 0);
+    return ok;
+}
+
+static bool bq_test_groups_equal(BqTestIdentity const* identity, gid_t const* actual, int count)
+{
+    bool ok = count >= 0 && count <= BQ_TEST_GROUP_CAP && count == identity->count;
+    for (int index = 0; ok && index < count; index += 1)
+    {
+        bool expected_found = false, actual_found = false;
+        for (int other = 0; other < count; other += 1)
+        {
+            expected_found |= identity->groups[index] == actual[other];
+            actual_found |= actual[index] == identity->groups[other];
+        }
+        ok = expected_found && actual_found;
+    }
+    return ok;
+}
+
+/* Do not manufacture an empty supplementary set. Re-resolve the account at
+ * the credential transition, then verify the entire effective set against the
+ * earlier snapshot. A concurrent membership change is a failed probe. */
+static bool bq_test_enter_identity(BqTestIdentity const* identity)
+{
+    bool ok = initgroups(identity->name, identity->gid) == 0 &&
+              setresgid(identity->gid, identity->gid, identity->gid) == 0 &&
+              setresuid(identity->uid, identity->uid, identity->uid) == 0 &&
+              prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0;
+    gid_t actual[BQ_TEST_GROUP_CAP];
+    int count = ok ? getgroups(BQ_TEST_GROUP_CAP, actual) : -1;
+    ok = ok && getuid() == identity->uid && geteuid() == identity->uid &&
+         getgid() == identity->gid && getegid() == identity->gid &&
+         bq_test_groups_equal(identity, actual, count);
+    fprintf(stderr, "BROKER_PROBE_IDENTITY name=%s uid=%u gid=%u groups=", identity->name,
+            (unsigned)geteuid(), (unsigned)getegid());
+    for (int index = 0; index < count && index < BQ_TEST_GROUP_CAP; index += 1)
+        fprintf(stderr, "%s%u", index ? "," : "", (unsigned)actual[index]);
+    fprintf(stderr, " verified=%s\n", ok ? "yes" : "no");
+    return ok;
+}
+
+static int bq_test_wait(pid_t child)
+{
+    int result = -1;
+    if (child > 0)
+    {
+        int status = 0;
+        pid_t waited;
+        do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+        if (waited == child && WIFEXITED(status)) result = WEXITSTATUS(status);
+    }
+    return result;
+}
+
+/* Never create/truncate/write a private object to test denial. Require an
+ * authorization error; ENOENT, an unsupported flag, or a broken fixture is not
+ * evidence of isolation. */
+static bool bq_test_permission_error(int error)
+{
+    return error == EACCES || error == EPERM;
+}
+
+static bool bq_test_denied_open(char const* path, int flags)
+{
+    errno = 0;
+    int fd = open(path, flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    int error = errno;
+    bool denied = fd < 0 && bq_test_permission_error(error);
+    if (fd >= 0) close(fd);
+    if (!denied) fprintf(stderr, "BROKER_PRIVATE_DENIAL failed path=%s flags=%d errno=%d\n", path, flags, error);
+    return denied;
+}
+
+static bool bq_test_denied_search(char const* path)
+{
+    errno = 0;
+    int fd = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int error = errno;
+    bool denied = fd < 0 && bq_test_permission_error(error);
+    if (fd >= 0)
+    {
+        errno = 0;
+        int result = fchdir(fd);
+        error = errno;
+        denied = result < 0 && bq_test_permission_error(error);
+        close(fd);
+    }
+    if (!denied) fprintf(stderr, "BROKER_PRIVATE_SEARCH failed path=%s errno=%d\n", path, error);
+    return denied;
+}
+
+static int bq_test_private_access(BqTestIdentity const* identity, char const* worker,
+                                   char const* instance, char const* result)
+{
+    pid_t child = fork();
+    if (child == 0)
+    {
+        bool ok = bq_test_enter_identity(identity);
+        char const* files[] = {worker, instance, BQ_TEST_STATE "/lease/host.lock"};
+        for (unsigned index = 0; ok && index < sizeof(files) / sizeof(files[0]); index += 1)
+            ok = bq_test_denied_open(files[index], O_RDONLY) && bq_test_denied_open(files[index], O_WRONLY) &&
+                 bq_test_denied_open(files[index], O_RDWR);
+        char const* directories[] = {BQ_TEST_STATE "/queue", BQ_TEST_STATE "/lease",
+                                     BQ_TEST_STATE "/workspaces/results", result};
+        for (unsigned index = 0; ok && index < sizeof(directories) / sizeof(directories[0]); index += 1)
+            ok = bq_test_denied_open(directories[index], O_RDONLY | O_DIRECTORY) &&
+                 bq_test_denied_search(directories[index]);
+        /* Refusing result-directory search also refuses every result payload,
+         * including those not yet produced by the running outer unit. */
+        _exit(ok ? 0 : 1);
+    }
+    return bq_test_wait(child);
+}
+
+static bool bq_test_socket_reachable(void)
+{
+    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    char const path[] = "/run/buster-bench-systemd-broker/control.sock";
+    memcpy(address.sun_path, path, sizeof(path));
+    bool ok = fd >= 0 && connect(fd, (struct sockaddr*)&address, sizeof(address)) == 0;
+    if (fd >= 0) close(fd);
+    return ok;
+}
+
+static int bq_test_self_test(void)
+{
+    unsigned checks = 0, failures = 0;
+#define BQ_IDENTITY_CHECK(expression) do { checks += 1; if (!(expression)) { failures += 1; \
+    fprintf(stderr, "BROKER_IDENTITY_TEST failure line=%d: %s\n", __LINE__, #expression); } } while (0)
+    BqTestIdentity clean = {.uid = 65001, .gid = 65001, .groups = {65001}, .count = 1};
+    BQ_IDENTITY_CHECK(bq_test_identity_isolated(&clean, 65000));
+    BqTestIdentity changed = clean;
+    changed.groups[changed.count++] = 65000;
+    BQ_IDENTITY_CHECK(!bq_test_identity_isolated(&changed, 65000));
+    BQ_IDENTITY_CHECK(!bq_test_groups_equal(&changed, clean.groups, clean.count));
+    changed = clean;
+    changed.gid = 65000;
+    BQ_IDENTITY_CHECK(!bq_test_identity_isolated(&changed, 65000));
+    changed = clean;
+    changed.groups[changed.count++] = 0;
+    BQ_IDENTITY_CHECK(!bq_test_identity_isolated(&changed, 65000));
+    changed = clean;
+    changed.uid = 0;
+    BQ_IDENTITY_CHECK(!bq_test_identity_isolated(&changed, 65000));
+    changed.uid = (uid_t)-1;
+    BQ_IDENTITY_CHECK(!bq_test_identity_isolated(&changed, 65000));
+    changed = clean;
+    changed.count = 0;
+    BQ_IDENTITY_CHECK(!bq_test_identity_isolated(&changed, 65000));
+    changed.count = BQ_TEST_GROUP_CAP + 1;
+    BQ_IDENTITY_CHECK(!bq_test_identity_isolated(&changed, 65000));
+    BQ_IDENTITY_CHECK(!bq_test_groups_equal(&changed, clean.groups, -1));
+    changed = clean;
+    changed.groups[changed.count++] = 65003;
+    gid_t reordered[] = {65003, 65001}, duplicated[] = {65001, 65001};
+    BQ_IDENTITY_CHECK(bq_test_groups_equal(&changed, reordered, 2));
+    BQ_IDENTITY_CHECK(!bq_test_groups_equal(&changed, duplicated, 2));
+    BQ_IDENTITY_CHECK(!bq_test_groups_equal(&clean, reordered, 2));
+    BQ_IDENTITY_CHECK(bq_test_permission_error(EACCES));
+    BQ_IDENTITY_CHECK(bq_test_permission_error(EPERM));
+    BQ_IDENTITY_CHECK(!bq_test_permission_error(ENOENT));
+    BQ_IDENTITY_CHECK(!bq_test_permission_error(EIO));
+#undef BQ_IDENTITY_CHECK
+    printf("BROKER_IDENTITY_SELF_TEST checks=%u failures=%u\n", checks, failures);
+    return failures ? 1 : 0;
+}
 
 static bool bq_test_decimal(char const* text)
 {
@@ -54,52 +269,48 @@ static bool bq_test_path(char const* path, uid_t owner, gid_t group, mode_t mode
     return ok;
 }
 
-static int bq_test_run(uid_t uid, gid_t gid, char* const arguments[])
+static int bq_test_run(BqTestIdentity const* identity, char* const arguments[])
 {
     pid_t child = fork();
-    int result = -1;
     if (child == 0)
     {
-        if (setgroups(0, NULL) != 0 || setgid(gid) != 0 || setuid(uid) != 0) _exit(127);
+        if (!bq_test_enter_identity(identity)) _exit(127);
         execv(arguments[0], arguments);
         _exit(127);
     }
-    if (child > 0)
-    {
-        int status = 0;
-        if (waitpid(child, &status, 0) == child && WIFEXITED(status)) result = WEXITSTATUS(status);
-    }
-    return result;
+    return bq_test_wait(child);
 }
 
-int main(int argc, char** argv)
+static int bq_test_live(int argc, char** argv)
 {
+    bool isolation_only = argc == 4 && !strcmp(argv[1], "--isolation-only");
     bool isolated = access("/.dockerenv", F_OK) == 0 || access("/run/.containerenv", F_OK) == 0;
-    bool ok = argc == 5 && isolated && geteuid() == 0 &&
+    bool ok = (argc == 5 || isolation_only) && isolated && geteuid() == 0 &&
               getenv("BUSTER_BROKER_LIVE_TEST") &&
-              !strcmp(getenv("BUSTER_BROKER_LIVE_TEST"), "1") &&
-              bq_test_decimal(argv[1]) && bq_test_decimal(argv[2]) &&
-              bq_test_revision(argv[3]) && bq_test_revision(argv[4]);
-    struct passwd* service = getpwnam("buster-bench");
-    uid_t service_uid = service ? service->pw_uid : (uid_t)-1;
-    gid_t service_gid = service ? service->pw_gid : (gid_t)-1;
-    struct passwd* candidate = getpwnam("buster-bench-candidate");
-    uid_t candidate_uid = candidate ? candidate->pw_uid : (uid_t)-1;
-    gid_t candidate_gid = candidate ? candidate->pw_gid : (gid_t)-1;
-    struct passwd* runner = getpwnam("buster-github-runner");
-    uid_t runner_uid = runner ? runner->pw_uid : (uid_t)-1;
-    gid_t runner_gid = runner ? runner->pw_gid : (gid_t)-1;
-    ok = ok && service_uid != (uid_t)-1 && service_gid != (gid_t)-1 &&
-         candidate_uid != (uid_t)-1 && candidate_gid != (gid_t)-1 &&
-         runner_uid != (uid_t)-1 && runner_gid != (gid_t)-1 &&
-         service_gid != candidate_gid && service_gid != runner_gid;
+              !strcmp(getenv("BUSTER_BROKER_LIVE_TEST"), "1");
+    char const* job = ok ? argv[isolation_only ? 2 : 1] : NULL;
+    char const* attempt = ok ? argv[isolation_only ? 3 : 2] : NULL;
+    ok = ok && bq_test_decimal(job) && bq_test_decimal(attempt) &&
+         (isolation_only || (bq_test_revision(argv[3]) && bq_test_revision(argv[4])));
+    BqTestIdentity service, candidate, runner, root;
+    bool accounts = bq_test_identity_load("buster-bench", &service) &&
+                    bq_test_identity_load("buster-bench-candidate", &candidate) &&
+                    bq_test_identity_load("buster-github-runner", &runner) &&
+                    bq_test_identity_load("root", &root);
+    ok = ok && accounts && root.uid == 0 && service.uid != 0 && service.gid != 0 &&
+         candidate.uid != service.uid && runner.uid != service.uid && runner.uid != candidate.uid &&
+         bq_test_group_member(&service, candidate.gid) && !bq_test_group_member(&runner, candidate.gid) &&
+         bq_test_identity_isolated(&candidate, service.gid) && bq_test_identity_isolated(&runner, service.gid);
+    if (!ok) fprintf(stderr, "BROKER_ISOLATION precondition or account/group policy failed\n");
+    uid_t service_uid = ok ? service.uid : (uid_t)-1;
+    gid_t service_gid = ok ? service.gid : (gid_t)-1;
     char unit[128], wrong_unit[128], result[256], worker[256], instance[256];
-    int unit_size = ok ? snprintf(unit, sizeof(unit), "buster-bench-%s-%s.service", argv[1], argv[2]) : -1;
-    char const* wrong_attempt = ok && !strcmp(argv[2], "999999") ? "999998" : "999999";
-    int wrong_size = ok ? snprintf(wrong_unit, sizeof(wrong_unit), "buster-bench-%s-%s.service", argv[1], wrong_attempt) : -1;
-    int result_size = ok ? snprintf(result, sizeof(result), BQ_TEST_STATE "/workspaces/results/job-%s-attempt-%s", argv[1], argv[2]) : -1;
-    int worker_size = ok ? snprintf(worker, sizeof(worker), BQ_TEST_STATE "/queue/worker-%s", argv[1]) : -1;
-    int instance_size = ok ? snprintf(instance, sizeof(instance), BQ_TEST_STATE "/queue/worker-instance-%s", argv[1]) : -1;
+    int unit_size = ok ? snprintf(unit, sizeof(unit), "buster-bench-%s-%s.service", job, attempt) : -1;
+    char const* wrong_attempt = ok && !strcmp(attempt, "999999") ? "999998" : "999999";
+    int wrong_size = ok ? snprintf(wrong_unit, sizeof(wrong_unit), "buster-bench-%s-%s.service", job, wrong_attempt) : -1;
+    int result_size = ok ? snprintf(result, sizeof(result), BQ_TEST_STATE "/workspaces/results/job-%s-attempt-%s", job, attempt) : -1;
+    int worker_size = ok ? snprintf(worker, sizeof(worker), BQ_TEST_STATE "/queue/worker-%s", job) : -1;
+    int instance_size = ok ? snprintf(instance, sizeof(instance), BQ_TEST_STATE "/queue/worker-instance-%s", job) : -1;
     ok = ok && unit_size > 0 && (size_t)unit_size < sizeof(unit) &&
          wrong_size > 0 && (size_t)wrong_size < sizeof(wrong_unit) &&
          result_size > 0 && (size_t)result_size < sizeof(result) &&
@@ -116,27 +327,43 @@ int main(int argc, char** argv)
         BQ_LIVE_CHECK(bq_test_path(result, service_uid, service_gid, 0700, true));
         BQ_LIVE_CHECK(bq_test_path(worker, service_uid, service_gid, 0440, false));
         BQ_LIVE_CHECK(bq_test_path(instance, service_uid, service_gid, 0440, false));
+        BQ_LIVE_CHECK(bq_test_private_access(&candidate, worker, instance, result) == 0);
+        BQ_LIVE_CHECK(bq_test_private_access(&runner, worker, instance, result) == 0);
+    }
+    if (ok && !isolation_only)
+    {
         char* start_socket[] = {"/usr/bin/systemctl", "start", "buster-bench-systemd-broker.socket", NULL};
-        BQ_LIVE_CHECK(bq_test_run(0, 0, start_socket) == 0);
+        BQ_LIVE_CHECK(bq_test_run(&root, start_socket) == 0);
         char* active[] = {"/usr/bin/systemctl", "is-active", "--quiet", unit, NULL};
-        BQ_LIVE_CHECK(bq_test_run(0, 0, active) == 0);
+        BQ_LIVE_CHECK(bq_test_run(&root, active) == 0);
         char* resume[] = {BQ_TEST_BROKER, "signal", unit, "CONT", NULL};
-        BQ_LIVE_CHECK(bq_test_run(service_uid, service_gid, resume) == 0);
-        BQ_LIVE_CHECK(bq_test_run(candidate_uid, candidate_gid, resume) == 126);
-        BQ_LIVE_CHECK(bq_test_run(runner_uid, runner_gid, resume) == 126);
+        BQ_LIVE_CHECK(bq_test_run(&service, resume) == 0);
+        /* Root can reach the socket, but is not an admitted service peer.
+         * Keep this distinct from the candidate/runner DAC-denial checks. */
+        BQ_LIVE_CHECK(bq_test_socket_reachable());
+        BQ_LIVE_CHECK(bq_test_run(&root, resume) == 126);
+        BQ_LIVE_CHECK(bq_test_run(&candidate, resume) == 126);
+        BQ_LIVE_CHECK(bq_test_run(&runner, resume) == 126);
         char* wrong_instance[] = {BQ_TEST_BROKER, "signal", wrong_unit, "CONT", NULL};
-        BQ_LIVE_CHECK(bq_test_run(service_uid, service_gid, wrong_instance) == 126);
+        BQ_LIVE_CHECK(bq_test_run(&service, wrong_instance) == 126);
         char* wrong_signal[] = {BQ_TEST_BROKER, "signal", unit, "HUP", NULL};
-        BQ_LIVE_CHECK(bq_test_run(service_uid, service_gid, wrong_signal) == 126);
+        BQ_LIVE_CHECK(bq_test_run(&service, wrong_signal) == 126);
         char wrong_revision[65];
         memset(wrong_revision, '0', strlen(argv[3]));
         wrong_revision[strlen(argv[3])] = 0;
         if (!strcmp(wrong_revision, argv[3])) wrong_revision[0] = '1';
         char* wrong_source[] = {BQ_TEST_BROKER, "start-outer", argv[1], argv[2], wrong_revision, argv[4], NULL};
-        BQ_LIVE_CHECK(bq_test_run(service_uid, service_gid, wrong_source) == 126);
-        BQ_LIVE_CHECK(bq_test_run(0, 0, active) == 0);
+        BQ_LIVE_CHECK(bq_test_run(&service, wrong_source) == 126);
+        BQ_LIVE_CHECK(bq_test_run(&root, active) == 0);
     }
 #undef BQ_LIVE_CHECK
-    printf("BUSTER_SYSTEMD_BROKER_LIVE_TEST checks=%u result=%s\n", checks, ok ? "pass" : "fail");
+    printf("%s checks=%u result=%s\n", isolation_only ? "BROKER_PRIVATE_ISOLATION_TEST" :
+           "BUSTER_SYSTEMD_BROKER_LIVE_TEST", checks, ok ? "pass" : "fail");
     return ok ? 0 : 1;
+}
+
+int main(int argc, char** argv)
+{
+    int result = argc == 2 && !strcmp(argv[1], "--self-test") ? bq_test_self_test() : bq_test_live(argc, argv);
+    return result;
 }

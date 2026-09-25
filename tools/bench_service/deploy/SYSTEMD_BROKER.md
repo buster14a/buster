@@ -41,6 +41,17 @@ directory components with `O_PATH`, checks the exact owner/group/mode, and
 reads only the named records and manifests. Candidate and runner accounts
 have neither service-group membership nor access to the socket.
 
+These are group-scoped filesystem grants, not per-request capabilities. The
+broker's code restricts which named objects and manager operations a request
+may use; membership can also read other reachable group-readable objects.
+`ProtectSystem=strict` and the explicit read-only state mount keep the broker
+from writing candidate-group staging directories. Cleanup is the trusted
+service's responsibility: the foreign-owner exception requires the resolved
+non-root `buster-bench-candidate` UID and primary GID, the same attempt GID,
+and mode `0770` or `02770`. Another UID with that GID is an identity mismatch,
+not a candidate payload. A missing/aliased candidate account disables this
+exception; service-owned cleanup remains available.
+
 ## Build and review
 
 From the reviewed checkout, run `./build.sh bench_service_broker self-test` and
@@ -79,9 +90,41 @@ run that test as root while its outer unit is active with
 CANDIDATE_REVISION`. It starts the constrained broker socket and makes an
 exact outer `CONT` request. It checks queue/result/lease modes and records,
 then rejects candidate and runner peers, wrong instance, wrong source and
-unlisted signal requests. Its container and environment gates prevent an
-ordinary host test invocation. The regular broker `self-test` remains the
-argument-construction test and cannot replace this live regression.
+unlisted signal requests. It also proves that root can reach the socket but
+is rejected as a non-service peer, separately from candidate/runner socket
+DAC denial. Its container and environment gates prevent an ordinary host test
+invocation.
+
+Account resolution uses the full supplementary membership list, not just
+primary GIDs. Candidate and runner must not have the service or root group;
+the runner must not have the candidate group. Each probe child calls
+`initgroups`, drops all three UID/GID slots, sets `NoNewPrivileges`, and reads
+back its complete effective group set against the captured account inventory.
+A membership change between capture and execution fails the probe.
+Candidate/runner children try read-only, write-only and read-write opens of
+both worker records and the lease; no create, truncate or write is attempted.
+They separately test listing and searching the queue, lease and result
+directories. Result-leaf search denial protects payloads that the running job
+has not produced yet. Only `EACCES`/`EPERM` counts as denial, never a missing
+fixture. Metadata-only `O_PATH` access to a leaf is not treated as traversal.
+
+`BUSTER_BROKER_LIVE_TEST=1 systemd-broker-live-test --isolation-only JOB ATTEMPT`
+performs just the account/private-hierarchy checks in a disposable provisioned
+container, without starting the socket or contacting the manager. Repeat with
+an intentionally service-group-member candidate and runner: each must fail.
+This is DAC/credential evidence, not a live broker or materializer/recipe run.
+Before deployment, also read `/proc/PID/status` for the actual service,
+candidate stage and runner processes: account snapshots do not prove that an
+already-running unit has no additional groups from unit-specific settings.
+
+The regular `bench_service_broker self-test` now runs both the existing command
+construction test and the probe's unprivileged `--self-test` identity-policy
+controls. Neither replaces the provisioned live regression. On disposable
+root-capable test infrastructure with the three fixed accounts provisioned,
+`build/bench-service-tools/service-tests --cleanup-identity-only` exercises the
+real cleanup traversal under the service UID, including exact candidate
+positives and same-GID foreign-owner negatives. It uses only fresh `/tmp`
+fixtures, not the installed queue or lease.
 
 ## Host installation boundary
 

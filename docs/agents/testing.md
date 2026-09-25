@@ -248,7 +248,13 @@ qualification remain explicit operator gates and are not covered here.
 `systemd-broker-live-test` probe. Run that probe only in a provisioned,
 disposable real-systemd container while an exact outer unit holds the lease;
 it exercises the constrained socket instance and positive/negative private
-state requests. See `tools/bench_service/deploy/SYSTEMD_BROKER.md`.
+state requests. The broker self-test also runs the probe's unprivileged
+identity-policy controls. Opt-in `--isolation-only JOB ATTEMPT` checks actual
+account groups and non-destructive private-file/traversal denial without
+manager calls; it is not live broker evidence. `service-tests
+--cleanup-identity-only` needs disposable root-capable infrastructure and the
+three fixed accounts, and tests the real cleanup helper under the service UID.
+See `tools/bench_service/deploy/SYSTEMD_BROKER.md` for both gates.
 
 ## Configured external compiler fixtures
 
