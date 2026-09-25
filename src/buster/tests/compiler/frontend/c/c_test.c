@@ -1251,6 +1251,126 @@ BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
     return string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(parts), false);
 }
 
+// A bit-field width is evaluated once, where the member is declared
+// (CMember.bit_width), and the sizeof folding in c_parse.c, bit-field promotion
+// and the IR layout in c_gen.c all read that one number. The folding used to
+// read a width only when it was a single decimal token: `(5)`, an enumerator,
+// a cast or a character constant folded as a zero-width field and moved every
+// later member, a hex or suffixed literal refused to fold at all, and
+// `_Generic(+promoted.b, ...)` saw an unpromoted `unsigned`, while the IR
+// layout evaluated the same tokens itself and was right. The expected numbers
+// are clang 18's for x86-64 Linux, not either engine's: two engines agreeing
+// with each other is not the oracle.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("enum { W = 5 };\n"
+                        "struct Paren { char c; int b : (5); char x; };\n"
+                        "struct Enumerator { char c; int b : W; char x; };\n"
+                        "struct Cast { char c; unsigned b : (unsigned char)261; char x; };\n"
+                        "struct Sized { char c; unsigned b : sizeof(int) * 8 - 7; char x; };\n"
+                        "struct Hex { char c; unsigned b : 0x5; char x; };\n"
+                        "struct Suffix { char c; unsigned b : 5u; char x; };\n"
+                        "struct Character { char c; unsigned b : '\\5'; char x; };\n"
+                        "struct Promoted { unsigned b : (3); };\n"
+                        "static struct Promoted promoted;\n"
+                        "enum {\n"
+                        " size_Paren = sizeof(struct Paren), x_Paren = __builtin_offsetof(struct Paren, x),\n"
+                        " size_Enumerator = sizeof(struct Enumerator), x_Enumerator = __builtin_offsetof(struct Enumerator, x),\n"
+                        " size_Cast = sizeof(struct Cast), x_Cast = __builtin_offsetof(struct Cast, x),\n"
+                        " size_Sized = sizeof(struct Sized), x_Sized = __builtin_offsetof(struct Sized, x),\n"
+                        " size_Hex = sizeof(struct Hex), x_Hex = __builtin_offsetof(struct Hex, x),\n"
+                        " size_Suffix = sizeof(struct Suffix), x_Suffix = __builtin_offsetof(struct Suffix, x),\n"
+                        " size_Character = sizeof(struct Character), x_Character = __builtin_offsetof(struct Character, x),\n"
+                        " promoted_selection = _Generic(+promoted.b, int: 1, unsigned: 2, default: 3)\n"
+                        "};\n"
+                        "_Static_assert(sizeof(struct Sized) == 12, \"sized\");\n"
+                        "int bit_field_width_authority(void) { return size_Paren + x_Paren + promoted_selection + promoted.b; }\n");
+    typedef struct CBitFieldWidthCase CBitFieldWidthCase;
+    struct CBitFieldWidthCase
+    {
+        String8 tag;
+        String8 size_name;
+        String8 offset_name;
+        u64 size;
+        u64 offset;
+    };
+    CBitFieldWidthCase cases[] = {
+        {S8("Paren"), S8("size_Paren"), S8("x_Paren"), 4, 2},
+        {S8("Enumerator"), S8("size_Enumerator"), S8("x_Enumerator"), 4, 2},
+        {S8("Cast"), S8("size_Cast"), S8("x_Cast"), 4, 2},
+        {S8("Sized"), S8("size_Sized"), S8("x_Sized"), 12, 8},
+        {S8("Hex"), S8("size_Hex"), S8("x_Hex"), 4, 2},
+        {S8("Suffix"), S8("size_Suffix"), S8("x_Suffix"), 4, 2},
+        {S8("Character"), S8("size_Character"), S8("x_Character"), 4, 2},
+    };
+    Target target = target_native;
+    target.cpu_arch = CPU_ARCH_X86_64;
+    target.os = OPERATING_SYSTEM_LINUX;
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, source, (CPreprocessOptions){
+            .target = target, .data_layout = target_data_layout(target), .dialect = C_PREPROCESS_DIALECT_GNU17,
+        });
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            u64 selection = 0;
+            for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+            {
+                CEntity const* entity = parse.entities + entity_index;
+                if (entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, S8("promoted_selection")))
+                {
+                    selection = entity->constant_value;
+                }
+            }
+            BUSTER_TEST(arguments, selection == 1);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("bit-field-width-authority.c"), tokens, parse, target,
+                                                                (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+            {
+                IrProgram* program = lowered.program;
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, program->modules).error == IR_VALIDATION_NONE);
+                for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+                {
+                    CBitFieldWidthCase expected = cases[case_index];
+                    u64 folded_size = UINT64_MAX;
+                    u64 folded_offset = UINT64_MAX;
+                    for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+                    {
+                        CEntity const* entity = parse.entities + entity_index;
+                        if (entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, expected.size_name))
+                        {
+                            folded_size = entity->constant_value;
+                        }
+                        if (entity->kind == C_ENTITY_ENUMERATOR && string_equal(entity->name, expected.offset_name))
+                        {
+                            folded_offset = entity->constant_value;
+                        }
+                    }
+                    BUSTER_TEST(arguments, folded_size == expected.size && folded_offset == expected.offset);
+                    IrType* record = 0;
+                    for (u32 index = 0; index < program->types.count && !record; index += 1)
+                    {
+                        IrType* type = program->types.types + index;
+                        if (!type->is_volatile && type->kind == IR_TYPE_STRUCT && string_equal(type->name, expected.tag))
+                        {
+                            record = type;
+                        }
+                    }
+                    if (BUSTER_REQUIRE(arguments, record && record->layout.resolved && record->field_count == 3))
+                    {
+                        BUSTER_TEST(arguments, record->layout.size == expected.size && record->fields[2].offset == expected.offset);
+                    }
+                }
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_bit_fields(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23200,6 +23320,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_ranges);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_enum_range_diagnostics);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_bit_fields);
+    BUSTER_TEST_FIXTURE(arguments, c_test_bit_field_width_authority);
     BUSTER_TEST_FIXTURE(arguments, c_test_volatile_split_bit_fields);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
