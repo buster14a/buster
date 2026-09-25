@@ -100,6 +100,12 @@ parent must not weaken the worker's private-final-lease-parent check. A `0700`
 workspace without SGID fails `bq_workspace_root_directory`; a `0700` state
 parent blocks candidate traversal even if the workspace itself is correct.
 Do not grant candidate write permission to either parent to fix an access error.
+With `RestrictSUIDSGID=yes`, verify that the materializer inherits SGID from
+the `02710` workspace parent when it creates an attempt, both `02710` subject
+directories, `02750` source directories and `02700` build directories. The
+trusted driver must likewise inherit `02770` for candidate staging and
+throughput output. Exact owner, candidate-group identity and mode checks must
+pass without requesting SGID in `mkdir` or `chmod`; a mismatch stops admission.
 
 The long-lived reference uses `Type=exec` and `serve`, with `Restart=no`.
 `RuntimeDirectory` manages only the socket directory. It does not reconcile

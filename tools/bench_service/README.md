@@ -61,6 +61,16 @@ final manifest, bundle and outcome evidence with no-replace links; the result
 tree is never writable by the candidate identity and is replayed before success
 is acknowledged.
 
+On Linux, `RestrictSUIDSGID` rejects `mkdir` and `chmod` requests that include
+SGID, even when the target directory already has it. The trusted materializer
+and recipe driver create their shared directories with a short-lived `0007`
+umask, inherit SGID and group from a validated parent, then verify the exact
+resulting owner, group and mode before use. The base and candidate subject
+directories both start at `02710`; copied source directories become `0550`
+after materialization. Once builds are complete, the driver clears special bits
+while making their trees read-only. The service and transient sandbox settings
+remain unchanged.
+
 Each fixed recipe stage helper uses a deterministic unit name linked with
 `PartOf=`, `BindsTo=` and `After=` to its owning worker unit and uses
 `CollectMode=inactive-or-failed`. Every nested
@@ -199,6 +209,19 @@ The existing native `build.c` driver owns compilation and execution:
 ./build.sh bench_service self-test --sanitize
 ./build.sh bench_service_recipe_self_test
 ```
+
+On Linux x86-64 and AArch64, both self-tests fork a disposable child with a
+native-architecture syscall filter that denies explicit SUID/SGID `mkdirat`,
+`fchmod` and `fchmodat` requests. Negative controls require `EPERM` even when
+reasserting an existing SGID bit. They exercise the production directory
+helpers, materializer/reconciliation and recipe tree-locking traversal. The
+filter never affects the parent test process. The Ubuntu 24.04 TCC bootstrap
+lane sets `BQ_REQUIRE_DISTINCT_GROUP=1` to require a fixture group different
+from the effective primary group; other Linux environments print
+`unsupported-different-primary` if their credentials cannot set up that case.
+Other architectures print `unsupported-architecture` and do not count as
+sandbox coverage. These tests do not reproduce the full systemd sandbox or
+qualify a dedicated host.
 
 `test_all_combinations` runs the normal service self-test beside the existing
 throughput self-test on each desktop lane, and also runs its AddressSanitizer
