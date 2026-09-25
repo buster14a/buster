@@ -312,7 +312,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         };
         CompilerDriverResult compiled = compiler_driver_execute_invocation(
             temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
-        BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE);
+        BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE, compiled.diagnostic);
         if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
         {
             String8 run[] = {output_path};
