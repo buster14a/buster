@@ -18765,7 +18765,8 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             (c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_DOT) ||
              c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_ARROW) ||
              c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_STAR) ||
-             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_AMPERSAND)))
+             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_AMPERSAND) ||
+             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_RIGHT_PARENTHESIS)))
         {
             continue;
         }
