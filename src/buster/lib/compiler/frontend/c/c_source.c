@@ -2766,12 +2766,12 @@ struct CMacroDefinition
     // token's spelling against every parameter name on every expansion.
     // Null when the replacement list is empty.
     u32* parameter_index;
-    // One count per parameter: how many replacement tokens name it. The
-    // substituted list's exact capacity is a dot product of this with the
-    // arguments' token counts, which is a walk of the parameters (1,4 on
-    // this workload) where reading it off the replacement list is a third
-    // walk of the list (6,9 tokens). Null when there are no parameters.
-    u32* parameter_use_count;
+    // Ordinary substitution uses per parameter, excluding stringization and
+    // either side of a paste. Zero means argument prescan is unnecessary;
+    // raw tokens remain available to # and ##. In a paste/stringize-free
+    // definition every use is ordinary, so this also retains the exact
+    // replacement-capacity dot product. Null when there are no parameters.
+    u32* parameter_expand_count;
     u32 replacement_count;
     // The replacement tokens that name no parameter: the fixed half of that
     // capacity.
@@ -3797,12 +3797,12 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
     // Allocated for every parameter list, empty replacement included: a
     // `#define F(x)` with no replacement tokens still reaches the capacity
     // walk below over its parameters.
-    u32* parameter_use_count = parameter_count ? arena_allocate(arena, u32, parameter_count) : 0;
+    u32* parameter_expand_count = parameter_count ? arena_allocate(arena, u32, parameter_count) : 0;
     for (u32 index = 0; index < parameter_count; index += 1)
     {
-        parameter_use_count[index] = 0;
+        parameter_expand_count[index] = 0;
     }
-    macro->definition.parameter_use_count = parameter_use_count;
+    macro->definition.parameter_expand_count = parameter_expand_count;
     if (replacement_count)
     {
         u32* parameter_index = arena_allocate(arena, u32, replacement_count);
@@ -3813,7 +3813,10 @@ BUSTER_C_INTERNAL CMacro* c_macro_define(Arena* arena, char8 const* spelling_bas
             parameter_index[index] = found >= 0 ? (u32)found : C_MACRO_PARAMETER_NONE;
             if (found >= 0)
             {
-                parameter_use_count[found] += 1;
+                bool stringized = index && c_token_is_punctuator(&replacement[index - 1], C_PUNCTUATOR_HASH);
+                bool pasted = (index && c_macro_is_paste(replacement[index - 1])) ||
+                              (index + 1 < replacement_count && c_macro_is_paste(replacement[index + 1]));
+                parameter_expand_count[found] += !stringized && !pasted;
                 macro->definition.plain_count -= 1;
             }
         }
@@ -4505,7 +4508,11 @@ BUSTER_C_INTERNAL CPpToken c_macro_pragma_token(CSpellingSpace* space, CMacro* m
 
 // The next argument that needs an expansion context of its own, or null
 // once every remaining argument is resolved and the invocation is ready to
-// materialize. An argument none of whose identifiers names a defined macro
+// materialize. Definition-owned demand is reused before inspecting any raw
+// argument: unused, stringized-only and pasted-only parameters must not be
+// prescanned. A mixed-use parameter still needs one expansion, shared by all
+// ordinary uses. Pragma operands are expanded despite their empty replacement.
+// An argument none of whose identifiers names a defined macro
 // — disabled ones included, since a name the disabled bit refuses must
 // still be painted no_expand — rescans to exactly itself, so its expansion
 // aliases its tokens instead of paying a child context, a task node and an
@@ -4520,8 +4527,10 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
     while (!child && continuation->argument_index < continuation->argument_count)
     {
         CMacroArgument* argument = continuation->arguments + continuation->argument_index;
+        bool used_expanded = continuation->macro->definition.pragma_like ||
+                             continuation->macro->definition.parameter_expand_count[continuation->argument_index] != 0;
         bool needs_expansion = false;
-        for (u64 token_index = 0; token_index < argument->token_count && !needs_expansion; token_index += 1)
+        for (u64 token_index = 0; used_expanded && token_index < argument->token_count && !needs_expansion; token_index += 1)
         {
             CPpToken token = argument->tokens[token_index];
             if (token.token.kind == C_TOKEN_IDENTIFIER && !token.no_expand)
@@ -4553,8 +4562,8 @@ BUSTER_C_INTERNAL CMacroExpansionContext* c_macro_continuation_advance(Arena* ar
 // The paste-free, stringify-free replacement of a non-builtin macro written
 // straight into its task batch: the same rows the plain branch of
 // c_macro_replacement_tokens stages, minus the staging array and its copy.
-// The batch size is exact (plain_count plus each parameter's use count times
-// its expanded count), so one reservation precedes every write; the ENABLE
+// The batch size is exact (plain_count plus each parameter's ordinary-use count
+// times its expanded count), so one reservation precedes every write; the ENABLE
 // marker takes the batch base and the substituted list is written downward
 // from the batch end, the reverse order c_macro_expansion_tasks_push stores.
 // Sources are the definition and argument arrays, never task storage, so
@@ -4569,7 +4578,7 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
     u64 token_count = macro->definition.plain_count;
     for (u32 parameter_index = 0; parameter_index < parameter_count; parameter_index += 1)
     {
-        token_count += (u64)macro->definition.parameter_use_count[parameter_index] * arguments[parameter_index].expanded_token_count;
+        token_count += (u64)macro->definition.parameter_expand_count[parameter_index] * arguments[parameter_index].expanded_token_count;
     }
     c_macro_expansion_tasks_reserve(arena, tasks, token_count, true);
     CMacroExpansionTask* batch = tasks->data + tasks->count;
@@ -6408,9 +6417,9 @@ BUSTER_C_INTERNAL void c_macro_push_definition(CPreprocessPragmaContext context,
         entry->definition.parameters = arena_allocate(context.arena, String8, macro->definition.parameter_count);
         memcpy(entry->definition.parameters, macro->definition.parameters,
                sizeof(*entry->definition.parameters) * macro->definition.parameter_count);
-        entry->definition.parameter_use_count = arena_allocate(context.arena, u32, macro->definition.parameter_count);
-        memcpy(entry->definition.parameter_use_count, macro->definition.parameter_use_count,
-               sizeof(*entry->definition.parameter_use_count) * macro->definition.parameter_count);
+        entry->definition.parameter_expand_count = arena_allocate(context.arena, u32, macro->definition.parameter_count);
+        memcpy(entry->definition.parameter_expand_count, macro->definition.parameter_expand_count,
+               sizeof(*entry->definition.parameter_expand_count) * macro->definition.parameter_count);
     }
     *context.macro_push_stack = entry;
 }
