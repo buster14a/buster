@@ -119,8 +119,7 @@ jobs:
           assert (unit_path / "pids.max").read_text().strip() == "256"
           print("POLICY_PASS", flush=True)
           PY
-          sudo docker cp "$evidence/check.py" "$container:/tmp/check.py"
-          sudo docker exec "$container" python3 /tmp/check.py "$unit" | tee "$evidence/effective.txt"
+          sudo docker exec -i "$container" python3 - "$unit" < "$evidence/check.py" | tee "$evidence/effective.txt"
           sudo docker exec "$container" systemctl stop "$unit"
           sudo docker exec "$container" systemctl reset-failed "$unit"
           sudo docker exec "$container" systemd-run --wait --pipe --unit="issue1162-control-$GITHUB_RUN_ID" --property=RestrictSUIDSGID=no -- /bin/sh -c 'd=$(mktemp -d); chmod 2770 "$d"; result=$?; rmdir "$d"; exit "$result"' | tee "$evidence/suid-control.txt"
