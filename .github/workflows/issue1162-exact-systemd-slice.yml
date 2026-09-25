@@ -22,8 +22,6 @@ jobs:
           persist-credentials: false
       - name: Run pinned source in disposable real systemd guest
         shell: bash
-        env:
-          ISSUE1162_DIAGNOSTIC_BROKER: "1"
         run: bash .github/scripts/issue1162_exact_systemd_slice.sh
       - name: Retain all isolated diagnostics
         if: always()

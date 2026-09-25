@@ -126,58 +126,6 @@ install -m 0755 build/bench-service-tools/service "$payload/binaries/buster-benc
 install -m 0755 build/bench-service-tools/systemd-broker "$payload/binaries/buster-bench-systemd-broker"
 install -m 0755 build/bench-service-tools/systemd-broker-live-test "$payload/binaries/systemd-broker-live-test"
 install -m 0755 build/throughput "$payload/binaries/buster-bench-throughput"
-if [[ "${ISSUE1162_DIAGNOSTIC_BROKER:-}" == 1 ]]; then
-  sha256sum build/bench-service-tools/systemd-broker >"$evidence/exact-broker-before-diagnostics.sha256"
-  SOURCE="$source_root/tools/bench_service/systemd_broker.c" OUTPUT="$payload/broker-diag.c" python3 - <<'PY'
-import os
-from pathlib import Path
-source = Path(os.environ['SOURCE']).read_text()
-start = source.index('static bool bq_broker_lease_held(')
-end = source.index('static bool bq_broker_manifest(', start)
-lease = source[start:end]
-old = '    return ok;\n'
-assert lease.count(old) == 1
-lease = lease.replace(old, '''    fprintf(stderr, "DIAG_LEASE receipt=%d parent=%d fd=%d expected=%llu:%llu actual=%llu:%llu owner=%lu:%lu mode=%o links=%lu result=%d errno=%d\\n",
-            receipt_ok, parent_ok, descriptor, (unsigned long long)device, (unsigned long long)inode,
-            (unsigned long long)info.st_dev, (unsigned long long)info.st_ino,
-            (unsigned long)info.st_uid, (unsigned long)info.st_gid, (unsigned)(info.st_mode & 07777),
-            (unsigned long)info.st_nlink, ok, errno);
-    return ok;\n''')
-source = source[:start] + lease + source[end:]
-old = '    if (ok) ok = bq_broker_state(&request, service_uid, service_gid, candidate_gid);'
-assert source.count(old) == 1
-source = source.replace(old, '''    fprintf(stderr, "DIAG_REQUEST preflight=%d peer=%lu service=%lu egid=%lu groups=%d received=%ld valid=%d\\n",
-            ok, (unsigned long)peer.uid, (unsigned long)service_uid, (unsigned long)getegid(),
-            bq_broker_groups_valid(service_gid, candidate_gid), (long)received,
-            bq_broker_request_valid(&request));
-    if (ok)
-    {
-        BqBrokerPaths paths;
-        bool paths_ok = bq_broker_paths(&request, &paths);
-        fprintf(stderr, "DIAG_STATE paths=%d root=%d workspace=%d results=%d result=%d worker=%d base=%d candidate=%d service=%d build=%d throughput=%d\\n",
-                paths_ok, bq_broker_private_directory("/var/lib/buster-bench", service_uid, candidate_gid, 0710),
-                bq_broker_private_directory(BQ_BROKER_WORKSPACES, service_uid, candidate_gid, 02710),
-                bq_broker_private_directory(BQ_BROKER_WORKSPACES "/results", service_uid, service_gid, 0710),
-                paths_ok && bq_broker_private_directory(paths.result, service_uid, service_gid, 0700),
-                paths_ok && bq_broker_worker_record(&request, &paths, service_uid, service_gid, false),
-                paths_ok && bq_broker_manifest(&request, &paths, service_uid, false),
-                paths_ok && bq_broker_manifest(&request, &paths, service_uid, true),
-                bq_broker_installed_binary(BQ_BROKER_SERVICE), bq_broker_installed_binary(BQ_BROKER_BUILD),
-                bq_broker_installed_binary(BQ_BROKER_THROUGHPUT));
-        ok = bq_broker_state(&request, service_uid, service_gid, candidate_gid);
-        fprintf(stderr, "DIAG_STATE final=%d\\n", ok);
-    }''')
-old = '        result = bq_broker_execute(&command, STDIN_FILENO, request.operation == BQ_BROKER_SIGNAL);'
-assert source.count(old) == 1
-source = source.replace(old, '''    {
-        result = bq_broker_execute(&command, STDIN_FILENO, request.operation == BQ_BROKER_SIGNAL);
-        fprintf(stderr, "DIAG_EXEC result=%d\\n", result);
-    }''')
-Path(os.environ['OUTPUT']).write_text(source)
-PY
-  clang -std=c11 -O2 -Wall -Wextra -Werror "$payload/broker-diag.c" -o "$payload/binaries/buster-bench-systemd-broker"
-  echo 'DIAGNOSTIC_ONLY: broker binary instrumented; cannot count as exact-source #1162 acceptance'
-fi
 cp tools/bench_service/deploy/{buster-bench.service,buster-bench.slice,buster-bench-systemd-broker.socket,buster-bench-systemd-broker@.service,buster-bench.tmpfiles.conf} "$payload/units/"
 mkdir -p "$payload/recipes"
 cp tools/bench_service/profiles/validate-buster-v1.recipe "$payload/recipes/"
@@ -233,9 +181,13 @@ printf 'device=%s\ninode=%s\n' \
   > /etc/buster-bench/systemd-broker-lease.identity
 chown root:root /etc/buster-bench/systemd-broker-lease.identity
 chmod 0444 /etc/buster-bench/systemd-broker-lease.identity
+# The broker checks its receipt parent as a root-owned, nonwritable directory.
+chmod 0555 /etc/buster-bench
+test "$(stat -c %a:%u:%g /etc/buster-bench)" = 555:0:0
+test "$(stat -c %a:%u:%g /etc/buster-bench/systemd-broker-lease.identity)" = 444:0:0
 printf 'GUEST_IDENTITIES\n'; id buster-bench; id buster-bench-candidate; id buster-github-runner
 stat -c 'LEASE_DEVICE=%d LEASE_INODE=%i MODE=%a OWNER=%u:%g LINKS=%h' /var/lib/buster-bench/lease/host.lock
-stat -c '%a %u:%g %n' /var/lib/buster-bench /var/lib/buster-bench/queue /var/lib/buster-bench/workspaces /var/lib/buster-bench/lease /var/lib/buster-bench/workspaces/results
+stat -c '%a %u:%g %n' /var/lib/buster-bench /var/lib/buster-bench/queue /var/lib/buster-bench/workspaces /var/lib/buster-bench/lease /var/lib/buster-bench/workspaces/results /etc/buster-bench /etc/buster-bench/systemd-broker-lease.identity
 systemctl daemon-reload
 systemd-analyze verify /etc/systemd/system/buster-bench.service /etc/systemd/system/buster-bench-systemd-broker.socket /etc/systemd/system/buster-bench-systemd-broker@.service /etc/systemd/system/buster-bench.slice
 GUEST
@@ -288,8 +240,4 @@ sha256sum "$evidence/result.bqexport" | tee "$evidence/archive-sha256.txt"
 mkdir -m 0700 "$evidence/replay"
 build/bench-service-tools/service unpack-export "$evidence/result.bqexport" "$evidence/replay/result" "$receipt" | tee "$evidence/replay.txt"
 sudo docker exec "$guest" sh -ec 'test ! -e /var/lib/buster-bench/workspaces/.lease-handoff; test "$(stat -c %h /var/lib/buster-bench/lease/host.lock)" = 1'
-if [[ "${ISSUE1162_DIAGNOSTIC_BROKER:-}" == 1 ]]; then
-  echo 'DIAGNOSTIC_ONLY: instrumented broker binary, exact-source acceptance unavailable'
-  exit 1
-fi
 echo "FULL_SLICE_EXECUTION_PASS source=$subject job=$job token=$token; no protected host involved"
