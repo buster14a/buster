@@ -12987,6 +12987,7 @@ struct CIrExpressionCoreState
     u32 pending_end;
     u32 sizeof_vla_start;
     u32 sizeof_vla_end;
+    bool sizeof_vla_previous_preparing_calls;
     IrTypeId pending_type;
     IrSourceRange pending_source;
     bool expect_operand;
@@ -27364,6 +27365,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     {
         if (!machine->child_result.success)
         {
+            builder->preparing_calls = state->sizeof_vla_previous_preparing_calls;
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
@@ -27373,6 +27375,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
                 .as.expression = {.start = state->sizeof_vla_start, .end = state->sizeof_vla_end},
             }))
         {
+            builder->preparing_calls = state->sizeof_vla_previous_preparing_calls;
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
         }
         return;
@@ -27380,6 +27383,10 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT ||
         frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA)
     {
+        if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA)
+        {
+            builder->preparing_calls = state->sizeof_vla_previous_preparing_calls;
+        }
         if (!machine->child_result.success)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -27950,8 +27957,12 @@ c_ir_expression_core_loop:
                             // The enclosing call-preparation pass skipped
                             // this sizeof operand; discover its calls only
                             // after its original type requires evaluation.
+                            // If this is a prepared call's argument, pause
+                            // that pass too so this nested scan can discover
+                            // the operand's calls.
                             state->sizeof_vla_start = operand_start;
                             state->sizeof_vla_end = operand_end;
+                            state->sizeof_vla_previous_preparing_calls = builder->preparing_calls;
                             c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types,
                                                       value_count, operation_count, consumed_index + 1, false);
                             u32 operand_preparation_start = operand_start;
@@ -27963,9 +27974,11 @@ c_ir_expression_core_loop:
                             {
                                 operand_preparation_start += 1;
                             }
+                            builder->preparing_calls = false;
                             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA_CALLS;
                             if (!c_ir_prepare_calls_frame_push(builder, operand_preparation_start, operand_end))
                             {
+                                builder->preparing_calls = state->sizeof_vla_previous_preparing_calls;
                                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                             }
                             yielded_sizeof = true;
