@@ -18783,12 +18783,11 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     }
     for (u32 index = start; index < end; index += 1)
     {
-        CToken token = preprocess.tokens[index];
-        bool assignment_token = c_parse_assignment_punctuator(token);
-        if ((declaration_tokens[index - start] && !assignment_token) || (skipped && skipped[index - start]))
+        if (declaration_tokens[index - start] || (skipped && skipped[index - start]))
         {
             continue;
         }
+        CToken token = preprocess.tokens[index];
         if (token.kind == C_TOKEN_CHARACTER_LITERAL)
         {
             u64 character = 0;
