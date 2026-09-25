@@ -2,6 +2,7 @@
 """Failure-first tests for the offline retirement export handoff."""
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -33,6 +34,9 @@ class ExportReplayTest(unittest.TestCase):
         receipt[8:16] = self.job.to_bytes(8, "little")
         receipt[16:24] = self.attempt.to_bytes(8, "little")
         receipt[24:32] = len(self.bytes).to_bytes(8, "little")
+        receipt[32:40] = len(self.bytes).to_bytes(8, "little")
+        receipt[40:44] = (1).to_bytes(4, "little")
+        receipt[44:48] = (1).to_bytes(4, "little")
         receipt[240:304] = self.full_digest.encode()
         receipt[304:368] = hashlib.sha256(self.bytes).hexdigest().encode()
         receipt[560:608] = recipe.ljust(48, b"\0")
@@ -219,6 +223,67 @@ class ExportReplayTest(unittest.TestCase):
         self.assertIn("independently supplied digest", second.stderr)
         self.assertEqual(list(clean.iterdir()), [])
         self.assertFalse((clean_root / "new-result").exists())
+
+    def test_receipt_derived_six_copy_capacity_from_real_fields(self):
+        ledger = replay.capacity_ledger(self.receipt)
+        copies = ledger["copies"]
+        exported = replay.RECEIPT_BYTES + len(self.bytes)
+        self.assertEqual(copies["retained_service_result_bytes"], len(self.bytes))
+        self.assertEqual(copies["extracted_clean_replay_bytes"], len(self.bytes))
+        self.assertEqual(copies["sealed_service_spool_bytes"],
+                         exported + replay.SPOOL_INDEX_BYTES)
+        for stage in ("gateway_download_bytes", "immutable_test_publication_bytes",
+                      "fresh_retrieval_bytes"):
+            self.assertEqual(copies[stage], exported)
+        self.assertEqual(ledger["logical_six_copy_file_bytes"], sum(copies.values()))
+
+    def test_capacity_upper_bound_accounts_for_six_copies(self):
+        receipt = bytearray(self.receipt)
+        receipt[24:32] = replay.ARCHIVE_CAP.to_bytes(8, "little")
+        receipt[32:40] = replay.RESULT_FILE_CAP.to_bytes(8, "little")
+        receipt[40:44] = replay.ENTRY_CAP.to_bytes(4, "little")
+        receipt[44:48] = replay.ENTRY_CAP.to_bytes(4, "little")
+        ledger = replay.capacity_ledger(receipt)
+        self.assertEqual(ledger["logical_six_copy_file_bytes"], 824805176192)
+        self.assertEqual(ledger["copies"]["sealed_service_spool_bytes"],
+                         137582487424)
+
+    def test_matching_external_digest_of_malformed_inventory_never_publishes(self):
+        command = [sys.executable, str(Path(replay.__file__).resolve()),
+                   str(self.archive), "--publish-only", "--test-publication",
+                   str(self.destination), "--bench-service", str(self.root / "reviewed-service"),
+                   "--repository-root", str(self.root), "--binding", "record.json",
+                   "--job", str(self.job), "--attempt", str(self.attempt),
+                   "--full-result-sha256", self.full_digest,
+                   "--trusted-execution-receipt-sha256", "b" * 64]
+        for offset, size, invalid in ((32, 8, len(self.bytes) + 1),
+                                      (40, 4, 0), (44, 4, replay.ENTRY_CAP + 1)):
+            with self.subTest(offset=offset):
+                receipt = bytearray(self.receipt)
+                receipt[offset:offset + size] = invalid.to_bytes(size, "little")
+                self.archive.write_bytes(receipt + self.bytes)
+                pinned_digest = hashlib.sha256(receipt).hexdigest()
+                result = subprocess.run(command + ["--export-receipt-sha256", pinned_digest],
+                                        capture_output=True, text=True, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid retirement capacity inventory", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(list(self.destination.iterdir()), [])
+
+    def test_publish_only_capacity_output_does_not_claim_replay(self):
+        command = [sys.executable, str(Path(replay.__file__).resolve()),
+                   str(self.archive), "--publish-only", "--test-publication",
+                   str(self.destination), "--bench-service", str(self.root / "reviewed-service"),
+                   "--repository-root", str(self.root), "--binding", "record.json",
+                   "--job", str(self.job), "--attempt", str(self.attempt),
+                   "--full-result-sha256", self.full_digest,
+                   "--trusted-execution-receipt-sha256", "b" * 64,
+                   "--export-receipt-sha256", self.receipt_sha256]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["transferred_bytes"], replay.RECEIPT_BYTES + len(self.bytes))
+        self.assertEqual(output["receipt_derived_capacity"], replay.capacity_ledger(self.receipt))
+        self.assertNotIn("replay", output)
 
 
 if __name__ == "__main__":

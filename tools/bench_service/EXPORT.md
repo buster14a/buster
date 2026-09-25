@@ -124,6 +124,20 @@ authority. This command does not implement or attest durable #510 publication.
 Both invocations report actual copied bytes and receipt-declared archive,
 indexed-file, entry, chunk and reserved spool sizes separately. These describe
 transported evidence; they do not count executed workloads or physical samples.
+They also report `receipt_derived_capacity.copies` for retained service-result
+regular files, the sealed spool including its fixed reserved chunk index,
+gateway download, immutable test publication, fresh retrieval and extracted
+clean replay. `logical_six_copy_file_bytes` sums these six logical file-byte
+counts. The 1,024-byte export receipt is included in the spool and each of
+the three exported copies. The result and extraction each use receipt offset
+32, which includes every regular result file, including control files. Before
+creating a pending publication, the utility checks that the externally pinned
+receipt reports a positive file inventory, no more than 4,096 entries,
+regular-file bytes within the 128 GiB payload limit and no larger than the
+archive. A matching digest for an internally inconsistent receipt cannot
+authorize publication. Receipt-derived capacity remains a model until the
+same-attempt service producer, gateway transfer and clean replay run; it is
+not a filesystem quota or a proof of actual retained copies.
 
 The native unpacker checks every archived byte, canonical inventory and worker
 result binding. The production Python validator then reconstructs the entire
@@ -249,9 +263,13 @@ retirement export or clean replay has been completed at this point.
 At maximum capacity, reserve six independent copies: retained service result,
 sealed service spool (including its chunk index), gateway download, immutable
 test publication, fresh retrieval and extracted clean replay. The
-128 GiB indexed-payload ceiling therefore implies **over 768 GiB** plus
-archive headers, index, filesystem and #510 publication headroom. At the
-archive ceiling of 137,448,259,584 bytes, the sealed spool reserves
+128 GiB indexed-payload ceiling yields **824,805,176,192 logical file/transport
+bytes** when both file and archive fields reach their respective ceilings.
+This is a simultaneous upper bound, not a measured storage requirement or
+proof that any producer can fill both ceilings. It excludes directory metadata,
+filesystem allocation, validator temporary space and any separate #510
+publication copy. At the archive ceiling of 137,448,259,584 bytes, the sealed
+spool reserves
 137,582,487,424 bytes including the 1,024-byte receipt and 2,097,294
 64-byte chunk digests. These are reservations, not transferred bytes. The
 reviewed whole-job deadline must also accommodate both stages; the current

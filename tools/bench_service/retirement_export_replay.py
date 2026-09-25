@@ -24,6 +24,8 @@ CHUNK = 64 * 1024
 RECEIPT_BYTES = 1024
 # export.c's separate blocked-retirement ceiling, including archive headers.
 ARCHIVE_CAP = 137448259584
+RESULT_FILE_CAP = 128 * 1024 * 1024 * 1024
+ENTRY_CAP = 4096
 # export.c reserves a full 64-byte digest index up to the recipe's archive cap.
 SPOOL_INDEX_BYTES = ((ARCHIVE_CAP + CHUNK - 1) // CHUNK) * 64
 RECIPE = b"native-retirement-performance-v1"
@@ -46,6 +48,33 @@ def u32(data, offset):
 
 def u64(data, offset):
     return int.from_bytes(data[offset:offset + 8], "little")
+
+
+def capacity_ledger(receipt):
+    """Logical file/transport capacity from the independently pinned receipt.
+
+    The service spool reserves its entire sparse chunk index, even for a
+    smaller archive. Filesystem allocation and separate durable publication
+    are deliberately outside this six-copy file-byte ledger.
+    """
+    archive_bytes = u64(receipt, 24)
+    file_bytes = u64(receipt, 32)
+    files = u32(receipt, 40)
+    entries = u32(receipt, 44)
+    if not (0 < archive_bytes <= ARCHIVE_CAP and
+            0 < file_bytes <= RESULT_FILE_CAP and file_bytes <= archive_bytes and
+            0 < files <= entries <= ENTRY_CAP):
+        fail("export receipt has an invalid retirement capacity inventory")
+    exported_bytes = RECEIPT_BYTES + archive_bytes
+    copies = {
+        "retained_service_result_bytes": file_bytes,
+        "sealed_service_spool_bytes": exported_bytes + SPOOL_INDEX_BYTES,
+        "gateway_download_bytes": exported_bytes,
+        "immutable_test_publication_bytes": exported_bytes,
+        "fresh_retrieval_bytes": exported_bytes,
+        "extracted_clean_replay_bytes": file_bytes,
+    }
+    return {"copies": copies, "logical_six_copy_file_bytes": sum(copies.values())}
 
 
 def archive_source(path, receipt_sha256, job, attempt, full_sha256):
@@ -71,6 +100,7 @@ def archive_source(path, receipt_sha256, job, attempt, full_sha256):
             fail("export is not the retirement recipe")
         if u32(receipt, 1020) != 7:
             fail("exported attempt is not terminal")
+        capacity_ledger(receipt)
         return descriptor, before, receipt
     except BaseException:
         os.close(descriptor)
@@ -216,6 +246,7 @@ def replay(args):
                       "files": u32(receipt, 40), "entries": u32(receipt, 44),
                       "archive_chunks": (u64(receipt, 24) + CHUNK - 1) // CHUNK,
                       "reserved_service_spool_bytes": RECEIPT_BYTES + SPOOL_INDEX_BYTES + u64(receipt, 24),
+                      "receipt_derived_capacity": capacity_ledger(receipt),
                       "export_receipt_sha256": receipt_sha256}, sort_keys=True), flush=True)
     if args.publish_only:
         return
