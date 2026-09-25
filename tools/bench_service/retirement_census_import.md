@@ -1,12 +1,46 @@
 # Raw #508 Census Import Boundary
 
-The service-side B-to-correctness entry accepts held descriptors for #508's
-support declaration, `inputs.tsv`, and `rows.tsv`. It projects every raw object
-row into the prepared B rows before importing the matched build. The row
-projection checks the complete fixed target, frontend, PIC, and allocator
+The staged C projection reads held descriptors for #508's support declaration,
+`inputs.tsv`, `rows.tsv`, `manifest.txt`, and the source-owned
+`docs/native-retirement-applicability-v1.tsv` ledger, plus the schema-2
+validator report, `applicability.tsv`, and `applicability-skips.tsv`. Every file
+has a separate compiled-profile SHA-256 pin. The importer recomputes the
+manifest identity, `rows_identity_sha256`, and `input_ledger_sha256`, and
+cross-checks the source ledger digest/count in the manifest and report. For
+full-census it requires the approved 374-entry ledger digest and four shards.
+It checks the report's schema, profile, binary/support identities, row/group
+counts, complete partition, exact class names/maps/membership, clean-candidate
+flags, and candidate/reference/acceptance failure rows against the
+applicability sidecar.
+
+The source ledger and authenticated non-object source obligation determine the
+exact expected non-executed set, class, and reason. The report skip IDs and
+`applicability-skips.tsv` must match that set row by row. In particular, every
+ledger-declared platform-inapplicable/unavailable row must be skipped, and an
+ordinary supported object row cannot be skipped as a retained control. The
+projection derives compiler eligibility from this exact source-derived set
+and creates row-bound skip proofs from the pinned report digest and skip row.
+
+This is a staged validator projection, not a C replay of the #508 producer.
+It does not inspect/replay every shard's object, result, argv, environment,
+supported-gap ledger, residual evidence, or every schema-2 report field. In
+particular, it does not derive default applicability classes for rows absent
+from the source ledger, replay fallback/telemetry/execution/artifact defect
+arrays, or establish `clean_acceptance` from independent result replay. The
+real schema-2 fixture runs the repository validator
+and Python replay before exercising the C projection; it proves importer
+mechanics only. The low-level C probe accepts the `self-test` profile for this
+purpose. The production service entry additionally requires
+`profile=full-census`, but still returns a fail-closed error after a valid
+projection because the remaining B/#509 authorities are not joined.
+
+The projection checks the complete fixed target, frontend, PIC, and allocator
 matrix; zero-based row and group order; fixture path, recipe, and compile
 obligation against the authenticated source ledger; and the approved #508
-canonical JSON identity digest for each row. The `inputs.tsv` projection joins
+canonical JSON identity digest for each row. The staged service entry checks
+projection ordinals against the supplied B rows, but does not import the
+matched build or begin the correctness gate. The lower-level `_built_pinned`
+fixture seam exercises matched-build import separately. The `inputs.tsv` projection joins
 every line to the pinned support declaration, validates byte count, SHA-256,
 role, and compile obligation, and checks exact path-based `fixture_recipe` and
 `fixture_flags` values from #508's approved recipe table. Each held file must
@@ -28,30 +62,34 @@ declaration used to derive the subject population, source digests, and compile
 obligations.
 
 The production profile
-`profiles/native-retirement-performance-v1.blocked` currently contains neither
-`census-inputs-sha256` nor `census-rows-sha256`, so the production entry fails
-closed before build import. Adding either pin requires the independently
-authenticated #508 artifact and a compiled profile update; this change does
-not add or infer either pin. The checked-in support declaration currently
-contains 411 subjects, which project to 78,912 object rows at 192 rows per
-subject.
+`profiles/native-retirement-performance-v1.blocked` currently lacks the raw
+input/row pins and all validator manifest/report/applicability/skip and source
+applicability-ledger pins, so the production entry fails closed before build
+import. The current census attempt used the #923 test-merge tree and failed its
+candidate gate, so it does not establish current source-head pins. No
+current-source full census artifact has established these exact pins. The checked-in support
+declaration currently contains 411 subjects, which project to 78,912 object
+rows at 192 rows per subject.
 
-This boundary authenticates the raw row matrix and identity/configuration
-fields represented by #508's approved row identity. It does not authenticate
-validator-derived eligibility, `configuration_sha256`, validator receipts,
-required checks, or semantic oracles. The checked-in profile and inspected
-#508 contract do not provide a validator-output digest or an approved per-row
-`configuration_sha256` serializer. Those inputs therefore still require
-independent authority and validator replay; the current B caller-provided
-eligibility and configuration values remain outside this boundary. The
-production recipe remains blocked; this projection is not a full-corpus or
-eligibility claim.
+The production service entry checks projection ordinals against the supplied B
+rows but does not overwrite them or call the correctness-gate begin function.
+Even a valid full-census projection returns `BQ_RECIPE_MISMATCH` until the
+separate authority joins are implemented. Missing facts include an approved
+#508 per-row `configuration_sha256` serializer, independent verification of
+per-row compiler/runtime argv/cwd/environment and CPU provenance, an
+authenticated #509 required-check list and receipt bytes/digests, and
+independent-oracle bytes/digest from an admitted producer. The gate can validate
+that a caller's check digest matches its caller-supplied expected digest; this
+import does not establish where that expectation or receipt came from. It also
+does not prove clean acceptance or replay the complete validator. The existing
+worker has no B-to-timed-launch caller, so this projection does not prove a
+campaign can start or that zero timed launches occurred. The production recipe
+remains blocked; do not treat the staged projection as full authority.
 
-The private fixture in `retirement_prepare_tests.c` exercises a positive
-three-subject miniature pinned-profile join with a hard-coded independently
-computed `inputs.tsv` digest, including a C23 recipe and a retained control.
-It rejects missing or altered input pins, an altered prepared row digest, a
-caller identity mismatch, descriptors without `FD_CLOEXEC`, changed input
-bytes, input recipes or source SHA values even after those files are given new
-test-only pins, and raw row mutations to allocator, ordinal, recipe, or fixture
-path even when each changed file is given a matching miniature profile digest.
+`retirement_validator_eligibility_test.py` generates genuine #508 schema-2
+validator output from a miniature source fixture, runs the Python evidence
+checks/replay, then invokes the C probe with runtime-computed pins. Its positive
+case exercises the importer mechanics; re-pinned tamper cases change class-map
+membership, skip membership/sidecar data, and required pins. It does not grant
+production authority. The separate private fixture in
+`retirement_prepare_tests.c` continues to test the raw support/input/row join.
