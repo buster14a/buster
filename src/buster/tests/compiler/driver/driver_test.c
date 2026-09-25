@@ -17395,6 +17395,84 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     // allocator because several are lowering rather than parsing defects.
     // The audit regressions also pin promotion, constant conditional typing,
     // and empty macro arguments across the same allocator matrix.
+    // Keep the frozen task-batch file unchanged. This additional ordinary
+    // runtime case is owned by the registered driver suite and uses its real
+    // temporary-file path and allocator execution loop.
+    String8 macro_fusion_source_path = buster_test_temporary_path(arguments->arena, S8("buster-macro-fusion-source"), S8(".c"));
+    String8 macro_fusion_source = S8(
+        "// Macro task storage: nested argument rescans, growth, empty replacement\n"
+        "// lists, re-enable lookahead, paste, stringify and variadics. No extensions.\n"
+        "#define TASK_ID(x) x\n"
+        "#define TASK_FN(x) ((x) + 1)\n"
+        "#define TASK_ALIAS TASK_FN\n"
+        "#define TASK_ALIAS2 TASK_ALIAS\n"
+        "#define TASK_PAIR(a,b) a b\n"
+        "#define TASK_EDGE(a,b) a+b\n"
+        "#define TASK_EXPAND_STR(x) TASK_STR(x)\n"
+        "#define TASK_EMPTY()\n"
+        "#define TASK_VALUE 1\n"
+        "#define TASK_TWO(x) ((x) + (x))\n"
+        "#define TASK_FOUR(x) TASK_TWO(TASK_TWO(x))\n"
+        "#define TASK_EIGHT(x) TASK_FOUR(TASK_TWO(x))\n"
+        "#define TASK_16(x) TASK_EIGHT(TASK_TWO(x))\n"
+        "#define TASK_32(x) TASK_16(TASK_TWO(x))\n"
+        "#define TASK_64(x) TASK_32(TASK_TWO(x))\n"
+        "#define TASK_128(x) TASK_64(TASK_TWO(x))\n"
+        "#define TASK_256(x) TASK_128(TASK_TWO(x))\n"
+        "#define TASK_CAT(a, b) a ## b\n"
+        "#define TASK_STR(x) #x\n"
+        "#define TASK_VALUES(first, ...) first, __VA_ARGS__\n"
+        "#define task_self task_self\n"
+        "#define task_cycle_a task_cycle_b\n"
+        "#define task_cycle_b task_cycle_a\n"
+        "\n"
+        "#if TASK_ID(TASK_VALUE) != 1\n"
+        "#error conditional expansion changed\n"
+        "#endif\n"
+        "\n"
+        "enum { task_sum = TASK_256(TASK_VALUE) };\n"
+        "\n"
+        "static int same_text(char const* left, char const* right)\n"
+        "{\n"
+        "    unsigned index = 0;\n"
+        "    while (left[index] && left[index] == right[index])\n"
+        "    {\n"
+        "        index += 1;\n"
+        "    }\n"
+        "    return left[index] == right[index];\n"
+        "}\n"
+        "\n"
+        "int main(void)\n"
+        "{\n"
+        "    int result = 0;\n"
+        "    int task_self = 19;\n"
+        "    int task_cycle_a = 23;\n"
+        "    int values[] = {TASK_VALUES(3, TASK_FN(3), TASK_ID(TASK_VALUE))};\n"
+        "    result |= task_sum != 256;\n"
+        "    result |= TASK_ID(TASK_FN)(7) != 8;\n"
+        "    result |= TASK_ALIAS(11) != 12;\n"
+        "    result |= TASK_ID(TASK_ALIAS)(13) != 14;\n"
+        "    result |= TASK_FN(TASK_FN(9)) != 11;\n"
+        "    result |= TASK_TWO(task_self) != 38;\n"
+        "    result |= TASK_TWO(task_cycle_a) != 46;\n"
+        "    result |= TASK_CAT(,12) != 12;\n"
+        "    result |= TASK_CAT(TASK_,VALUE) != 1;\n"
+        "    result |= TASK_EMPTY() TASK_CAT(,) 7 != 7;\n"
+        "    result |= !same_text(TASK_STR(task_self /* gap */ + TASK_VALUE), \"task_self + TASK_VALUE\");\n"
+        "    result |= sizeof(values) / sizeof(values[0]) != 3;\n"
+        "    result |= values[0] != 3 || values[1] != 4 || values[2] != 1;\n"
+        "    result |= TASK_ID(TASK_ALIAS2)(13) != 14;\n"
+        "    result |= TASK_PAIR(,TASK_FN)(7) != 8;\n"
+        "    result |= TASK_PAIR(TASK_FN,)(7) != 8;\n"
+        "    result |= TASK_PAIR(TASK_EMPTY(),TASK_FN)(7) != 8;\n"
+        "    result |= TASK_ID(TASK_256(TASK_VALUE)) + TASK_ID(TASK_128(TASK_VALUE)) != 384;\n"
+        "    result |= !same_text(TASK_EXPAND_STR(TASK_EDGE(,1)), \"+1\");\n"
+        "    result |= !same_text(TASK_EXPAND_STR(TASK_EDGE(1,)), \"1+\");\n"
+        "    result |= !same_text(TASK_EXPAND_STR(TASK_PAIR(,TASK_FN)(7)), \"((7) + 1)\");\n"
+        "    return result;\n"
+        "}\n"
+    );
+    bool macro_fusion_written = file_write(macro_fusion_source_path, BUSTER_SLICE_TO_BYTE_SLICE(macro_fusion_source));
     String8 c_quickjs_regression_paths[] = {
         S8("tests/basic_c_aggregate_attribute.c"),
         S8("tests/basic_c_integer_literals.c"),
@@ -17414,6 +17492,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("tests/basic_c_constant_conditional_type.c"),
         S8("tests/basic_c_macro_empty_paste.c"),
         S8("tests/basic_c_preprocessor_short_circuit.c"),
+        macro_fusion_source_path,
     };
     String8 c_quickjs_regression_names[] = {
         S8("buster-c-aggregate-attribute"),
@@ -17434,34 +17513,42 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         S8("buster-c-constant-conditional-type"),
         S8("buster-c-macro-empty-paste"),
         S8("buster-c-preprocessor-short-circuit"),
+        S8("buster-c-macro-task-fusion"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths) == BUSTER_ARRAY_LENGTH(c_quickjs_regression_names));
     for (u64 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths); fixture_index += 1)
     {
-        for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        if (fixture_index + 1 < BUSTER_ARRAY_LENGTH(c_quickjs_regression_paths) || BUSTER_REQUIRE(arguments, macro_fusion_written))
         {
-            TemporalArena quickjs_temporary = scratch_begin(&arguments->arena, 1);
-            String8 fixture_path = buster_test_temporary_path(quickjs_temporary.arena, c_quickjs_regression_names[fixture_index], S8(""));
-            String8 fixture_command_line[] = {
-                c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_quickjs_regression_paths[fixture_index],
-            };
-            CompilerDriverResult fixture = compiler_driver_execute_invocation(
-                quickjs_temporary.arena,
-                compiler_driver_parse_arguments(quickjs_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
-            BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
-            if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+            for (u64 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
             {
-                String8 fixture_arguments[] = {fixture_path};
-                ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
-                                                                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
-                BUSTER_TEST(arguments, fixture_spawn.handle != 0);
-                if (fixture_spawn.handle)
+                TemporalArena quickjs_temporary = scratch_begin(&arguments->arena, 1);
+                String8 fixture_path = buster_test_temporary_path(quickjs_temporary.arena, c_quickjs_regression_names[fixture_index], S8(""));
+                String8 fixture_command_line[] = {
+                    c_lz4_regression_allocators[allocator_index], S8("-o"), fixture_path, c_quickjs_regression_paths[fixture_index],
+                };
+                CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                    quickjs_temporary.arena,
+                    compiler_driver_parse_arguments(quickjs_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+                BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+                if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
                 {
-                    BUSTER_TEST(arguments, os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                    String8 fixture_arguments[] = {fixture_path};
+                    ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0}, (SliceString8){0},
+                                                                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                    if (fixture_spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(quickjs_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
                 }
+                scratch_end(quickjs_temporary);
             }
-            scratch_end(quickjs_temporary);
         }
+    }
+    if (macro_fusion_written)
+    {
+        BUSTER_TEST(arguments, os_file_delete(macro_fusion_source_path));
     }
     // The C23 attribute syntax, which the frontend did not parse at all: an
     // attributed declaration failed to register and the error surfaced later
