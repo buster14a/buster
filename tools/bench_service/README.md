@@ -210,6 +210,19 @@ The existing native `build.c` driver owns compilation and execution:
 ./build.sh bench_service_recipe_self_test
 ```
 
+On Linux x86-64 and AArch64, both self-tests fork a disposable child with a
+native-architecture syscall filter that denies explicit SUID/SGID `mkdirat`,
+`fchmod` and `fchmodat` requests. Negative controls require `EPERM` even when
+reasserting an existing SGID bit. They exercise the production directory
+helpers, materializer/reconciliation and recipe tree-locking traversal. The
+filter never affects the parent test process. The Ubuntu 24.04 TCC bootstrap
+lane sets `BQ_REQUIRE_DISTINCT_GROUP=1` to require a fixture group different
+from the effective primary group; other Linux environments print
+`unsupported-different-primary` if their credentials cannot set up that case.
+Other architectures print `unsupported-architecture` and do not count as
+sandbox coverage. These tests do not reproduce the full systemd sandbox or
+qualify a dedicated host.
+
 `test_all_combinations` runs the normal service self-test beside the existing
 throughput self-test on each desktop lane, and also runs its AddressSanitizer
 and UndefinedBehaviorSanitizer variant on POSIX hosts. Existing compiler,

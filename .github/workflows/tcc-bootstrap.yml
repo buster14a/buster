@@ -25,6 +25,9 @@ jobs:
     timeout-minutes: 10
     env:
       LC_ALL: C
+      # Hosted Ubuntu supplies a supplementary group; the SGID regression
+      # must cover inheritance from a group other than the primary group.
+      BQ_REQUIRE_DISTINCT_GROUP: '1'
     steps:
       - name: Require CI admission to be enabled
         shell: bash
