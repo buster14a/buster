@@ -1,0 +1,147 @@
+{
+ "schema": "buster-first-touch-census-v1",
+ "thp_mode": "always",
+ "cwd": "/home/user/buster",
+ "arguments": [
+  "cc",
+  "-Isrc",
+  "-Ibuild/generated",
+  "-DBUSTER_UNITY_BUILD=1",
+  "-DBUSTER_INCLUDE_TESTS=0",
+  "-g",
+  "-c",
+  "src/buster/apps/ide/ide.c"
+ ],
+ "identical_objects": true,
+ "summary": {
+  "baseline": {
+   "compiler": "/tmp/claude-0/-home-user-buster/d117f688-1ac4-5d3c-bfcc-eb1a4fa4a29f/scratchpad/base/ide-base",
+   "compiler_sha256": "5f769d8a3e8cf5b2a652c26d92ec85f14b9237460bb1b1282738647a060f427c",
+   "runs": 3,
+   "all_exit_zero": true,
+   "object_sha256": [
+    "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e"
+   ],
+   "minor_faults": [
+    2460,
+    2884,
+    2897
+   ],
+   "maxrss_kib": [
+    2006072,
+    2006088,
+    2006740
+   ],
+   "thp_fault_alloc_delta": [
+    975,
+    975,
+    976
+   ]
+  },
+  "candidate": {
+   "compiler": "/tmp/claude-0/-home-user-buster/d117f688-1ac4-5d3c-bfcc-eb1a4fa4a29f/scratchpad/streams/ide-streams",
+   "compiler_sha256": "f10ba5fc30eb76d29bf24e81b0af811479a3e807c03ad20487a1b33411a0118c",
+   "runs": 3,
+   "all_exit_zero": true,
+   "object_sha256": [
+    "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e"
+   ],
+   "minor_faults": [
+    2214,
+    2698,
+    2702
+   ],
+   "maxrss_kib": [
+    1526376,
+    1527140,
+    1527356
+   ],
+   "thp_fault_alloc_delta": [
+    740,
+    740,
+    741
+   ]
+  }
+ },
+ "records": [
+  {
+   "label": "baseline",
+   "index": 0,
+   "exit_status": 0,
+   "maxrss_kib": 2006088,
+   "minor_faults": 2897,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 975,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 14.5131,
+   "diagnostic_user_s": 3.7999,
+   "diagnostic_system_s": 10.5212
+  },
+  {
+   "label": "candidate",
+   "index": 0,
+   "exit_status": 0,
+   "maxrss_kib": 1527140,
+   "minor_faults": 2698,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 740,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 4.3015,
+   "diagnostic_user_s": 3.695,
+   "diagnostic_system_s": 0.4733
+  },
+  {
+   "label": "candidate",
+   "index": 1,
+   "exit_status": 0,
+   "maxrss_kib": 1526376,
+   "minor_faults": 2702,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 740,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 5.2989,
+   "diagnostic_user_s": 3.6151,
+   "diagnostic_system_s": 1.5916
+  },
+  {
+   "label": "baseline",
+   "index": 1,
+   "exit_status": 0,
+   "maxrss_kib": 2006740,
+   "minor_faults": 2460,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 976,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 7.6308,
+   "diagnostic_user_s": 3.6523,
+   "diagnostic_system_s": 3.913
+  },
+  {
+   "label": "baseline",
+   "index": 2,
+   "exit_status": 0,
+   "maxrss_kib": 2006072,
+   "minor_faults": 2884,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 975,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 5.159,
+   "diagnostic_user_s": 3.536,
+   "diagnostic_system_s": 1.5508
+  },
+  {
+   "label": "candidate",
+   "index": 2,
+   "exit_status": 0,
+   "maxrss_kib": 1527356,
+   "minor_faults": 2214,
+   "major_faults": 0,
+   "thp_fault_alloc_delta": 741,
+   "object_sha256": "26f11f7eb2dafc30665a2fa7c2205bf12db4874cd8f52f30fe6c402234c7372e",
+   "diagnostic_wall_s": 3.812,
+   "diagnostic_user_s": 3.4822,
+   "diagnostic_system_s": 0.2454
+  }
+ ],
+ "note": "Deterministic page-work census; wall/user/system fields are diagnostics, not acceptance timing."
+}

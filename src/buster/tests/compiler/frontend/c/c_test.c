@@ -514,6 +514,111 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_enum_lowering_source = S8_INITIALIZER(
     "}\n"
 );
 
+// Lowering places every function's rows at the cursors of the module's row
+// streams and trims the streams to the rows the function kept
+// (c_ir_row_streams_trim). Every lowered function therefore leaves lowering
+// with exact capacities, cache-line-aligned instruction rows, rows owned by
+// the result arena, and rows that no later function overlaps; the canonical
+// passes that grow a trimmed function afterwards -- promotion appends
+// block-parameter values -- move that array out of the stream and still see
+// valid IR.
+BUSTER_GLOBAL_LOCAL String8 const c_test_ir_row_streams_source = S8_INITIALIZER(
+    "static int counter;\n"
+    "int accumulate(int limit)\n"
+    "{\n"
+    "    for (int index = 0; index < limit; index += 1)\n"
+    "    {\n"
+    "        if (index & 1) counter += index; else counter -= 1;\n"
+    "    }\n"
+    "    return counter;\n"
+    "}\n"
+    "int classify(int value)\n"
+    "{\n"
+    "    switch (value) { case 0: return 10; case 1: return 20; case 7: return 30; default: break; }\n"
+    "    return value > 100 ? 1 : value < -100 ? -1 : 0;\n"
+    "}\n"
+    "int wide(void)\n"
+    "{\n"
+    "    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8;\n"
+    "    /* many body tokens, few rows */\n"
+    "    return ((((((a + b) * (c - d)) ^ (e | f)) & (g << 1)) >> 1) + h) + (a + b + c + d + e + f + g + h);\n"
+    "}\n"
+    "void empty(void) {}\n"
+);
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_ir_row_streams(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 target_index = 0; target_index < 3; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index == 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index == 2 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_LINUX;
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, c_test_ir_row_streams_source,
+                                                    (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
+            CParseResult parse = c_parse(temporary.arena, tokens);
+            if (BUSTER_REQUIRE(arguments, tokens.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("ir-row-streams.c"), tokens, parse, target,
+                                                                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count))
+                {
+                    IrProgram* program = lowered.program;
+                    IrModule* module = program->modules;
+                    u8 const* owned_start = (u8 const*)temporary.arena + arena_minimum_position;
+                    u8 const* owned_end = (u8 const*)temporary.arena + temporary.arena->position;
+                    u32 lowered_count = 0;
+                    for (u32 function_index = 0; function_index < module->function_count; function_index += 1)
+                    {
+                        IrFunction* function = module->functions + function_index;
+                        if (function->state == IR_FUNCTION_LOWERED)
+                        {
+                            lowered_count += 1;
+                            BUSTER_TEST(arguments, function->instruction_count && function->block_count);
+                            BUSTER_TEST(arguments, function->instruction_capacity == function->instruction_count);
+                            BUSTER_TEST(arguments, function->value_capacity == function->value_count);
+                            BUSTER_TEST(arguments, function->block_capacity == function->block_count);
+                            BUSTER_TEST(arguments, ((u64)function->instructions & 63) == 0);
+                            BUSTER_TEST(arguments, (u8 const*)function->instructions >= owned_start &&
+                                                       (u8 const*)(function->instructions + function->instruction_count) <= owned_end);
+                            BUSTER_TEST(arguments, (u8 const*)function->values >= owned_start &&
+                                                       (u8 const*)(function->values + function->value_count) <= owned_end);
+                            BUSTER_TEST(arguments, (u8 const*)function->blocks >= owned_start &&
+                                                       (u8 const*)(function->blocks + function->block_count) <= owned_end);
+                            BUSTER_TEST(arguments, function->instruction_canonical_sources &&
+                                                       (u8 const*)function->instruction_canonical_sources >= owned_start &&
+                                                       (u8 const*)(function->instruction_canonical_sources + function->instruction_count) <= owned_end);
+                        }
+                    }
+                    BUSTER_TEST(arguments, lowered_count == 4);
+                    for (u32 first = 0; first < module->function_count; first += 1)
+                    {
+                        IrFunction* a = module->functions + first;
+                        for (u32 second = first + 1; a->state == IR_FUNCTION_LOWERED && second < module->function_count; second += 1)
+                        {
+                            IrFunction* b = module->functions + second;
+                            if (b->state == IR_FUNCTION_LOWERED)
+                            {
+                                BUSTER_TEST(arguments, a->instructions + a->instruction_count <= b->instructions ||
+                                                           b->instructions + b->instruction_count <= a->instructions);
+                                BUSTER_TEST(arguments, a->values + a->value_count <= b->values || b->values + b->value_count <= a->values);
+                                BUSTER_TEST(arguments, a->blocks + a->block_count <= b->blocks || b->blocks + b->block_count <= a->blocks);
+                            }
+                        }
+                    }
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+                    BUSTER_TEST(arguments, ir_prepare_canonical_module(program, module, false).error == IR_VALIDATION_NONE);
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_enum_lowering(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -23192,6 +23297,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy);
     BUSTER_TEST_FIXTURE(arguments, c_test_integer_literal_policy_runtime);
+    BUSTER_TEST_FIXTURE(arguments, c_test_ir_row_streams);
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_lowering);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_fixed_and_wide_enumerator_types);

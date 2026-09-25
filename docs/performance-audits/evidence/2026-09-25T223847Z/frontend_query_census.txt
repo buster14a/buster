@@ -1,0 +1,10 @@
+FRONTEND	type_query_all	calls=1989883	unique=1883889	repeat_calls=105994	tokens=6582100	repeat_tokens=886435	max_same_key=2808
+FRONTEND	type_query_top_nonmemo	calls=1104777	unique=1094006	repeat_calls=10771	tokens=1382389	repeat_tokens=10813	max_same_key=2808
+FRONTEND	type_query_nested	calls=1279	unique=1279	repeat_calls=0	tokens=1287	repeat_tokens=0	max_same_key=1
+FRONTEND	infer_array_count_core	calls=5984	unique=5983	repeat_calls=1	tokens=2580639	repeat_tokens=29	max_same_key=2
+FRONTEND	initializer_expression_constraint	calls=579120	unique=579120	repeat_calls=0	tokens=949990	repeat_tokens=0	max_same_key=1
+FRONTEND	type_query_memo_eligible	calls=883827	unique=788604	repeat_calls=95223	tokens=5198424	repeat_tokens=875622	max_same_key=20
+FRONTEND	type_query_memo_hit	calls=246637	unique=221083	repeat_calls=25554	tokens=1742840	repeat_tokens=216896	max_same_key=19
+FRONTEND	validate_initializer_shape	calls=35435	unique=35435	repeat_calls=0	tokens=1830518	repeat_tokens=0	max_same_key=1
+FRONTEND	type_query_relaxed_no_checked_bit	calls=1989883	unique=1155270	repeat_calls=834613	tokens=6582100	repeat_tokens=2740067	max_same_key=2808
+FRONTEND	infer_array_count_no_diagnostic_bit	calls=5984	unique=5983	repeat_calls=1	tokens=2580639	repeat_tokens=29	max_same_key=2
