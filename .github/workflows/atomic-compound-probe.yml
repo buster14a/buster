@@ -1,0 +1,74 @@
+name: Atomic compound-assignment investigation
+on:
+  push:
+    branches: [research/atomic-compound-probe-20260925-astra]
+    paths: [.github/workflows/atomic-compound-probe.yml, tools/investigations/atomic_compound_probe.py]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      PROBE_OUT: /tmp/buster-atomic-compound-evidence
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - name: Checkout owned investigation branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 8
+      - name: Freeze and inspect exact unchanged production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROBE_OUT"
+          git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/investigation-source.txt"
+          cp tools/investigations/atomic_compound_probe.py "$RUNNER_TEMP/atomic_compound_probe.py"
+          cp tools/investigations/atomic_compound_probe.py "$PROBE_OUT/"
+          python3 -m py_compile "$RUNNER_TEMP/atomic_compound_probe.py"
+          git checkout --detach 83c5f229288ecd8e23588c11b9ad19edc8bf4be2
+          test "$(git rev-parse HEAD^{tree})" = b310e6573e6c89c618f8466941be4b995021a410
+          git diff --exit-code
+          git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/production-source.txt"
+          python3 "$RUNNER_TEMP/atomic_compound_probe.py" --inspect
+      - name: Retain source screen before compilation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: atomic-source-screen-${{ github.run_id }}
+          path: /tmp/buster-atomic-compound-evidence
+          retention-days: 30
+          if-no-files-found: error
+      - name: Build through documented hosted Clang bootstrap exception
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version | tee "$PROBE_OUT/producer.txt"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-atomic-probe-build" 2>&1 | tee "$PROBE_OUT/bootstrap.log"
+          "$RUNNER_TEMP/buster-atomic-probe-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$PROBE_OUT/configure.log"
+          "$RUNNER_TEMP/buster-atomic-probe-build" build --config Release -t ide 2>&1 | tee "$PROBE_OUT/build.log"
+          sha256sum build/Release/ide > "$PROBE_OUT/compiler.sha256"
+          cp build/Release/ide "$PROBE_OUT/compiler-ide"
+          cp build/compile_commands.json "$PROBE_OUT/compile_commands.json"
+      - name: Execute bounded semantic differential and controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/atomic_compound_probe.py" | tee "$PROBE_OUT/probe.log"
+      - name: Hash collected files
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          if test -d "$PROBE_OUT"; then
+            cd "$PROBE_OUT"
+            find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          fi
+      - name: Retain every outcome without converting failures to success
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: atomic-compound-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/buster-atomic-compound-evidence
+          retention-days: 30
+          if-no-files-found: error
