@@ -18514,6 +18514,8 @@ BUSTER_C_INTERNAL bool c_parse_update_after_cast(CParseResult* result, CPreproce
 BUSTER_C_INTERNAL bool c_parse_incompatible_function_initializer(CTypeParseMachine* machine, CParseResult* result,
                                                                     CPreprocessResult preprocess, CScopeId scope, CTypeId destination,
                                                                     u32 start, u32 end);
+BUSTER_C_INTERNAL bool c_parse_local_type_is_variable_length(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
+                                                               CScopeId scope, CTypeId type_id);
 
 BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_type_name(Arena* arena, CParseResult* result, CTypeId type_id, bool decay)
 {
@@ -18652,6 +18654,13 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
                 bool compatible = object_void_compatible ||
                                   c_parse_types_compatible(machine->scratch_arena, result, preprocess,
                                       c_parse_unqualified_type(result, target_pointee), c_parse_unqualified_type(result, source_pointee));
+                if (!compatible && target_element.kind == C_TYPE_ARRAY && source_element.kind == C_TYPE_ARRAY &&
+                    c_parse_local_type_is_variable_length(machine, result, preprocess, scope, target_pointee) &&
+                    c_parse_local_type_is_variable_length(machine, result, preprocess, scope, source_pointee))
+                {
+                    compatible = c_parse_types_compatible(machine->scratch_arena, result, preprocess,
+                                                          target_element.element_type, source_element.element_type);
+                }
                 if (!compatible || drops_qualifier)
                 {
                     String8 source_name = c_parse_assignment_conversion_type_name(result->arena, result, source, true);
@@ -18783,11 +18792,23 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     }
     for (u32 index = start; index < end; index += 1)
     {
-        if (declaration_tokens[index - start] || (skipped && skipped[index - start]))
+        CToken token = preprocess.tokens[index];
+        bool direct_identifier_assignment = false;
+        if (declaration_tokens[index - start] && index > start && c_parse_assignment_punctuator(token) &&
+            preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
+        {
+            u32 lhs_use_index = c_parse_identifier_use_index(result, index - 1);
+            CEntityId lhs_entity_id = lhs_use_index != C_ID_UNDERLYING_INVALID
+                                          ? result->identifier_uses[lhs_use_index].entity
+                                          : C_ENTITY_ID_INVALID;
+            CEntity* lhs_entity = lhs_entity_id.value < result->entity_count ? result->entities + lhs_entity_id.value : 0;
+            direct_identifier_assignment = lhs_entity && lhs_entity->declaration_token_plus_one != index &&
+                (lhs_entity->kind == C_ENTITY_LOCAL || lhs_entity->kind == C_ENTITY_PARAMETER || lhs_entity->kind == C_ENTITY_OBJECT);
+        }
+        if ((declaration_tokens[index - start] && !direct_identifier_assignment) || (skipped && skipped[index - start]))
         {
             continue;
         }
-        CToken token = preprocess.tokens[index];
         if (token.kind == C_TOKEN_CHARACTER_LITERAL)
         {
             u64 character = 0;
