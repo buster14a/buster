@@ -169,7 +169,8 @@ bool bq_recipe_files(BqRecipe recipe, BqRecipeFiles* files)
 {
     String8 name = bq_recipe_name(recipe);
     char const* profile_suffix = recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? ".blocked" : ".recipe";
-    char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" : "";
+    char const* command = recipe == BQ_RECIPE_VALIDATE_BUSTER ? "bench_service_recipe" :
+                          recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED ? "bench_service_retirement_recipe" : "";
     bool described = files && (recipe == BQ_RECIPE_VALIDATE_BUSTER ||
                                recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED);
     if (files) *files = (BqRecipeFiles){0};

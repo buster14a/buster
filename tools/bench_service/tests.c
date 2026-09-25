@@ -309,7 +309,7 @@ BUSTER_GLOBAL_LOCAL void bq_test_codec(void)
         BQ_CHECK(described && expected.length > 0 && profile && bytes && count == expected.length &&
                  !memcmp(bytes, expected.pointer, expected.length) &&
                  (recipes[index] == BQ_RECIPE_VALIDATE_BUSTER ? !strcmp(files.command, "bench_service_recipe") :
-                                                               !files.command[0]));
+                                                               !strcmp(files.command, "bench_service_retirement_recipe")));
         free(bytes);
         if (profile) fclose(profile);
     }
@@ -2359,6 +2359,92 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_lease_handoff_negative(u32 mode)
     if (ready_pipe[1] >= 0) close(ready_pipe[1]);
     if (hold_pipe[0] >= 0) close(hold_pipe[0]);
     if (hold_pipe[1] >= 0) close(hold_pipe[1]);
+    bq_worker_lease_handoff_close(&handoff);
+    bq_worker_lease_release(&lease);
+    if (result_directory >= 0) close(result_directory);
+    unlink(lease_path);
+    rmdir(result_root);
+    rmdir(root);
+}
+
+/* Drive the installed unit entry, not just a message parser. A received fd
+ * with an expired or malformed response must be closed and the child must
+ * return before a single recipe exec attempt. The public retirement recipe
+ * remains blocked; this fixture exercises the admitted smoke unit boundary. */
+BUSTER_GLOBAL_LOCAL void bq_test_worker_unit_bad_lease_response(bool expired)
+{
+    char root[] = "/tmp/buster-lease-unit-negative-XXXXXX";
+    char result_root[BQ_PATH_CAP + 1], lease_path[BQ_PATH_CAP + 1];
+    BqWorkerLease lease = {.descriptor = -1};
+    BqWorkerLeaseHandoff handoff = {.listener = -1, .parent = -1};
+    bool ready = bq_test_mkdtemp_physical(root, sizeof(root));
+    int result_length = snprintf(result_root, sizeof(result_root), "%s/result", root);
+    int lease_length = snprintf(lease_path, sizeof(lease_path), "%s/host.lock", root);
+    int result_directory = -1;
+    ready = ready && result_length > 0 && (u32)result_length < sizeof(result_root) &&
+            lease_length > 0 && (u32)lease_length < sizeof(lease_path) &&
+            mkdir(result_root, 0700) == 0 &&
+            (result_directory = open(result_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)) >= 0 &&
+            bq_worker_lease_acquire(lease_path, &lease) == 0 &&
+            bq_worker_lease_handoff_open(result_root, result_directory, &handoff);
+    BQ_CHECK(ready);
+    pid_t child = ready ? fork() : -1;
+    if (child == 0)
+    {
+        if (handoff.listener >= 0) close(handoff.listener);
+        if (handoff.parent >= 0) close(handoff.parent);
+        if (result_directory >= 0) close(result_directory);
+        if (lease.descriptor >= 0) close(lease.descriptor);
+        u32 before = 0, after = 0;
+        for (int fd = 3; fd < 256; ++fd) before += fcntl(fd, F_GETFD) >= 0;
+        bq_worker_test_recipe_exec_count = 0;
+        BqError error = bq_worker_unit(string_from_pointer(lease_path), S8("1"), S8("2"),
+            S8("validate-buster-v1"), string_from_pointer(root),
+            S8("1111111111111111111111111111111111111111"),
+            S8("2222222222222222222222222222222222222222"), string_from_pointer(result_root));
+        for (int fd = 3; fd < 256; ++fd) after += fcntl(fd, F_GETFD) >= 0;
+        _exit(error == BQ_CONFIGURATION_MISMATCH && !bq_worker_test_recipe_exec_count &&
+              before == after ? 0 : 1);
+    }
+    int connection = ready && child > 0 && bq_worker_lease_handoff_poll(handoff.listener, POLLIN,
+        bq_worker_deadline(bq_worker_monotonic_milliseconds(), 5000)) ?
+        accept4(handoff.listener, NULL, NULL, SOCK_CLOEXEC) : -1;
+    BqWorkerLeaseMessage request = {0};
+    ssize_t received = connection >= 0 ? recv(connection, &request, sizeof(request), 0) : -1;
+    struct stat info = {0};
+    ready = ready && received == (ssize_t)sizeof(request) &&
+            bq_worker_lease_message_matches(&request, BQ_WORKER_LEASE_REQUEST,
+                lease_path, 1, 2, 0, 0, "", 0) && fstat(lease.descriptor, &info) == 0;
+    BqWorkerLeaseMessage response = {0};
+    u64 future_ns = bq_phase_clock() + UINT64_C(5000000000);
+    ready = ready && bq_worker_lease_message_make(&response, BQ_WORKER_LEASE_RESPONSE,
+        lease_path, 1, 2, (u64)info.st_dev, (u64)info.st_ino, "", future_ns);
+    if (expired) response.execution_deadline_ns = 1;
+    else response.attempt_token += 1;
+    char control[CMSG_SPACE(sizeof(lease.descriptor))] = {0};
+    struct iovec vector = {&response, sizeof(response)};
+    struct msghdr message = {0};
+    message.msg_iov = &vector;
+    message.msg_iovlen = 1;
+    message.msg_control = control;
+    message.msg_controllen = sizeof(control);
+    struct cmsghdr* header = CMSG_FIRSTHDR(&message);
+    if (ready && header)
+    {
+        header->cmsg_level = SOL_SOCKET;
+        header->cmsg_type = SCM_RIGHTS;
+        header->cmsg_len = CMSG_LEN(sizeof(lease.descriptor));
+        memcpy(CMSG_DATA(header), &lease.descriptor, sizeof(lease.descriptor));
+        ready = sendmsg(connection, &message, MSG_NOSIGNAL) == (ssize_t)sizeof(response);
+    }
+    BQ_CHECK(ready);
+    if (connection >= 0) close(connection);
+    if (child > 0)
+    {
+        int status = 0;
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        BQ_CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0 && bq_test_worker_probe_locked(lease_path));
+    }
     bq_worker_lease_handoff_close(&handoff);
     bq_worker_lease_release(&lease);
     if (result_directory >= 0) close(result_directory);
@@ -4651,6 +4737,8 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_worker_lease_handoff_negative(2);
     bq_test_worker_lease_handoff_negative(3);
     bq_test_worker_lease_handoff_negative(4);
+    bq_test_worker_unit_bad_lease_response(true);
+    bq_test_worker_unit_bad_lease_response(false);
     bq_test_worker_lease_handoff_cleanup_failure(0);
     bq_test_worker_lease_handoff_cleanup_failure(1);
     bq_test_worker_lease_handoff_cleanup_failure(2);

@@ -431,6 +431,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_test_handoff_unlink_failure;
 BUSTER_GLOBAL_LOCAL bool bq_worker_test_handoff_fsync_failure;
 BUSTER_GLOBAL_LOCAL bool bq_worker_test_handoff_listener_close_failure;
 BUSTER_GLOBAL_LOCAL bool bq_worker_test_handoff_parent_close_failure;
+BUSTER_GLOBAL_LOCAL u32 bq_worker_test_recipe_exec_count;
 #endif
 
 BUSTER_GLOBAL_LOCAL bool bq_worker_lease_handoff_close(BqWorkerLeaseHandoff* handoff)
@@ -729,19 +730,38 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_lease_handoff_receive(String8 lease_file, 
         message.msg_control = control;
         message.msg_controllen = sizeof(control);
         ssize_t received = recvmsg(client, &message, MSG_CMSG_CLOEXEC);
-        bool response_ok = received == (ssize_t)sizeof(response) && !(message.msg_flags & MSG_CTRUNC) &&
+        bool response_ok = received == (ssize_t)sizeof(response) &&
+                           !(message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) &&
                            bq_worker_preparation_matches_recipe(recipe, response.preparation_sha256) &&
                            bq_worker_lease_message_matches(&response, BQ_WORKER_LEASE_RESPONSE, lease_path,
                                                            job_value.value, token_value.value, response.device,
                                                            response.inode, response.preparation_sha256,
                                                            response.execution_deadline_ns);
-        for (struct cmsghdr* header = response_ok ? CMSG_FIRSTHDR(&message) : NULL; header;
+        bool ancillary_ok = true;
+        for (struct cmsghdr* header = received >= 0 ? CMSG_FIRSTHDR(&message) : NULL; header;
              header = CMSG_NXTHDR(&message, header))
         {
             if (header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS &&
-                header->cmsg_len == CMSG_LEN(sizeof(received_fd)) && received_fd < 0)
-                memcpy(&received_fd, CMSG_DATA(header), sizeof(received_fd));
+                header->cmsg_len >= CMSG_LEN(0))
+            {
+                size_t count = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                if (header->cmsg_len != CMSG_LEN(count * sizeof(int)) || count != 1) ancillary_ok = false;
+                for (size_t index = 0; index < count; ++index)
+                {
+                    int descriptor = -1;
+                    memcpy(&descriptor, (u8*)CMSG_DATA(header) + index * sizeof(int), sizeof(descriptor));
+                    if (descriptor >= 0 && received_fd < 0 && count == 1 && ancillary_ok)
+                        received_fd = descriptor;
+                    else
+                    {
+                        if (descriptor >= 0) close(descriptor);
+                        ancillary_ok = false;
+                    }
+                }
+            }
+            else ancillary_ok = false;
         }
+        response_ok = response_ok && ancillary_ok;
         bool adopted_ok = false;
         if (response_ok && received_fd >= 3)
         {
@@ -4210,7 +4230,12 @@ BqError bq_worker_unit(String8 lease_file, String8 job_id, String8 attempt_token
         if (recipe == BQ_RECIPE_NATIVE_RETIREMENT_BLOCKED) arguments[10] = deadline_text;
         u64 now_ns = bq_phase_clock();
         if (now_ns && now_ns < execution_deadline_ns)
+        {
+#ifdef BUSTER_BENCH_SERVICE_TEST
+            bq_worker_test_recipe_exec_count += 1;
+#endif
             execv(BQ_RECIPE_EXECUTABLE, (char* const*)arguments);
+        }
         error = !now_ns || now_ns >= execution_deadline_ns ? BQ_WORKER_TIMEOUT : BQ_CONFIGURATION_MISMATCH;
     }
     bq_worker_lease_release(&lease);

@@ -82,6 +82,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_BENCH_SERVICE,
     BUILD_COMMAND_BENCH_SERVICE_BROKER,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE,
+    BUILD_COMMAND_BENCH_SERVICE_RETIREMENT_RECIPE,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
@@ -38378,6 +38379,57 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_add(Arena* arena, SliceSt
     return result;
 }
 
+/* The fixed retirement command has a distinct private interface. The service
+ * supplies the A preparation identity, inherited phase socket, and absolute
+ * monotonic deadline in addition to the six smoke identities. No graph is
+ * constructed while B's complete independent oracle import and the C/D/E
+ * producer handoff remain unavailable. A malformed entry is rejected before
+ * any phase acknowledgement or timed child can begin. */
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_retirement_recipe_add(Arena* arena, SliceString8 arguments)
+{
+    bool valid = BUSTER_LINUX && arguments.length == BENCH_SERVICE_RECIPE_ARGUMENT_COUNT + 3;
+#if BUSTER_LINUX
+    if (valid)
+    {
+        String8 job_id = arguments.pointer[0], attempt_token = arguments.pointer[1];
+        String8 workspace_root = arguments.pointer[2], result_root = arguments.pointer[5];
+        String8 expected_result = path_join(arena, workspace_root,
+            string_format(arena, S8("results/job-{S8}-attempt-{S8}"), job_id, attempt_token));
+        String8 preparation = arguments.pointer[6];
+        IntegerParsingU64 job = string8_parse_u64_decimal(job_id);
+        IntegerParsingU64 attempt = string8_parse_u64_decimal(attempt_token);
+        IntegerParsingU64 descriptor = string8_parse_u64_decimal(arguments.pointer[7]);
+        IntegerParsingU64 deadline = string8_parse_u64_decimal(arguments.pointer[8]);
+        u64 now = bq_phase_clock();
+        valid = bench_service_recipe_decimal(job_id) && bench_service_recipe_decimal(attempt_token) &&
+                bench_service_recipe_path(workspace_root) &&
+                bench_service_recipe_revision(arguments.pointer[3]) &&
+                bench_service_recipe_revision(arguments.pointer[4]) &&
+                bench_service_recipe_path(result_root) && string_equal(result_root, expected_result) &&
+                preparation.length == 64 &&
+                job.status == INTEGER_PARSING_SUCCESS && job.length == job_id.length &&
+                attempt.status == INTEGER_PARSING_SUCCESS && attempt.length == attempt_token.length &&
+                descriptor.status == INTEGER_PARSING_SUCCESS &&
+                descriptor.length == arguments.pointer[7].length && descriptor.value >= 3 &&
+                descriptor.value <= INT_MAX && deadline.status == INTEGER_PARSING_SUCCESS &&
+                deadline.length == arguments.pointer[8].length && now &&
+                deadline.value > now && deadline.value - now <= UINT64_C(3600000000000);
+        for (u64 index = 0; valid && index < preparation.length; index += 1)
+        {
+            u8 byte = preparation.pointer[index];
+            valid = (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+        }
+        BqPhaseChannel channel;
+        if (valid) valid = bq_phase_init(&channel, (int)descriptor.value, job.value, attempt.value) != 0;
+    }
+#else
+    BUSTER_UNUSED(arena);
+#endif
+    string_print(valid ? S8("error: fixed retirement recipe awaits complete B oracle and service result producer\n") :
+                         S8("error: invalid fixed retirement recipe identity, channel or deadline\n"));
+    return PROCESS_RESULT_FAILED;
+}
+
 #if BUSTER_LINUX
 typedef struct BenchServiceRecipeTestFixture BenchServiceRecipeTestFixture;
 struct BenchServiceRecipeTestFixture
@@ -38914,6 +38966,36 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
         cases += 1;
         bench_service_recipe_test_fixture_cleanup(arena, &fixture);
     }
+    if (ok)
+    {
+        int phase_pair[2] = {-1, -1};
+        bool paired = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, phase_pair) == 0;
+        char descriptor_text[32], deadline_text[32];
+        u64 now = bq_phase_clock();
+        int descriptor_length = paired ? snprintf(descriptor_text, sizeof(descriptor_text), "%d", phase_pair[0]) : -1;
+        int deadline_length = now ? snprintf(deadline_text, sizeof(deadline_text), "%llu",
+                                             (unsigned long long)(now + UINT64_C(5000000000))) : -1;
+        String8 private_arguments[] = {
+            S8("1"), S8("2"), S8("/tmp/buster-retirement-boundary"),
+            S8("1111111111111111111111111111111111111111"),
+            S8("2222222222222222222222222222222222222222"),
+            S8("/tmp/buster-retirement-boundary/results/job-1-attempt-2"),
+            S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            string_from_pointer(descriptor_text), string_from_pointer(deadline_text)};
+        program.build_graph = (BuildGraph){0};
+        ProcessResult guarded = paired && descriptor_length > 0 && deadline_length > 0 ?
+            bench_service_retirement_recipe_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(private_arguments)) :
+            PROCESS_RESULT_SUCCESS;
+        bool no_child = guarded == PROCESS_RESULT_FAILED && !program.build_graph.first_step;
+        private_arguments[8] = S8("1");
+        ProcessResult expired = no_child ?
+            bench_service_retirement_recipe_add(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(private_arguments)) :
+            PROCESS_RESULT_SUCCESS;
+        ok = ok && no_child && expired == PROCESS_RESULT_FAILED && !program.build_graph.first_step;
+        if (phase_pair[0] >= 0) close(phase_pair[0]);
+        if (phase_pair[1] >= 0) close(phase_pair[1]);
+        cases += 1;
+    }
     unlink(fail_marker);
     unlink(tamper_marker);
     unlink(candidate_tamper_marker);
@@ -39198,6 +39280,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_BENCH_SERVICE] = S8_INITIALIZER("bench_service"),
         [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
+        [BUILD_COMMAND_BENCH_SERVICE_RETIREMENT_RECIPE] = S8_INITIALIZER("bench_service_retirement_recipe"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
@@ -39374,6 +39457,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         String8 argument = arguments.pointer[argument_i];
         if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
+            command == BUILD_COMMAND_BENCH_SERVICE_RETIREMENT_RECIPE ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
             command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
@@ -40323,6 +40407,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE:
         {
             result = bench_service_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_RETIREMENT_RECIPE:
+        {
+            result = bench_service_retirement_recipe_add(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST:
