@@ -4,7 +4,10 @@ on:
     branches: [research/aggregate-init-20260925-dce1-astra]
     paths:
       - '.github/workflows/investigate-aggregate-init.yml'
-      - 'tools/investigations/aggregate-init-20260925/**'
+      - 'tools/investigations/aggregate-init-20260925/cases.c'
+      - 'tools/investigations/aggregate-init-20260925/probe.c'
+      - 'tools/investigations/aggregate-init-20260925/minima.c'
+      - 'tools/investigations/aggregate-init-20260925/confirm.c'
 permissions:
   contents: read
 jobs:
@@ -14,6 +17,7 @@ jobs:
     env:
       SOURCE_SHA: dce1b8caa3d368dede16ad4aa9da6760e26fe704
       BUSTER_TEST_JOBS: '2'
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -39,6 +43,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
       - name: Build unchanged compiler on this runner
+        id: build
         shell: bash
         run: |
           set -euo pipefail
@@ -46,15 +51,36 @@ jobs:
           set -x
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
           "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
-          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j2
           sha256sum build/Release/ide > evidence/compiler.sha256
-          cp build/CMakeCache.txt evidence/ || true
-          clang -std=c17 -Wall -Wextra -Werror tools/investigations/aggregate-init-20260925/probe.c -o "$RUNNER_TEMP/aggregate-observer"
-      - name: Execute bounded reference and Buster family
+          find build -name CMakeCache.txt -exec cp --parents '{}' evidence/ \;
+          clang -std=c17 -Wall -Wextra -Werror tools/investigations/aggregate-init-20260925/confirm.c -o "$RUNNER_TEMP/aggregate-observer"
+      - name: Execute reduced reference and Buster matrix
         shell: bash
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/aggregate-observer" "$PWD/build/Release/ide" "$PWD/tools/investigations/aggregate-init-20260925/cases.c" | tee evidence/observer.log
+          "$RUNNER_TEMP/aggregate-observer" "$PWD/build/Release/ide" "$PWD/tools/investigations/aggregate-init-20260925/minima.c" | tee evidence/observer.log
+      - name: Observe frontend results through emitted bitcode
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          exec > >(tee evidence/bitcode.log) 2>&1
+          set -x
+          printf 'case\tfrontend\temit\tdecode\n' > evidence/bitcode.tsv
+          for case in 0 4 6; do
+            for frontend in -ffrontend-ssa -fno-frontend-ssa; do
+              stem="evidence/ir-c${case}${frontend}"
+              build/Release/ide cc -target x86_64-linux -std=c17 -O0 -g0 "$frontend" -emit-llvm "-DCASE=$case" -DSTORAGE=0 tools/investigations/aggregate-init-20260925/minima.c -o "$stem.bc" > "$stem.emit.stdout" 2> "$stem.emit.stderr"
+              emit=$?
+              decode=-1
+              if test "$emit" -eq 0; then
+                clang -S -emit-llvm -O0 "$stem.bc" -o "$stem.ll" > "$stem.decode.stdout" 2> "$stem.decode.stderr"
+                decode=$?
+              fi
+              printf '%s\t%s\t%s\t%s\n' "$case" "$frontend" "$emit" "$decode" >> evidence/bitcode.tsv
+            done
+          done
       - name: Hash retained evidence
         if: always()
         shell: bash
