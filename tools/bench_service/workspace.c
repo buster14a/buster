@@ -29,6 +29,12 @@
 #define BQ_CLEANUP_ENTRY_CAP 16384u
 #define BQ_CLEANUP_DEPTH_CAP 256u
 
+#ifdef BUSTER_BENCH_SERVICE_TEST
+/* Deterministic test-only seam: a successful mkdir whose mode changes before
+ * verification must remain distinguishable from a pre-existing collision. */
+BUSTER_GLOBAL_LOCAL bool bq_test_unverify_next_create;
+#endif
+
 typedef struct BqDirectoryList
 {
     u32 count;
@@ -150,6 +156,13 @@ BUSTER_GLOBAL_LOCAL int bq_create_inherited_group_directory(int parent, char con
         umask(previous_umask);
         errno = saved_errno;
         *created = status == 0;
+#ifdef BUSTER_BENCH_SERVICE_TEST
+        if (*created && bq_test_unverify_next_create)
+        {
+            bq_test_unverify_next_create = false;
+            if (fchmodat(parent, name, 0700, 0) != 0) ok = false;
+        }
+#endif
 #else
         *created = mkdirat(parent, name, mode) == 0;
         if (*created && fchmodat(parent, name, mode, 0) != 0) ok = false;

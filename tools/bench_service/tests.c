@@ -12,6 +12,8 @@
 #include <stddef.h>
 #ifdef __linux__
 #include <sys/time.h>
+#include <sys/wait.h>
+#include "sgid_sandbox_test.h"
 #endif
 
 BUSTER_GLOBAL_LOCAL u32 bq_test_assertions;
@@ -658,6 +660,168 @@ BUSTER_GLOBAL_LOCAL void bq_material_test_end(BqMaterialFixture* fixture)
     }
     bq_test_end(&fixture->queue);
 }
+
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+BUSTER_GLOBAL_LOCAL void bq_test_sgid_sandbox_child(void)
+{
+    char root[] = "/tmp/buster-sgid-filter-XXXXXX";
+    bool ok = mkdtemp(root) != NULL;
+    gid_t inherited_group = getegid();
+    bool distinct = false;
+    if (ok) ok = bq_test_sgid_fixture_group(root, &inherited_group, &distinct);
+    BQ_CHECK(ok);
+    BqMaterialFixture* fixtures = calloc(3, sizeof(*fixtures));
+    bool started[3] = {0};
+    BQ_CHECK(fixtures != NULL);
+    for (u32 index = 0; ok && fixtures && index < 3; index += 1)
+    {
+        started[index] = bq_material_test_begin(fixtures + index, 0);
+        ok = started[index] && (!distinct || chown(fixtures[index].workspaces, (uid_t)-1, inherited_group) == 0) &&
+             chmod(fixtures[index].workspaces, 02710) == 0;
+        BQ_CHECK(ok);
+    }
+    char collision[512] = {0};
+    if (ok)
+    {
+        int length = snprintf(collision, sizeof(collision), "%s/job-1-attempt-2", fixtures[1].workspaces);
+        ok = length > 0 && (size_t)length < sizeof(collision) && mkdir(collision, 0700) == 0;
+        BQ_CHECK(ok);
+    }
+    int parent = ok ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    BQ_CHECK(parent >= 0);
+    if (ok) ok = bq_test_install_sgid_restriction();
+    BQ_CHECK(ok);
+    if (ok)
+    {
+        mode_t modes[] = {02710, 02750, 02700, 02770};
+        mode_t masks[] = {0077, 0022, 0000, 0777};
+        bool created = false;
+        int controlled = bq_create_inherited_group_directory(parent, "controlled", 02770, &created);
+        BQ_CHECK(controlled >= 0 && created && bq_test_sgid_controls(parent, "controlled"));
+        if (controlled >= 0) close(controlled);
+        for (u32 m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+        {
+            for (u32 u = 0; u < BUSTER_ARRAY_LENGTH(masks); u += 1)
+            {
+                char name[32];
+                snprintf(name, sizeof(name), "mode-%u-umask-%u", m, u);
+                mode_t old = umask(masks[u]);
+                created = false;
+                int child = bq_create_inherited_group_directory(parent, name, modes[m], &created);
+                mode_t observed = umask(masks[u]);
+                umask(old);
+                struct stat info = {0};
+                BQ_CHECK(child >= 0 && created && observed == masks[u] && fstat(child, &info) == 0 &&
+                         info.st_uid == geteuid() && info.st_gid == inherited_group &&
+                         (info.st_mode & 07777) == modes[m]);
+                if (child >= 0) close(child);
+                created = true;
+                old = umask(masks[u]);
+                child = bq_create_inherited_group_directory(parent, name, modes[m], &created);
+                observed = umask(masks[u]);
+                umask(old);
+                BQ_CHECK(child < 0 && !created && observed == masks[u] && errno == EEXIST);
+                if (child >= 0) close(child);
+                BQ_CHECK(unlinkat(parent, name, AT_REMOVEDIR) == 0);
+            }
+        }
+        created = true;
+        mode_t old = umask(0022);
+        int invalid = bq_create_inherited_group_directory(-1, "invalid", 02770, &created);
+        mode_t observed = umask(old);
+        BQ_CHECK(invalid < 0 && !created && observed == 0022);
+        if (invalid >= 0) close(invalid);
+        int missing = openat(parent, "missing", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        BQ_CHECK(missing < 0 && errno == ENOENT);
+        BQ_CHECK(mkdirat(parent, "no-sgid", 0700) == 0);
+        int no_sgid = openat(parent, "no-sgid", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        BQ_CHECK(no_sgid >= 0 && fchmod(no_sgid, 0700) == 0);
+        created = true;
+        old = umask(0077);
+        int refused = bq_create_inherited_group_directory(no_sgid, "child", 02770, &created);
+        observed = umask(old);
+        BQ_CHECK(refused < 0 && !created && observed == 0077);
+        if (refused >= 0) close(refused);
+        if (no_sgid >= 0) close(no_sgid);
+        BQ_CHECK(unlinkat(parent, "no-sgid", AT_REMOVEDIR) == 0);
+        bq_test_unverify_next_create = true;
+        created = false;
+        old = umask(0777);
+        refused = bq_create_inherited_group_directory(parent, "unverified", 02770, &created);
+        observed = umask(old);
+        struct stat unverified = {0};
+        BQ_CHECK(refused < 0 && created && !bq_test_unverify_next_create && observed == 0777 &&
+                 fstatat(parent, "unverified", &unverified, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 (unverified.st_mode & 07777) == 0700);
+        if (refused >= 0) close(refused);
+        BQ_CHECK(unlinkat(parent, "unverified", AT_REMOVEDIR) == 0);
+        BQ_CHECK(unlinkat(parent, "controlled", AT_REMOVEDIR) == 0);
+
+        for (u32 index = 0; index < 3; index += 1)
+        {
+            BqRequest request = bq_test_real_request(1);
+            u64 id = 0, token = 0;
+            BQ_CHECK(bq_submit(&fixtures[index].queue.queue, &request, &id) == BQ_OK);
+            if (index == 2) bq_test_unverify_next_create = true;
+            BqError result = bq_materialize(&fixtures[index].queue.queue,
+                                            string_from_pointer(fixtures[index].installed),
+                                            string_from_pointer(fixtures[index].workspaces), &id, &token);
+            BqJob* job = bq_job(&fixtures[index].queue.queue.state, id);
+            if (index == 0)
+            {
+                BQ_CHECK(result == BQ_OK && job && job->phase == BQ_PREPARING &&
+                         !fixtures[index].queue.queue.needs_reconciliation);
+            }
+            else
+            {
+                BQ_CHECK(result == BQ_WORKSPACE_MISMATCH && job && job->phase == BQ_RESERVED &&
+                         fixtures[index].queue.queue.needs_reconciliation &&
+                         bq_failure_evidence(&fixtures[index].queue.queue, job) == BQ_WORKSPACE_MISMATCH);
+                char name[64], path[512];
+                BQ_CHECK(bq_workspace_name(name, id, token));
+                int length = snprintf(path, sizeof(path), "%s/%s", fixtures[index].workspaces, name);
+                BQ_CHECK(length > 0 && (size_t)length < sizeof(path) && access(path, F_OK) == 0);
+                if (index == 2)
+                {
+                    BQ_CHECK(!bq_test_unverify_next_create &&
+                             bq_workspace_reconcile(&fixtures[index].queue.queue,
+                                                    string_from_pointer(fixtures[index].workspaces), id, token) != BQ_OK &&
+                             fixtures[index].queue.queue.needs_reconciliation && access(path, F_OK) == 0);
+                }
+            }
+        }
+    }
+    if (parent >= 0) close(parent);
+    for (u32 index = 0; fixtures && index < 3; index += 1)
+        if (started[index]) bq_material_test_end(fixtures + index);
+    free(fixtures);
+    if (root[0]) BQ_CHECK(rmdir(root) == 0);
+    char const* required = getenv("BQ_REQUIRE_DISTINCT_GROUP");
+    BQ_CHECK(!required || strcmp(required, "1") || distinct);
+    printf("SGID_SANDBOX_TEST service assertions=%u failures=%u group=%s arch=%s\n",
+           bq_test_assertions, bq_test_failures, distinct ? "different-primary" : "unsupported-different-primary",
+#if defined(__x86_64__)
+           "x86_64");
+#else
+           "aarch64");
+#endif
+    fflush(stdout);
+    _exit(bq_test_failures ? 1 : 0);
+}
+
+BUSTER_GLOBAL_LOCAL void bq_test_sgid_sandbox(void)
+{
+    pid_t child = fork();
+    BQ_CHECK(child >= 0);
+    if (child == 0) bq_test_sgid_sandbox_child();
+    if (child > 0)
+    {
+        int status = 0;
+        pid_t waited = waitpid(child, &status, 0);
+        BQ_CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL void bq_test_materialization_failures(void)
 {
@@ -4590,6 +4754,12 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
     bq_test_cancelled_failure_recovery();
     bq_test_cleanup_bounds_and_failure();
 #ifdef __linux__
+    /* The filter is confined to a child; supported Linux CI must execute it. */
+#if defined(__x86_64__) || defined(__aarch64__)
+    bq_test_sgid_sandbox();
+#else
+    printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
+#endif
     bq_test_transport_boundaries();
     bq_test_worker_deadlines();
     bq_test_worker_lease_handoff();
@@ -4653,6 +4823,16 @@ int main(int argc, char** argv)
         bq_test_export(false);
         printf("EXPORT_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
         result = bq_test_failures ? 1 : 0;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--sgid-only"))
+    {
+#if defined(__x86_64__) || defined(__aarch64__)
+        bq_test_sgid_sandbox();
+        result = bq_test_failures ? 1 : 0;
+#else
+        printf("SGID_SANDBOX_TEST service status=unsupported-architecture\n");
+        result = 0;
+#endif
     }
     else result = helper ? bq_test_fixed_recipe_helper(argc, argv) : bq_test_run_all(argc, argv);
 #else

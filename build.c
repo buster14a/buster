@@ -58,7 +58,9 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include "tools/bench_service/sgid_sandbox_test.h"
 #endif
 
 #include <buster/lib/string.c>
@@ -38642,11 +38644,180 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_candidate_traverse_mode(char 
     return ok;
 }
 
+#if defined(__x86_64__) || defined(__aarch64__)
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sgid_test_mode(char const* path, mode_t mode, gid_t group)
+{
+    struct stat info = {0};
+    bool ok = lstat(path, &info) == 0 && info.st_uid == geteuid() && info.st_gid == group &&
+              (info.st_mode & 07777) == mode;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sgid_test_child(Arena* arena)
+{
+    char root[] = "/tmp/buster-recipe-sgid-XXXXXX";
+    bool ok = mkdtemp(root) != NULL;
+    gid_t group = getegid();
+    bool distinct = false;
+    if (ok) ok = bq_test_sgid_fixture_group(root, &group, &distinct);
+    char visible[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, private_tree[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    char visible_nested[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, private_nested[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    char visible_exe[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, private_exe[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    char visible_data[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, private_data[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    char stage[BENCH_SERVICE_RECIPE_PATH_CAP] = {0}, output[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    char visible_control[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
+    ok = ok && bench_service_recipe_test_child_path(visible, root, "visible") &&
+         bench_service_recipe_test_child_path(private_tree, root, "private") &&
+         bench_service_recipe_test_child_path(visible_nested, visible, "nested") &&
+         bench_service_recipe_test_child_path(private_nested, private_tree, "nested") &&
+         bench_service_recipe_test_child_path(visible_exe, visible_nested, "executable") &&
+         bench_service_recipe_test_child_path(private_exe, private_nested, "executable") &&
+         bench_service_recipe_test_child_path(visible_data, visible_nested, "data") &&
+         bench_service_recipe_test_child_path(private_data, private_nested, "data") &&
+         bench_service_recipe_test_child_path(stage, root, "staging") &&
+         bench_service_recipe_test_child_path(output, stage, "throughput-results") &&
+         bench_service_recipe_test_child_path(visible_control, root, "visible-control");
+    /* Arrange special bits before the filter so freezing must remove them. */
+    if (ok)
+    {
+        ok = bench_service_recipe_test_mkdir(visible, 02770) &&
+             bench_service_recipe_test_mkdir(private_tree, 02770) &&
+             bench_service_recipe_test_mkdir(visible_nested, 02700) &&
+             bench_service_recipe_test_mkdir(private_nested, 02700) &&
+             bench_service_recipe_test_mkdir(visible_control, 02710) &&
+             bench_service_recipe_test_write(visible_exe, "x", 06755) &&
+             bench_service_recipe_test_write(private_exe, "x", 06755) &&
+             bench_service_recipe_test_write(visible_data, "d", 02640) &&
+             bench_service_recipe_test_write(private_data, "d", 02640) &&
+             bench_service_recipe_sgid_test_mode(visible_nested, 02700, group) &&
+             bench_service_recipe_sgid_test_mode(private_exe, 06755, group);
+    }
+    int parent = ok ? open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (ok) ok = parent >= 0 && bq_test_install_sgid_restriction();
+    if (!ok) fprintf(stderr, "SGID_SANDBOX_TEST recipe setup/filter failed errno=%d\n", errno);
+    if (ok)
+    {
+        mode_t modes[] = {02710, 02750, 02700, 02770};
+        mode_t masks[] = {0077, 0022, 0000, 0777};
+        int controlled = bench_service_recipe_create_inherited_group_directory(parent, "controlled", 02770);
+        ok = controlled >= 0 && bq_test_sgid_controls(parent, "controlled");
+        if (controlled >= 0) close(controlled);
+        for (u32 m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+        {
+            for (u32 u = 0; u < BUSTER_ARRAY_LENGTH(masks); u += 1)
+            {
+                char name[32];
+                snprintf(name, sizeof(name), "mode-%u-umask-%u", m, u);
+                mode_t old = umask(masks[u]);
+                int child = bench_service_recipe_create_inherited_group_directory(parent, name, modes[m]);
+                mode_t observed = umask(masks[u]);
+                umask(old);
+                struct stat info = {0};
+                bool made = child >= 0 && fstat(child, &info) == 0 && info.st_uid == geteuid() &&
+                            info.st_gid == group && (info.st_mode & 07777) == modes[m] && observed == masks[u];
+                if (!made) fprintf(stderr, "SGID_SANDBOX_TEST recipe mode=%o umask=%o errno=%d\n", modes[m], masks[u], errno);
+                ok = ok && made;
+                if (child >= 0) close(child);
+                old = umask(masks[u]);
+                child = bench_service_recipe_create_inherited_group_directory(parent, name, modes[m]);
+                int collision_errno = errno;
+                observed = umask(masks[u]);
+                umask(old);
+                ok = ok && child < 0 && collision_errno == EEXIST && observed == masks[u];
+                if (child >= 0) close(child);
+                if (unlinkat(parent, name, AT_REMOVEDIR) != 0) ok = false;
+            }
+        }
+        mode_t old = umask(0022);
+        int invalid = bench_service_recipe_create_inherited_group_directory(-1, "invalid", 02770);
+        mode_t observed = umask(old);
+        ok = ok && invalid < 0 && observed == 0022;
+        if (invalid >= 0) close(invalid);
+        int missing = openat(parent, "missing", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        ok = ok && missing < 0 && errno == ENOENT && mkdirat(parent, "no-sgid", 0700) == 0;
+        int no_sgid = openat(parent, "no-sgid", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        ok = ok && no_sgid >= 0 && fchmod(no_sgid, 0700) == 0;
+        old = umask(0077);
+        int refused = bench_service_recipe_create_inherited_group_directory(no_sgid, "child", 02770);
+        observed = umask(old);
+        ok = ok && refused < 0 && observed == 0077;
+        if (refused >= 0) close(refused);
+        if (no_sgid >= 0) close(no_sgid);
+        if (unlinkat(parent, "no-sgid", AT_REMOVEDIR) != 0) ok = false;
+
+        ok = ok && bench_service_recipe_prepare_candidate_stage(string_from_pointer(root), string_from_pointer(stage)) &&
+             bench_service_recipe_prepare_throughput_output(arena, string_from_pointer(stage), string_from_pointer(output)) &&
+             bench_service_recipe_sgid_test_mode(stage, 02770, group) &&
+             bench_service_recipe_sgid_test_mode(output, 02770, group) &&
+             bench_service_recipe_verify_visible_directory(string_from_pointer(visible_control), 02710);
+        if (chmod(visible_control, 0700) != 0) ok = false;
+        ok = ok && !bench_service_recipe_verify_visible_directory(string_from_pointer(visible_control), 02710) &&
+             bench_service_recipe_sgid_test_mode(visible_control, 0700, group);
+        int visible_fd = open(visible, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        int private_fd = open(private_tree, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        ok = ok && visible_fd >= 0 && private_fd >= 0;
+        for (u32 repeat = 0; ok && repeat < 2; repeat += 1)
+        {
+            ok = bench_service_recipe_lock_tree(arena, visible_fd, true) &&
+                 bench_service_recipe_lock_tree(arena, private_fd, false) &&
+                 bench_service_recipe_sgid_test_mode(visible, 0550, group) &&
+                 bench_service_recipe_sgid_test_mode(visible_nested, 0550, group) &&
+                 bench_service_recipe_sgid_test_mode(visible_exe, 0550, group) &&
+                 bench_service_recipe_sgid_test_mode(visible_data, 0440, group) &&
+                 bench_service_recipe_sgid_test_mode(private_tree, 0550, group) &&
+                 bench_service_recipe_sgid_test_mode(private_nested, 0500, group) &&
+                 bench_service_recipe_sgid_test_mode(private_exe, 0555, group) &&
+                 bench_service_recipe_sgid_test_mode(private_data, 0440, group);
+            if (!ok) fprintf(stderr, "SGID_SANDBOX_TEST recipe tree lock repeat=%u errno=%d\n", repeat, errno);
+        }
+        if (visible_fd >= 0) close(visible_fd);
+        if (private_fd >= 0) close(private_fd);
+        if (unlinkat(parent, "controlled", AT_REMOVEDIR) != 0) ok = false;
+    }
+    if (parent >= 0) close(parent);
+    if (visible_nested[0] && access(visible_nested, F_OK) == 0) chmod(visible_nested, 0700);
+    if (private_nested[0] && access(private_nested, F_OK) == 0) chmod(private_nested, 0700);
+    if (visible[0] && access(visible, F_OK) == 0) chmod(visible, 0700);
+    if (private_tree[0] && access(private_tree, F_OK) == 0) chmod(private_tree, 0700);
+    if (root[0] && access(root, F_OK) == 0)
+    {
+        remove_path_recursive(arena, string_from_pointer(root));
+        if (access(root, F_OK) == 0 || errno != ENOENT) ok = false;
+    }
+    char const* required = getenv("BQ_REQUIRE_DISTINCT_GROUP");
+    if (required && !strcmp(required, "1") && !distinct) ok = false;
+    printf("SGID_SANDBOX_TEST recipe result=%s group=%s\n", ok ? "pass" : "fail",
+           distinct ? "different-primary" : "unsupported-different-primary");
+    fflush(stdout);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bench_service_recipe_sgid_sandbox_test(Arena* arena)
+{
+    pid_t child = fork();
+    bool ok = child >= 0;
+    if (child == 0) _exit(bench_service_recipe_sgid_test_child(arena) ? 0 : 1);
+    if (child > 0)
+    {
+        int status = 0;
+        ok = waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    return ok;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_self_test(Arena* arena)
 {
     char script_root[BENCH_SERVICE_RECIPE_PATH_CAP] = {0};
     bool ok = bench_service_recipe_test_script_setup(arena, script_root);
     u32 cases = 1;
+#if defined(__x86_64__) || defined(__aarch64__)
+    bool sandbox_ok = bench_service_recipe_sgid_sandbox_test(arena);
+    ok = ok && sandbox_ok;
+    cases += 1;
+#else
+    string_print(S8("SGID_SANDBOX_TEST recipe status=unsupported-architecture\n"));
+#endif
     ok = ok && bench_service_recipe_identity_test(arena);
     char const* base_revision = "1111111111111111111111111111111111111111";
     char const* candidate_revision = "2222222222222222222222222222222222222222";
