@@ -237,8 +237,16 @@ generation or any stale output before baseline build poisons the sequence;
 a successful no-op stage cannot freeze an inherited executable. The worker
 must isolate that directory and reap descendants across this check and the
 build so another process cannot replace the name during the attempt.
-The helper holds the configured build directory's descriptor and device/inode
-identity from each build launch through completion, preventing inode reuse.
+The helper requires an absent configured root before baseline generate. For
+candidate generate it holds the prior root, if present, through child
+completion and requires the new configured root to be a different inode owned
+by the expected baseline or candidate identity. A successful no-op generate
+over cached baseline objects cannot pass. After
+either successful generate it holds the new root through the matching build
+launch and checks the name and inode before creating the build log or child.
+The build stage keeps its root descriptor through completion, preventing inode
+reuse. The runner must release an unfinished generated root after cancellation
+and descendant cleanup.
 The freeze step verifies the expected name still resolves to that held root,
 reads `Release/ide` through held directory and file descriptors, and rechecks
 both names after copying the executable. It also rejects changes to the input
@@ -309,3 +317,7 @@ The build fixture also replaces the generated `ide` name with a byte-equal
 inode, moves its `Release` directory, and rewrites one byte without changing
 the file size. Each change invalidates the held output observation before the
 fixture restores the executable and completes the normal stage.
+It swaps the configured directory after both generate stages and checks that
+the corresponding build never starts. A candidate generate that succeeds
+without replacing the baseline configured root, or produces a root owned by
+the wrong identity, also fails before build.

@@ -44,8 +44,11 @@ int main(int argc, char** argv)
              * record or dependent timed child follows a failed generate. */
             bool probe = strstr(argv[3], "driver-exec-probe") != NULL;
             bool no_leak = !probe || (fcntl(90, F_GETFD) < 0 && errno == EBADF);
+            /* One zero-exit candidate generate deliberately leaves the old
+             * configured root intact to test the no-op/cache rejection. */
+            bool stale_candidate = candidate && strstr(argv[3], "job-46-attempt-56") != NULL;
             result = !no_leak ? 6 : strstr(argv[3], "job-30-attempt-40") ? 5 :
-                     mkdir(argv[3], 0700) == 0 ? 0 : 1;
+                     stale_candidate || mkdir(argv[3], 0700) == 0 ? 0 : 1;
             puts(result ? "fixture generate failed" : "fixture generated");
             if (!result && strstr(argv[3], "job-39-attempt-49"))
             {

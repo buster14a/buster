@@ -39,6 +39,9 @@ typedef struct BqRetirementMatchedBuild
     char stage_receipt_sha256[BQ_RETIREMENT_BUILD_STAGES][SHA256_HEX_CAPACITY];
     char binary_record_sha256[SHA256_HEX_CAPACITY];
     char build_record_sha256[SHA256_HEX_CAPACITY];
+    /* Held between a successful generate and its matching build launch. */
+    int generated_root;
+    u64 generated_device, generated_inode;
     u32 next;
     bool failed;
 } BqRetirementMatchedBuild;
@@ -56,7 +59,8 @@ typedef struct BqRetirementBuildProcess
     int directory, writer, reader, build_root;
     pid_t process;
     u64 directory_device, directory_inode, log_device, log_inode;
-    /* Build stages hold the configured root until completion prevents inode reuse. */
+    /* Build stages hold their generated root; generate stages retain any old
+     * root until completion so a no-op cannot claim a fresh configuration. */
     u64 build_device, build_inode;
     u64 log_bytes;
     char name[32], command_sha256[SHA256_HEX_CAPACITY];
@@ -72,6 +76,9 @@ BUSTER_F_DECL BqError bq_retirement_matched_build_begin(BqQueue* queue, BqJob co
     char const preparation_sha256[SHA256_HEX_CAPACITY], BqRetirementMatchedBuild* build);
 BUSTER_F_DECL bool bq_retirement_matched_build_stage(BqRetirementMatchedBuild* build,
     BqRetirementBuildStage* stage);
+/* Release a generated root if the job ends before its matching build. Do not
+ * call while a stage child is running; the worker first cancels and reaps it. */
+BUSTER_F_DECL bool bq_retirement_matched_build_release(BqRetirementMatchedBuild* build);
 /* A fresh log is created exclusively in the held attempt directory. Poll
  * drains bounded child output, returning 0 while running or draining, 1 for
  * exit zero with complete capture, and -1 for a child/capture/wait failure.
