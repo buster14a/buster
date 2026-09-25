@@ -81,6 +81,18 @@
       "owner_pr": 522,
       "observed_pr_head_commit": "be93ed3047044b099872ced1679ad8b795c9ce94",
       "observed_pr_head_tree": "fd6be9eedbc7f145c66437708df006d556fb9596",
+      "writer_handoff_status": "explicit-prior-writer-release-not-recorded",
+      "current_main_merge_preflight": {
+        "run_id": 36145188837,
+        "artifact_id": 10868853540,
+        "artifact_zip_sha256": "8801d1713333cdd2961a3abf94753a2156f2a71e436b50972a8c436386391a93",
+        "outcome": "two-genuine-source-overlap-conflicts",
+        "conflicted_files": [
+          "src/buster/lib/compiler/codegen/codegen.c",
+          "src/buster/lib/compiler/driver/driver.c"
+        ],
+        "combined_tree": null
+      },
       "integration_commit": null,
       "integration_tree": null,
       "source_snapshot_sha256": null,

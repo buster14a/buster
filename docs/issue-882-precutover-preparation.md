@@ -36,9 +36,20 @@ identity. Recheck the live refs and exact Git objects before any freeze.
   merge base with observed main is `1d64654d72b259485dbac6ddc36c784fe2bac6c3`.
   Live exact-head checks include failed Buster CI, self-host, throughput and
   rebinding runs; the native-retirement contract workflow passed. The later
-  merge-conflict preflight status is failure. The #522 owner must identify a
-  reviewed exact integration commit/tree intended for #513 after resolving
-  those failures. Read-only coordination found no evidence to freeze this head.
+  merge-conflict preflight status is failure. The explicit
+  [#522 owner checkpoint](https://github.com/buster14a/buster/pull/522#issuecomment-5833817276)
+  says the previous branch writer has not explicitly released or retained
+  ownership. Its read-only current-main preflight run `36145188837`, artifact
+  `10868853540`, ZIP SHA-256
+  `8801d1713333cdd2961a3abf94753a2156f2a71e436b50972a8c436386391a93`,
+  found two genuine source conflicts, in `codegen.c` and `driver.c`, and no
+  combined tree. The retained 94 failed assertions belong to an older
+  source-tree test merge, not today's integration; its artifact supplies no
+  admitted compiler-executable digest. The prior writer or coordinating
+  maintainer must explicitly transfer ownership, and the sole successor must
+  publish a reviewed replacement integration commit/tree intended for #513
+  with new exact-head evidence. Read-only coordination found no identity to
+  freeze or binary hash to borrow.
 - [#1014](https://github.com/buster14a/buster/pull/1014) is separate, stacked
   #514 deletion preparation: draft head
   `cce86bd108fb402fd8eac86bd1532f87facadb06`, tree
@@ -90,7 +101,7 @@ supplies a later category.
 | Fixed retirement recipe / #881 integrator, #1018–#1024 | #923 draft head `ad6058af763570c6a12d22dec3fc1aae7d99c592`, tree `d5395192bd5eb2813cf44801539e6bbc70aefde9`; blocked descriptor SHA-256 above | Draft implementation; recipe remains blocked. Exact-head Buster CI failed; native evidence workflow was in progress at read. | A–F real producer handoffs, reviewed inventory/build/correctness/campaign/seal/export capacity, trusted integration, installed recipe identity and admission receipt. | Recipe, worker, collector, statistics, profile or publication code/bytes change. |
 | Physical host/noise qualification / #422, #426 and 9700X operator | #422 historical audit `2026-09-12T001148Z`, SHA-256 `0d08719b03aef664245c1923c40449ef29c8a41959af50bd7c1cc0e824f35f4d`; current calibration handoff SHA-256 `7ed3d6e212f822b1a265ceb66ae228b4e4c6d0ce594dec68c4373ced0e4ffd13` | #422 basic qualification closed; #426 empirical A/A decision and physical acceptance remain open. The descriptive calibration does not authorize A/B. | Protected-service, real-host raw A/A and cross-build controls; reviewed versioned noise/resolution policy, PMU availability, host/profile/boot and admitted qualification receipts. | Host, boot, kernel, microcode, firmware, memory, power policy, topology, toolchain, build root or profile drift. |
 | Complete support/workload population / #508 and trusted rebinder | Current main support SHA-256 `932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82`; 559 inputs, 411 subjects, 19,728 groups, 78,912 object rows | #508 historic acceptance complete; current declaration is larger than its closure record. | Actual exact-candidate census manifest, inputs/dependencies/environment/rows, independent validator report, performance rows and authenticated eligibility projection; exact installed recipe match. | Any supported input, closure, generated binding, applicability, workload, target/mode/stage or source change. |
-| Exact-candidate semantic/census/fixed point / #522/#513 owner and #509 | Historic #509 accepted merge `24263a6ab21aa29c7da197ad7527447738deddb5`, tree `cdc0e38e7b8bc87db8fc14b8bbf3117ad04bdeb4`; #522 draft head/tree above | Historic #509 pass cannot be transferred. #522 exact-head broad CI and fixed-point failed. | Reviewed integrated cutover source/tree, zero fallback, full census and supported semantic/platform gates, output/oracle checks, repeated fixed point and current-head CI. | Candidate/main integration, compiler, fixture, dependency, oracle or generated binding change. |
+| Exact-candidate semantic/census/fixed point / #522/#513 owner and #509 | Historic #509 accepted merge `24263a6ab21aa29c7da197ad7527447738deddb5`, tree `cdc0e38e7b8bc87db8fc14b8bbf3117ad04bdeb4`; #522 draft head/tree and conflict receipt above | Historic #509 pass cannot be transferred. #522 has unresolved branch-writer transfer, two source conflicts against current main and failed old-head broad CI/fixed point. | Explicit writer handoff; reviewed integrated cutover source/tree, zero fallback, full census and supported semantic/platform gates, output/oracle checks, repeated fixed point and current-head CI. | Candidate/main integration, compiler, fixture, dependency, oracle or generated binding change. |
 | Matched subjects and approved plan / #882 operator with #522, #881 and #426 | Historical oracle and current policy pins above; actual direct/MIR source snapshots, Clang/linker/SDK closure, build receipts and binary hashes unresolved | No frozen plan or measured binary exists. | Same-root serial trusted Release unity builds, same-source path controls, exact binary/build hashes, canonical row/family plan, fixed seed/pair count, reviewed pre-sample publication and post-A/A binding. | Any source, binary, toolchain, workload, recipe, profile or predeclared sampling/policy change; start a new attempt and retain the old one. |
 
 The approved [rebinding contract](native-retirement-rebinding.md) makes the
@@ -211,7 +222,8 @@ service token is. Keep failed, interrupted, invalid, unavailable and
 superseded attempts, including partial evidence and cleanup decisions. Do not
 overwrite a record or present a later good attempt as the only history.
 
-The designated operator may freeze only after #880's live normal/recovery,
+The designated operator may freeze only after #522's explicit writer handoff,
+conflict reconciliation and accepted exact source/tree, #880's live normal/recovery,
 continuous-lease/cleanup and export/replay receipts; #881's exact recipe
 admission; #426's real-host A/A policy and qualification; the protected #879
 route and #878 exporter; #508/#511/installed recipe identity reconciliation;
