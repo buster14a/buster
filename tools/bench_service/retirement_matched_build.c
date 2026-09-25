@@ -231,10 +231,11 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_build_source_fd(BqRetirementMatchedBuild c
 /* A successful no-op build must not inherit an earlier executable from the
  * shared configured pathname. The worker owns isolation until the child and
  * all descendants have been reaped; this check precedes log and child creation. */
-BUSTER_GLOBAL_LOCAL bool bq_retirement_build_output_absent(BqRetirementMatchedBuild const* build)
+BUSTER_GLOBAL_LOCAL int bq_retirement_build_output_absent(BqRetirementMatchedBuild const* build,
+    struct stat* observed)
 {
     int root = bq_open_absolute_directory(string_from_pointer(build->build));
-    bool ok = root >= 3;
+    bool ok = root >= 3 && fstat(root, observed) == 0 && S_ISDIR(observed->st_mode);
     int release = ok ? openat(root, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     if (ok && release < 0) ok = errno == ENOENT;
     if (release >= 0)
@@ -243,8 +244,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_output_absent(BqRetirementMatchedBu
         ok = fstatat(release, "ide", &output, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
         if (close(release) != 0) ok = false;
     }
-    if (root >= 0 && close(root) != 0) ok = false;
-    return ok;
+    if (!ok)
+    {
+        if (root >= 0) close(root);
+        root = -1;
+    }
+    return root;
 }
 
 /* The child keeps verified executable and source descriptors through setup;
@@ -290,7 +295,7 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     BqRetirementBuildStage stage = {0};
     struct stat directory_stat = {0}, log_stat = {0};
     bool fresh = process && !process->state && !process->process &&
-        !process->directory && !process->writer && !process->reader;
+        !process->directory && !process->writer && !process->reader && !process->build_root;
     bool ok = fresh && bq_retirement_matched_build_stage(build, &stage);
     char digest[SHA256_HEX_CAPACITY] = {0}, name[32] = {0};
     if (ok) bq_retirement_build_command_sha(&stage, digest);
@@ -303,9 +308,12 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     int source = ok ? bq_retirement_build_source_fd(build) : -1;
     if (ok && source < 3) build->failed = true;
     ok = ok && source >= 3;
+    struct stat build_stat = {0};
+    int build_root = -1;
     if (ok && (build->next & 1u))
     {
-        ok = bq_retirement_build_output_absent(build);
+        build_root = bq_retirement_build_output_absent(build, &build_stat);
+        ok = build_root >= 3;
         if (!ok) build->failed = true;
     }
     int directory = ok ? bq_open_absolute_directory(string_from_pointer(build->attempt)) : -1;
@@ -340,11 +348,14 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
         process->directory = directory;
         process->writer = writer;
         process->reader = capture[0];
+        process->build_root = build_root;
         process->process = child;
         process->directory_device = (u64)directory_stat.st_dev;
         process->directory_inode = (u64)directory_stat.st_ino;
         process->log_device = (u64)log_stat.st_dev;
         process->log_inode = (u64)log_stat.st_ino;
+        process->build_device = (u64)build_stat.st_dev;
+        process->build_inode = (u64)build_stat.st_ino;
         memcpy(process->name, name, (size_t)length + 1);
         memcpy(process->command_sha256, digest, sizeof(digest));
         process->stage = build->next;
@@ -353,6 +364,7 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     else
     {
         if (capture[0] >= 0) close(capture[0]);
+        if (build_root >= 0) close(build_root);
         if (writer >= 0) close(writer);
         if (directory >= 0) close(directory);
     }
@@ -423,6 +435,7 @@ void bq_retirement_matched_build_abort(BqRetirementBuildProcess* process)
         process->state != BQ_RETIREMENT_BUILD_DRAINING)
     {
         if (process->reader >= 3) close(process->reader);
+        if (process->build_root >= 3) close(process->build_root);
         if (process->writer >= 3) close(process->writer);
         if (process->directory >= 3) close(process->directory);
         *process = (BqRetirementBuildProcess){0};
@@ -533,16 +546,27 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_build_stage_evidence(BqQueue* queue,
 /* Copy only the successful build's observed Release/ide. The next generate
  * may remove the shared build root only after the prior executable is frozen. */
 BUSTER_GLOBAL_LOCAL bool bq_retirement_build_freeze(BqRetirementMatchedBuild* build,
-    int workspaces, BqJob const* job, u32 side, uid_t candidate_uid)
+    int workspaces, BqJob const* job, u32 side, uid_t candidate_uid,
+    BqRetirementBuildProcess const* process)
 {
     char name[64];
     int attempt = bq_workspace_name(name, job->id, job->token) ?
                   openat(workspaces, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-    int root = bq_open_absolute_directory(string_from_pointer(build->build));
-    int release = root >= 0 ? openat(root, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int root = process->build_root;
+    struct stat build_stat = {0};
+    bool same_root = root >= 3 && fstat(root, &build_stat) == 0 &&
+                     (u64)build_stat.st_dev == process->build_device &&
+                     (u64)build_stat.st_ino == process->build_inode;
+    int named_root = same_root ? bq_open_absolute_directory(string_from_pointer(build->build)) : -1;
+    struct stat named_stat = {0};
+    same_root = same_root && named_root >= 3 && fstat(named_root, &named_stat) == 0 &&
+                (u64)named_stat.st_dev == process->build_device &&
+                (u64)named_stat.st_ino == process->build_inode;
+    if (named_root >= 0 && close(named_root) != 0) same_root = false;
+    int release = same_root ? openat(root, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
     int input = release >= 0 ? openat(release, "ide", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
     struct stat first = {0}, last = {0};
-    bool ok = attempt >= 0 && bq_owned_directory(attempt, true, false) && input >= 0 &&
+    bool ok = same_root && attempt >= 0 && bq_owned_directory(attempt, true, false) && input >= 0 &&
               fstat(input, &first) == 0 && S_ISREG(first.st_mode) && first.st_nlink == 1 &&
               first.st_uid == (side ? candidate_uid : geteuid()) &&
               (first.st_mode & S_IXUSR) && first.st_size > 0 &&
@@ -570,10 +594,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_build_freeze(BqRetirementMatchedBuild* bu
          fchmod(output, 0500) == 0 && fsync(output) == 0;
     if (output >= 0 && close(output) != 0) ok = false;
     if (ok) ok = fsync(frozen) == 0 && (!side || (fchmod(frozen, 0500) == 0 && fsync(frozen) == 0));
+    int final_root = ok ? bq_open_absolute_directory(string_from_pointer(build->build)) : -1;
+    if (ok) ok = final_root >= 3 && fstat(final_root, &named_stat) == 0 &&
+                 (u64)named_stat.st_dev == process->build_device &&
+                 (u64)named_stat.st_ino == process->build_inode;
+    if (final_root >= 0 && close(final_root) != 0) ok = false;
     if (frozen >= 0 && close(frozen) != 0) ok = false;
     if (input >= 0 && close(input) != 0) ok = false;
     if (release >= 0 && close(release) != 0) ok = false;
-    if (root >= 0 && close(root) != 0) ok = false;
     if (attempt >= 0 && close(attempt) != 0) ok = false;
     return ok;
 }
@@ -703,7 +731,8 @@ BqError bq_retirement_matched_build_import(BqQueue* queue, BqJob const* job,
 
 BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed_pinned(BqQueue* queue,
     BqJob const* job, int installed, int workspaces, String8 profile, int stage_log,
-    int stage_exit, uid_t candidate_uid, BqRetirementMatchedBuild* build)
+    uid_t candidate_uid, BqRetirementBuildProcess const* process,
+    BqRetirementMatchedBuild* build)
 {
     BqRetirementBuildStage stage = {0};
     BqError result = bq_retirement_matched_build_stage(build, &stage) ? BQ_OK : BQ_RECIPE_MISMATCH;
@@ -714,8 +743,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed_pinned
         result = bq_retirement_build_log_sha(stage_log, build->log_sha256[current]) ? BQ_OK : BQ_IO;
     }
     if (result == BQ_OK)
-        result = bq_retirement_build_stage_evidence(queue, job, stage_log, stage_exit, build);
-    if (result == BQ_OK && stage_exit != 0) result = BQ_WORKER_FAILED;
+        result = bq_retirement_build_stage_evidence(queue, job, stage_log, process->exit_code, build);
+    if (result == BQ_OK && process->exit_code != 0) result = BQ_WORKER_FAILED;
     if (result == BQ_OK && !bq_retirement_toolchain_recheck(&build->toolchain))
         result = BQ_CONFIGURATION_MISMATCH;
     if (result == BQ_OK)
@@ -726,7 +755,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_observed_pinned
     }
     if (result == BQ_OK && (current & 1u))
         result = bq_retirement_build_freeze(build, workspaces, job, current / 2u,
-                                            candidate_uid) ? BQ_OK : BQ_SOURCE_MISMATCH;
+                                            candidate_uid, process) ?
+                 BQ_OK : BQ_SOURCE_MISMATCH;
     if (result == BQ_OK && current == BQ_RETIREMENT_BUILD_STAGES - 1u)
         result = bq_retirement_binaries_record_pinned(queue, job, installed, workspaces,
                    profile, build->preparation_sha256, build->binary_record_sha256);
@@ -743,12 +773,18 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue*
 {
     BqRetirementBuildStage stage = {0};
     struct stat directory_stat = {0}, named = {0}, writer_stat = {0}, reader_stat = {0};
+    struct stat build_stat = {0};
     char command_sha256[SHA256_HEX_CAPACITY] = {0};
     bool ok = process && process->state == BQ_RETIREMENT_BUILD_REAPED &&
         !process->process && process->writer >= 3 && process->directory >= 3 &&
         process->log_eof && !process->log_overflow && !process->capture_failed &&
         build && !build->failed && process->stage == build->next &&
         bq_retirement_matched_build_stage(build, &stage);
+    if (ok && (process->stage & 1u))
+        ok = process->build_root >= 3 && fstat(process->build_root, &build_stat) == 0 &&
+             (u64)build_stat.st_dev == process->build_device &&
+             (u64)build_stat.st_ino == process->build_inode;
+    if (ok && !(process->stage & 1u)) ok = process->build_root == -1;
     if (ok) bq_retirement_build_command_sha(&stage, command_sha256);
     int writer_flags = ok ? fcntl(process->writer, F_GETFD) : -1;
     int access_flags = writer_flags >= 0 ? fcntl(process->writer, F_GETFL) : -1;
@@ -791,7 +827,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_matched_build_complete_pinned(BqQueue*
         reader_stat.st_dev == named.st_dev && reader_stat.st_ino == named.st_ino &&
         reader_stat.st_size == named.st_size && reader_stat.st_mode == named.st_mode;
     BqError result = ok ? bq_retirement_matched_build_complete_observed_pinned(queue, job,
-        installed, workspaces, profile, log, process->exit_code, candidate_uid, build) : BQ_WORKER_FAILED;
+        installed, workspaces, profile, log, candidate_uid, process, build) : BQ_WORKER_FAILED;
     if (log >= 0 && close(log) != 0) result = BQ_IO;
     if (process && process->state != BQ_RETIREMENT_BUILD_RUNNING)
         bq_retirement_matched_build_abort(process);
