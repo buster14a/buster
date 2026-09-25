@@ -10,7 +10,7 @@ BUSTER_GLOBAL_LOCAL bool owner_position_equal(IrSourcePosition a, IrSourcePositi
 BUSTER_GLOBAL_LOCAL bool owner_location_equal(CompilerDiagnosticLocation a, CompilerDiagnosticLocation b)
 {
     return string_equal(a.path, b.path) && string_equal(a.original_path, b.original_path) && a.has_range == b.has_range &&
-           a.range.source == b.range.source && a.range.offset == b.range.offset && a.range.length == b.range.length &&
+           a.range.source.value == b.range.source.value && a.range.offset == b.range.offset && a.range.length == b.range.length &&
            owner_position_equal(a.position, b.position) && owner_position_equal(a.original_position, b.original_position);
 }
 BUSTER_GLOBAL_LOCAL bool owner_diagnostic_equal(CompilerDiagnostic a, CompilerDiagnostic b)

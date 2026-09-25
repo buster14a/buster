@@ -23,6 +23,10 @@
 #include <buster/lib/compiler/assembly/x86_64_metadata.c>
 #endif
 
+// Applications own the ProgramState selected by the shared entry wrapper.
+BUSTER_GLOBAL_LOCAL ProgramState owner_probe_program;
+BUSTER_V_IMPL ProgramState* program_state = &owner_probe_program;
+
 enum { OWNER_PROBE_MAX_LANES = 2, OWNER_PROBE_WORDS = 128, OWNER_PROBE_COHORTS = 15 };
 typedef enum OwnerProbePhase
 {
