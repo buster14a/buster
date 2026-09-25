@@ -15,6 +15,7 @@ infrastructure; the probe scripts patch a **copy** of the tree and must never be
 | `callgrind.frozen-unity.{base,prototype}.out.gz` | the raw callgrind outputs behind that table |
 | `probe_frontend.py`, `probe_fast_base.py`, `probe_fast_prototype.py` | anchor-checked counter patches (print on exit when `BUSTER_PROBE` is set) |
 | `build_variant.py`, `build_counting.py` | the exact compile recipes of the native and counting variants |
+| `object_link_gen.py`, `object_link_counts.txt` | Mach-O `__eh_frame`, initializer-slot and `.s` symbol families (#1309, #1319) and their instruction counts |
 | `SHA256SUMS` | hashes of every other file here |
 
 Reproducing a FAST grid point:
