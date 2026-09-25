@@ -22,6 +22,33 @@ static int test_text(char const* root, char const* name, char const* text)
     return ok;
 }
 
+#ifdef __linux__
+static void test_service_output_share(char const* root)
+{
+    char directory[TP_PATH_CAP], nested[TP_PATH_CAP], file[TP_PATH_CAP], link[TP_PATH_CAP];
+    int paths = tp_path(directory, root, "service-output-XXXXXX") && mkdtemp(directory) != NULL &&
+                tp_path(nested, directory, "artifacts") && tp_path(file, nested, "result.log") &&
+                tp_path(link, directory, "linked.log");
+    CHECK(paths);
+    if (paths)
+    {
+        TpConfig config;
+        char* options[] = {"throughput", "run", "--output", directory, "--service-output", NULL};
+        CHECK(tp_options(5, options, &config) && config.service_output);
+        CHECK(mkdir(nested, 0700) == 0 && test_text(nested, "result.log", "result\n") &&
+              chmod(file, 0600) == 0 && tp_share_service_output(directory));
+        struct stat root_info = {0}, nested_info = {0}, file_info = {0};
+        CHECK(stat(directory, &root_info) == 0 && stat(nested, &nested_info) == 0 &&
+              stat(file, &file_info) == 0 && (root_info.st_mode & 07777) == 0750 &&
+              (nested_info.st_mode & 07777) == 0750 && (file_info.st_mode & 07777) == 0640);
+        CHECK(chmod(directory, 0700) == 0 && symlink("artifacts/result.log", link) == 0 &&
+              !tp_share_service_output(directory));
+        CHECK(unlink(link) == 0 && chmod(nested, 0700) == 0 && unlink(file) == 0 &&
+              rmdir(nested) == 0 && rmdir(directory) == 0);
+    }
+}
+#endif
+
 static int test_bundle(char const* root, unsigned scenario)
 {
     int ok = tp_mkdirs(root) && test_text(root, "metadata.json", "{\"synthetic_test_fixture\":true}\n") &&
@@ -1638,6 +1665,9 @@ int main(int argc, char** argv)
         test_diagnostic_probes(root);
         test_legacy_schema(executable, root);
         test_compile_options();
+#ifdef __linux__
+        test_service_output_share(root);
+#endif
         test_workload_selection();
         test_job_capacity();
         test_optional_inputs(root);

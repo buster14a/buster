@@ -78,7 +78,8 @@ numeric `SystemCallErrorNumber=1` spelling for `EPERM`. An active unit with
 After exit, systemd may clear `ControlGroup` or collect the unit entirely.
 The worker then requires the recorded invocation where available and proof
 that the original cgroup leaf is absent. For a collected unit, it uses the
-bounded `systemd-run --wait` process status for the outcome before finalizing.
+bounded `systemd-run --wait` process status for the outcome before finalizing;
+`LoadState=not-found` does not carry the full set of active-unit properties.
 
 Recipe stages use deterministic sibling service names and bind their lifetime
 to the outer worker with `PartOf=`, `BindsTo=` and `After=` and are collected
@@ -99,6 +100,11 @@ and copies the complete throughput tree into an unpredictable trusted staging
 directory before a no-replace directory publication. The workspace parent is
 SGID to the candidate group so materialized source/build descendants inherit
 the intended group without a request-controlled chown or path.
+The fixed throughput command includes `--service-output`. After measurement
+and comparison close their files, the candidate verifies the output tree has
+only same-device, single-link regular files and directories owned by its UID
+and group, then grants the trusted service group read/traverse access. The
+service still copies into its own private result leaf and validates the bundle.
 
 Do not enable the service yet. The broker socket, binary, root-owned lease
 identity and service dependencies must be installed and independently reviewed

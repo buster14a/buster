@@ -3668,6 +3668,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_deploy_policy(void)
 
 BUSTER_GLOBAL_LOCAL void bq_test_worker_systemd_results(void)
 {
+    char collected[] = "LoadState=not-found\nActiveState=inactive\nControlGroup=\n";
+    char loaded[] = "LoadState=loaded\nActiveState=inactive\nControlGroup=\n";
+    BQ_CHECK(bq_worker_systemd_collected(collected) && !bq_worker_systemd_collected(loaded));
     BQ_CHECK(bq_worker_systemd_result("success", true) == BQ_WORKER_RUNNING);
     BQ_CHECK(bq_worker_systemd_result("success", false) == BQ_WORKER_SUCCEEDED);
     BQ_CHECK(bq_worker_systemd_result("oom-kill", true) == BQ_WORKER_OOM);

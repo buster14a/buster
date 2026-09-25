@@ -20,6 +20,8 @@
 #include <inttypes.h>
 #include <limits.h>
 #ifdef __linux__
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/file.h>
 #endif
 #include "qualification.h"
@@ -84,7 +86,7 @@ typedef struct TpConfig
     unsigned flag_count;
     unsigned workload_mask, mode_mask, pairs, warmups, timeout, seed, scale;
     int cpu, pmu, require_pmu, guard, identical;
-    int assembly, output_explicit;
+    int assembly, output_explicit, service_output;
 } TpConfig;
 
 typedef struct TpWorkload
@@ -226,6 +228,10 @@ static int tp_options(int argc, char** argv, TpConfig* config)
         {
             config->guard = 0;
         }
+        else if (!strcmp(key, "--service-output"))
+        {
+            config->service_output = 1;
+        }
         else if (!strcmp(key, "--require-identical-output"))
         {
             config->identical = 1;
@@ -336,6 +342,12 @@ static int tp_options(int argc, char** argv, TpConfig* config)
          config->warmups <= 20 && config->timeout > 0 && config->timeout <= 3600 &&
          config->seed > 0 && config->scale > 0 && config->scale <= 64 &&
          (!strcmp(config->profile, "smoke") || !strcmp(config->profile, "ci") || !strcmp(config->profile, "full"));
+#ifdef __linux__
+    if (config->service_output)
+        ok = ok && !strcmp(config->command, "run") && config->output_explicit && config->output[0] == '/';
+#else
+    if (config->service_output) ok = 0;
+#endif
     if (config->guard && config->pairs < 20 && !strcmp(config->command, "run"))
     {
         tp_error("a guard requires at least 20 pairs in EACH of two rounds; use --no-guard for smoke measurements");
@@ -1654,6 +1666,95 @@ static int tp_run(TpConfig config)
     return result;
 }
 
+#ifdef __linux__
+/* The fixed service is a member of the candidate group but has no DAC
+ * override. Publish group-readable output only after all measurements and
+ * comparison files are closed. Reject links and cross-device replacements. */
+static int tp_share_service_output(char const* path)
+{
+    enum { depth_cap = 256, entry_cap = 4096 };
+    DIR* stack[depth_cap] = {0};
+    int root = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat root_info = {0};
+    int ok = root >= 0 && fstat(root, &root_info) == 0 && S_ISDIR(root_info.st_mode) &&
+             root_info.st_gid == getegid() && (root_info.st_mode & 0007) == 0 &&
+             (root_info.st_uid == geteuid() || (root_info.st_mode & 0070) == 0070);
+    unsigned depth = 0, entries = 0;
+    if (ok)
+    {
+        stack[0] = fdopendir(root);
+        ok = stack[0] != NULL;
+        if (ok)
+        {
+            root = -1;
+            depth = 1;
+        }
+    }
+    while (ok && depth)
+    {
+        DIR* stream = stack[depth - 1];
+        int parent = dirfd(stream);
+        errno = 0;
+        struct dirent* entry = readdir(stream);
+        if (!entry)
+        {
+            ok = errno == 0 && parent >= 0;
+            if (ok && (depth > 1 || root_info.st_uid == geteuid())) ok = fchmod(parent, 0750) == 0;
+            if (ok) ok = fsync(parent) == 0;
+            if (closedir(stream) != 0) ok = 0;
+            stack[depth - 1] = NULL;
+            depth -= 1;
+        }
+        else if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, ".."))
+        {
+            struct stat before = {0}, after = {0};
+            entries += 1;
+            ok = entries <= entry_cap && parent >= 0 &&
+                 fstatat(parent, entry->d_name, &before, AT_SYMLINK_NOFOLLOW) == 0 &&
+                 before.st_dev == root_info.st_dev && before.st_uid == geteuid() &&
+                 before.st_gid == getegid() && (before.st_mode & 0002) == 0;
+            if (ok && S_ISDIR(before.st_mode))
+            {
+                int child = depth < depth_cap ?
+                            openat(parent, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+                ok = child >= 0 && fstat(child, &after) == 0 &&
+                     before.st_dev == after.st_dev && before.st_ino == after.st_ino;
+                DIR* child_stream = ok ? fdopendir(child) : NULL;
+                if (ok) ok = child_stream != NULL;
+                if (ok)
+                {
+                    stack[depth] = child_stream;
+                    depth += 1;
+                    child = -1;
+                }
+                if (child >= 0) close(child);
+            }
+            else if (ok && S_ISREG(before.st_mode))
+            {
+                int file = before.st_nlink == 1 ?
+                           openat(parent, entry->d_name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW) : -1;
+                ok = file >= 0 && fstat(file, &after) == 0 &&
+                     before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+                     after.st_nlink == 1;
+                if (ok) ok = fchmod(file, (before.st_mode & 0111) ? 0750 : 0640) == 0 && fsync(file) == 0;
+                if (file >= 0 && close(file) != 0) ok = 0;
+            }
+            else if (ok)
+            {
+                ok = 0;
+            }
+        }
+    }
+    while (depth)
+    {
+        if (stack[depth - 1]) closedir(stack[depth - 1]);
+        depth -= 1;
+    }
+    if (root >= 0) close(root);
+    return ok;
+}
+#endif
+
 static int tp_self_test(void)
 {
     unsigned assertions = 0, failures = 0;
@@ -1906,6 +2007,7 @@ static void tp_help(void)
           "macros, aggregate-abi. Default: the first six, in fixed corpus order regardless of selection order.\n"
           "Dedicated Linux run/qualify: --machine-id LABEL --lock-file ABSOLUTE_PATH --cpu N|auto.\n"
           "A service may additionally pass its held lease with --lease-fd N; it requires --lock-file and is not inherited by compiler children.\n"
+          "The fixed Linux service uses --service-output to expose completed files to its trusted group reader.\n"
           "qualify prints read-only observations to stdout; does not prove isolation or benchmark noise.\n"
           "The cooperative lease covers run preparation through replay; prebuild this tool before measurement.\n\n"
           "Exit: 0 no confirmed regression (inspect inconclusive warnings), 1 confirmed regression,\n"
@@ -1985,6 +2087,13 @@ int main(int argc, char** argv)
         else if (!strcmp(config.command, "run"))
         {
             result = tp_run(config);
+#ifdef __linux__
+            if (config.service_output && !tp_share_service_output(config.output))
+            {
+                tp_error("could not publish service-readable output tree");
+                result = 2;
+            }
+#endif
         }
         else if (!strcmp(config.command, "compare"))
         {

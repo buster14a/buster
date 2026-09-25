@@ -348,6 +348,7 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerCommand* c
             bq_broker_add(command, "--warmups");
             bq_broker_add(command, "1");
             bq_broker_add(command, "--no-guard");
+            bq_broker_add(command, "--service-output");
         }
         else
         {
@@ -1176,6 +1177,8 @@ static int bq_broker_self_test(void)
                         bq_broker_has_argument(&command, "--property=NoNewPrivileges=yes") &&
                         bq_broker_has_argument(&command, "--property=ProtectSystem=strict") &&
                         bq_broker_has_argument(&command, "--property=PrivateNetwork=yes"));
+        BQ_BROKER_CHECK(bq_broker_has_argument(&command, "--service-output") ==
+                        (stage == BQ_BROKER_THROUGHPUT_STAGE));
         if (stage == BQ_BROKER_OUTER)
         {
             BQ_BROKER_CHECK(bq_broker_has_argument(&command, BQ_BROKER_SERVICE) &&

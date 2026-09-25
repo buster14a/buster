@@ -1473,6 +1473,15 @@ BUSTER_GLOBAL_LOCAL BqWorkerResult bq_worker_systemd_result(char const* value, b
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool bq_worker_systemd_collected(char* output)
+{
+    char* load_state = bq_worker_property(output, "LoadState");
+    char* end = load_state ? strchr(load_state, '\n') : NULL;
+    bool collected = end && (size_t)(end - load_state) == sizeof("not-found") - 1 &&
+                     !memcmp(load_state, "not-found", sizeof("not-found") - 1);
+    return collected;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, char const* unit,
                                                      BqWorkerObserved* observed, u64 deadline)
 {
@@ -1497,6 +1506,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe_once(BqWorkerBackend* backend, ch
     BqError error = remaining ? bq_worker_exec_capture(arguments, output, sizeof(output), &status, remaining) : BQ_IO;
     *observed = (BqWorkerObserved){0};
     bool missing = error == BQ_OK && (!WIFEXITED(status) || WEXITSTATUS(status) != 0);
+    if (error == BQ_OK && !missing && bq_worker_systemd_collected(output)) missing = true;
     enum { BQ_SYSTEMD_FIELD_COUNT = 48 };
     char* fields[BQ_SYSTEMD_FIELD_COUNT] = {0};
     char const* names[] = {"Id", "LoadState", "ActiveState", "SubState", "ControlGroup", "AllowedCPUs",
