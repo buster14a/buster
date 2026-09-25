@@ -53,6 +53,9 @@ typedef struct BqTestBrokerStatus
     int32_t status;
 } BqTestBrokerStatus;
 
+_Static_assert(sizeof(BqTestBrokerRequest) == 176, "broker request envelope changed");
+_Static_assert(sizeof(BqTestBrokerStatus) == 12, "broker status envelope changed");
+
 typedef struct BqTestIdentity
 {
     char const* name;
@@ -195,7 +198,7 @@ static bool bq_test_existing_payload(char const* path, uid_t owner, gid_t group)
          opened.st_uid == before.st_uid && opened.st_gid == before.st_gid &&
          (opened.st_mode & 07777) == (before.st_mode & 07777);
     if (fd >= 0) close(fd);
-    if (!ok) fprintf(stderr, "BROKER_PRIVATE_PAYLOAD absent or invalid path=%s errno=%d\n", path, errno);
+    fprintf(stderr, "BROKER_PRIVATE_PAYLOAD path=%s verified=%s\n", path, ok ? "yes" : "no");
     return ok;
 }
 
@@ -206,10 +209,17 @@ static int bq_test_private_access(BqTestIdentity const* identity, char const* wo
     if (child == 0)
     {
         bool ok = bq_test_enter_identity(identity);
-        char const* files[] = {worker, instance, BQ_TEST_STATE "/lease/host.lock", payload};
+        char const* files[] = {worker, instance, BQ_TEST_STATE "/lease/host.lock"};
         for (unsigned index = 0; ok && index < sizeof(files) / sizeof(files[0]); index += 1)
             ok = bq_test_denied_open(files[index], O_RDONLY) && bq_test_denied_open(files[index], O_WRONLY) &&
-                 bq_test_denied_open(files[index], O_RDWR);
+                  bq_test_denied_open(files[index], O_RDWR);
+        if (ok)
+        {
+            ok = bq_test_denied_open(payload, O_RDONLY) && bq_test_denied_open(payload, O_WRONLY) &&
+                 bq_test_denied_open(payload, O_RDWR);
+            fprintf(stderr, "BROKER_PRIVATE_PAYLOAD_ACCESS identity=%s read/write/rw_denied=%s\n",
+                    identity->name, ok ? "yes" : "no");
+        }
         char const* directories[] = {BQ_TEST_STATE "/queue", BQ_TEST_STATE "/lease",
                                      BQ_TEST_STATE "/workspaces/results", result};
         for (unsigned index = 0; ok && index < sizeof(directories) / sizeof(directories[0]); index += 1)
