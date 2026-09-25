@@ -21232,7 +21232,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_post_tag_declaration_specifiers(UnitTe
 // Buster deliberately selects signed __int128 for decimal magnitudes above
 // INT64_MAX. Test that established extension, not Clang's different raw-literal
 // policy, and retain explicit unsigned suffixes/casts as independent controls.
-BUSTER_GLOBAL_LOCAL String8 const c_test_integer_literal_policy_source = S8(
+BUSTER_GLOBAL_LOCAL String8 const c_test_integer_literal_policy_source = S8_INITIALIZER(
     "typedef __int128 wide;\n"
     "#define LO ((wide)9223372036854775808ULL)\n"
     "#define HI ((wide)18446744073709551615ULL)\n"
