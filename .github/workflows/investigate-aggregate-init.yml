@@ -1,0 +1,72 @@
+name: Aggregate initializer investigation
+on:
+  push:
+    branches: [research/aggregate-init-20260925-dce1-astra]
+    paths:
+      - '.github/workflows/investigate-aggregate-init.yml'
+      - 'tools/investigations/aggregate-init-20260925/**'
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    env:
+      SOURCE_SHA: dce1b8caa3d368dede16ad4aa9da6760e26fe704
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin unchanged source and tool identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence source-evidence
+          git diff --exit-code "$SOURCE_SHA" HEAD -- src build.c build.sh CMakeLists.txt
+          git rev-parse HEAD 'HEAD^{tree}' > evidence/transport.txt
+          git rev-parse "$SOURCE_SHA" "$SOURCE_SHA^{tree}" > evidence/source.txt
+          git archive "$SOURCE_SHA" | gzip -1 > source-evidence/source.tar.gz
+          cp tools/investigations/aggregate-init-20260925/*.c evidence/
+          { clang --version; gcc --version; cmake --version; ninja --version; uname -a; cat /etc/os-release; lscpu; } > evidence/versions.txt
+          sha256sum source-evidence/source.tar.gz > source-evidence/SHA256SUMS
+      - name: Retain source before compilation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: aggregate-source-${{ github.run_id }}
+          path: source-evidence
+          retention-days: 30
+          if-no-files-found: error
+      - name: Build unchanged compiler on this runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee evidence/build.log) 2>&1
+          set -x
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide
+          sha256sum build/Release/ide > evidence/compiler.sha256
+          cp build/CMakeCache.txt evidence/ || true
+          clang -std=c17 -Wall -Wextra -Werror tools/investigations/aggregate-init-20260925/probe.c -o "$RUNNER_TEMP/aggregate-observer"
+      - name: Execute bounded reference and Buster family
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/aggregate-observer" "$PWD/build/Release/ide" "$PWD/tools/investigations/aggregate-init-20260925/cases.c" | tee evidence/observer.log
+      - name: Hash retained evidence
+        if: always()
+        shell: bash
+        run: |
+          if test -d evidence; then
+            find evidence -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS
+          fi
+      - name: Retain all outcomes including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: aggregate-results-${{ github.run_id }}
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
