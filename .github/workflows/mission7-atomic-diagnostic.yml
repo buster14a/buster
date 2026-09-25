@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: bb96b5d08e570aff3cbd473441d71ab0dc691d67
+          ref: fd7b1e7b35597c844973495faf5d77dbe2d1dc51
           persist-credentials: false
       - name: Original, two disposable mutants, independent oracle
         shell: bash
