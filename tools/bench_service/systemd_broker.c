@@ -278,6 +278,10 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerCommand* c
             bq_broker_add(command, "--gid=buster-bench");
             bq_broker_add(command, "--property=UMask=0077");
         }
+        /* Retain failed outer units until their exact manager Result is read.
+         * Only stage units use aggressive collection. */
+        if (request->stage == BQ_BROKER_OUTER)
+            bq_broker_add(command, "--property=CollectMode=inactive");
         bq_broker_common_sandbox(command);
         if (request->stage == BQ_BROKER_OUTER)
         {
@@ -721,7 +725,7 @@ static bool bq_broker_show(char const* unit, char output[8192])
     static char const* const properties[] = {"Id", "LoadState", "Slice", "InvocationID", "ControlGroup",
         "User", "Group", "ExecStart", "PartOf", "BindsTo", "After", "AllowedCPUs", "MemoryMax",
         "MemorySwapMax", "TasksMax", "RuntimeMaxUSec", "NoNewPrivileges", "ProtectSystem",
-        "PrivateNetwork"};
+        "PrivateNetwork", "CollectMode"};
     char options[sizeof(properties) / sizeof(properties[0])][64];
     char const* arguments[sizeof(properties) / sizeof(properties[0]) + 5] = {BQ_BROKER_CTL, "show", "--no-pager"};
     bool ok = true;
@@ -811,6 +815,8 @@ static bool bq_broker_signal_identity(BqBrokerRequest const* request)
               bq_broker_field_equals(output, "NoNewPrivileges", "yes") &&
               bq_broker_field_equals(output, "ProtectSystem", "strict") &&
               bq_broker_field_equals(output, "PrivateNetwork", "yes") &&
+              bq_broker_field_equals(output, "CollectMode", request->stage == BQ_BROKER_OUTER ?
+                                      "inactive" : "inactive-or-failed") &&
               bq_broker_field_equals(output, "AllowedCPUs", "2") &&
               bq_broker_field_equals(output, "MemoryMax", "8589934592") &&
               bq_broker_field_equals(output, "MemorySwapMax", "0") &&
@@ -1179,6 +1185,10 @@ static int bq_broker_self_test(void)
                         bq_broker_has_argument(&command, "--property=PrivateNetwork=yes"));
         BQ_BROKER_CHECK(bq_broker_has_argument(&command, "--service-output") ==
                         (stage == BQ_BROKER_THROUGHPUT_STAGE));
+        BQ_BROKER_CHECK(bq_broker_has_argument(&command, "--property=CollectMode=inactive") ==
+                        (stage == BQ_BROKER_OUTER));
+        BQ_BROKER_CHECK(bq_broker_has_argument(&command, "--collect") ==
+                        (stage != BQ_BROKER_OUTER));
         if (stage == BQ_BROKER_OUTER)
         {
             BQ_BROKER_CHECK(bq_broker_has_argument(&command, BQ_BROKER_SERVICE) &&

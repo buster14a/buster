@@ -77,9 +77,16 @@ numeric `SystemCallErrorNumber=1` spelling for `EPERM`. An active unit with
 `Result=success` is still running until its active state and cgroup prove exit.
 After exit, systemd may clear `ControlGroup` or collect the unit entirely.
 The worker then requires the recorded invocation where available and proof
-that the original cgroup leaf is absent. For a collected unit, it uses the
-bounded `systemd-run --wait` process status for the outcome before finalizing;
+that the original cgroup leaf is absent. Outer units explicitly use
+`CollectMode=inactive`, verified by the worker and signal broker, so failed
+units retain their exact manager `Result` for OOM/timeout attribution.
+Only a collected successful outer unit may use the bounded
+`systemd-run --wait` zero exit status before finalizing. A missing unit
+with a nonzero or signalled launcher status is an evidence mismatch and
+remains quarantined; it is never classified as a generic execution failure.
 `LoadState=not-found` does not carry the full set of active-unit properties.
+Stage units retain `CollectMode=inactive-or-failed`; this change adds no
+manager reset operation or automatic removal of retained failed outer units.
 Manager collection can precede removal of the cgroup leaf. The worker waits
 up to the fixed stop deadline for the recorded leaf to disappear, and waits
 for an inactive stage unit to be collected without sending it another signal.

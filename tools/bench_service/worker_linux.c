@@ -1192,6 +1192,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_observed(BqWorkerConfig const* config, char c
               observed->paths_valid && inaccessible_length > 0 && !strcmp(observed->inaccessible_paths, expected_inaccessible) &&
               !strcmp(observed->read_only_paths, expected_read_only) && !strcmp(observed->read_write_paths, expected_read_write) &&
               !strcmp(observed->user, "buster-bench") && !strcmp(observed->group, "buster-bench") &&
+              !strcmp(observed->collect_mode, "inactive") &&
               observed->no_new_privileges && observed->private_tmp && observed->private_devices &&
               observed->private_network && observed->protect_home && observed->protect_system &&
               observed->protect_proc && observed->restrict_suidsgid && observed->protect_control_groups &&
@@ -3367,6 +3368,7 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_instance_matches(BqWorkerConfig const* config
     bool drained = observed->unit_found && !strcmp(identity->boot_id, observed->boot_id) &&
                    !strcmp(identity->unit, observed->unit) && !observed->active && !observed->populated &&
                    observed->result != BQ_WORKER_RUNNING &&
+                   !strcmp(observed->collect_mode, "inactive") &&
                    (!observed->cgroup[0] || !strcmp(identity->cgroup, observed->cgroup)) &&
                    bq_worker_cgroup_absent(config, identity);
     return (live || drained) && !strcmp(identity->invocation_id, observed->invocation_id);
@@ -3858,11 +3860,12 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         {
             error = bq_worker_wait_cgroup_absent(config, backend, &identity,
                 bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
-            /* --wait reports the service exit status, while --collect may
-             * remove its manager record before the post-join observation. */
-            if (error == BQ_OK)
-                observed.result = WIFEXITED(status) && WEXITSTATUS(status) == 0 ?
-                                  BQ_WORKER_SUCCEEDED : BQ_WORKER_EXECUTION_FAILED;
+            /* CollectMode=inactive permits successful outer units to disappear,
+             * but retains failures and their exact Result. A missing failed
+             * invocation cannot be classified from the launcher status. */
+            if (error == BQ_OK && (!WIFEXITED(status) || WEXITSTATUS(status) != 0))
+                error = BQ_WORKER_MISMATCH;
+            if (error == BQ_OK) observed.result = BQ_WORKER_SUCCEEDED;
         }
     }
     if (error == BQ_OK && !recovering && !signal_cancelled)

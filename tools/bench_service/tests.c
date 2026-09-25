@@ -2898,7 +2898,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_join(BqWorkerBackend* backend, int* s
     }
     if (fake->replace_slice_on_cleanup_join && fake->joins == 2)
         BQ_CHECK(bq_test_worker_replace_slice(fake));
-    *status = fake->collect_on_join && fake->completion != BQ_WORKER_SUCCEEDED ? 1 << 8 : 0;
+    *status = fake->completion == BQ_WORKER_SUCCEEDED ? 0 :
+              fake->completion == BQ_WORKER_OOM ? SIGKILL : 1 << 8;
     return error;
 }
 
@@ -3063,6 +3064,7 @@ BUSTER_GLOBAL_LOCAL bool bq_test_worker_begin(BqWorkerFixture* fixture, BqWorker
     snprintf(fixture->fake.observed.read_write_paths, sizeof(fixture->fake.observed.read_write_paths), "%s",
              fixture->material.workspaces);
     snprintf(fixture->fake.observed.kill_mode, sizeof(fixture->fake.observed.kill_mode), "%s", "control-group");
+    snprintf(fixture->fake.observed.collect_mode, sizeof(fixture->fake.observed.collect_mode), "%s", "inactive");
     fixture->backend = (BqWorkerBackend){&fixture->fake, bq_test_worker_start, bq_test_worker_observe,
                                         bq_test_worker_signal, bq_test_worker_join,
                                         bq_test_worker_cleanup_launcher, bq_test_worker_delay,
@@ -3193,23 +3195,50 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_success_and_tree_cleanup(void)
 BUSTER_GLOBAL_LOCAL void bq_test_worker_drained_unit(void)
 {
     BqWorkerFixture fixture;
-    for (u32 collected = 0; collected < 3; collected += 1)
+    struct { BqWorkerResult result; BqError reason; } cases[] = {
+        {BQ_WORKER_SUCCEEDED, BQ_NOT_FOUND},
+        {BQ_WORKER_EXECUTION_FAILED, BQ_WORKER_FAILED},
+        {BQ_WORKER_OOM, BQ_WORKER_OOM_FAILURE},
+        {BQ_WORKER_TIMED_OUT, BQ_WORKER_TIMEOUT}};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
     {
-        BqWorkerResult completion = collected == 2 ? BQ_WORKER_EXECUTION_FAILED : BQ_WORKER_SUCCEEDED;
-        if (bq_test_worker_begin(&fixture, completion, false))
+        for (u32 collected = 0; collected < 2; collected += 1)
         {
-            BqRequest request = bq_test_real_request(146 + collected);
-            u64 id = 0;
-            fixture.fake.drain_on_join = true;
-            fixture.fake.collect_on_join = collected != 0;
-            BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK &&
-                     bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == BQ_OK);
-            BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
-            BqOutcome expected = collected == 2 ? BQ_FAILED : BQ_SUCCEEDED;
-            BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == expected &&
-                     fixture.fake.joins >= 2 && !fixture.fake.observed.cgroup[0] &&
-                     fixture.fake.observed.unit_found == (collected == 0));
-            bq_test_worker_end(&fixture);
+            if (bq_test_worker_begin(&fixture, cases[index].result, false))
+            {
+                BqRequest request = bq_test_real_request(146 + index * 2 + collected);
+                u64 id = 0;
+                fixture.fake.drain_on_join = true;
+                fixture.fake.collect_on_join = collected != 0;
+                /* A failed outer unit must be retained. Losing its manager
+                 * result is an identity/evidence failure, not an exit-code verdict. */
+                bool lost_result = collected && cases[index].result != BQ_WORKER_SUCCEEDED;
+                BqError expected_error = lost_result ? BQ_WORKER_MISMATCH : BQ_OK;
+                BQ_CHECK(bq_submit(&fixture.material.queue.queue, &request, &id) == BQ_OK &&
+                         bq_worker_run(&fixture.material.queue.queue, &fixture.config, &id) == expected_error);
+                BqJob* job = bq_job(&fixture.material.queue.queue.state, id);
+                BqError expected_reason = lost_result ? BQ_WORKER_MISMATCH : cases[index].reason;
+                BQ_CHECK(job && bq_failure_evidence(&fixture.material.queue.queue, job) == expected_reason);
+                if (lost_result)
+                {
+                    BQ_CHECK(job && job->phase != BQ_FINISHED &&
+                             fixture.material.queue.queue.needs_reconciliation &&
+                             fixture.material.queue.queue.state.active_id == id);
+                }
+                else
+                {
+                    BqOutcome expected = cases[index].result == BQ_WORKER_SUCCEEDED ? BQ_SUCCEEDED : BQ_FAILED;
+                    BQ_CHECK(job && job->phase == BQ_FINISHED && job->outcome == expected &&
+                             fixture.fake.joins >= 2 && !fixture.fake.observed.cgroup[0] &&
+                             fixture.fake.observed.unit_found == (collected == 0));
+                }
+                /* Check the durable reason after replay, not just the fake's result. */
+                bq_close(&fixture.material.queue.queue);
+                BQ_CHECK(bq_open(&fixture.material.queue.queue, fixture.material.queue.path) == BQ_OK);
+                job = bq_job(&fixture.material.queue.queue.state, id);
+                BQ_CHECK(job && bq_failure_evidence(&fixture.material.queue.queue, job) == expected_reason);
+                bq_test_worker_end(&fixture);
+            }
         }
     }
     if (bq_test_worker_begin(&fixture, BQ_WORKER_SUCCEEDED, false))
@@ -3234,6 +3263,11 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_drained_unit(void)
         identity.active = true;
         identity.populated = true;
         BQ_CHECK(bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &identity, false));
+        BqWorkerObserved wrong_policy = identity;
+        snprintf(wrong_policy.collect_mode, sizeof(wrong_policy.collect_mode), "%s", "inactive-or-failed");
+        BQ_CHECK(!bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, false));
+        wrong_policy.collect_mode[0] = 0;
+        BQ_CHECK(!bq_worker_observed(&fixture.config, identity.boot_id, identity.unit, &wrong_policy, false));
         BqWorkerObserved drained = identity;
         drained.active = false;
         drained.populated = false;
@@ -3241,6 +3275,9 @@ BUSTER_GLOBAL_LOCAL void bq_test_worker_drained_unit(void)
         drained.cgroup[0] = 0;
         BQ_CHECK(bq_test_worker_remove_cgroup(fixture.root, fixture.unit) &&
                  bq_worker_instance_matches(&fixture.config, &identity, &drained));
+        wrong_policy = drained;
+        snprintf(wrong_policy.collect_mode, sizeof(wrong_policy.collect_mode), "%s", "inactive-or-failed");
+        BQ_CHECK(!bq_worker_instance_matches(&fixture.config, &identity, &wrong_policy));
         snprintf(drained.invocation_id, sizeof(drained.invocation_id), "%s",
                  "ffffffffffffffffffffffffffffffff");
         BQ_CHECK(!bq_worker_instance_matches(&fixture.config, &identity, &drained));
