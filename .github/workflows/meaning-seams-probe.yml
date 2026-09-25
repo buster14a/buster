@@ -1,0 +1,33 @@
+name: Meaning seams investigation
+on:
+  push:
+    branches: [research/meaning-seams-20260925-d9e7-astra]
+    paths: [.github/workflows/meaning-seams-probe.yml, tools/investigations/meaning-seams-20260925/**]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Capture exact unmodified production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          pin=d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          test "$(git rev-parse "$pin^{tree}")" = ae9f274b6768b023fe6e0ef80a161e14b290e0a2
+          git rev-parse HEAD HEAD^{tree} > evidence/transport.txt
+          git rev-parse "$pin" "$pin^{tree}" > evidence/production.txt
+          git archive --format=tar "$pin" > evidence/production.tar
+          sha256sum evidence/production.tar > evidence/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: meaning-seams-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 30
+          if-no-files-found: error
