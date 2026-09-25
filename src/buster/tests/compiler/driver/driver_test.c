@@ -16203,6 +16203,170 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             scratch_end(fixture_temporary);
         }
     }
+    // The native-retirement ledger pins tests/ fixture bytes. Keep this
+    // regression embedded and each literal below C99's minimum length limit.
+    String8 c_designator_continuation_parts[] = {
+        S8(
+            "// C17 6.7.9p17-20: after a chained designator, the next item continues\n"
+            "// within its innermost selected aggregate before advancing outward.\n"
+            "struct Tail\n"
+            "{\n"
+            "    int values[2];\n"
+            "    int tail;\n"
+            "};\n"
+            "\n"
+            "struct Two\n"
+            "{\n"
+            "    int values[2];\n"
+            "};\n"
+            "\n"
+            "struct Pair\n"
+            "{\n"
+            "    int first;\n"
+            "    int second;\n"
+            "};\n"
+            "\n"
+            "struct Named\n"
+            "{\n"
+            "    struct Pair pair;\n"
+            "    int tail;\n"
+            "};\n"
+            "\n"
+            "struct ContinuationGrid\n"
+            "{\n"
+            "    int rows[2][2];\n"
+            "    int tail;\n"
+            "};\n"
+            "\n"
+            "struct Promoted\n"
+            "{\n"
+            "    struct\n"
+            "    {\n"
+            "        int values[2];\n"
+            "    };\n"
+            "    int tail;\n"
+            "};\n"
+            "\n"
+            "struct UnionOuter\n"
+            "{\n"
+            "    union\n"
+            "    {\n"
+            "        struct Pair pair;\n"
+            "        int raw;\n"
+            "    } choice;\n"
+            "    int tail;\n"
+            "};\n"
+            "\n"
+            "static struct Tail static_tail = {.values[0] = 1, 2};\n"
+            "static struct Two static_two = {.values[0] = 3, 4};\n"
+            "static struct Named static_named = {.pair.first = 5, 6, 7};\n"
+            "static struct ContinuationGrid static_grid = {.rows[0][0] = 8, 9, 10, 11, 12};\n"
+            "static int static_root_array[2][2] = {[0][0] = 19, 20, 21, 22};\n"
+            "static struct Promoted static_promoted = {.values[0] = 13, 14, 15};\n"
+            "static struct UnionOuter static_union = {.choice.pair.first = 16, 17, 18};\n"
+            "\n"
+            "int main(void)\n"
+            "{\n"
+            "    int result = 0;\n"
+            "    struct Tail wrong_field = {.values[0] = 1, 2};\n"
+            "    if (wrong_field.values[0] != 1 || wrong_field.values[1] != 2 || wrong_field.tail != 0) result = 1;\n"
+            "\n"
+            "    struct Two no_outer_field = {.values[0] = 3, 4};\n"
+            "    if (no_outer_field.values[0] != 3 || no_outer_field.values[1] != 4) result = 2;\n"
+            "\n"
+            "    struct Named named = {.pair.first = 5, 6, 7};\n"
+            "    if (named.pair.first != 5 || named.pair.second != 6 || named.tail != 7) result = 3;\n"
+            "\n"
+            "    struct ContinuationGrid grid = {.rows[0][0] = 8, 9, 10, 11, 12};\n"
+            "    if (grid.rows[0][0] != 8 || grid.rows[0][1] != 9 || grid.rows[1][0] != 10 || grid.rows[1][1] != 11 || grid.tail != 12) result = 4;\n"
+            "\n"
+            "    int root_array[2][2] = {[0][0] = 19, 20, 21, 22};\n"
+        ),
+        S8(
+            "    if (root_array[0][0] != 19 || root_array[0][1] != 20 || root_array[1][0] != 21 || root_array[1][1] != 22) result = 5;\n"
+            "\n"
+            "    struct Promoted promoted = {.values[0] = 13, 14, 15};\n"
+            "    if (promoted.values[0] != 13 || promoted.values[1] != 14 || promoted.tail != 15) result = 6;\n"
+            "\n"
+            "    struct UnionOuter union_member = {.choice.pair.first = 16, 17, 18};\n"
+            "    if (union_member.choice.pair.first != 16 || union_member.choice.pair.second != 17 || union_member.tail != 18) result = 7;\n"
+            "\n"
+            "    struct Tail end_of_inner = {.values[1] = 23, 24};\n"
+            "    if (end_of_inner.values[0] != 0 || end_of_inner.values[1] != 23 || end_of_inner.tail != 24) result = 8;\n"
+            "\n"
+            "    struct Tail reset_designator = {.values[0] = 25, .tail = 26};\n"
+            "    if (reset_designator.values[0] != 25 || reset_designator.values[1] != 0 || reset_designator.tail != 26) result = 9;\n"
+            "\n"
+            "    struct Tail braced = {.values = {27, 28}, 29};\n"
+            "    if (braced.values[0] != 27 || braced.values[1] != 28 || braced.tail != 29) result = 10;\n"
+            "\n"
+            "    // Disjoint deferred braces and omitted zero members remain intact.\n"
+            "    struct Tail deferred_disjoint = {.values = {34, 35}, .tail = 36};\n"
+            "    struct Tail omitted_zero = {.values = {37}, .tail = 38};\n"
+            "    if (deferred_disjoint.values[0] != 34 || deferred_disjoint.values[1] != 35 || deferred_disjoint.tail != 36 ||\n"
+            "        omitted_zero.values[0] != 37 || omitted_zero.values[1] != 0 || omitted_zero.tail != 38) result = 13;\n"
+            "\n"
+            "    struct Tail literal = (struct Tail){.values[0] = 30, 31};\n"
+            "    struct Two literal_two = (struct Two){.values[0] = 32, 33};\n"
+            "    if (literal.values[0] != 30 || literal.values[1] != 31 || literal.tail != 0 || literal_two.values[0] != 32 ||\n"
+            "        literal_two.values[1] != 33) result = 11;\n"
+            "\n"
+            "    if (static_tail.values[0] != 1 || static_tail.values[1] != 2 || static_tail.tail != 0 ||\n"
+        ),
+        S8(
+            "        static_two.values[0] != 3 || static_two.values[1] != 4 ||\n"
+            "        static_named.pair.first != 5 || static_named.pair.second != 6 || static_named.tail != 7 ||\n"
+            "        static_grid.rows[0][0] != 8 || static_grid.rows[0][1] != 9 || static_grid.rows[1][0] != 10 ||\n"
+            "        static_grid.rows[1][1] != 11 || static_grid.tail != 12 ||\n"
+            "        static_root_array[0][0] != 19 || static_root_array[0][1] != 20 || static_root_array[1][0] != 21 || static_root_array[1][1] != 22 ||\n"
+            "        static_promoted.values[0] != 13 || static_promoted.values[1] != 14 || static_promoted.tail != 15 ||\n"
+            "        static_union.choice.pair.first != 16 || static_union.choice.pair.second != 17 || static_union.tail != 18) result = 12;\n"
+            "\n"
+            "    return result;\n"
+            "}\n"
+        ),
+    };
+    String8 c_designator_continuation_source =
+        string_join_arena(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(c_designator_continuation_parts), false);
+    // A chained designator resumes at the innermost selected aggregate.
+    // Check both frontend forms, every native allocator, and O0/O2 so a
+    // wrong destination or valid-source rejection fails this registered gate.
+    String8 c_designator_optimizations[] = {S8("-O0"), S8("-O2")};
+    for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(c_flat_initializer_frontends); frontend_index += 1)
+    {
+        for (u32 allocator_index = 0; allocator_index < BUSTER_ARRAY_LENGTH(c_lz4_regression_allocators); allocator_index += 1)
+        {
+            for (u32 optimization_index = 0; optimization_index < BUSTER_ARRAY_LENGTH(c_designator_optimizations); optimization_index += 1)
+            {
+                TemporalArena fixture_temporary = scratch_begin(&arguments->arena, 1);
+                String8 fixture_path = buster_test_temporary_path(
+                    fixture_temporary.arena, S8("buster-c-designator-continuation"),
+                    string_format(fixture_temporary.arena, S8("-{u32}-{u32}-{u32}"), frontend_index, allocator_index, optimization_index));
+                String8 source_path = string_format_z(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+                BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_designator_continuation_source)));
+                String8 fixture_command_line[] = {
+                    S8("-std=c17"), c_flat_initializer_frontends[frontend_index], c_lz4_regression_allocators[allocator_index],
+                    c_designator_optimizations[optimization_index], S8("-fverify-codegen"), S8("-fno-machine-fallback"),
+                    S8("-o"), fixture_path, source_path,
+                };
+                CompilerDriverResult fixture = compiler_driver_execute_invocation(
+                    fixture_temporary.arena, compiler_driver_parse_arguments(fixture_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_command_line)));
+                BUSTER_TEST(arguments, fixture.error == COMPILER_DRIVER_ERROR_NONE);
+                if (fixture.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 fixture_arguments[] = {fixture_path};
+                    ProcessSpawnResult fixture_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(fixture_arguments), (SliceString8){0},
+                                                                        (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                    BUSTER_TEST(arguments, fixture_spawn.handle != 0);
+                    if (fixture_spawn.handle)
+                    {
+                        BUSTER_TEST(arguments, os_process_wait_sync(fixture_temporary.arena, fixture_spawn).result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(fixture_temporary);
+            }
+        }
+    }
     // #792: on a PE target that fixture used to be unlinkable.  `atexit` and
     // `at_quick_exit` are not ucrtbase.dll exports -- UCRT keeps them in its
     // import library as one call apiece to `_crt_atexit` and
