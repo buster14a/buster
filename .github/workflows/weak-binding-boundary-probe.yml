@@ -17,39 +17,60 @@ jobs:
         with:
           ref: ade6ac4b6ecb21f30b61b656439bac476c145e2f
           persist-credentials: false
-      - name: Pin source and record tools
+      - name: Isolate pinned source and record provenance
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/weak-boundary-evidence"
-          exec > >(tee "$RUNNER_TEMP/weak-boundary-evidence/provenance.txt") 2>&1
+          OUT="$RUNNER_TEMP/weak-boundary-extended"
+          mkdir -p "$OUT"
+          exec > >(tee "$OUT/provenance.txt") 2>&1
           test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
           test "$(git rev-parse 'HEAD^{tree}')" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git worktree add --detach "$RUNNER_TEMP/weak-source" HEAD
           git rev-parse HEAD 'HEAD^{tree}'
           printf 'workflow_commit=%s run_id=%s attempt=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-          uname -a
-          command -v clang
           clang --version
-          ld.bfd --version
           as --version
+          ld.bfd --version
           readelf --version
-          if command -v ld.lld; then ld.lld --version; else echo 'LLD_UNAVAILABLE'; fi
-      - name: Build pinned compiler through native build driver
+          git grep -n -e assembly_unit_encode -e compiler_driver_object_from_assembly -- src/buster/lib/compiler > "$OUT/caller-census.txt"
+          python3 - <<'PY'
+          import os, pathlib
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'weak-boundary-extended'
+          files = {
+              'src/buster/lib/compiler/assembly/assembly_unit.c': ('assembly_unit_directive_symbol(', 'if (!width || !symbol.defined'),
+              'src/buster/lib/compiler/driver/driver.c': ('assembly_unit_encode(',),
+              'src/buster/lib/compiler/object/object.c': ('symbol->weak ? 2',),
+              'src/buster/lib/compiler/codegen/codegen.c': ('assembly_unit_encode(',),
+          }
+          with (out / 'source-excerpts.txt').open('w') as f:
+              for name, anchors in files.items():
+                  lines = pathlib.Path(name).read_text().splitlines()
+                  for i, text in enumerate(lines):
+                      if any(anchor in text for anchor in anchors):
+                          f.write('\nFILE ' + name + '\n')
+                          for n in range(max(0, i-8), min(len(lines), i+46)):
+                              f.write(str(n+1) + ': ' + lines[n] + '\n')
+          PY
+      - name: Build unchanged source through the native driver
         shell: bash
         run: |
           set -euo pipefail
-          exec > >(tee "$RUNNER_TEMP/weak-boundary-evidence/build.log") 2>&1
-          mkdir -p .cache/weak-boundary-probe
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o .cache/weak-boundary-probe/build
-          .cache/weak-boundary-probe/build generate --ci --linker DEFAULT --build-directory build-weak-boundary -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
-          .cache/weak-boundary-probe/build build --config Release --build-directory build-weak-boundary -t ide
-          sha256sum .cache/weak-boundary-probe/build build-weak-boundary/Release/ide > "$RUNNER_TEMP/weak-boundary-evidence/compiler.sha256"
-      - name: Cross independent assemblers and linkers; check failure publication
+          OUT="$RUNNER_TEMP/weak-boundary-extended"
+          cd "$RUNNER_TEMP/weak-source"
+          exec > >(tee "$OUT/build.log") 2>&1
+          mkdir -p .cache/weak-probe
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o .cache/weak-probe/build
+          .cache/weak-probe/build generate --ci --linker DEFAULT --build-directory build-probe -- -DBUSTER_INCLUDE_TESTS=OFF -DBUSTER_UNITY_BUILD=OFF
+          .cache/weak-probe/build build --config Release --build-directory build-probe -t ide
+          sha256sum .cache/weak-probe/build build-probe/Release/ide > "$OUT/compiler.sha256"
+          git diff --exit-code
+      - name: Binding and invocation reach; AArch64 relocation control
         shell: bash
         run: |
           set -euo pipefail
-          IDE="$GITHUB_WORKSPACE/build-weak-boundary/Release/ide"
-          OUT="$RUNNER_TEMP/weak-boundary-evidence"
+          IDE="$RUNNER_TEMP/weak-source/build-probe/Release/ide"
+          OUT="$RUNNER_TEMP/weak-boundary-extended"
           cd "$OUT"
           exec > >(tee transcript.log) 2>&1
           cat > weak.s <<'ASM'
@@ -74,10 +95,7 @@ jobs:
               ret
           ASM
           cat > strong.c <<'C'
-          int chosen(void)
-          {
-              return 29;
-          }
+          int chosen(void) { return 29; }
           C
           cat > main.c <<'C'
           extern int printf(char const *, ...);
@@ -85,12 +103,6 @@ jobs:
           extern int chosen(void);
           extern int via_call(void);
           extern ChosenFunction via_address(void);
-          #ifndef EXPECT_VIA
-          #define EXPECT_VIA 29
-          #endif
-          #ifndef EXPECT_SAME
-          #define EXPECT_SAME 1
-          #endif
           int main(void)
           {
               int direct = chosen();
@@ -99,11 +111,20 @@ jobs:
               int pointed = pointer();
               int same = pointer == chosen;
               printf("direct=%d via_call=%d pointed=%d same_address=%d\n", direct, wrapped, pointed, same);
-              return direct != 29 || wrapped != EXPECT_VIA || pointed != EXPECT_VIA || same != EXPECT_SAME;
+              return direct != 29 || wrapped != 29 || pointed != 29 || same != 1;
           }
           C
-          sed '/^\.globl via_call/i .section .text.wrapper,"ax",@progbits' weak.s > cross-section.s
-          sed '/^\.weak chosen$/d' weak.s > local.s
+          python3 - <<'PY'
+          import json, pathlib
+          text = pathlib.Path('weak.s').read_text()
+          pathlib.Path('preprocessed.S').write_text('#define DEFAULT_RESULT 11\n' + text.replace('mov eax, 11', 'mov eax, DEFAULT_RESULT'))
+          pathlib.Path('module.c').write_text('__asm__(\n' + ''.join(json.dumps(s+'\n')+'\n' for s in text.splitlines()) + ');\nint unrelated_unit(void) { return 7; }\n')
+          pathlib.Path('late.s').write_text(text.replace('.weak chosen\n', '') + '.weak chosen\n')
+          pathlib.Path('hidden.s').write_text(text.replace('.weak chosen\n', '.weak chosen\n.hidden chosen\n'))
+          prefix, rest = text.split('chosen:\n', 1)
+          definition, wrappers = rest.split('.globl via_call\n', 1)
+          pathlib.Path('forward.s').write_text(prefix + '.globl via_call\n' + wrappers + 'chosen:\n' + definition)
+          PY
           failures=0
           run_record() {
             local label="$1"
@@ -120,62 +141,56 @@ jobs:
           }
           require_success() {
             run_record "$@"
-            if [ "$status" -ne 0 ]; then failures=$((failures + 1)); fi
+            if [ "$status" -ne 0 ]; then failures=$((failures+1)); fi
           }
           require_success host-strong clang -g0 -O0 -fno-pie -c strong.c -o strong.o
           require_success host-main clang -g0 -O0 -fno-pie -c main.c -o main.o
-          require_success host-local-main clang -g0 -O0 -fno-pie -DEXPECT_VIA=11 -DEXPECT_SAME=0 -c main.c -o local-main.o
-          require_success buster-assemble "$IDE" cc -target x86_64-unknown-linux -c weak.s -o buster.o
-          require_success gnu-assemble as --64 weak.s -o gnu.o
-          require_success llvm-assemble clang -target x86_64-unknown-linux -c weak.s -o llvm.o
-          for producer in buster gnu llvm; do
-            require_success "$producer-inspect" readelf -W -h -S -s -r "$producer.o"
-            require_success "$producer-disassemble" objdump -drwC -Mintel "$producer.o"
-            require_success "$producer-bfd-link" clang -fuse-ld=bfd -no-pie "$producer.o" strong.o main.o -o "$producer-bfd"
-            if [ -f "$producer-bfd" ]; then require_success "$producer-bfd-run" "./$producer-bfd"; fi
-            if command -v ld.lld >/dev/null; then
-              require_success "$producer-lld-link" clang -fuse-ld=lld -no-pie "$producer.o" strong.o main.o -o "$producer-lld"
-              if [ -f "$producer-lld" ]; then require_success "$producer-lld-run" "./$producer-lld"; fi
-            fi
-            require_success "$producer-buster-link" "$IDE" cc "$producer.o" strong.o main.o -o "$producer-buster"
-            if [ -f "$producer-buster" ]; then require_success "$producer-buster-run" "./$producer-buster"; fi
+          for source in weak.s preprocessed.S module.c late.s hidden.s forward.s; do
+            shape="${source%.*}"
+            for producer in buster llvm; do
+              if [ "$producer" = buster ]; then
+                require_success "$shape-$producer-compile" "$IDE" cc -target x86_64-unknown-linux -c "$source" -o "$shape-$producer.o"
+              else
+                require_success "$shape-$producer-compile" clang -g0 -O0 -fno-pie -c "$source" -o "$shape-$producer.o"
+              fi
+              require_success "$shape-$producer-inspect" readelf -W -s -r "$shape-$producer.o"
+              require_success "$shape-$producer-disassemble" objdump -drwC -Mintel "$shape-$producer.o"
+              require_success "$shape-$producer-bfd-link" clang -fuse-ld=bfd -no-pie "$shape-$producer.o" strong.o main.o -o "$shape-$producer-bfd"
+              if [ -f "$shape-$producer-bfd" ]; then require_success "$shape-$producer-bfd-run" "./$shape-$producer-bfd"; fi
+              require_success "$shape-$producer-buster-link" "$IDE" cc "$shape-$producer.o" strong.o main.o -o "$shape-$producer-buster"
+              if [ -f "$shape-$producer-buster" ]; then require_success "$shape-$producer-buster-run" "./$shape-$producer-buster"; fi
+            done
           done
-          require_success buster-reverse-link "$IDE" cc strong.o buster.o main.o -o buster-reverse
-          if [ -f buster-reverse ]; then require_success buster-reverse-run ./buster-reverse; fi
-          for mode in none mir-stack fast quality; do
-            require_success "combined-$mode-link" "$IDE" cc "-fregister-allocator=$mode" weak.s strong.c main.c -o "combined-$mode"
-            if [ -f "combined-$mode" ]; then require_success "combined-$mode-run" "./combined-$mode"; fi
+          for source in preprocessed.S module.c; do
+            shape="${source%.*}"
+            require_success "$shape-combined-link" "$IDE" cc "$source" strong.c main.c -o "$shape-combined"
+            if [ -f "$shape-combined" ]; then require_success "$shape-combined-run" "./$shape-combined"; fi
           done
-          for shape in cross-section local; do
-            require_success "$shape-assemble" "$IDE" cc -target x86_64-unknown-linux -c "$shape.s" -o "$shape.o"
-            require_success "$shape-inspect" readelf -W -s -r "$shape.o"
-            consumer=main.o
-            if [ "$shape" = local ]; then consumer=local-main.o; fi
-            require_success "$shape-bfd-link" clang -fuse-ld=bfd -no-pie "$shape.o" strong.o "$consumer" -o "$shape-bfd"
-            if [ -f "$shape-bfd" ]; then require_success "$shape-bfd-run" "./$shape-bfd"; fi
-            require_success "$shape-buster-link" "$IDE" cc "$shape.o" strong.o "$consumer" -o "$shape-buster"
-            if [ -f "$shape-buster" ]; then require_success "$shape-buster-run" "./$shape-buster"; fi
+          cat > aarch64.s <<'ASM'
+          .text
+          .weak chosen
+          .type chosen, @function
+          chosen:
+              ret
+          .globl via_jump
+          .type via_jump, @function
+          via_jump:
+              b chosen
+          ASM
+          require_success arm-buster-assemble "$IDE" cc -target aarch64-unknown-linux -c aarch64.s -o arm-buster.o
+          require_success arm-llvm-assemble clang -target aarch64-unknown-linux -c aarch64.s -o arm-llvm.o
+          for producer in buster llvm; do
+            require_success "arm-$producer-inspect" readelf -W -h -s -r "arm-$producer.o"
+            if ! grep -q 'R_AARCH64_JUMP26.*chosen' "arm-$producer-inspect.stdout"; then failures=$((failures+1)); fi
           done
-          cp buster.o preserved.o
-          sha256sum preserved.o > preserved.before.sha256
-          printf '.this_directive_is_not_supported\n' > rejected.s
-          run_record rejected-source "$IDE" cc -c rejected.s -o preserved.o
-          test "$status" -ne 0 || failures=$((failures + 1))
-          sha256sum -c preserved.before.sha256 || failures=$((failures + 1))
-          mkdir output-is-directory
-          run_record write-failure "$IDE" cc -c weak.s -o output-is-directory
-          test "$status" -ne 0 || failures=$((failures + 1))
-          test -d output-is-directory || failures=$((failures + 1))
-          test -z "$(find output-is-directory -mindepth 1 -print -quit)" || failures=$((failures + 1))
-          sha256sum ./*.s ./*.c ./*.o > inputs-and-objects.sha256
+          sha256sum ./*.s ./*.S ./*.c ./*.o > inputs-and-objects.sha256
           printf 'CORRECTNESS_FAILURE_COUNT=%s\n' "$failures" | tee result.txt
-          # This is a correctness probe: nonzero runtime results remain failures.
           test "$failures" -eq 0
-      - name: Retain every attempted command and artifact
+      - name: Preserve all evidence including failing attempts
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: weak-binding-boundary-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/weak-boundary-evidence
+          name: weak-binding-extended-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/weak-boundary-extended
           if-no-files-found: error
           retention-days: 14
