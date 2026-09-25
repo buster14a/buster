@@ -1,45 +1,98 @@
 name: Arena ownership evidence (branch-only)
-
-# Isolated investigation for #53. No benchmark host, deployment, or production changes.
 on:
   push:
     branches: [astra/53-arena-ownership-evidence-20260925]
     paths:
       - .github/workflows/arena-owner-evidence.yml
       - tools/experiments/arena-owner/**
-
 permissions:
   contents: read
-
 jobs:
-  source:
+  mechanism:
     if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        mode: [ordinary, single-threaded, asan-ubsan]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
-      - name: Retain exact investigation source
+      - name: Build and execute bounded mechanism witness
+        shell: bash
+        env:
+          MODE: ${{ matrix.mode }}
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          exec > >(tee evidence/mechanism.log) 2>&1
+          set -x
+          test "$(git rev-parse ade6ac4b6ecb21f30b61b656439bac476c145e2f^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git diff --exit-code ade6ac4b6ecb21f30b61b656439bac476c145e2f -- src build.c CMakeLists.txt
+          git rev-parse HEAD HEAD^{tree}
+          clang --version
+          uname -a
+          flags=(-O1 -g -fwrapv -fno-strict-aliasing -funsigned-char)
+          case "$MODE" in
+            ordinary) ;;
+            single-threaded) flags+=(-DBUSTER_SINGLE_THREADED=1) ;;
+            asan-ubsan) flags+=(-DBUSTER_SANITIZE=1 -fsanitize=address,undefined -fno-omit-frame-pointer) ;;
+          esac
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable "${flags[@]}" tools/experiments/arena-owner/ownership_probe.c -pthread -lm -o evidence/ownership-probe
+          sha256sum evidence/ownership-probe tools/experiments/arena-owner/ownership_probe.c
+          timeout 120 evidence/ownership-probe
+      - name: Retain every mechanism attempt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: arena-owner-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
+  compiler:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUSTER_TEST_JOBS: 2
+      BUSTER_MATRIX_THREADS: 2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build and execute exact-source driver regression
         shell: bash
         run: |
           set -euo pipefail
-          source=ade6ac4b6ecb21f30b61b656439bac476c145e2f
-          expected_tree=4c5306221fdb22fccc929b55e333163742de17d0
-          test "$(git rev-parse "$source^{tree}")" = "$expected_tree"
-          mkdir -p "$RUNNER_TEMP/arena-owner-evidence"
-          git archive --format=tar.gz "$source" > "$RUNNER_TEMP/arena-owner-evidence/source.tar.gz"
-          {
-            printf 'source_commit=%s\nsource_tree=%s\nworkflow_commit=%s\n' "$source" "$expected_tree" "$GITHUB_SHA"
-            printf 'run_id=%s\nattempt=%s\nclassification=source-only; no correctness or performance result\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
-            sha256sum "$RUNNER_TEMP/arena-owner-evidence/source.tar.gz"
-          } > "$RUNNER_TEMP/arena-owner-evidence/identity.txt"
-      - name: Retain source evidence
-        if: ${{ !cancelled() }}
+          mkdir -p evidence
+          exec > >(tee evidence/compiler.log) 2>&1
+          set -x
+          test "$(git rev-parse ade6ac4b6ecb21f30b61b656439bac476c145e2f^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git diff --exit-code ade6ac4b6ecb21f30b61b656439bac476c145e2f -- src build.c CMakeLists.txt
+          git rev-parse HEAD HEAD^{tree}
+          clang --version
+          uname -a
+          python3 tools/experiments/arena-owner/prepare.py
+          git diff -- src/buster/apps/ide/ide.c > evidence/entry-seam.patch
+          test "$(git diff --name-only)" = src/buster/apps/ide/ide.c
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-owner-build"
+          "$RUNNER_TEMP/buster-owner-build" generate --cc clang --ci --linker DEFAULT
+          "$RUNNER_TEMP/buster-owner-build" build --config Release -t ide -- -j2
+          sha256sum build/Release/ide tools/experiments/arena-owner/compiler_probe.h > evidence/compiler-sha256.txt
+          BUSTER_ARENA_OWNER_COMPILER_PROBE=1 timeout 180 build/Release/ide test
+      - name: Retain every compiler attempt
+        if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: arena-owner-source-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/arena-owner-evidence/
+          name: arena-owner-compiler-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
           if-no-files-found: error
           retention-days: 7
