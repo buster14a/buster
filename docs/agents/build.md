@@ -72,6 +72,13 @@ installing a pinned and checksummed Zig and the distribution's mold, both of
 which the images lack. Canonical local and Forgejo workflows continue to
 bootstrap with TCC.
 
+The separately installed Benchpress recipe driver is compiled from the
+reviewed `build.c` with Clang and checked for a nonexecutable `GNU_STACK`
+header. Its transient unit keeps `MemoryDenyWriteExecute=yes`; the TCC
+bootstrap executable lacks that header and cannot spawn stages there. This
+installed artifact is reviewed by digest and is never a local-bootstrap
+substitute. See the [broker installation contract](../../tools/bench_service/deploy/SYSTEMD_BROKER.md).
+
 The separate `TCC bootstrap / Canonical TCC bootstrap` check guards the
 canonical path on an ephemeral GitHub-hosted Ubuntu runner. For pull requests,
 merge groups, pushes to `main`, and manual runs it builds TinyCC at the pinned

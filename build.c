@@ -29,7 +29,7 @@
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   bench_service_recipe                        fixed validate-buster service recipe
-//   bench_service_broker_add                    Linux constrained systemd broker build
+//   bench_service_broker_add                    Linux broker and live regression probe build
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
@@ -36630,7 +36630,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_recipe_stage_cleanup(Arena* aren
     {
         if (!bench_service_recipe_promote_candidate(arena, stage->manifest) ||
             !bench_service_recipe_lock_tree(arena, stage->manifest->candidate_build_directory, true) ||
-            !bench_service_recipe_prepare_candidate_visibility(arena, stage->manifest))
+            !bench_service_recipe_prepare_candidate_visibility(arena, stage->manifest) ||
+            !bench_service_recipe_prepare_throughput_output(arena, stage->manifest->candidate_stage_build,
+                                                             stage->manifest->throughput_output))
             result = PROCESS_RESULT_FAILED;
     }
     else if (result == PROCESS_RESULT_SUCCESS && string_equal(stage->name, S8("throughput")))
@@ -38591,7 +38593,10 @@ BUSTER_GLOBAL_LOCAL bool bench_service_recipe_test_script_setup(Arena* arena, ch
         "  if [ \"$1\" = \"--build-directory\" ]; then build=\"$2\"; shift 2; else shift; fi\n"
         "done\n"
         "[ -n \"$build\" ] || exit 40\n"
-        "if [ \"$mode\" = generate ]; then mkdir -p \"$build/Release\"; exit 0; fi\n"
+        "if [ \"$mode\" = generate ]; then\n"
+        "  if [ \"$build\" != \"${build%%/candidate/staging}\" ]; then rm -rf \"$build/throughput-results\"; fi\n"
+        "  mkdir -p \"$build/Release\"; exit 0\n"
+        "fi\n"
         "if [ \"$mode\" = build ]; then\n"
         "  if [ -e \"%s/fail\" ] && [ \"$build\" != \"${build%%/candidate/staging}\" ]; then exit 42; fi\n"
         "  printf '#!/bin/sh\\nexit 0\\n' > \"$build/Release/ide\"\n"
@@ -39171,6 +39176,22 @@ BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceSt
         os_argument_builder_append(&builder, executable);
         *compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
                                 .spawn_options = {.use_process_environment = 1}};
+        ProcessRun* live_compile = run_add(arena, step_add(arena));
+        builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, compiler);
+        os_argument_builder_append(&builder, S8("-std=c11"));
+        os_argument_builder_append(&builder, S8("-O2"));
+        os_argument_builder_append(&builder, S8("-Wall"));
+        os_argument_builder_append(&builder, S8("-Wextra"));
+        os_argument_builder_append(&builder, S8("-Werror"));
+        os_argument_builder_append(&builder, S8("-fwrapv"));
+        os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
+        os_argument_builder_append(&builder, S8("-funsigned-char"));
+        os_argument_builder_append(&builder, S8("tools/bench_service/systemd_broker_live_test.c"));
+        os_argument_builder_append(&builder, S8("-o"));
+        os_argument_builder_append(&builder, S8("build/bench-service-tools/systemd-broker-live-test"));
+        *live_compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
+                                     .spawn_options = {.use_process_environment = 1}};
         if (self_test)
         {
             ProcessRun* test = run_add(arena, step_add(arena));

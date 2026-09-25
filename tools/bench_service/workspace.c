@@ -436,7 +436,8 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_verified_file(int source_root, int destination_
     }
     char8 digest[SHA256_HEX_CAPACITY];
     sha256_finish_hex(&hash, digest);
-    ok = ok && copied == (u64)info.st_size && expected.length == 64 && !memcmp(digest, expected.pointer, 64) && fsync(destination) == 0;
+    ok = ok && copied == (u64)info.st_size && expected.length == 64 && !memcmp(digest, expected.pointer, 64) &&
+         fchmod(destination, 0440) == 0 && fsync(destination) == 0;
     if (ok)
     {
         *total += copied;
@@ -493,7 +494,8 @@ BUSTER_GLOBAL_LOCAL bool bq_copy_manifest(int installed, int destination, String
     int copy = ok ? openat(destination, ".source-manifest", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0440) : -1;
     if (ok)
     {
-        ok = copy >= 0 && bq_write_all(copy, manifest_bytes, manifest_size) && fsync(copy) == 0;
+        ok = copy >= 0 && bq_write_all(copy, manifest_bytes, manifest_size) &&
+             fchmod(copy, 0440) == 0 && fsync(copy) == 0;
     }
     if (copy >= 0)
     {
@@ -632,7 +634,7 @@ BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload(int workspace)
     memset(frames, 0, sizeof(frames));
     int root = openat(workspace, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     struct stat root_info;
-    bool ok = root >= 0 && fstat(root, &root_info) == 0;
+    bool ok = root >= 0 && fstat(root, &root_info) == 0 && root_info.st_uid == geteuid();
     frames[0].stream = ok ? fdopendir(root) : NULL;
     if (!frames[0].stream && root >= 0)
     {
@@ -671,15 +673,24 @@ BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload(int workspace)
                 {
                     ok = depth < BQ_CLEANUP_DEPTH_CAP && directories < BQ_DIRECTORY_CAP;
                     int child = ok ? openat(directory, entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
-                    struct stat child_info;
+                    struct stat child_info = {0};
                     ok = child >= 0 && fstat(child, &child_info) == 0 && child_info.st_dev == info.st_dev &&
-                         child_info.st_ino == info.st_ino;
+                         child_info.st_ino == info.st_ino && child_info.st_dev == root_info.st_dev;
                     DIR* stream = ok ? fdopendir(child) : NULL;
                     if (!stream && child >= 0)
                     {
                         close(child);
                     }
-                    ok = stream != NULL && fchmod(dirfd(stream), 0700) == 0;
+                    /* Candidate build directories inherit the attempt group.
+                     * The service can remove entries through group write, but
+                     * cannot chmod a foreign-owned directory without CAP_FOWNER. */
+                    mode_t mode = child_info.st_mode & 07777;
+                    bool trusted_owned = child_info.st_uid == geteuid();
+                    bool candidate_owned = child_info.st_uid != 0 &&
+                                           child_info.st_gid == root_info.st_gid &&
+                                           (mode == 0770 || mode == 02770);
+                    ok = stream != NULL && (trusted_owned ? fchmod(dirfd(stream), 0700) == 0 :
+                                            candidate_owned);
                     if (ok)
                     {
                         BqCleanupFrame* next = frames + depth;
@@ -842,13 +853,15 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_read(BqQueue* queue, char const* name, u8*
     return error;
 }
 
-BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8 const* bytes, u32 size, bool existing_ok)
+BUSTER_GLOBAL_LOCAL BqError bq_record_write_mode(BqQueue* queue, char const* name, u8 const* bytes,
+                                                  u32 size, bool existing_ok, mode_t mode)
 {
     int fd = openat(queue->directory_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
     BqError error = BQ_IO;
     if (fd >= 0)
     {
-        if (bq_write_all(fd, bytes, size) && fsync(fd) == 0 && fsync(queue->directory_fd) == 0)
+        if (bq_write_all(fd, bytes, size) && fchmod(fd, mode) == 0 &&
+            fsync(fd) == 0 && fsync(queue->directory_fd) == 0)
         {
             error = BQ_OK;
         }
@@ -859,11 +872,21 @@ BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8
         u8 actual[640];
         u32 actual_size = 0;
         error = bq_record_read(queue, name, actual, sizeof(actual), &actual_size);
+        struct stat info = {0};
+        if (error == BQ_OK &&
+            (fstatat(queue->directory_fd, name, &info, AT_SYMLINK_NOFOLLOW) != 0 ||
+             (info.st_mode & 07777) != mode)) error = BQ_CORRUPT;
         if (error == BQ_OK && (actual_size != size || memcmp(actual, bytes, size)))
         {
             error = BQ_CORRUPT;
         }
     }
+    return error;
+}
+
+BUSTER_GLOBAL_LOCAL BqError bq_record_write(BqQueue* queue, char const* name, u8 const* bytes, u32 size, bool existing_ok)
+{
+    BqError error = bq_record_write_mode(queue, name, bytes, size, existing_ok, 0400);
     return error;
 }
 

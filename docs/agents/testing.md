@@ -244,6 +244,11 @@ with only the external build and throughput programs stubbed, followed by the
 fixed no-argument recipe suite. These tests are fake-backend and
 stubbed-external evidence; privileged live-systemd and deployment
 qualification remain explicit operator gates and are not covered here.
+`./build.sh bench_service_broker self-test` also compiles the opt-in
+`systemd-broker-live-test` probe. Run that probe only in a provisioned,
+disposable real-systemd container while an exact outer unit holds the lease;
+it exercises the constrained socket instance and positive/negative private
+state requests. See `tools/bench_service/deploy/SYSTEMD_BROKER.md`.
 
 ## Configured external compiler fixtures
 

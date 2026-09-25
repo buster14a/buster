@@ -164,8 +164,9 @@ identity and an empty recursive cgroup are required.
 Lease parents and the cgroup root are parsed as strict absolute paths and
 opened one component at a time from `/` with `O_NOFOLLOW`. Every ancestor must
 be root/service-owned and not group/world writable, except a root-owned sticky
-handoff directory such as `/tmp`; the final lease parent must be private to the
-service account. The configured cgroup root must remain root/service-owned and
+handoff directory such as `/tmp`; the fixed broker lease parent permits
+traversal by the service group only and the lease is `0640`. The configured
+cgroup root must remain root/service-owned and
 non-writable by other users. Dot components and symlink aliases fail closed.
 
 The durable `worker-JOB` intent binds `{job, token, request digest, boot_id,
@@ -275,8 +276,10 @@ against an owning UID. The fixed systemd service supplies the actual queue,
 lease, installed-tree and workspace path policy; the trusted driver additionally
 locks built baseline/candidate trees before throughput. The recipe accepts only
 operator-installed source directories and manifests owned by root or the
-service UID, with no group/other access or write bits. It never treats a
-submitted source tree as a source-free broker command. Before publication it
+service UID, with no group/other write bits. Materialized source files and
+manifest copies are `0440` so the candidate can read its fixed source. It
+never treats a submitted source tree as a source-free broker command. Before
+publication it
 reopens every source and workspace identity, rechecks the baseline/candidate
 tree roots, and compares the baseline and candidate executable digests captured
 after their builds with the digests after throughput. Any mismatch fails closed
