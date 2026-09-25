@@ -23156,7 +23156,11 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
         IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->ptrdiff_type);
         right = c_ir_emit_binary_value(builder, right, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
     }
-    else if (!pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
+    // Ordinary compound arithmetic needs the original RHS type for promotions
+    // and the usual arithmetic conversions. Only the existing atomic RMW path
+    // needs a destination-typed operand here; non-atomic stores/results convert
+    // after c_ir_apply_operation, not before it (C17 6.5.16.2).
+    else if (atomic && !pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
     {
         right = c_ir_emit_cast(builder, right, value_type, source);
         operation_right = right;
