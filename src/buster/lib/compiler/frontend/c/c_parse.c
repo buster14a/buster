@@ -4626,6 +4626,15 @@ BUSTER_C_INTERNAL bool c_parse_static_assert_evaluate(CTypeParseMachine* machine
     for (u32 expression_index = 0; expression_index < expression_count; expression_index += 1)
     {
         CToken token = preprocess.tokens[start + 2 + expression_index];
+        // The legacy spelling evaluator only folds `sizeof (type-or-expression)`.
+        // A unary-form `sizeof object` must use the typed evaluator so block-scope
+        // locals and arrays resolve in the assertion's lexical scope.
+        if (requires_typed_evaluation_out && token.kind == C_TOKEN_IDENTIFIER &&
+            string_equal(c_token_spelling(preprocess.spelling_base, token), S8("sizeof")) && expression_index + 1 < expression_count &&
+            !c_token_is_punctuator(&preprocess.tokens[start + 3 + expression_index], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            *requires_typed_evaluation_out = true;
+        }
         if (c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
         {
             u32 cast_close = expression_index + 1;
