@@ -1,7 +1,7 @@
-name: Frontend map 1100 candidate validation
+name: Frontend map 1100 refreshed-main validation
 on:
   push:
-    branches: [astra/frontend-map-lifetime-transport-20260924]
+    branches: [astra/frontend-map-lifetime-transport-20260925]
     paths: [.github/workflows/frontend-map-1100-validation.yml]
 permissions:
   contents: read
@@ -31,9 +31,9 @@ jobs:
           assert hashlib.sha256(patch).hexdigest() == 'a38a3eae894f6ba027a764135a79cfa983961407ecdd39f6c7e0bc69bb73bd25'
           pathlib.Path(os.environ['RUNNER_TEMP'], 'candidate.patch').write_bytes(patch)
           PY
-          git worktree add --detach "$RUNNER_TEMP/product" 744a948f41291b4238d1755b1507678799f1206d
+          git worktree add --detach "$RUNNER_TEMP/product" 50d603af42afeb8ebc466459b7fe2587f2f1deee
           cd "$RUNNER_TEMP/product"
-          test "$(git rev-parse HEAD^{tree})" = 0a0e0d59e68f151c48dcf39ed209326b6a895f07
+          test "$(git rev-parse HEAD^{tree})" = 4366b705251082e216f3daee52f7fb5f088d96e6
           git apply --check "$RUNNER_TEMP/candidate.patch"
           git apply "$RUNNER_TEMP/candidate.patch"
           git diff --check
@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/product"
-          branch=astra/1100-source-map-lifetime
+          branch=astra/1100-source-map-lifetime-refresh-20260925
           set +e
           git ls-remote --exit-code --heads origin "refs/heads/$branch" > "$RUNNER_TEMP/existing-branch.txt"
           status=$?
