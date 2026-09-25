@@ -53,6 +53,7 @@ static void fixture_init(BqCorrectnessFixture* fixture)
     digest(prepared->preparation_sha256, 'a');
     digest(prepared->support_sha256, 'b');
     digest(prepared->census_sha256, 'c');
+    digest(prepared->aa_second_commands_sha256, 'd');
     prepared->rows = BQ_TEST_ROWS;
     prepared->object_rows = 3;
     prepared->native_target = 1;
@@ -201,6 +202,10 @@ static void test_valid(void)
     fixture.trusted[2].source_sha256[0] = 'c';
     fixture.gate.prepared.binary_sha256[0][0] = 'f';
     CHECK(!bq_retirement_correctness_ready(&fixture.gate));
+    fixture.gate.prepared.binary_sha256[0][0] = '1';
+    CHECK(bq_retirement_correctness_ready(&fixture.gate));
+    fixture.gate.prepared.aa_second_commands_sha256[0] = 'e';
+    CHECK(!bq_retirement_correctness_ready(&fixture.gate));
 }
 
 static void test_bad_checks(void)
@@ -277,7 +282,7 @@ static void test_bad_rows(void)
 
 static void test_bad_import(void)
 {
-    for (unsigned fault = 0; fault < 15; fault += 1)
+    for (unsigned fault = 0; fault < 17; fault += 1)
     {
         BqCorrectnessFixture fixture;
         fixture_init(&fixture);
@@ -296,6 +301,8 @@ static void test_bad_import(void)
         if (fault == 12) fixture.trusted[1].runtime_command_sha256[0][0] = 0;
         if (fault == 13) fixture.trusted[4].runtime_command_sha256[0][0] = 'f';
         if (fault == 14) fixture.required[0].receipt_sha256[0] = 0;
+        if (fault == 15) fixture.prepared.aa_second_commands_sha256[0] = 0;
+        if (fault == 16) fixture.prepared.aa_second_commands_sha256[0] = 'g';
         CHECK(!bq_retirement_correctness_begin(&fixture.gate, &fixture.prepared,
             fixture.trusted, fixture.required, BQ_TEST_CHECKS,
             fixture.check_facts, fixture.facts, fixture.identity_workspace,

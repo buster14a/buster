@@ -102,6 +102,17 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         memcpy(side->runtime_command_sha256, commands[1][2 + variant].command_sha256, 65);
         side->code_bytes = 13;
     }
+    /* The fixture precommits the second baseline label, whose distinct path
+     * gives it a different command hash from the first A/A label. */
+    sha256_init(&hash);
+    static char const second_domain[] = "bq-retirement-aa-second-commands-v1";
+    sha256_add(&hash, second_domain, sizeof(second_domain) - 1);
+    uint8_t ordinal[4] = {6, 0, 0, 0}, applicable_runtime = 1;
+    sha256_add(&hash, ordinal, sizeof(ordinal));
+    sha256_add(&hash, command_sha[0][1], 64);
+    sha256_add(&hash, &applicable_runtime, sizeof(applicable_runtime));
+    sha256_add(&hash, command_sha[0][3], 64);
+    sha256_finish_hex(&hash, gate.prepared.aa_second_commands_sha256);
     bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
     CHECK(bq_retirement_correctness_ready(&gate));
     CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
@@ -191,6 +202,33 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(statistic.valid && statistic.outcome != TP_RETIREMENT_INVALID);
     test_sample_close(&aa);
     test_sample_close(&ab);
+
+    /* Both baseline-label-2 command kinds require the sealed precommit;
+     * a different, self-consistent plan fails before the first timed child. */
+    for (unsigned kind = 0; kind < 2; ++kind)
+    {
+        unsigned index = kind * 2 + 1;
+        CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
+        CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
+            aa.runtime, 1, 60, aa.workspace, 5));
+        CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
+            ab.runtime, 1, 60, ab.workspace, 5));
+        aa.transcript.cpu = ab.transcript.cpu = cpu;
+        campaign = (TpRetirementCampaign){0};
+        binding = (BqRetirementCampaignBinding){0};
+        arguments[0][index][4] = "fail";
+        CHECK(tp_retirement_command_hash(&commands[0][index], command_sha[0][index]));
+        CHECK(bq_retirement_correctness_ready(&gate));
+        CHECK(!bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
+            &frozen, &frozen, commands[0], commands[1], snapshots, 8,
+            identities, 3, identity, identity) &&
+            campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
+            aa.samples.failed && ab.samples.failed &&
+            !aa.execution.sequence && !ab.execution.sequence && !binding.campaign);
+        arguments[0][index][4] = "ok";
+        CHECK(tp_retirement_command_hash(&commands[0][index], command_sha[0][index]));
+        test_sample_close(&aa); test_sample_close(&ab);
+    }
 
     /* Recheck the full #1020 seal at the launch boundary. A changed fact or
      * self-consistent reseal after freeze cannot start even the first child. */

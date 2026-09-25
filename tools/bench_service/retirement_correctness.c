@@ -80,6 +80,7 @@ BUSTER_GLOBAL_LOCAL void bq_retirement_correctness_seal(BqRetirementCorrectness 
     bq_retirement_correctness_text(&hash, prepared->preparation_sha256);
     bq_retirement_correctness_text(&hash, prepared->support_sha256);
     bq_retirement_correctness_text(&hash, prepared->census_sha256);
+    bq_retirement_correctness_text(&hash, prepared->aa_second_commands_sha256);
     for (uint32_t side = 0; side < 2; side += 1)
     {
         bq_retirement_correctness_text(&hash, prepared->source_sha256[side]);
@@ -169,7 +170,8 @@ bool bq_retirement_correctness_begin(BqRetirementCorrectness* gate,
         check_count <= BQ_RETIREMENT_CORRECTNESS_CHECKS_CAP &&
         bq_retirement_correctness_digest(prepared->preparation_sha256) &&
         bq_retirement_correctness_digest(prepared->support_sha256) &&
-        bq_retirement_correctness_digest(prepared->census_sha256);
+        bq_retirement_correctness_digest(prepared->census_sha256) &&
+        bq_retirement_correctness_digest(prepared->aa_second_commands_sha256);
     for (uint32_t side = 0; ok && side < 2; side += 1)
         ok = bq_retirement_correctness_digest(prepared->source_sha256[side]) &&
              bq_retirement_correctness_digest(prepared->binary_sha256[side]);

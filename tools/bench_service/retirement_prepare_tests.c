@@ -411,6 +411,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_correctness_join(BqQueue* queue, BqJob con
     memcpy(prepared.preparation_sha256, preparation_digest, SHA256_HEX_CAPACITY);
     memset(prepared.support_sha256, '1', 64);
     memset(prepared.census_sha256, 'b', 64);
+    memset(prepared.aa_second_commands_sha256, 'c', 64);
     for (u32 side = 0; side < 2; side += 1)
     {
         memcpy(prepared.source_sha256[side], observed->source_sha256[side], SHA256_HEX_CAPACITY);
