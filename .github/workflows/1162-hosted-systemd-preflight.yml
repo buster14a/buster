@@ -121,7 +121,8 @@ jobs:
           PY
           sudo docker exec -i "$container" python3 - "$unit" < "$evidence/check.py" | tee "$evidence/effective.txt"
           sudo docker exec "$container" systemctl stop "$unit"
-          sudo docker exec "$container" systemctl reset-failed "$unit"
+          sudo docker exec "$container" systemctl show "$unit" --property=LoadState --property=ActiveState | tee "$evidence/stopped-unit.txt"
+          test "$(sudo docker exec "$container" systemctl show "$unit" --property=LoadState --value)" = not-found
           sudo docker exec "$container" systemd-run --wait --pipe --unit="issue1162-control-$GITHUB_RUN_ID" --property=RestrictSUIDSGID=no -- /bin/sh -c 'd=$(mktemp -d); chmod 2770 "$d"; result=$?; rmdir "$d"; exit "$result"' | tee "$evidence/suid-control.txt"
           set +e
           sudo docker exec "$container" systemd-run --wait --pipe --unit="issue1162-restrict-$GITHUB_RUN_ID" --property=RestrictSUIDSGID=yes -- /bin/sh -c 'd=$(mktemp -d); chmod 2770 "$d"; result=$?; rmdir "$d"; exit "$result"' > "$evidence/suid-restrict.txt" 2>&1
