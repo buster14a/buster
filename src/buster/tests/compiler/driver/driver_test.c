@@ -4562,7 +4562,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_aarch64_float_to_i128(Un
 // controls with a guarded pair of GNU-signature 64-bit calls. The macros apply
 // only to that fixture's two wide calls; the helpers' 64-bit calls are parsed
 // before the macros are defined.
-BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_i128_count_runtime_source(Arena* arena)
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL String8 compiler_driver_test_i128_count_runtime_source(Arena* arena)
 {
     String8 source = S8(
         "typedef unsigned __int128 Count128;\n"
