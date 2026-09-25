@@ -1,0 +1,87 @@
+name: PR1177 terminal retention validation
+
+on:
+  push:
+    branches: [codex/1177-terminal-retention-validation]
+    paths:
+      - .github/workflows/pr1177-terminal-retention.yml
+      - .github/scripts/pr1177_terminal_retention_packet.py
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'buster14a/buster' && github.ref == 'refs/heads/codex/1177-terminal-retention-validation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      LC_ALL: C
+      BQ_REQUIRE_DISTINCT_GROUP: '1'
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require existing validation admission
+        env:
+          CI_ENABLED: ${{ vars.GH_ACTIONS_CI_ENABLED }}
+        run: test "$CI_ENABLED" = true
+      - name: Bootstrap reviewed build driver
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD HEAD^{tree}
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
+            -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/buster-build"
+      - name: Regression must fail before the implementation
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/pr1177_terminal_retention_packet.py regressions
+          set +e
+          "$RUNNER_TEMP/buster-build" bench_service self-test > "$RUNNER_TEMP/pr1177-red.log" 2>&1
+          result=$?
+          set -e
+          tail -100 "$RUNNER_TEMP/pr1177-red.log"
+          test "$result" -eq 1
+          grep -E 'expected_error|expected_reason|wrong_policy' "$RUNNER_TEMP/pr1177-red.log"
+          echo 'RETENTION_RED result=expected-failure'
+      - name: Apply the bounded production change
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/pr1177_terminal_retention_packet.py implementation
+          git diff --check
+          git diff --stat
+      - name: Native service and recipe regressions
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" bench_service self-test 2>&1 | tee "$RUNNER_TEMP/pr1177-green.log"
+      - name: Service address and undefined-behavior sanitizers
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" bench_service self-test --sanitize 2>&1 | tee "$RUNNER_TEMP/pr1177-sanitize.log"
+      - name: Broker command regressions
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/buster-build" bench_service_broker self-test 2>&1 | tee "$RUNNER_TEMP/pr1177-broker.log"
+      - name: Disposable real-systemd result retention controls
+        run: python3 .github/scripts/pr1177_terminal_retention_packet.py live
+      - name: Publish validated files only to the temporary branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff -- tools/bench_service/systemd_broker.c tools/bench_service/worker_linux.c tools/bench_service/tests.c tools/bench_service/deploy/README.md
+          git add tools/bench_service/systemd_broker.c tools/bench_service/worker_linux.c tools/bench_service/tests.c tools/bench_service/deploy/README.md
+          test "$(git diff --cached --name-only | wc -l)" -eq 4
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'bench: enforce outer result retention and reject missing failure metadata'
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin HEAD:refs/heads/codex/1177-terminal-retention-validation
+          git rev-parse HEAD HEAD^{tree}
+          git ls-tree HEAD tools/bench_service/systemd_broker.c tools/bench_service/worker_linux.c tools/bench_service/tests.c tools/bench_service/deploy/README.md
