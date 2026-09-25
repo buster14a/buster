@@ -791,9 +791,8 @@ BUSTER_GLOBAL_LOCAL void report_source_metrics(Arena* arena, String8 unit, CSour
 // throughput series that STEP_INSTRUCTIONS alone cannot express (see
 // `self_host_compare_action` in build.c).
 //
-// A whole file rather than another stdout line, because capturing the
-// compiler's stdout would buffer the diagnostics that currently stream as the
-// compile runs, and losing those on a failing build costs more than this file.
+// A whole file rather than another stdout line lets a build driver read these
+// measurements without capturing the compiler's primary output.
 //
 // Keys are `<group>.<CSourceMetrics field name>`, so the format is the struct
 // and readers can key off exactly the fields they need. Only ever add keys:
@@ -862,7 +861,7 @@ BUSTER_GLOBAL_LOCAL bool write_source_metrics(Arena* arena, String8 path, String
 #if BUSTER_BENCH_ALLOCATIONS
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_calls"), allocations.calls);
     source_metrics_append_field(arena, &text, S8("allocation"), S8("arena_bytes"), allocations.requested_bytes);
-    source_metrics_append_field(arena, &text, S8("quality_census"), S8("version"), 1);
+    source_metrics_append_field(arena, &text, S8("quality_census"), S8("version"), 2);
 #define BUSTER_QUALITY_WRITE_FIELD(name) source_metrics_append_field(arena, &text, S8("quality_census"), S8(#name), quality.name);
     BUSTER_QUALITY_CENSUS_FIELDS(BUSTER_QUALITY_WRITE_FIELD)
 #undef BUSTER_QUALITY_WRITE_FIELD
@@ -905,6 +904,14 @@ BUSTER_GLOBAL_LOCAL String8 compiler_census_stage(CodegenFallbackReason reason)
     return stage;
 }
 
+BUSTER_GLOBAL_LOCAL void compiler_print_diagnostic(String8 format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    string_write_to_file_va(os_get_standard_stream(STANDARD_STREAM_ERROR), format, arguments, STRING_FORMAT_VA_GP_SLOTS(2));
+    va_end(arguments);
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
 {
     Arena* arena = arena_create((ArenaCreation){
@@ -919,11 +926,11 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
     ProcessResult result = PROCESS_RESULT_SUCCESS;
     if (compile.warning.length)
     {
-        string_print(S8("{S8}"), compile.warning);
+        compiler_print_diagnostic(S8("{S8}"), compile.warning);
     }
     if (compile.error != COMPILER_DRIVER_ERROR_NONE)
     {
-        string_print(S8("cc: error: {S8}\n"), compile.diagnostic);
+        compiler_print_diagnostic(S8("cc: error: {S8}\n"), compile.diagnostic);
         result = PROCESS_RESULT_FAILED;
     }
     else if (!invocation.output_path.length)
@@ -968,7 +975,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         if (invocation.source_metrics_path.length &&
             !write_source_metrics(arena, invocation.source_metrics_path, unit, compile.source_unique, compile.source_lexed, compile.preprocessed))
         {
-            string_print(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
+            compiler_print_diagnostic(S8("cc: error: could not write {S8}\n"), invocation.source_metrics_path);
             result = PROCESS_RESULT_FAILED;
         }
     }

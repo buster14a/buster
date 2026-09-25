@@ -24,6 +24,7 @@
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/object/object.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 #include <buster/lib/integer.h>
@@ -300,14 +301,17 @@ struct MachineX64Selector
     bool supported;
 };
 
-// The reference form a symbol takes in this module: its own address under
-// the default model, the linker's slot or entry under -fPIC when another
-// object could supply the definition. `call_site` distinguishes the two
-// -fPIC forms, which differ only in what names the symbol -- a call's rel32
-// or a load's displacement.
+// The reference form a symbol takes in this module. An undefined ELF
+// function uses the PLT even in the default model, so an external linker can
+// place the -c object in a PIE. Under -fPIC, any interposable function uses
+// the PLT and any interposable address uses the GOT.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
-    bool indirect = selector->position_independent && ir_symbol_is_interposable(ir_symbol_from_id(&selector->program->symbols, symbol));
+    IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
+    bool elf_external_call = call_site && record && !record->is_definition &&
+                             object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
+    bool indirect = elf_external_call ||
+                    (selector->position_independent && ir_symbol_is_interposable(record));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }
 
@@ -5619,25 +5623,27 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_store(MachineX64Selector* selector, 
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_function(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
-    // A function reference is an ordinary rip-relative symbol address;
-    // direct calls carry the symbol on the CALL row itself, so this lea
-    // only matters when the value is used as data.
+    // A function reference is an ordinary symbol address; direct calls carry
+    // the symbol on the CALL row itself, so a value used only as that callee
+    // needs no address row or relocation.
     bool selected = false;
-    if (result_register != UINT32_MAX && instruction->symbol.value != IR_ID_UNDERLYING_INVALID)
+    if (instruction->symbol.value != IR_ID_UNDERLYING_INVALID)
     {
-        // The address of a function is data like any other address: under
-        // -fPIC an interposable one comes out of the GOT, so every object in
-        // the image agrees on which definition `&f` names.
-        u8 reference = machine_x64_symbol_reference(selector, instruction->symbol, false);
-        u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                       .payload = target_index,
-                                                       .opcode = (u16)(reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT
-                                                                                                                 : MACHINE_X64_LEA_SYMBOL),
-                                                   });
-        machine_x64_define(selector, result_register, row);
         selected = true;
+        if (result_register != UINT32_MAX)
+        {
+            // Under -fPIC an interposable address comes out of the GOT, so
+            // every object in the image agrees on which definition `&f` names.
+            u8 reference = machine_x64_symbol_reference(selector, instruction->symbol, false);
+            u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                           .payload = target_index,
+                                                           .opcode = (u16)(reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT
+                                                                                                                     : MACHINE_X64_LEA_SYMBOL),
+                                                       });
+            machine_x64_define(selector, result_register, row);
+        }
     }
     return selected;
 }
@@ -7882,6 +7888,22 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 {
                     continue;
                 }
+                // A direct CALL names its function on the call row. Its
+                // function-value operand is not an address use; counting it
+                // would keep a dead LEA/GOT load and its relocation alive.
+                bool direct_symbol_callee = operand_index == 0 && instruction->opcode == IR_OPCODE_CALL &&
+                                            instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
+                if (direct_symbol_callee)
+                {
+                    IrInstructionId definition = function->values[used].definition;
+                    direct_symbol_callee = definition.value < function->instruction_count &&
+                                           function->instructions[definition.value].opcode == IR_OPCODE_FUNCTION &&
+                                           function->instructions[definition.value].symbol.value == instruction->symbol.value;
+                }
+                if (direct_symbol_callee)
+                {
+                    continue;
+                }
                 MachineX64ValueUse* use = value_uses + used;
                 use->use_count += 1;
                 if (use->use_block == 0)
@@ -8069,6 +8091,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
             IrValue* value = function->values + instruction->result.value;
             selector.place_kinds[instruction->result.value] = (u8)machine_x64_place_kind_of_opcode(instruction->opcode);
+            if (instruction->opcode == IR_OPCODE_FUNCTION && !value_uses[instruction->result.value].use_count)
+            {
+                continue;
+            }
             if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count && instruction->immediates &&
                 instruction->immediates[0] < selector.parameter_count)
             {

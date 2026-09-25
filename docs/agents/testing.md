@@ -50,12 +50,14 @@
   see [analyzer sharding](../clang-analyze-shards.md). The separate
   `Linux x86-64 bootstrap evidence` check is required as well when the stronger
   repeated self-host audit is mandatory; `CI complete` does not aggregate it.
-  The aggregate's independent desktop inventory waits up to 24 seconds if the
-  Actions API still reports a required job unfinished after the matrix need
-  completes. It checks every job and required step again on each probe and
-  fails closed after the deadline. A completed job with missing steps, including
-  a partial-rerun carry-forward, is rejected immediately; run a fresh full CI
-  attempt rather than treating a copied success label as execution evidence.
+  The aggregate's independent desktop inventory checks exact-run job attempts
+  and required step records. When the Actions API returns incomplete or stale
+  metadata, it retries with 1/2/4-second backoff, at most three refreshes and
+  a 30-second total metadata budget. A later exact snapshot may recover a
+  transient omission; a persistent empty, stale or ambiguous record fails
+  closed. It never borrows step proof from an older attempt when a newer attempt
+  shadows that job. Run a fresh full CI attempt when required metadata remains
+  unresolved; a green job-level conclusion alone is not execution evidence.
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Buster CI keeps
   full matrix diagnostics for pull requests, main/tag pushes and manual runs.
@@ -253,8 +255,15 @@ separate arguments, including `zig` with `cc`. An unknown family fails the
 fixture with an explicit diagnostic instead of inheriting Clang's options.
 The argument-policy regression runs on every test host; real ELF fixture
 compilation, relocation inspection, linking and execution are native Linux
-x86-64 checks. They preserve signed absolute `R_X86_64_32S` and GOTPCREL
-coverage; the indexed fixture makes both GCC and Clang produce those forms.
+x86-64 checks. The direct-call regression compiles an undefined import and a
+module-local function through all four allocator modes, requires PLT32 for the
+import and PC32 for the local call, and links/runs each default-model object
+with the configured host compiler as a PIE. It also verifies that a direct-call
+only function value leaves no separate address relocation. The argument-policy
+regression requires `-fPIE` and `-fpie` to be rejected on x86-64 ELF and remain
+accepted on Mach-O, COFF, UEFI, eBPF and Wasm. The existing fixtures preserve
+signed absolute `R_X86_64_32S` and GOTPCREL coverage; the indexed fixture makes
+both GCC and Clang produce those forms.
 The fixture is compiled `-O2`, because that is where both narrow an address to
 32 bits and emit a GOT load with no REX prefix -- the `R_X86_64_GOTPCRELX`
 shapes the linker converts to an absolute immediate rather than to an address

@@ -322,17 +322,12 @@ BUSTER_C_INTERNAL void c_parse_position_index_append(Arena* arena, u32** positio
     (C_SYMBOL_WELL_KNOWN_BIT(TYPEDEF) | C_SYMBOL_WELL_KNOWN_BIT(STATIC) | C_SYMBOL_WELL_KNOWN_BIT(REGISTER) | \
      C_SYMBOL_WELL_KNOWN_BIT(EXTERN) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(CONSTEXPR))
 
-// The two well-known questions c_analyze_semantics asks of a declaration's
-// whole token range rather than of one token: `overloadable`, which makes a
-// file-scope name admit several declarations, and the thread-storage words
-// an object declaration may carry.  Both name attributes almost no
-// translation unit spells, and both used to be answered by a walk of every
-// token of every declaration -- 4,6 M token visits per stage-1 compile of
-// this tree, and the largest mispredicting branch in the frontend.  The
-// token census marks the candidates for both in one bitmap instead, and
-// each question becomes an OR of the words its range covers.
+// c_analyze_semantics_core asks declaration-range questions about
+// `overloadable`, thread storage, and file-scope `static` storage. The token
+// census marks their candidate words once; each question becomes an OR of
+// only the words its range covers.
 #define C_PARSE_DECLARATION_RANGE_KEYWORDS                                                                                  \
-    (C_SYMBOL_WELL_KNOWN_BIT(OVERLOADABLE) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23))
+    (C_SYMBOL_WELL_KNOWN_BIT(OVERLOADABLE) | C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23) | C_SYMBOL_WELL_KNOWN_BIT(STATIC))
 
 // The words a type-only declaration may open with ahead of its tag keyword.
 #define C_PARSE_TYPE_ONLY_PREFIX_KEYWORDS                                                                        \
@@ -9624,11 +9619,10 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
     c_type_parse_frame_complete(machine, type, suffix, true);
 }
 
-// A type qualifier is allowed between a struct/union/enum specifier and the
-// declarator -- `struct S const x;`, `struct { const char *tag; } const
-// defs[]` -- the same way it is allowed after a primitive one. The aggregate
-// paths used to stop at the closing brace or the tag, so the qualifier stood
-// where the declarator was expected and the declaration bound no name at all.
+// Declaration-prefix words may follow a struct/union/enum specifier just as
+// they may follow a primitive specifier. Consume the complete prefix run so a
+// storage or function specifier cannot be mistaken for the declarator name,
+// while only true qualifiers are materialized in the aggregate type.
 BUSTER_C_INTERNAL CTypeId c_parse_apply_trailing_qualifiers(CParseResult* result, CPreprocessResult preprocess, CTypeId type, u32* index, u32 end)
 {
     if (type.value >= result->type_count)
@@ -9637,10 +9631,15 @@ BUSTER_C_INTERNAL CTypeId c_parse_apply_trailing_qualifiers(CParseResult* result
     }
     CType qualified = result->types[type.value];
     bool has_qualifier = false;
-    while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER &&
-           c_parse_type_qualifier_word_token(preprocess, preprocess.tokens[*index], &qualified))
+    while (*index < end && preprocess.tokens[*index].kind == C_TOKEN_IDENTIFIER)
     {
-        has_qualifier = true;
+        CToken token = preprocess.tokens[*index];
+        u16 bits = c_parse_word_bits_token(preprocess, token);
+        if (!c_parse_atomic_declaration_prefix_token(preprocess, token, &qualified))
+        {
+            break;
+        }
+        has_qualifier |= (bits & C_WORD_QUALIFIER_ANY) != 0;
         *index += 1;
     }
     return has_qualifier ? c_parse_add_qualified_type(result, type, qualified) : type;
@@ -11728,6 +11727,75 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
     return element_type;
 }
 
+BUSTER_C_INTERNAL bool c_parse_token_in_c23_attribute(CPreprocessResult preprocess, u32 token_index, u32 start, u32 end)
+{
+    // Declaration recovery may start its token span at the first attribute
+    // name when the C23 attribute itself was the unrecognized part. In that
+    // case, extend the probe back to the start of this declaration statement.
+    u32 scan_start = BUSTER_MIN(start, token_index);
+    if (scan_start == token_index || end <= token_index)
+    {
+        scan_start = token_index;
+        while (scan_start)
+        {
+            u32 previous = scan_start - 1;
+            CToken token = preprocess.tokens[previous];
+            if (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) || c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE) ||
+                c_token_is_punctuator(&token, C_PUNCTUATOR_RIGHT_BRACE))
+            {
+                break;
+            }
+            scan_start = previous;
+        }
+    }
+    u32 token_count = (u32)preprocess.token_count;
+    for (u32 index = scan_start; index < token_index && index + 1 < token_count; index += 1)
+    {
+        u32 after = 0;
+        if (c_parse_c23_attribute_at(preprocess, index, token_count, &after) && token_index < after)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+BUSTER_C_INTERNAL void c_parse_diagnose_unknown_type_name(CParseResult* result, CPreprocessResult preprocess, u32 token_index,
+                                                            bool parameter, u32 segment_start, u32 segment_end)
+{
+    bool unknown = false;
+    if (token_index < preprocess.token_count && preprocess.tokens[token_index].kind == C_TOKEN_IDENTIFIER &&
+        !c_parse_type_word_for_dialect_token(preprocess, preprocess.tokens[token_index]))
+    {
+        CToken token = preprocess.tokens[token_index];
+        CEntityId entity = c_parse_lookup_entity_token(result, preprocess.spelling_base, (CScopeId){.value = 0}, &token);
+        if (entity.value == C_ID_UNDERLYING_INVALID)
+        {
+            entity = c_parse_lookup_typedef_name(result, c_token_spelling(preprocess.spelling_base, token), true);
+        }
+        bool is_typedef = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF;
+        // GCC and Clang accept these floating-point spellings as builtin type
+        // words, although this frontend does not model them yet. Preserve
+        // their prior unsupported type behavior instead of reporting them as
+        // unknown identifiers.
+        String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+        bool is_unmodeled_builtin_type = string_equal(spelling, S8("__float128")) || string_equal(spelling, S8("_Float128")) ||
+                                        string_equal(spelling, S8("_Float64x")) || string_equal(spelling, S8("_Float128x"));
+        // A one-word identifier segment in a function declarator is the
+        // legacy identifier-list form, not a parameter declaration with a
+        // missing type specifier. Keep it out of the unknown-type diagnostic;
+        // typed parameters with a misspelled specifier contain another token.
+        bool is_old_style_identifier = parameter && token_index == segment_start && segment_end == segment_start + 1;
+        bool is_attribute_identifier = c_parse_token_in_c23_attribute(preprocess, token_index, segment_start, segment_end);
+        unknown = !is_typedef && !is_unmodeled_builtin_type && !is_old_style_identifier && !is_attribute_identifier;
+        if (unknown)
+        {
+            c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, token), C_DIAGNOSTIC_UNKNOWN_TYPE_NAME,
+                               string_format(result->arena, S8("unknown type name '{S8}'"), spelling));
+        }
+    }
+}
+
 BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult preprocess,
                                                     CDeclaration declaration, u32 start, u32 end)
 {
@@ -11743,9 +11811,14 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     }
     u32 derived_start = result->type_count;
     u32 declarator_start = start;
+    u32 type_diagnostic_start = result->diagnostic_count;
     CTypeId type = c_parse_scalar_type(machine, result, preprocess, start, end, &declarator_start);
     if (type.value == C_ID_UNDERLYING_INVALID)
     {
+        if (declarator_start < end || result->diagnostic_count == type_diagnostic_start)
+        {
+            c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, true, start, end);
+        }
         return false;
     }
     type = c_parse_pointer_chain(result, preprocess, type, &declarator_start, end);
@@ -12070,9 +12143,16 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
         }
         u32 declarator_start = declaration->token_start;
         CTypeId base = inherited_base;
+        u32 type_diagnostic_start = result->diagnostic_count;
         if (base.value == C_ID_UNDERLYING_INVALID)
         {
             base = c_parse_scalar_type(machine, result, preprocess, declaration->token_start, name_index, &declarator_start);
+            if (base.value == C_ID_UNDERLYING_INVALID && !declaration->is_declarator_continuation &&
+                (declarator_start < name_index ||
+                 (declarator_start == name_index && result->diagnostic_count == type_diagnostic_start)))
+            {
+                c_parse_diagnose_unknown_type_name(result, preprocess, declarator_start, false, declaration->token_start, name_index);
+            }
             base = c_parse_apply_vector_attribute(result, preprocess, declaration->scope, base, declaration->token_start, name_index);
         }
         else
@@ -17238,6 +17318,7 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
         Simd512 thread_local_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_LOCAL);
         Simd512 thread_gnu_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_GNU);
         Simd512 thread_local_c23_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_THREAD_LOCAL_C23);
+        Simd512 static_symbol = simd512_splat((u8)C_SYMBOL_WELL_KNOWN_STATIC);
         u32 brace_depth = 0;
         u32 delimiter_depth = 0;
         u32 maximum_depth = 0;
@@ -17311,7 +17392,8 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
                     identifiers,
                     mask64_or(mask64_or(uninterned, simd512_equal_byte(symbol_lanes, overloadable_symbol)),
                               mask64_or(mask64_or(simd512_equal_byte(symbol_lanes, thread_local_symbol), simd512_equal_byte(symbol_lanes, thread_gnu_symbol)),
-                                        simd512_equal_byte(symbol_lanes, thread_local_c23_symbol))));
+                                        mask64_or(simd512_equal_byte(symbol_lanes, thread_local_c23_symbol),
+                                                  simd512_equal_byte(symbol_lanes, static_symbol)))));
                 for (Mask64 remaining = for_candidates; remaining; remaining &= remaining - 1)
                 {
                     u32 lane = mask64_first_set(remaining);
@@ -22432,6 +22514,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         u32 declaration_name_token = kind == C_DECLARATION_FUNCTION && syntax_declaration->function_name_token < token_count
                                          ? syntax_declaration->function_name_token
                                          : syntax_declaration->name_token;
+        bool is_static_storage = false;
         bool is_thread_local = false;
         if (kind == C_DECLARATION_OBJECT &&
             c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
@@ -22439,6 +22522,8 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             for (u32 token_index = declaration->token_start; token_index < declaration->token_start + declaration->token_count; token_index += 1)
             {
                 CToken token = preprocess.tokens[token_index];
+                is_static_storage |= token.kind == C_TOKEN_IDENTIFIER &&
+                                     c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(STATIC));
                 is_thread_local |= token.kind == C_TOKEN_IDENTIFIER &&
                                    c_token_in_well_known_set(preprocess.spelling_base, token,
                                                              C_PARSE_THREAD_LOCAL_KEYWORDS | C_SYMBOL_WELL_KNOWN_BIT(THREAD_LOCAL_C23));
@@ -22463,6 +22548,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                     : kind == C_DECLARATION_TYPEDEF ? C_ENTITY_TYPEDEF
                                                     : C_ENTITY_OBJECT,
             .is_definition = declaration->is_definition,
+            .is_static_storage = is_static_storage,
             .is_thread_local = is_thread_local,
             .is_constexpr = declaration->is_constexpr,
         };

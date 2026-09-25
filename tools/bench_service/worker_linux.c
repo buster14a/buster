@@ -16,7 +16,7 @@
 
 #define BQ_WORKER_EXECUTABLE "/usr/local/libexec/buster-bench-service"
 #define BQ_RECIPE_EXECUTABLE "/usr/local/libexec/buster-bench-build"
-#define BQ_SYSTEMD_RUN "/usr/bin/systemd-run"
+#define BQ_SYSTEMD_BROKER "/usr/local/libexec/buster-bench-systemd-broker"
 #define BQ_SYSTEMCTL "/usr/bin/systemctl"
 #define BQ_WORKER_COMMAND_MILLISECONDS 5000u
 #define BQ_WORKER_STOP_MILLISECONDS 10000u
@@ -1598,7 +1598,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_observe(BqWorkerBackend* backend, char co
                                                 BqWorkerObserved* observed, u64 deadline)
 {
     BqSystemdContext* context = backend->context;
-    u32 attempts = context->starting ? 20 : 1;
+    /* The socket instance may be cold-started before the manager creates the
+     * unit.  Keep retrying within the existing five-second command deadline. */
+    u32 attempts = context->starting ? 500 : 1;
     BqError error = BQ_OK;
     for (u32 attempt = 0; error == BQ_OK && attempt < attempts; attempt += 1)
     {
@@ -1622,13 +1624,11 @@ BUSTER_GLOBAL_LOCAL BqError bq_systemd_signal(BqWorkerBackend* backend, char con
                                                u64 deadline)
 {
     (void)backend;
-    char option[64];
-    int length = snprintf(option, sizeof(option), "--signal=%s", signal_name);
     char output[512];
-    char const* arguments[] = {BQ_SYSTEMCTL, "kill", "--kill-whom=all", option, unit, NULL};
+    char const* arguments[] = {BQ_SYSTEMD_BROKER, "signal", unit, signal_name, NULL};
     int status = 0;
     u32 remaining = bq_worker_remaining(deadline);
-    BqError error = length <= 0 || (u32)length >= sizeof(option) ? BQ_BAD_REQUEST : !remaining ? BQ_IO :
+    BqError error = strcmp(signal_name, "TERM") && strcmp(signal_name, "KILL") ? BQ_BAD_REQUEST : !remaining ? BQ_IO :
                     bq_worker_exec_capture(arguments, output, sizeof(output), &status, remaining);
     if (error == BQ_OK && (!WIFEXITED(status) || WEXITSTATUS(status) != 0)) error = BQ_IO;
     return error;
@@ -3888,33 +3888,23 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
                                                      BQ_WORKER_CANCEL_SIGNAL, &finalization);
         recovering = true;
     }
-    char unit_option[128], cpu_property[64], memory_property[64], swap_property[64], tasks_property[64], runtime_property[64];
-    char queue_property[BQ_PATH_CAP * 2 + 64], installed_property[BQ_PATH_CAP + 64];
-    char workspace_property[BQ_PATH_CAP + 64], protect_property[64], tmp_property[64];
-    char devices_property[64], privileges_property[64], suid_property[64];
-    char home_property[64], cgroups_property[64], tunables_property[64], modules_property[64];
-    char kernel_logs_property[64], clock_property[64], hostname_property[64], proc_property[64];
-    char personality_property[64], write_execute_property[64], ipc_property[64], keyring_property[64];
-    char families_property[64], namespaces_property[64], realtime_property[64], architecture_property[64];
-    char syscall_property[64], syscall_error_property[64], network_property[64];
-    char job_id[32], attempt_token[32], recipe_text[BQ_RECIPE_NAME_CAP + 1];
-    char workspace_root[BQ_PATH_CAP + 1], result_root[BQ_PATH_CAP + 1];
+    char job_id[32], attempt_token[32];
     char base_revision_text[65], candidate_revision_text[65];
     String8 base_revision = {0}, candidate_revision = {0};
     if (error == BQ_OK && !recovering)
     {
-        int workspace_length = bq_worker_text(config->workspace_root, workspace_root, sizeof(workspace_root)) ?
-                               (int)strlen(workspace_root) : -1;
-        int result_length = finalization.result_root[0] ? snprintf(result_root, sizeof(result_root), "%s", finalization.result_root) : -1;
         int job_length = snprintf(job_id, sizeof(job_id), "%" PRIu64, (uint64_t)job->id);
         int token_length = snprintf(attempt_token, sizeof(attempt_token), "%" PRIu64, (uint64_t)job->token);
-        int recipe_length = snprintf(recipe_text, sizeof(recipe_text), "%s", finalization.recipe.name);
         base_revision = bq_field(&job->request, 3);
         candidate_revision = bq_field(&job->request, 4);
-        if (workspace_length <= 0 || (size_t)workspace_length >= sizeof(workspace_root) || result_length <= 0 ||
-            (size_t)result_length >= sizeof(result_root) || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
-            token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) || recipe_length <= 0 ||
-            (size_t)recipe_length >= sizeof(recipe_text) ||
+        bool canonical = !production ||
+                         (string_equal(config->queue_root, S8("/var/lib/buster-bench/queue")) &&
+                          string_equal(config->installed_root, S8("/opt/buster-bench/installed")) &&
+                          string_equal(config->workspace_root, S8("/var/lib/buster-bench/workspaces")) &&
+                          !strcmp(lease_path, "/var/lib/buster-bench/lease/host.lock"));
+        if (!canonical || job_length <= 0 || (size_t)job_length >= sizeof(job_id) ||
+            token_length <= 0 || (size_t)token_length >= sizeof(attempt_token) ||
+            strcmp(finalization.recipe.name, "validate-buster-v1") ||
             !bq_worker_text(base_revision, base_revision_text, sizeof(base_revision_text)) ||
             !bq_worker_text(candidate_revision, candidate_revision_text, sizeof(candidate_revision_text)))
         {
@@ -3922,65 +3912,15 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         }
     }
     if (error == BQ_OK && !recovering && production && !config->backend)
-        error = bq_worker_lease_handoff_open(result_root, finalization.result_directory, &handoff) ? BQ_OK : BQ_IO;
+        error = bq_worker_lease_handoff_open(finalization.result_root, finalization.result_directory,
+                                             &handoff) ? BQ_OK : BQ_IO;
     if (error == BQ_OK && !recovering && backend->clock(backend) >= execution_deadline)
         error = BQ_WORKER_TIMEOUT;
     if (error == BQ_OK && !recovering)
     {
-        snprintf(unit_option, sizeof(unit_option), "--unit=%s", unit);
-        snprintf(cpu_property, sizeof(cpu_property), "--property=AllowedCPUs=%u", config->limits.cpu);
-        snprintf(memory_property, sizeof(memory_property), "--property=MemoryMax=%" PRIu64, (uint64_t)config->limits.memory_max);
-        snprintf(swap_property, sizeof(swap_property), "--property=MemorySwapMax=%" PRIu64, (uint64_t)config->limits.memory_swap_max);
-        snprintf(tasks_property, sizeof(tasks_property), "--property=TasksMax=%" PRIu64, (uint64_t)config->limits.tasks_max);
-        snprintf(runtime_property, sizeof(runtime_property), "--property=RuntimeMaxSec=%" PRIu64 "us", (uint64_t)config->limits.runtime_max_usec);
-        int queue_length = snprintf(queue_property, sizeof(queue_property), "--property=InaccessiblePaths=%s %s",
-                                     production ? queue_root : workspace_root, lease_path);
-        char installed_text[BQ_PATH_CAP + 1];
-        bool installed_valid = bq_worker_text(config->installed_root, installed_text, sizeof(installed_text));
-        char const* installed_parts[] = {"--property=ReadOnlyPaths=", installed_text};
-        int installed_length = installed_valid ? bq_worker_join_text(installed_property, sizeof(installed_property),
-                                                                       installed_parts, BUSTER_ARRAY_LENGTH(installed_parts)) : -1;
-        int workspace_property_length = snprintf(workspace_property, sizeof(workspace_property),
-                                                  "--property=ReadWritePaths=%s", workspace_root);
-        snprintf(protect_property, sizeof(protect_property), "--property=ProtectSystem=strict");
-        snprintf(tmp_property, sizeof(tmp_property), "--property=PrivateTmp=yes");
-        snprintf(devices_property, sizeof(devices_property), "--property=PrivateDevices=yes");
-        snprintf(privileges_property, sizeof(privileges_property), "--property=NoNewPrivileges=yes");
-        snprintf(suid_property, sizeof(suid_property), "--property=RestrictSUIDSGID=yes");
-        snprintf(home_property, sizeof(home_property), "--property=ProtectHome=yes");
-        snprintf(cgroups_property, sizeof(cgroups_property), "--property=ProtectControlGroups=yes");
-        snprintf(tunables_property, sizeof(tunables_property), "--property=ProtectKernelTunables=yes");
-        snprintf(modules_property, sizeof(modules_property), "--property=ProtectKernelModules=yes");
-        snprintf(kernel_logs_property, sizeof(kernel_logs_property), "--property=ProtectKernelLogs=yes");
-        snprintf(clock_property, sizeof(clock_property), "--property=ProtectClock=yes");
-        snprintf(hostname_property, sizeof(hostname_property), "--property=ProtectHostname=yes");
-        snprintf(proc_property, sizeof(proc_property), "--property=ProtectProc=invisible");
-        snprintf(personality_property, sizeof(personality_property), "--property=LockPersonality=yes");
-        snprintf(write_execute_property, sizeof(write_execute_property), "--property=MemoryDenyWriteExecute=yes");
-        snprintf(ipc_property, sizeof(ipc_property), "--property=RemoveIPC=yes");
-        snprintf(keyring_property, sizeof(keyring_property), "--property=KeyringMode=private");
-        snprintf(families_property, sizeof(families_property), "--property=RestrictAddressFamilies=AF_UNIX");
-        snprintf(namespaces_property, sizeof(namespaces_property), "--property=RestrictNamespaces=yes");
-        snprintf(realtime_property, sizeof(realtime_property), "--property=RestrictRealtime=yes");
-        snprintf(architecture_property, sizeof(architecture_property), "--property=SystemCallArchitectures=native");
-        snprintf(syscall_property, sizeof(syscall_property), "--property=SystemCallFilter=@system-service");
-        snprintf(syscall_error_property, sizeof(syscall_error_property), "--property=SystemCallErrorNumber=EPERM");
-        snprintf(network_property, sizeof(network_property), "--property=PrivateNetwork=yes");
-        char const* arguments[] = {BQ_SYSTEMD_RUN, "--quiet", "--wait", "--service-type=exec",
-            "--uid=buster-bench", "--gid=buster-bench", unit_option, "--slice=buster-bench.slice",
-            "--property=KillMode=control-group", "--property=SendSIGKILL=yes", "--property=TimeoutStopSec=10s",
-            cpu_property, memory_property, swap_property, tasks_property, runtime_property,
-            queue_property, installed_property, workspace_property, protect_property, tmp_property, devices_property,
-            privileges_property, suid_property, home_property, cgroups_property, tunables_property, modules_property,
-            kernel_logs_property, clock_property, hostname_property, proc_property, personality_property,
-            write_execute_property, ipc_property, keyring_property, families_property, namespaces_property,
-            realtime_property, architecture_property, syscall_property, syscall_error_property, network_property,
-            BQ_WORKER_EXECUTABLE, "worker-unit", lease_path, job_id, attempt_token, recipe_text, workspace_root,
-            base_revision_text, candidate_revision_text, result_root, NULL};
-        error = queue_length > 0 && (u32)queue_length < sizeof(queue_property) && installed_length > 0 &&
-                (u32)installed_length < sizeof(installed_property) && workspace_property_length > 0 &&
-                (u32)workspace_property_length < sizeof(workspace_property) ?
-                backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1) : BQ_CONFIGURATION_MISMATCH;
+        char const* arguments[] = {BQ_SYSTEMD_BROKER, "start-outer", job_id, attempt_token,
+                                   base_revision_text, candidate_revision_text, NULL};
+        error = backend->start(backend, arguments, BUSTER_ARRAY_LENGTH(arguments) - 1);
         launched = error == BQ_OK;
     }
     if (error == BQ_OK && !recovering && handoff.listener >= 0)

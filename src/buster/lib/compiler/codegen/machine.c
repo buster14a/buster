@@ -4329,6 +4329,36 @@ BUSTER_GLOBAL_LOCAL bool machine_verify_block_dominates(MachineVerifyDominance d
            dominance.preorder[dominator] <= dominance.preorder[block] && dominance.postorder[block] <= dominance.postorder[dominator];
 }
 
+String8 machine_verify_error_name(MachineVerifyError error)
+{
+    static const String8 names[] = {
+        [MACHINE_VERIFY_NONE] = S8_INITIALIZER("none"),
+        [MACHINE_VERIFY_BLOCK_RANGE] = S8_INITIALIZER("block-range"),
+        [MACHINE_VERIFY_INSTRUCTION_COVERAGE] = S8_INITIALIZER("instruction-coverage"),
+        [MACHINE_VERIFY_OPCODE] = S8_INITIALIZER("opcode"),
+        [MACHINE_VERIFY_OPERAND_REFERENCE] = S8_INITIALIZER("operand-reference"),
+        [MACHINE_VERIFY_OPERAND_SLOT] = S8_INITIALIZER("operand-slot"),
+        [MACHINE_VERIFY_TERMINATOR] = S8_INITIALIZER("terminator"),
+        [MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION] = S8_INITIALIZER("virtual-register-definition"),
+        [MACHINE_VERIFY_VIRTUAL_REGISTER_MISSING_DEFINITION] = S8_INITIALIZER("virtual-register-missing-definition"),
+        [MACHINE_VERIFY_VIRTUAL_REGISTER_DUPLICATE_DEFINITION] = S8_INITIALIZER("virtual-register-duplicate-definition"),
+        [MACHINE_VERIFY_VIRTUAL_REGISTER_USE_BEFORE_DEFINITION] = S8_INITIALIZER("virtual-register-use-before-definition"),
+        [MACHINE_VERIFY_VIRTUAL_REGISTER_DEFINITION_POINT] = S8_INITIALIZER("virtual-register-definition-point"),
+        [MACHINE_VERIFY_POINT_CAPACITY] = S8_INITIALIZER("point-capacity"),
+        [MACHINE_VERIFY_EDGE_RANGE] = S8_INITIALIZER("edge-range"),
+        [MACHINE_VERIFY_EDGE_COPY] = S8_INITIALIZER("edge-copy"),
+        [MACHINE_VERIFY_BLOCK_PARAMETER] = S8_INITIALIZER("block-parameter"),
+        [MACHINE_VERIFY_CONSTRAINT] = S8_INITIALIZER("constraint"),
+        [MACHINE_VERIFY_STORAGE] = S8_INITIALIZER("storage"),
+        [MACHINE_VERIFY_PAYLOAD] = S8_INITIALIZER("payload"),
+        [MACHINE_VERIFY_OPERAND_KIND] = S8_INITIALIZER("operand-kind"),
+        [MACHINE_VERIFY_OPERAND_CLASS] = S8_INITIALIZER("operand-class"),
+    };
+    BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == MACHINE_VERIFY_COUNT);
+    String8 result = (u32)error < BUSTER_ARRAY_LENGTH(names) ? names[error] : S8("unknown");
+    return result;
+}
+
 MachineVerifyResult machine_verify_function(MachineFunction* function)
 {
     MachineVerifyResult result = {0};

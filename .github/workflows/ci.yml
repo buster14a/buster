@@ -268,6 +268,7 @@ jobs:
           run_suite tools/native_producer_profile_test.py native-producer-profile.log
           run_suite tools/ci_configure_evidence_test.py configure-evidence-test.log
           run_suite tools/ci_matrix_phases_test.py matrix-phases-test.log
+          run_suite tools/ci_matrix_phases_bridge_test.py matrix-phases-bridge-test.log
           run_suite tools/ci_native_observation_test.py native-observation-test.log
           printf 'WORKFLOW_TOOLS_END result=success elapsed_seconds=%s at=%s\n' \
             "$((SECONDS - workflow_tools_started))" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1031,10 +1032,14 @@ jobs:
 
       - name: Retain mobile logs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: mobile
+          label_title: Mobile
           name: mobile-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/
+          compression-level: 6
           if-no-files-found: ignore
           retention-days: 7
 
@@ -1057,9 +1062,22 @@ jobs:
           deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-updates main universe
           deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-security main universe
           SOURCES
-          apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/uefi-sources.list" -o 'Dir::Etc::sourceparts=-' -o 'APT::Get::List-Cleanup=0')
-          sudo apt-get "${apt_options[@]}" update
-          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends \
+          # Retry transient snapshot transport failures without changing the signed source or package pins.
+          apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/uefi-sources.list" -o 'Dir::Etc::sourceparts=-' \
+            -o 'APT::Get::List-Cleanup=0' -o 'APT::Update::Error-Mode=any' -o 'Acquire::Retries=3')
+          retry_snapshot_apt() {
+            local attempt=1
+            while ! sudo apt-get "${apt_options[@]}" "$@"; do
+              if (( attempt == 3 )); then
+                echo '::error::Pinned Ubuntu snapshot unavailable after three apt attempts.'
+                return 1
+              fi
+              sleep "$(( 30 * attempt ))"
+              (( attempt += 1 ))
+            done
+          }
+          retry_snapshot_apt update
+          retry_snapshot_apt install -y --no-install-recommends \
             qemu-system-x86=1:8.2.2+ds-0ubuntu1.18 qemu-system-arm=1:8.2.2+ds-0ubuntu1.18 \
             qemu-system-common=1:8.2.2+ds-0ubuntu1.18 qemu-system-data=1:8.2.2+ds-0ubuntu1.18 \
             ovmf=2024.02-2ubuntu0.9 qemu-efi-aarch64=2024.02-2ubuntu0.9
