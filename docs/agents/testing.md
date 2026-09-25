@@ -313,6 +313,16 @@ failure reduction. See [metamorphic testing](../metamorphic-testing.md) for the
 transformation preconditions, reproducible seeds, strict execution mode and
 failure bundles. Cross-target compilation is not a behavioral pass.
 
+## Constant name-binding oracle
+
+`tools/scope_oracle/` is a hand-run, stdlib-only detector for a subset the other
+campaigns do not generate: ordinary identifiers shadowed across scopes and used in
+member bounds, bit-field widths, `_Alignas`, type names, and enumerator
+initializers. Expected values come from an independent C17 scope and psABI layout
+model, which Clang and GCC confirm. A mismatch counts only when both reference
+compilers reproduce the model. See its [README](../../tools/scope_oracle/README.md)
+for the dependency gap, the validation record, and the limits.
+
 ## External GPU consumers
 
 `./build.sh test_gpu_toolchains` exposes explicit optional status; each selected
