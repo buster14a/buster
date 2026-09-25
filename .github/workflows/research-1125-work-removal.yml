@@ -1,0 +1,77 @@
+name: Research 1125 work removal
+
+on:
+  push:
+    branches:
+      - research/1125-work-removal-d9e736e2-20260925
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-1125-work-removal-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Retain exact unmodified production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          test "$(git rev-parse "$base^{tree}")" = ae9f274b6768b023fe6e0ef80a161e14b290e0a2
+          mkdir -p "$RUNNER_TEMP/source"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/source/buster-source.tar.gz" "$base"
+          git rev-parse HEAD HEAD^{tree} "$base" "$base^{tree}" > "$RUNNER_TEMP/source/identities.txt"
+          sha256sum "$RUNNER_TEMP/source/buster-source.tar.gz" > "$RUNNER_TEMP/source/archive-sha256.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: research-1125-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/source
+          retention-days: 30
+          if-no-files-found: error
+          compression-level: 0
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '2'
+      BUSTER_MATRIX_THREADS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          persist-credentials: false
+      - name: Baseline source and tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          test "$(git rev-parse HEAD)" = d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          test "$(git rev-parse HEAD^{tree})" = ae9f274b6768b023fe6e0ef80a161e14b290e0a2
+          { git rev-parse HEAD HEAD^{tree}; uname -a; clang --version; gcc --version; cmake --version; ninja --version; } > "$RUNNER_TEMP/evidence/identities.txt"
+      - name: Build through the native driver and establish the baseline fixed point
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -x
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build" 2>&1 | tee "$RUNNER_TEMP/evidence/bootstrap.log"
+          "$RUNNER_TEMP/buster-build" generate --cc clang --ci --linker DEFAULT 2>&1 | tee "$RUNNER_TEMP/evidence/generate.log"
+          "$RUNNER_TEMP/buster-build" build --config Release -t ide -- -j1 2>&1 | tee "$RUNNER_TEMP/evidence/build.log"
+          sha256sum build/Release/ide > "$RUNNER_TEMP/evidence/compiler-sha256.txt"
+          "$RUNNER_TEMP/buster-build" test_self_host --config Release 2>&1 | tee "$RUNNER_TEMP/evidence/self-host.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: research-1125-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 30
+          if-no-files-found: error
