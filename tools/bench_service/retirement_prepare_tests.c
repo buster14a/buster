@@ -854,7 +854,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
     int length = snprintf(profile, sizeof(profile), "%sbuild-driver-sha256=%.64s\n",
                           original_profile, driver_digest);
     BQ_PREP_CHECK(length > 0 && (u32)length < sizeof(profile));
-    for (u32 trial = 0; trial < 14; trial += 1)
+    for (u32 trial = 0; trial < 18; trial += 1)
     {
         BqJob job = *original;
         job.id = 30 + trial;
@@ -988,7 +988,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                     chmod(tool_bin, 0555) == 0 && bq_retirement_toolchain_recheck(&checked));
                 break;
             }
-            if (trial && stage == 2) ok = renameat(attempt, "matched-build", attempt, "old-build") == 0;
+            if (trial && trial != 16 && stage == 2)
+                ok = renameat(attempt, "matched-build", attempt, "old-build") == 0;
             if ((trial == 10 && stage == 1) || (trial == 11 && stage == 3))
             {
                 int root = bq_open_absolute_directory(string_from_pointer(build.build));
@@ -1012,6 +1013,30 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                     errno == ENOENT);
                 break;
             }
+            if ((trial == 14 && stage == 1) || (trial == 15 && stage == 3))
+            {
+                int held = build.generated_root;
+                struct stat previous = {0}, replacement = {0};
+                BQ_PREP_CHECK(held >= 3 && fstat(held, &previous) == 0 &&
+                    renameat(attempt, "matched-build", attempt, "held-generated") == 0 &&
+                    mkdirat(attempt, "matched-build", 0700) == 0);
+                int substituted = openat(attempt, "matched-build",
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+                BQ_PREP_CHECK(substituted >= 3 && fstat(substituted, &replacement) == 0 &&
+                    (previous.st_dev != replacement.st_dev || previous.st_ino != replacement.st_ino));
+                if (substituted >= 0) close(substituted);
+                BqRetirementBuildProcess refused = {0};
+                BQ_PREP_CHECK(!bq_retirement_matched_build_launch(&build, &refused) &&
+                    build.failed && build.generated_root == -1 &&
+                    !refused.state && !refused.process &&
+                    fcntl(held, F_GETFD) < 0 && errno == EBADF);
+                char log_name[32];
+                snprintf(log_name, sizeof(log_name), "build-log-%u", stage);
+                struct stat absent = {0};
+                BQ_PREP_CHECK(fstatat(attempt, log_name, &absent, AT_SYMLINK_NOFOLLOW) != 0 &&
+                    errno == ENOENT);
+                break;
+            }
             BqRetirementBuildStage current = {0};
             ok = ok && bq_retirement_matched_build_stage(&build, &current) &&
                  !strcmp(current.argv[3], command.argv[3]) &&
@@ -1023,6 +1048,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             if (ok)
             {
                 int held_root = process.build_root;
+                int held_generated = build.generated_root;
                 if (trial == 1 && stage == 1)
                     bq_prep_test_build_output_stability(held_root);
                 if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
@@ -1048,27 +1074,41 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                     BQ_PREP_CHECK(replacement >= 3 && fchmod(replacement, 0400) == 0);
                     if (replacement >= 0) close(replacement);
                 }
-                uid_t candidate = trial == 2 ? geteuid() + 1 : geteuid();
+                uid_t candidate = ((trial == 2 && stage == 3) ||
+                                   (trial == 17 && stage == 2)) ? geteuid() + 1 : geteuid();
                 BqError expected = !trial ? BQ_WORKER_FAILED :
                                    trial == 4 || trial == 5 ? BQ_WORKER_FAILED :
                                    ((trial == 2 || trial == 13) && stage == 3) ||
-                                   (trial == 12 && stage == 1) ? BQ_SOURCE_MISMATCH : BQ_OK;
+                                   (trial == 12 && stage == 1) ||
+                                   ((trial == 16 || trial == 17) && stage == 2) ?
+                                   BQ_SOURCE_MISMATCH : BQ_OK;
                 BQ_PREP_CHECK(bq_retirement_matched_build_complete_pinned(queue, &job,
                     installed, workspaces, pinned, &process, candidate, &build) == expected &&
                     !process.state && !process.process);
+                struct stat generated_after = {0};
+                if (expected == BQ_OK && !(stage & 1u))
+                    BQ_PREP_CHECK(build.generated_root >= 3 &&
+                        fstat(build.generated_root, &generated_after) == 0 &&
+                        (u64)generated_after.st_dev == build.generated_device &&
+                        (u64)generated_after.st_ino == build.generated_inode);
+                if (stage & 1u)
+                    BQ_PREP_CHECK(build.generated_root == -1 &&
+                        fcntl(held_generated, F_GETFD) < 0 && errno == EBADF);
                 if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
                     BQ_PREP_CHECK(fcntl(held_root, F_GETFD) < 0 && errno == EBADF);
             }
             bq_retirement_matched_build_abort(&process);
-            if (trial == 4 || trial == 5 || (trial == 12 && stage == 1)) break;
+            if (trial == 4 || trial == 5 || (trial == 12 && stage == 1) ||
+                ((trial == 16 || trial == 17) && stage == 2)) break;
         }
         BQ_PREP_CHECK(ok);
         if (trial != 1)
         {
             char record_name[48], bytes[16];
             u32 size = 0;
-            BQ_PREP_CHECK(build.failed && build.next == (trial == 3 ? 2u : trial == 2 || trial == 11 ||
-                                                    trial == 13 ? 3u : trial == 10 || trial == 12 ? 1u : 0u) &&
+            BQ_PREP_CHECK(build.failed && build.next == (trial == 3 || trial == 16 || trial == 17 ? 2u :
+                                                    trial == 2 || trial == 11 || trial == 13 || trial == 15 ? 3u :
+                                                    trial == 10 || trial == 12 || trial == 14 ? 1u : 0u) &&
                 !build.binary_record_sha256[0] &&
                 !bq_retirement_matched_build_stage(&build, &command) &&
                 bq_record_name(record_name, "binaries", job.id) &&
@@ -1135,6 +1175,7 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
                 driver_path, toolchain_root, preparation_digest, build.binary_record_sha256,
                 build.build_record_sha256, &observed) == BQ_CORRUPT && !observed.preparation_sha256[0]);
         }
+        BQ_PREP_CHECK(bq_retirement_matched_build_release(&build) && build.generated_root == -1);
         if (attempt >= 0) close(attempt);
     }
 }
