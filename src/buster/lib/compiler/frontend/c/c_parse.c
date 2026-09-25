@@ -18793,18 +18793,8 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
-        bool masked_assignment = declaration_tokens[index - start] || (skipped && skipped[index - start]);
-        bool direct_identifier_assignment = false;
-        if (masked_assignment && index > start && c_parse_assignment_punctuator(token) &&
-            preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
-        {
-            CScopeId assignment_scope = c_parse_scope_for_token(result, declaration->scope, index);
-            CEntityId lhs_entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, assignment_scope,
-                                                                    &preprocess.tokens[index - 1]);
-            CEntity* lhs_entity = lhs_entity_id.value < result->entity_count ? result->entities + lhs_entity_id.value : 0;
-            direct_identifier_assignment = lhs_entity && lhs_entity->declaration_token_plus_one != index &&
-                (lhs_entity->kind == C_ENTITY_LOCAL || lhs_entity->kind == C_ENTITY_PARAMETER || lhs_entity->kind == C_ENTITY_OBJECT);
-        }
+        bool direct_identifier_assignment = index > start && c_parse_assignment_punctuator(token) &&
+                                            preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER;
         if ((declaration_tokens[index - start] && !direct_identifier_assignment) ||
             ((skipped && skipped[index - start]) && !direct_identifier_assignment))
         {
