@@ -459,6 +459,13 @@ typedef enum TargetStringComponents
     TARGET_STRING_COMPONENT_COUNT,
 } TargetStringComponent;
 
+typedef enum TargetPlainCharPolicy
+{
+    TARGET_PLAIN_CHAR_POLICY_TARGET_DEFAULT,
+    TARGET_PLAIN_CHAR_POLICY_SIGNED,
+    TARGET_PLAIN_CHAR_POLICY_UNSIGNED,
+} TargetPlainCharPolicy;
+
 typedef struct Target Target;
 struct Target
 {
@@ -470,6 +477,9 @@ struct Target
     u8 os_version_patch;
     u16 os_version_major;
     TargetCpuFeatures cpu_features;
+    // Command-line plain-char overrides; target default keeps the ABI's
+    // implementation-defined signedness.
+    TargetPlainCharPolicy plain_char_policy;
 };
 
 typedef struct TargetStringSplit TargetStringSplit;
