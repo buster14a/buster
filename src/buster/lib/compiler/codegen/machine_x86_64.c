@@ -24,6 +24,7 @@
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/assembly/assembly.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/compiler/object/object.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 #include <buster/lib/integer.h>
@@ -300,14 +301,17 @@ struct MachineX64Selector
     bool supported;
 };
 
-// The reference form a symbol takes in this module: its own address under
-// the default model, the linker's slot or entry under -fPIC when another
-// object could supply the definition. `call_site` distinguishes the two
-// -fPIC forms, which differ only in what names the symbol -- a call's rel32
-// or a load's displacement.
+// The reference form a symbol takes in this module. An undefined ELF
+// function uses the PLT even in the default model, so an external linker can
+// place the -c object in a PIE. Under -fPIC, any interposable function uses
+// the PLT and any interposable address uses the GOT.
 BUSTER_GLOBAL_LOCAL u8 machine_x64_symbol_reference(MachineX64Selector* selector, IrSymbolId symbol, bool call_site)
 {
-    bool indirect = selector->position_independent && ir_symbol_is_interposable(ir_symbol_from_id(&selector->program->symbols, symbol));
+    IrSymbol* record = ir_symbol_from_id(&selector->program->symbols, symbol);
+    bool elf_external_call = call_site && record && !record->is_definition &&
+                             object_format_for_target(selector->target) == OBJECT_FORMAT_ELF64;
+    bool indirect = elf_external_call ||
+                    (selector->position_independent && ir_symbol_is_interposable(record));
     return (u8)(!indirect ? MACHINE_SYMBOL_REFERENCE_DIRECT : call_site ? MACHINE_SYMBOL_REFERENCE_PLT : MACHINE_SYMBOL_REFERENCE_GOT);
 }
 
@@ -5619,25 +5623,27 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_store(MachineX64Selector* selector, 
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_select_function(MachineX64Selector* selector, IrInstruction* instruction, u32 result_register)
 {
-    // A function reference is an ordinary rip-relative symbol address;
-    // direct calls carry the symbol on the CALL row itself, so this lea
-    // only matters when the value is used as data.
+    // A function reference is an ordinary symbol address; direct calls carry
+    // the symbol on the CALL row itself, so a value used only as that callee
+    // needs no address row or relocation.
     bool selected = false;
-    if (result_register != UINT32_MAX && instruction->symbol.value != IR_ID_UNDERLYING_INVALID)
+    if (instruction->symbol.value != IR_ID_UNDERLYING_INVALID)
     {
-        // The address of a function is data like any other address: under
-        // -fPIC an interposable one comes out of the GOT, so every object in
-        // the image agrees on which definition `&f` names.
-        u8 reference = machine_x64_symbol_reference(selector, instruction->symbol, false);
-        u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
-        u32 row = machine_x64_select_row(selector, (MachineInstruction){
-                                                       .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
-                                                       .payload = target_index,
-                                                       .opcode = (u16)(reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT
-                                                                                                                 : MACHINE_X64_LEA_SYMBOL),
-                                                   });
-        machine_x64_define(selector, result_register, row);
         selected = true;
+        if (result_register != UINT32_MAX)
+        {
+            // Under -fPIC an interposable address comes out of the GOT, so
+            // every object in the image agrees on which definition `&f` names.
+            u8 reference = machine_x64_symbol_reference(selector, instruction->symbol, false);
+            u32 target_index = machine_x64_call_target(selector, instruction->symbol, reference);
+            u32 row = machine_x64_select_row(selector, (MachineInstruction){
+                                                           .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, result_register)},
+                                                           .payload = target_index,
+                                                           .opcode = (u16)(reference == MACHINE_SYMBOL_REFERENCE_GOT ? MACHINE_X64_LOAD_SYMBOL_GOT
+                                                                                                                     : MACHINE_X64_LEA_SYMBOL),
+                                                       });
+            machine_x64_define(selector, result_register, row);
+        }
     }
     return selected;
 }
@@ -7882,6 +7888,22 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 {
                     continue;
                 }
+                // A direct CALL names its function on the call row. Its
+                // function-value operand is not an address use; counting it
+                // would keep a dead LEA/GOT load and its relocation alive.
+                bool direct_symbol_callee = operand_index == 0 && instruction->opcode == IR_OPCODE_CALL &&
+                                            instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
+                if (direct_symbol_callee)
+                {
+                    IrInstructionId definition = function->values[used].definition;
+                    direct_symbol_callee = definition.value < function->instruction_count &&
+                                           function->instructions[definition.value].opcode == IR_OPCODE_FUNCTION &&
+                                           function->instructions[definition.value].symbol.value == instruction->symbol.value;
+                }
+                if (direct_symbol_callee)
+                {
+                    continue;
+                }
                 MachineX64ValueUse* use = value_uses + used;
                 use->use_count += 1;
                 if (use->use_block == 0)
@@ -8069,6 +8091,10 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
             IrValue* value = function->values + instruction->result.value;
             selector.place_kinds[instruction->result.value] = (u8)machine_x64_place_kind_of_opcode(instruction->opcode);
+            if (instruction->opcode == IR_OPCODE_FUNCTION && !value_uses[instruction->result.value].use_count)
+            {
+                continue;
+            }
             if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count && instruction->immediates &&
                 instruction->immediates[0] < selector.parameter_count)
             {
@@ -11753,6 +11779,14 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_form_entry(MachineX64Prepared
 #define MACHINE_X64_CHUNK_DIRECTION_LOAD 0u
 #define MACHINE_X64_CHUNK_DIRECTION_STORE 1u
 BUSTER_GLOBAL_LOCAL u8 machine_x64_chunk_memory_tables[2][MACHINE_X64_CHUNK_WIDTH_COUNT];
+// Frame chunks are the closed RBP, forced-disp32 row of those same tables:
+// the record depends only on direction, width and data register, so prewarm
+// copies the sixteen RBP records of each table here and a spill or reload
+// reads one record instead of re-validating the table index and re-deriving
+// the displacement class and row stride per call. The frame base offset is
+// still added at emission time; it is a per-function fact. A zero byte count
+// is the same refusal an unprepared table gave.
+BUSTER_GLOBAL_LOCAL MachineX64GprEncoding machine_x64_frame_chunk_encodings[2][MACHINE_X64_CHUNK_WIDTH_COUNT][16];
 // Chunk byte counts are 1, 2, 4 and 8 (machine_x64_copy_chunk); every other
 // value took the ladder's 64-bit arm, so it maps to the last width here.
 BUSTER_GLOBAL_LOCAL u8 const machine_x64_chunk_width_index[9] = {3, 0, 1, 3, 2, 3, 3, 3, 3};
@@ -11789,6 +11823,17 @@ BUSTER_GLOBAL_LOCAL void machine_x64_exact_prepare_chunk_memory_tables(void)
             load_entry && load_entry->plan_valid && load_entry->variant_count ? load_entry->variable_memory_encoding_tables[0] : 0;
         machine_x64_chunk_memory_tables[MACHINE_X64_CHUNK_DIRECTION_STORE][width_slot] =
             store_entry && store_entry->plan_valid && store_entry->variant_count ? store_entry->variable_memory_encoding_tables[0] : 0;
+        for (u32 direction = 0; direction < 2; direction += 1)
+        {
+            u8 table_plus_one = machine_x64_chunk_memory_tables[direction][width_slot];
+            for (u32 reg = 0; reg < 16; reg += 1)
+            {
+                machine_x64_frame_chunk_encodings[direction][width_slot][reg] =
+                    table_plus_one && table_plus_one <= machine_x64_variable_memory_encoding_table_count
+                        ? machine_x64_variable_memory_encoding_tables[table_plus_one - 1u].encodings[2][reg + (MACHINE_X64_RBP << 4)]
+                        : (MachineX64GprEncoding){0};
+            }
+        }
     }
 }
 
@@ -13651,20 +13696,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_variable_memory_encoding(
     MachineX64Encoder* encoder, u8 table_plus_one, u32 reg, u32 base, s32 displacement,
     bool force_disp32, MachineX64ExactEmitCounters* counters);
 
-BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
-                                                             MachineX64ExactEmitCounters* counters)
+BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk_metadata(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
+                                                                      MachineX64ExactEmitCounters* counters)
 {
-    // Spill/reload and expansion chunks are the same MOV/MOVZX population as
-    // pointer memory.  Preserve their canonical frame shape by selecting the
-    // already-proven disp32 lane rather than rebuilding physical operands.
-    if (machine_x64_emit_variable_memory_encoding(
-            encoder,
-            machine_x64_chunk_memory_tables[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
-                                           [machine_x64_chunk_width_slot(chunk)],
-            reg, MACHINE_X64_RBP, (s32)(0u - offset), true, counters))
-        return true;
-    if (encoder->overflow) return false;
-
     u16 opcode = load ? (chunk == 1 ? MACHINE_X64_LOAD_PTR8 : chunk == 2 ? MACHINE_X64_LOAD_PTR16 : chunk == 4 ? MACHINE_X64_LOAD_PTR32
                                                                            : MACHINE_X64_LOAD_FRAME)
                       : (chunk == 1 ? MACHINE_X64_STORE_FRAME8 : chunk == 2 ? MACHINE_X64_STORE_FRAME16 : chunk == 4 ? MACHINE_X64_STORE_FRAME32
@@ -13689,6 +13723,78 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* e
     MachineX64ExactRecipeVariant variant = machine_x64_exact_recipe_variant(entry->descriptor, 0);
     return machine_x64_emit_exact_form(encoder, entry->metadata_tokens[0], operands, variant.operand_count, true, false, 0, false, counters);
 }
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool machine_x64_emit_exact_frame_chunk(MachineX64Encoder* encoder, bool load, u32 reg, u32 offset, u32 chunk,
+                                                                           MachineX64ExactEmitCounters* counters)
+{
+    bool result = false;
+    MachineX64GprEncoding const* encoding =
+        machine_x64_frame_chunk_encodings[load ? MACHINE_X64_CHUNK_DIRECTION_LOAD : MACHINE_X64_CHUNK_DIRECTION_STORE]
+                                         [machine_x64_chunk_width_slot(chunk)] + (reg & 15u);
+    u32 byte_count = encoding->byte_count;
+    if (reg < 16 && byte_count)
+    {
+        if (encoder->count > encoder->capacity || byte_count > encoder->capacity - encoder->count)
+        {
+            encoder->overflow = true;
+            if (counters)
+            {
+                counters->attempts += 1;
+                counters->fallbacks += 1;
+            }
+        }
+        else
+        {
+            machine_x64_encoder_copy_encoding(encoder, encoding, byte_count);
+            u32 value = (0u - offset) + encoder->frame_base_offset;
+            memcpy(encoder->bytes + encoder->count + byte_count - (u32)sizeof(u32), &value, sizeof(value));
+            encoder->count += byte_count;
+            if (counters)
+            {
+                counters->attempts += 1;
+                counters->successes += 1;
+            }
+            result = true;
+        }
+    }
+    else
+    {
+        result = machine_x64_emit_exact_frame_chunk_metadata(encoder, load, reg, offset, chunk, counters);
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_x64_test_frame_chunk_prepared(void)
+{
+    bool result = machine_x64_exact_opcode_map_ready;
+    for (u32 direction = 0; direction < 2; direction += 1)
+    {
+        for (u32 width_slot = 0; width_slot < MACHINE_X64_CHUNK_WIDTH_COUNT; width_slot += 1)
+        {
+            for (u32 reg = 0; reg < 16; reg += 1)
+            {
+                u32 byte_count = machine_x64_frame_chunk_encodings[direction][width_slot][reg].byte_count;
+                result &= byte_count > sizeof(u32) && byte_count <= 15;
+            }
+        }
+    }
+    return result;
+}
+
+MachineEncodeResult machine_x64_test_emit_frame_chunk(u8* bytes, u32 capacity, u32 start, u32 frame_base_offset, bool load, u32 reg,
+                                                      u32 offset, u32 chunk, bool reference)
+{
+    MachineX64Encoder encoder = {.bytes = bytes, .capacity = capacity, .count = start, .frame_base_offset = frame_base_offset};
+    MachineX64ExactEmitCounters counters = {0};
+    MachineEncodeResult result = {.bytes = bytes};
+    result.valid = reference ? machine_x64_emit_exact_frame_chunk_metadata(&encoder, load, reg, offset, chunk, &counters)
+                             : machine_x64_emit_exact_frame_chunk(&encoder, load, reg, offset, chunk, &counters);
+    result.byte_count = encoder.count;
+    machine_x64_exact_counters_assign(&result, counters);
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL bool machine_x64_emit_x87(MachineX64Encoder* encoder, String8 mnemonic,
                                                BusterX86MetadataPhysicalOperand const* operands, u32 operand_count);

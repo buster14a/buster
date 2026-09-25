@@ -630,6 +630,23 @@ BUSTER_C_INTERNAL IrTypeId c_ir_complex_type(CIrTypeContext* context, CTypeKind 
     return type;
 }
 
+// Literal magnitudes use a u64 carrier even when their selected C type is
+// wider. Cached lowering and uncached semantic queries must admit the same
+// values; a signed 128-bit type can represent every value in that carrier.
+BUSTER_C_INTERNAL u64 c_semantic_integer_literal_limit(u32 width, bool is_signed)
+{
+    u64 result = 0;
+    if (width > 64 || (width == 64 && !is_signed))
+    {
+        result = UINT64_MAX;
+    }
+    else if (width)
+    {
+        result = (UINT64_C(1) << (width - (is_signed ? 1u : 0u))) - 1;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind)
 {
     if ((u32)kind >= C_TYPE_COUNT)
@@ -685,9 +702,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
     context->scalar_types[kind] = type;
     if (ir_kind == IR_TYPE_INTEGER)
     {
-        context->literal_limits[kind] = bit_width >= 64 ? (is_signed ? (u64)INT64_MAX : UINT64_MAX)
-                                        : is_signed     ? (((u64)1 << (bit_width - 1)) - 1)
-                                                        : (((u64)1 << bit_width) - 1);
+        context->literal_limits[kind] = c_semantic_integer_literal_limit(bit_width, is_signed);
     }
     return type;
 }
@@ -6931,7 +6946,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SHIFT_LEFT, source);
         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
     }
-    IrValueId result = c_ir_emit_cast(builder, assembled, type, source);
+    // A bit-field place may be volatile even though the value of its read is
+    // not qualified. Keep the split path's result type in step with the
+    // ordinary load path; otherwise a multi-piece access leaks the qualified
+    // field type into arithmetic, returns, and call arguments.
+    IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
+    IrValueId result = c_ir_emit_cast(builder, assembled, result_type, source);
     c_ir_mark_unsigned_bit_field_value(builder, result, field);
     return result;
 }
@@ -8837,9 +8857,7 @@ BUSTER_C_INTERNAL bool c_semantic_integer_literal_fits(Target target, u64 const*
         bool sign = false;
         if (c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) && width)
         {
-            limit = width > 64 ? UINT64_MAX
-                    : width == 64 ? sign ? (u64)INT64_MAX : UINT64_MAX
-                                  : (UINT64_C(1) << (width - (sign ? 1u : 0u))) - 1;
+            limit = c_semantic_integer_literal_limit(width, sign);
         }
     }
     return limit && value <= limit;
@@ -12985,6 +13003,9 @@ struct CIrExpressionCoreState
     u32 operation_count;
     u32 pending_start;
     u32 pending_end;
+    u32 sizeof_vla_start;
+    u32 sizeof_vla_end;
+    bool sizeof_vla_previous_preparing_calls;
     IrTypeId pending_type;
     IrSourceRange pending_source;
     bool expect_operand;
@@ -13047,6 +13068,8 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_VOID_ASSIGNMENT,
     C_IR_LOWER_STAGE_EXPRESSION_CONDITION,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA_CALLS,
+    C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_CONTROL,
     C_IR_LOWER_STAGE_EXPRESSION_CORE_CALLS,
     C_IR_LOWER_STAGE_CONDITION_LEAF_PLACE,
@@ -17128,6 +17151,14 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerI
     return false;
 }
 
+// An operand of sizeof or _Alignof is not prepared by either prepass. Its
+// owner decides whether a VLA expression operand must be lowered.
+#define C_IR_UNEVALUATED_OPERAND_WORDS                                                              \
+    (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) |                            \
+     C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
+
+BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u32 cursor, u32 end);
+
 BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
 
 BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
@@ -17158,6 +17189,18 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     while (frame->as.prepare_control.index < frame->as.prepare_control.end)
     {
         u32 index = frame->as.prepare_control.index++;
+        CToken token = builder->preprocess.tokens[index];
+        // The sizeof owner decides whether a VLA expression must run. When it
+        // does, it lowers the operand in a child expression frame, which runs
+        // its own preparation pass. This scan must not hoist control groups
+        // from a fixed-size sizeof or unevaluated _Alignof operand.
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_IR_UNEVALUATED_OPERAND_WORDS))
+        {
+            frame->as.prepare_control.index =
+                c_ir_unevaluated_operand_end(builder, index + 1, frame->as.prepare_control.end);
+            continue;
+        }
         c_ir_lazy_operand_scan_step(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
                                     frame->as.prepare_control.end, index);
         if (index + 1 < frame->as.prepare_control.end &&
@@ -17704,13 +17747,6 @@ BUSTER_C_INTERNAL bool c_ir_atomic_compare_orders_valid(IrMemoryOrder success, I
     return false;
 }
 
-// The words whose operand is never evaluated, as a well-known set: a call
-// inside one must not be prepared by the discover scan below, or its side
-// effects run even though the operand itself only ever folds to a constant.
-#define C_IR_UNEVALUATED_OPERAND_WORDS                                                              \
-    (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) |                            \
-     C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
-
 // Where the unevaluated operand of the sizeof or _Alignof word ending at
 // `cursor - 1` stops: the first token index past one unary-expression.
 // Prefix operators (and nested sizeof/_Alignof words, which continue the
@@ -17932,6 +17968,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
     u32* active_calls = arena_allocate(builder->temporary_arena, u32, active_capacity);
     u32 active_call_count = 0;
     u32 last_root = UINT32_MAX;
+    // Calls after a comma are lowered with their expression so the left side
+    // cannot be overtaken. Argument separators also use commas; there the
+    // expression walk's source-order choice is one valid order for unsequenced
+    // arguments. Keep the outermost comma's delimiter level until it closes
+    // or its statement ends, so unrelated later expressions prepare normally.
+    u32 comma_sequence_depth = UINT32_MAX;
     // A call in an operand only a taken branch runs is left unprepared here:
     // hoisting runs it unconditionally. The branch's own lowering prepares it
     // inside the block that runs, the way c_ir_lower_conditional_value_step
@@ -17958,6 +18000,19 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // children of an enclosing call, so the prepared-call emitter can
         // temporarily clear preparation while lowering that body.
         c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index);
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            if (comma_sequence_depth == UINT32_MAX)
+            {
+                comma_sequence_depth = lazy.depth;
+            }
+        }
+        else if (comma_sequence_depth != UINT32_MAX &&
+                 (lazy.depth < comma_sequence_depth ||
+                  (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) && lazy.depth == comma_sequence_depth)))
+        {
+            comma_sequence_depth = UINT32_MAX;
+        }
         // Every shape prepared below -- a named, builtin, indexed, member or
         // parenthesized callee -- is the token right before a `(`, and the
         // rejection at the bottom refuses anything else.  That one byte is
@@ -18205,7 +18260,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         {
             continue;
         }
-        if (c_ir_lazy_operand_scan_deferred(lazy))
+        if (c_ir_lazy_operand_scan_deferred(lazy) || comma_sequence_depth != UINT32_MAX)
         {
             if (active_call_count)
             {
@@ -23106,7 +23161,11 @@ BUSTER_C_INTERNAL bool c_ir_emit_compound_assignment(CIntegerIrBuilder* builder,
         IrValueId scale = c_ir_emit_integer_value_typed(builder, element->layout.size, false, (CToken){0}, builder->ptrdiff_type);
         right = c_ir_emit_binary_value(builder, right, scale, builder->ptrdiff_type, IR_BINARY_INTEGER_MULTIPLY, source);
     }
-    else if (!pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
+    // Ordinary compound arithmetic needs the original RHS type for promotions
+    // and the usual arithmetic conversions. Only the existing atomic RMW path
+    // needs a destination-typed operand here; non-atomic stores/results convert
+    // after c_ir_apply_operation, not before it (C17 6.5.16.2).
+    else if (atomic && !pointer_arithmetic && !c_ir_unsigned_bit_field_promotes_to_int(builder, c_ir_bit_field_from_place(builder, place)))
     {
         right = c_ir_emit_cast(builder, right, value_type, source);
         operation_right = right;
@@ -27238,6 +27297,25 @@ BUSTER_C_INTERNAL bool c_ir_lower_expression_core_consume_place(CIntegerIrBuilde
     return appended;
 }
 
+// This shortcut starts from a completed local VLA declaration, so an
+// unmapped array suffix is variable-sized rather than an incomplete object.
+// Inspect the operand's suffix, not the containing local: a[n][3] is a VLA,
+// but a[index++] has fixed array type and sizeof must not evaluate its index.
+BUSTER_C_INTERNAL bool c_ir_sizeof_vla_suffix_evaluated(CIntegerIrBuilder* builder, CEntityId entity, u32 suffix)
+{
+    CTypeId type = entity.value < builder->parse.entity_count ? builder->parse.entities[entity.value].type : C_TYPE_ID_INVALID;
+    CType* current = c_type_from_id(&builder->parse, type);
+    while (suffix && current && (current->kind == C_TYPE_ARRAY || current->kind == C_TYPE_POINTER))
+    {
+        type = current->element_type;
+        current = c_type_from_id(&builder->parse, type);
+        suffix -= 1;
+    }
+    bool result = !suffix && current && current->kind == C_TYPE_ARRAY &&
+                  builder->c_type_ir_map[type.value].value == IR_ID_UNDERLYING_INVALID;
+    return result;
+}
+
 BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builder)
 {
     CIrLowerMachine* machine = &builder->lower_machine;
@@ -27255,6 +27333,7 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
     u32 operation_count = 0;
     u32 index;
     bool expect_operand;
+    bool yielded_sizeof = false;
     // GNU __extension__ is a diagnostic-only unary marker.  Strip a leading
     // marker before the control and call preparation passes as well as in the
     // evaluator below.  In particular, glibc's assert macro prefixes a
@@ -27317,8 +27396,32 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
         goto c_ir_expression_core_loop;
     }
-    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT)
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA_CALLS)
     {
+        if (!machine->child_result.success)
+        {
+            builder->preparing_calls = state->sizeof_vla_previous_preparing_calls;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            return;
+        }
+        frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA;
+        if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                .kind = C_IR_LOWER_FRAME_EXPRESSION,
+                .as.expression = {.start = state->sizeof_vla_start, .end = state->sizeof_vla_end},
+            }))
+        {
+            builder->preparing_calls = state->sizeof_vla_previous_preparing_calls;
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+        return;
+    }
+    if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT ||
+        frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA)
+    {
+        if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA)
+        {
+            builder->preparing_calls = state->sizeof_vla_previous_preparing_calls;
+        }
         if (!machine->child_result.success)
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -27331,7 +27434,12 @@ BUSTER_C_INTERNAL void c_ir_lower_expression_core_step(CIntegerIrBuilder* builde
         value_count = state->value_count;
         operation_count = state->operation_count;
         index = state->index;
-        values[value_count++] = machine->child_result.value;
+        if (frame->stage == C_IR_LOWER_STAGE_EXPRESSION_CORE_STATEMENT)
+        {
+            values[value_count++] = machine->child_result.value;
+        }
+        // A VLA sizeof already saved its declaration-time size on the value
+        // stack. Its child supplies required effects, not a replacement size.
         expect_operand = false;
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
         goto c_ir_expression_core_loop;
@@ -27825,8 +27933,10 @@ c_ir_expression_core_loop:
             }
             u32 consumed_index = parenthesized ? operand_end : operand_end - 1;
             // A dereference of a pointer-to-VLA names the same array object
-            // as subscript zero. Use its saved size, including through groups,
-            // without reading the object or reevaluating declaration bounds.
+            // as subscript zero. Retain its declaration-time size, including
+            // through groups, but evaluate a variable-sized operand once.
+            // Evaluation forms the row address; it does not read array data
+            // or reevaluate declaration bounds.
             u32 size_start = operand_start;
             u32 size_end = operand_end;
             u32 size_dereferences = 0;
@@ -27877,6 +27987,38 @@ c_ir_expression_core_loop:
                     {
                         values[value_count++] = runtime_size;
                         expect_operand = false;
+                        if (c_ir_sizeof_vla_suffix_evaluated(builder, size_entity, suffix_index))
+                        {
+                            // The enclosing call-preparation pass skipped
+                            // this sizeof operand; discover its calls only
+                            // after its original type requires evaluation.
+                            // If this is a prepared call's argument, pause
+                            // that pass too so this nested scan can discover
+                            // the operand's calls.
+                            state->sizeof_vla_start = operand_start;
+                            state->sizeof_vla_end = operand_end;
+                            state->sizeof_vla_previous_preparing_calls = builder->preparing_calls;
+                            c_ir_expression_core_save(frame, values, operations, operation_sources, operation_cast_types,
+                                                      value_count, operation_count, consumed_index + 1, false);
+                            u32 operand_preparation_start = operand_start;
+                            while (operand_preparation_start < operand_end &&
+                                   builder->preprocess.tokens[operand_preparation_start].kind == C_TOKEN_IDENTIFIER &&
+                                   string_equal(c_token_spelling(builder->preprocess.spelling_base,
+                                                                 builder->preprocess.tokens[operand_preparation_start]),
+                                                S8("__extension__")))
+                            {
+                                operand_preparation_start += 1;
+                            }
+                            builder->preparing_calls = false;
+                            frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_SIZEOF_VLA_CALLS;
+                            if (!c_ir_prepare_calls_frame_push(builder, operand_preparation_start, operand_end))
+                            {
+                                builder->preparing_calls = state->sizeof_vla_previous_preparing_calls;
+                                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                            }
+                            yielded_sizeof = true;
+                            break;
+                        }
                         index = consumed_index;
                         continue;
                     }
@@ -28637,28 +28779,19 @@ c_ir_expression_core_loop:
         operation_cast_types[operation_count++] = IR_TYPE_ID_INVALID;
         expect_operand = true;
     }
-    if (expect_operand)
+    if (!yielded_sizeof)
     {
-        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-        return;
-    }
-    while (operation_count)
-    {
-        operation_count -= 1;
-        if (operations[operation_count] == C_CONDITIONAL_OPEN || operations[operation_count] == C_CONDITIONAL_INDEX_OPEN ||
-            !c_ir_apply_operation(builder, operations[operation_count], values, &value_count, operation_sources[operation_count],
-                                  operation_cast_types[operation_count]))
+        bool complete = !expect_operand;
+        while (complete && operation_count)
         {
-            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-            return;
+            operation_count -= 1;
+            complete = operations[operation_count] != C_CONDITIONAL_OPEN && operations[operation_count] != C_CONDITIONAL_INDEX_OPEN &&
+                       c_ir_apply_operation(builder, operations[operation_count], values, &value_count, operation_sources[operation_count],
+                                            operation_cast_types[operation_count]);
         }
+        complete = complete && value_count == 1;
+        c_ir_lower_frame_finish(builder, complete, complete ? values[0] : IR_VALUE_ID_INVALID);
     }
-    if (value_count != 1)
-    {
-        c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
-        return;
-    }
-    c_ir_lower_frame_finish(builder, true, values[0]);
 }
 
 BUSTER_C_INTERNAL IrBlockId c_ir_block_create(CIntegerIrBuilder* builder)
@@ -29401,6 +29534,54 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
+            }
+            // A literal left operand determines whether the right operand is
+            // reached. Avoid creating and lowering a disconnected right block:
+            // its edge into the join would make a value defined only on the
+            // live path appear to be used before its definition in machine IR.
+            u32 left_start = task.start;
+            u32 left_end = operation;
+            while (left_start + 2 < left_end &&
+                   c_token_is_punctuator(&builder->preprocess.tokens[left_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                   !c_ir_group_is_statement_expression(builder, left_start, left_end) &&
+                   c_ir_matching_delimiter_cached(builder, left_start, left_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                  C_PUNCTUATOR_RIGHT_PARENTHESIS) == left_end - 1)
+            {
+                left_start += 1;
+                left_end -= 1;
+            }
+            if (left_start + 1 == left_end)
+            {
+                CToken leaf = builder->preprocess.tokens[left_start];
+                bool literal = leaf.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                               (leaf.kind == C_TOKEN_IDENTIFIER &&
+                                (string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("true")) ||
+                                 string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("false"))));
+                u64 constant = 0;
+                if (literal && c_ir_constant_condition_evaluate(builder, left_start, left_end, &constant))
+                {
+                    bool is_or = operation == logical_or;
+                    if ((constant != 0) == is_or)
+                    {
+                        IrBlockId target = is_or ? task.true_block : task.false_block;
+                        if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, frame->as.condition.source))
+                        {
+                            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        tasks[frame->as.condition.task_count++] = (CIrConditionTask){
+                            .start = operation + 1,
+                            .end = task.end,
+                            .block = task.block,
+                            .true_block = task.true_block,
+                            .false_block = task.false_block,
+                        };
+                    }
+                    continue;
+                }
             }
             IrBlockId right = c_ir_block_create(builder);
             if (right.value == IR_ID_UNDERLYING_INVALID)

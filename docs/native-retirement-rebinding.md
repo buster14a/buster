@@ -97,12 +97,20 @@ Manual generated edits, edits stacked on unrecognized integration output and
 genuine conflicts remain blocked. A fresh dispatch is still required after main
 advances; this recovery does not grant automated dispatcher authority.
 
-Merge-group admission is read-only: GitHub's single-candidate synthetic commit
-must have current main first, the attested integration head second, and exactly
-the attested final tree. It resolves live publication evidence for that PR head,
+Merge-group admission is read-only: a speculative base waits until it has landed
+as current main, using the independently trusted main policy checked out at
+workflow start. A queued predecessor that changes that policy requires a fresh
+group. The synthetic commit must then have current main first, the attested
+integration head second, and exactly the attested final tree. A stale writer
+head still needs a fresh authorized dispatch and replacement group. The gate
+resolves live publication evidence for that PR head,
 including the successful latest writer attempt. Combined-head CI remains required
 on the synthetic SHA. Rebinding checks that existing generated pair in place;
 it does not refresh it into a different, untested group tree.
+The read-only rebinding workflow likewise waits for a later group's predecessor
+under independently checked-out main policy. It verifies the exact queue ref
+and admission/rebinding policy identity before reconstruction. The repository
+job has a 310-minute limit for the bounded five-hour wait.
 
 The workflow has three separately permissioned jobs:
 
@@ -131,6 +139,11 @@ a manual feature-branch rebase. The independent `API migration policy` check
 continues to enforce bounded API compatibility. Configure admission as a
 required GitHub Actions check (integration ID `15368`) without enabling strict
 required-status-check policy or removing any existing required check.
+On PR events, both read-only admission jobs check out independent live `main`
+and require that checkout to match the remote `main` before checking the writer's
+recorded base. The PR event's base SHA may still name the commit that was main
+when the PR opened. Merge groups keep their exact queued base SHA and wait for
+the predecessor to land before final admission.
 
 Evidence records base/head commits and trees, the pre-generation combined tree,
 the final tree, the old trusted rebinder revision/tree and file digests, the
@@ -191,6 +204,15 @@ tree. A bootstrap that would immediately make `main` stale therefore fails
 before publication. A schema change that the old implementation cannot
 understand must land as a backwards-compatible bootstrap first, then as a
 separate policy transition after that bootstrap is trusted.
+
+For #935, the first bootstrap admits exactly the existing support declaration
+digest and the digest of the proposed aggregate-test ledger update in the
+materializer, full-census validator, and performance binding. It classifies the
+support ledger as reviewed policy while leaving that ledger and the frozen test
+bytes intact. Once trusted, a separate policy transition may change the test,
+its exact byte/hash ledger row, and the benchmark-service profile pins. Old
+census/performance evidence remains bound to its original declaration digest;
+the matching manifest and exact declaration bytes are checked together.
 
 ### Solo-maintainer authorization
 

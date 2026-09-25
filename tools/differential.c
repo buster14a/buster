@@ -5,6 +5,7 @@
 // d_case_lane dynamically admits complete cases into the persistent lane gang;
 // d_cases_run validates and publishes case-owned evidence in registry order.
 // d_workers_self_test checks live admission, unequal cases and arena cleanup.
+// d_reference_* owns explicit reference dialect capabilities and argv policy.
 #include <buster/lib/compiler/driver/codegen_configurations.h>
 #include <signal.h>
 
@@ -45,19 +46,38 @@ struct DObservation
     DKind kind;
     u32 status;
     u32 raw_status;
+    u64 elapsed_microseconds;
     bool sanitizer;
     String8 sanitizer_report;
     String8 output;
     String8 error;
 };
 typedef struct DResult DResult;
-struct DResult { DObservation compile; DObservation link; DObservation run; bool linked; bool ran; bool verified; };
+struct DResult
+{
+    DObservation compile;
+    DObservation caller_compile;
+    DObservation link;
+    DObservation run;
+    bool caller_compiled;
+    bool caller_output_ready;
+    bool caller_ready;
+    bool linked;
+    bool ran;
+    bool verified;
+};
+typedef struct DOracleFailure DOracleFailure;
+struct DOracleFailure { String8 reason; String8 failure_phase; };
+typedef enum DReferenceDialect { D_REFERENCE_GNU, D_REFERENCE_MSVC } DReferenceDialect;
 typedef struct DSettings DSettings;
 struct DSettings
 {
     Arena* arena;
     String8 ide;
     String8 cc;
+    String8 cc_version;
+    String8 cc_target;
+    DReferenceDialect reference_dialect;
     String8 out;
     String8 include;
     SliceString8 library_paths;
@@ -73,6 +93,9 @@ struct DSettings
     SliceString8 environment_values;
     u32 rows;
     u32 timeout_seconds;
+    u32 reference_timeout_seconds;
+    u32 reference_samples;
+    bool reference_timeout_explicit;
     u32 reduce_limit;
     bool verify;
     bool sanitize_oracle;
@@ -254,6 +277,13 @@ BUSTER_GLOBAL_LOCAL String8 d_reference_compiler(Arena* arena, String8 file)
     bool explicit_path = d_contains(file, S8("/")) || d_contains(file, S8("\\"));
     String8 result = explicit_path ? os_path_absolute(arena, file, true) : executable_resolve_in_path(arena, file);
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_reference_capabilities(DSettings* settings, bool native_windows, bool custom_source)
+{
+    bool valid = settings->reference_dialect == D_REFERENCE_GNU ||
+        (native_windows && custom_source && !settings->sanitize_oracle && settings->reduce_limit == 0);
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL String8 const d_sanitizer_environment_names[] = {
@@ -565,7 +595,8 @@ BUSTER_GLOBAL_LOCAL DObservation d_wait_observation(ProcessWaitResult wait)
     return observation;
 }
 
-BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 command, String8 prefix)
+BUSTER_GLOBAL_LOCAL DObservation d_observe_with_timeout(DSettings* settings, SliceString8 command,
+    String8 prefix, u32 timeout_seconds)
 {
     Arena* arena = settings->arena;
     // NUL-delimited argv is lossless, including whitespace, quotes and newlines.
@@ -623,8 +654,10 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
     DObservation observation = {.kind = D_SPAWN};
     if (spawn.handle)
     {
-        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, (u64)settings->timeout_seconds * 1000000);
+        ProcessWaitResult wait = os_process_wait_deadline(arena, spawn, (u64)timeout_seconds * 1000000);
         observation = d_wait_observation(wait);
+        u64 elapsed = os_now_microseconds() - start;
+        observation.elapsed_microseconds = elapsed;
 #if BUSTER_LINUX || BUSTER_MACOS
         if (wait.process_group_reservation_retained)
         {
@@ -640,16 +673,22 @@ BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 com
 #endif
         d_collect_sanitizer_report(settings, prefix, sanitizer_report_base, process_identifier, &observation);
     }
+    else { observation.elapsed_microseconds = os_now_microseconds() - start; }
     d_write_evidence(settings, string_format(arena, S8("{S8}.stdout"), prefix), observation.output);
     d_write_evidence(settings, string_format(arena, S8("{S8}.stderr"), prefix), observation.error);
-    u64 elapsed = os_now_microseconds() - start;
     if (settings->report)
     {
         int written = fprintf(settings->report, "%.*s\t%u\t%u\t%u\t%u\t%llu\n", (int)prefix.length, prefix.pointer,
-            (unsigned)observation.kind, observation.status, observation.raw_status, (unsigned)observation.sanitizer, (unsigned long long)elapsed);
+            (unsigned)observation.kind, observation.status, observation.raw_status, (unsigned)observation.sanitizer,
+            (unsigned long long)observation.elapsed_microseconds);
         settings->io_failed |= written < 0 || fflush(settings->report) != 0;
     }
     return observation;
+}
+
+BUSTER_GLOBAL_LOCAL DObservation d_observe(DSettings* settings, SliceString8 command, String8 prefix)
+{
+    return d_observe_with_timeout(settings, command, prefix, settings->timeout_seconds);
 }
 
 BUSTER_GLOBAL_LOCAL bool d_number(String8 text, u32* value)
@@ -743,28 +782,81 @@ BUSTER_GLOBAL_LOCAL u32 d_matrix(DConfig* configs, u32 capacity)
 // Source-only flags belong to compilation; sanitizer runtime flags also belong
 // to the final link. Explicit library paths make the Visual Studio developer
 // shell's LIB contract visible to child compilers that do not consume LIB.
-BUSTER_GLOBAL_LOCAL u64 d_caller_arguments(DSettings* settings, DCase test, bool compile, String8* argv)
+BUSTER_GLOBAL_LOCAL u64 d_caller_arguments(DSettings* settings, DCase test, bool compile, bool optimize, String8* argv)
 {
     Arena* arena = settings->arena;
     u64 count = 0;
     argv[count++] = settings->cc;
-    if (compile)
+    if (settings->reference_dialect == D_REFERENCE_MSVC)
     {
-        argv[count++] = S8("-O0");
-        argv[count++] = S8("-fwrapv");
-        argv[count++] = S8("-fno-strict-aliasing");
-        argv[count++] = S8("-funsigned-char");
+        argv[count++] = S8("/nologo");
+        if (compile)
+        {
+            argv[count++] = S8("/std:c11");
+            argv[count++] = S8("/TC");
+            argv[count++] = S8("/J");
+            argv[count++] = optimize ? S8("/O2") : S8("/Od");
+            if (test.include.length) { argv[count++] = string_format(arena, S8("/I{S8}"), test.include); }
+            if (settings->include.length) { argv[count++] = string_format(arena, S8("/I{S8}"), settings->include); }
+        }
     }
-    if (settings->sanitize_oracle)
+    else
     {
-        argv[count++] = S8("-fsanitize=address,undefined");
-        argv[count++] = S8("-fno-sanitize-recover=all");
+        if (compile)
+        {
+            argv[count++] = optimize ? S8("-O2") : S8("-O0");
+            argv[count++] = S8("-fwrapv");
+            argv[count++] = S8("-fno-strict-aliasing");
+            argv[count++] = S8("-funsigned-char");
+        }
+        if (settings->sanitize_oracle)
+        {
+            argv[count++] = S8("-fsanitize=address,undefined");
+            argv[count++] = S8("-fno-sanitize-recover=all");
+        }
+        if (compile && test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
+        if (compile && settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
+        for (u64 index = 0; index < settings->library_paths.length; index += 1)
+        {
+            argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
+        }
     }
-    if (compile && test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
-    if (compile && settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
-    for (u64 index = 0; index < settings->library_paths.length; index += 1)
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u64 d_reference_compile_arguments(DSettings* settings, DCase test, String8 source, String8 object,
+                                                       bool optimize, String8* argv)
+{
+    u64 count = d_caller_arguments(settings, test, true, optimize, argv);
+    argv[count++] = source;
+    argv[count++] = S8("/c");
+    argv[count++] = string_format(settings->arena, S8("/Fo{S8}"), object);
+    return count;
+}
+
+BUSTER_GLOBAL_LOCAL u64 d_reference_link_arguments(DSettings* settings, DCase test, String8 caller, String8 object,
+                                                    String8 executable, bool compile_caller, String8* argv)
+{
+    u64 count = d_caller_arguments(settings, test, compile_caller, false, argv);
+    if (caller.length) { argv[count++] = caller; }
+    argv[count++] = object;
+    if (settings->reference_dialect == D_REFERENCE_MSVC)
     {
-        argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
+        argv[count++] = string_format(settings->arena, S8("/Fe{S8}"), executable);
+        argv[count++] = S8("/link");
+        for (u64 index = 0; index < settings->library_paths.length; index += 1)
+        {
+            argv[count++] = string_format(settings->arena, S8("/LIBPATH:{S8}"), settings->library_paths.pointer[index]);
+        }
+        argv[count++] = S8("legacy_stdio_definitions.lib");
+    }
+    else
+    {
+#if BUSTER_LINUX
+        argv[count++] = S8("-no-pie");
+#endif
+        argv[count++] = S8("-o");
+        argv[count++] = executable;
     }
     return count;
 }
@@ -779,17 +871,26 @@ BUSTER_GLOBAL_LOCAL String8 d_prepare_caller(DSettings* settings, DCase test, St
     Arena* arena = settings->arena;
     String8 caller_directory = path_join(arena, directory, S8("caller"));
     make_directory_recursive(arena, caller_directory);
-    String8 object = path_join(arena, caller_directory, S8("caller.o"));
+    String8 object = path_join(arena, caller_directory,
+        settings->reference_dialect == D_REFERENCE_MSVC ? S8("caller.obj") : S8("caller.o"));
     os_file_delete(object);
     bool ready = false;
     if (!path_exists(arena, object) && !settings->io_failed)
     {
         String8* argv = arena_allocate(arena, String8, 40 + settings->library_paths.length);
-        u64 count = d_caller_arguments(settings, test, true, argv);
-        argv[count++] = test.host;
-        argv[count++] = S8("-c");
-        argv[count++] = S8("-o");
-        argv[count++] = object;
+        u64 count = 0;
+        if (settings->reference_dialect == D_REFERENCE_MSVC)
+        {
+            count = d_reference_compile_arguments(settings, test, test.host, object, false, argv);
+        }
+        else
+        {
+            count = d_caller_arguments(settings, test, true, false, argv);
+            argv[count++] = test.host;
+            argv[count++] = S8("-c");
+            argv[count++] = S8("-o");
+            argv[count++] = object;
+        }
         DObservation compile = d_observe(settings, (SliceString8){.pointer = argv, .length = count},
             path_join(arena, caller_directory, S8("compile")));
         ready = d_caller_ready(compile, path_exists(arena, object), settings->io_failed);
@@ -809,11 +910,19 @@ BUSTER_GLOBAL_LOCAL String8 d_prepare_caller(DSettings* settings, DCase test, St
     return ready ? object : (String8){0};
 }
 
+BUSTER_GLOBAL_LOCAL u32 d_process_timeout_seconds(DSettings* settings, bool reference)
+{
+    return reference && settings->reference_timeout_seconds ?
+        settings->reference_timeout_seconds : settings->timeout_seconds;
+}
+
 BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig config, bool host, bool optimize, String8 directory, String8 caller_object)
 {
     Arena* arena = settings->arena;
+    u32 timeout_seconds = d_process_timeout_seconds(settings, host);
     make_directory_recursive(arena, directory);
-    String8 object = path_join(arena, directory, S8("subject.o"));
+    String8 object = path_join(arena, directory,
+        settings->reference_dialect == D_REFERENCE_MSVC ? S8("subject.obj") : S8("subject.o"));
 #if BUSTER_WINDOWS
     String8 executable = path_join(arena, directory, S8("program.exe"));
 #else
@@ -823,57 +932,63 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
     os_file_delete(object);
     os_file_delete(executable);
     String8* argv = arena_allocate(arena, String8, 40 + settings->library_paths.length);
+    bool msvc_host = host && settings->reference_dialect == D_REFERENCE_MSVC;
     u64 count = 0;
-    argv[count++] = host ? settings->cc : settings->ide;
-    if (host)
+    if (msvc_host)
     {
-        argv[count++] = optimize ? S8("-O2") : S8("-O0");
-        if (settings->sanitize_oracle)
-        {
-            argv[count++] = S8("-fsanitize=address,undefined");
-            argv[count++] = S8("-fno-sanitize-recover=all");
-        }
+        count = d_reference_compile_arguments(settings, test, test.source, object, optimize, argv);
     }
     else
     {
-        argv[count++] = S8("cc");
-        if (d_optimizations[config.optimization].length) { argv[count++] = d_optimizations[config.optimization]; }
-        String8 allocator = d_allocators[config.allocator];
-        if (string_equal(allocator, S8("alias-none"))) { argv[count++] = S8("-fno-register-allocator"); }
-        else if (!string_equal(allocator, S8("default"))) { argv[count++] = string_format(arena, S8("-fregister-allocator={S8}"), allocator); }
-        if ((test.strict_mir || settings->strict_mir) && d_mir_config(config)) { argv[count++] = S8("-fno-machine-fallback"); }
-        argv[count++] = (config.promotion & 1) ? S8("-fcanonical-local-promotion") : S8("-fno-canonical-local-promotion");
-        argv[count++] = (config.promotion & 2) ? S8("-ftarget-local-promotion") : S8("-fno-target-local-promotion");
-        argv[count++] = (config.promotion & 4) ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa");
-        if (settings->verify) { argv[count++] = S8("-fverify-codegen"); }
-    }
-    argv[count++] = S8("-fwrapv");
-    argv[count++] = S8("-fno-strict-aliasing");
-    argv[count++] = S8("-funsigned-char");
-    if (test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
-    if (settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
-    for (u64 index = 0; index < settings->library_paths.length; index += 1)
-    {
-        argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
-    }
-    argv[count++] = test.source;
-    if (test.host.length && host) { argv[count++] = test.host; }
-    bool object_only = (!host && test.host.length) || test.reject;
-    if (object_only) { argv[count++] = S8("-c"); }
+        argv[count++] = host ? settings->cc : settings->ide;
+        if (host)
+        {
+            argv[count++] = optimize ? S8("-O2") : S8("-O0");
+            if (settings->sanitize_oracle)
+            {
+                argv[count++] = S8("-fsanitize=address,undefined");
+                argv[count++] = S8("-fno-sanitize-recover=all");
+            }
+        }
+        else
+        {
+            argv[count++] = S8("cc");
+            if (d_optimizations[config.optimization].length) { argv[count++] = d_optimizations[config.optimization]; }
+            String8 allocator = d_allocators[config.allocator];
+            if (string_equal(allocator, S8("alias-none"))) { argv[count++] = S8("-fno-register-allocator"); }
+            else if (!string_equal(allocator, S8("default"))) { argv[count++] = string_format(arena, S8("-fregister-allocator={S8}"), allocator); }
+            if ((test.strict_mir || settings->strict_mir) && d_mir_config(config)) { argv[count++] = S8("-fno-machine-fallback"); }
+            argv[count++] = (config.promotion & 1) ? S8("-fcanonical-local-promotion") : S8("-fno-canonical-local-promotion");
+            argv[count++] = (config.promotion & 2) ? S8("-ftarget-local-promotion") : S8("-fno-target-local-promotion");
+            argv[count++] = (config.promotion & 4) ? S8("-ffrontend-ssa") : S8("-fno-frontend-ssa");
+            if (settings->verify) { argv[count++] = S8("-fverify-codegen"); }
+        }
+        argv[count++] = S8("-fwrapv");
+        argv[count++] = S8("-fno-strict-aliasing");
+        argv[count++] = S8("-funsigned-char");
+        if (test.include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), test.include); }
+        if (settings->include.length) { argv[count++] = string_format(arena, S8("-I{S8}"), settings->include); }
+        for (u64 index = 0; index < settings->library_paths.length; index += 1)
+        {
+            argv[count++] = string_format(arena, S8("-L{S8}"), settings->library_paths.pointer[index]);
+        }
+        argv[count++] = test.source;
+        if (test.host.length && host) { argv[count++] = test.host; }
+        bool object_only = (!host && test.host.length) || test.reject;
+        if (object_only) { argv[count++] = S8("-c"); }
 #if BUSTER_LINUX
-    if (host && !object_only) { argv[count++] = S8("-no-pie"); }
+        if (host && !object_only) { argv[count++] = S8("-no-pie"); }
 #endif
 #if BUSTER_WINDOWS
-    // The Windows UCRT does not export the legacy direct printf symbol used by
-    // the headerless observables and generated-source corpus. Keep those exact
-    // sources and link Microsoft's compatibility definitions into both sides
-    // of the differential instead of pruning the cases on this host.
-    if (!object_only && !test.host.length) { argv[count++] = S8("-llegacy_stdio_definitions"); }
+        // Headerless Buster printf needs the UCRT compatibility definitions.
+        if (!object_only && !test.host.length) { argv[count++] = S8("-llegacy_stdio_definitions"); }
 #endif
-    argv[count++] = S8("-o");
-    argv[count++] = object_only ? object : executable;
+        argv[count++] = S8("-o");
+        argv[count++] = object_only ? object : executable;
+    }
     DResult result = {0};
-    result.compile = d_observe(settings, (SliceString8){.pointer = argv, .length = count}, path_join(arena, directory, S8("compile")));
+    result.compile = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = count},
+        path_join(arena, directory, S8("compile")), timeout_seconds);
     result.verified = host || !settings->verify;
     if (!host && settings->verify && d_success(result.compile) && !test.reject)
     {
@@ -882,24 +997,44 @@ BUSTER_GLOBAL_LOCAL DResult d_execute(DSettings* settings, DCase test, DConfig c
     if (!test.reject && d_success(result.compile))
     {
         bool executable_ready = path_exists(arena, executable);
-        if (!host && test.host.length && path_exists(arena, object))
+        if ((msvc_host || (!host && test.host.length)) && path_exists(arena, object))
         {
-            count = d_caller_arguments(settings, test, !caller_object.length, argv);
-            argv[count++] = caller_object.length ? caller_object : test.host;
-            argv[count++] = object;
-#if BUSTER_LINUX
-            argv[count++] = S8("-no-pie");
-#endif
-            argv[count++] = S8("-o");
-            argv[count++] = executable;
-            result.link = d_observe(settings, (SliceString8){.pointer = argv, .length = count}, path_join(arena, directory, S8("link")));
             result.linked = true;
-            executable_ready = d_success(result.link) && path_exists(arena, executable);
+            String8 link_caller = caller_object;
+            bool caller_ready = true;
+            if (msvc_host && test.host.length)
+            {
+                link_caller = path_join(arena, directory, S8("oracle-caller.obj"));
+                os_file_delete(link_caller);
+                count = d_reference_compile_arguments(settings, test, test.host, link_caller, optimize, argv);
+                result.caller_compile = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = count},
+                    path_join(arena, directory, S8("caller-compile")), timeout_seconds);
+                result.caller_compiled = true;
+                result.caller_output_ready = path_exists(arena, link_caller);
+                result.caller_ready = d_caller_ready(result.caller_compile, result.caller_output_ready, settings->io_failed);
+                caller_ready = result.caller_ready;
+            }
+            if (caller_ready)
+            {
+                if (settings->reference_dialect == D_REFERENCE_MSVC)
+                {
+                    count = d_reference_link_arguments(settings, test, link_caller, object, executable, false, argv);
+                }
+                else
+                {
+                    count = d_reference_link_arguments(settings, test, link_caller.length ? link_caller : test.host,
+                        object, executable, !link_caller.length, argv);
+                }
+                result.link = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = count},
+                    path_join(arena, directory, S8("link")), timeout_seconds);
+            }
+            executable_ready = caller_ready && d_success(result.link) && path_exists(arena, executable);
         }
         if (executable_ready)
         {
             argv[0] = executable;
-            result.run = d_observe(settings, (SliceString8){.pointer = argv, .length = 1}, path_join(arena, directory, S8("run")));
+            result.run = d_observe_with_timeout(settings, (SliceString8){.pointer = argv, .length = 1},
+                path_join(arena, directory, S8("run")), timeout_seconds);
             result.ran = true;
         }
     }
@@ -923,13 +1058,177 @@ BUSTER_GLOBAL_LOCAL u32 d_classify(DResult candidate, DResult reference, bool re
     return failure;
 }
 
-BUSTER_GLOBAL_LOCAL bool d_oracle_valid(DResult o0, DResult o2, DCase test)
+BUSTER_GLOBAL_LOCAL DOracleFailure d_observation_failure(Arena* arena, String8 reason_prefix,
+    String8 failure_phase, DObservation observation)
 {
-    bool trusted = test.reject ?
-        d_normal(o0.compile) && o0.compile.status != 0 && d_normal(o2.compile) && o2.compile.status != 0 :
-        o0.ran && o2.ran && d_normal(o0.run) && d_normal(o2.run) && d_difference(o0.run, o2.run) == 0;
-    if (test.require_zero && !test.reject) { trusted &= o0.run.status == 0 && o2.run.status == 0; }
-    return trusted;
+    String8 kind = S8("unexpected");
+    if (observation.kind == D_TIMEOUT) { kind = S8("timeout"); }
+    else if (observation.kind == D_SPAWN) { kind = S8("spawn-failure"); }
+    else if (observation.kind == D_WAIT) { kind = S8("wait-failure"); }
+    else if (observation.kind == D_SIGNAL) { kind = S8("signal"); }
+    else if (observation.kind == D_EXIT && observation.sanitizer) { kind = S8("sanitizer-report"); }
+    else if (observation.kind == D_EXIT && observation.status != 0) { kind = S8("nonzero-exit"); }
+    DOracleFailure result = {
+        .reason = string_format(arena, S8("{S8}-{S8}"), reason_prefix, kind),
+        .failure_phase = failure_phase,
+    };
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL DOracleFailure d_oracle_result_failure(Arena* arena, String8 prefix, DResult observation,
+    bool reject)
+{
+    DOracleFailure result = {0};
+    String8 compile_reason = string_format(arena, S8("{S8}-compile"), prefix);
+    String8 compile_phase = string_format(arena, S8("{S8}/compile"), prefix);
+    if (reject)
+    {
+        if (!d_normal(observation.compile))
+        {
+            result = d_observation_failure(arena, compile_reason, compile_phase, observation.compile);
+        }
+        else if (observation.compile.status == 0)
+        {
+            result.reason = string_format(arena, S8("{S8}-accepted-rejected-source"), prefix);
+            result.failure_phase = compile_phase;
+        }
+    }
+    else if (!d_success(observation.compile))
+    {
+        result = d_observation_failure(arena, compile_reason, compile_phase, observation.compile);
+    }
+    else if (observation.caller_compiled && !observation.caller_ready)
+    {
+        String8 caller_reason = string_format(arena, S8("{S8}-caller-compile"), prefix);
+        String8 caller_phase = string_format(arena, S8("{S8}/caller-compile"), prefix);
+        if (!d_success(observation.caller_compile))
+        {
+            result = d_observation_failure(arena, caller_reason, caller_phase, observation.caller_compile);
+        }
+        else if (!observation.caller_output_ready)
+        {
+            result.reason = string_format(arena, S8("{S8}-caller-object-missing"), prefix);
+            result.failure_phase = caller_phase;
+        }
+        else
+        {
+            result.reason = string_format(arena, S8("{S8}-caller-compile-evidence-failure"), prefix);
+            result.failure_phase = caller_phase;
+        }
+    }
+    else if (!observation.ran)
+    {
+        if (!observation.linked)
+        {
+            result.reason = string_format(arena, S8("{S8}-compile-output-missing"), prefix);
+            result.failure_phase = compile_phase;
+        }
+        else if (!d_success(observation.link))
+        {
+            result = d_observation_failure(arena, string_format(arena, S8("{S8}-link"), prefix),
+                string_format(arena, S8("{S8}/link"), prefix), observation.link);
+        }
+        else
+        {
+            result.reason = string_format(arena, S8("{S8}-link-output-missing"), prefix);
+            result.failure_phase = string_format(arena, S8("{S8}/link"), prefix);
+        }
+    }
+    else if (!d_normal(observation.run))
+    {
+        result = d_observation_failure(arena, string_format(arena, S8("{S8}-run"), prefix),
+            string_format(arena, S8("{S8}/run"), prefix), observation.run);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL DOracleFailure d_oracle_failure_reason(Arena* arena, DResult o0, DResult o2, DCase test)
+{
+    DOracleFailure failure = d_oracle_result_failure(arena, S8("host-o0"), o0, test.reject);
+    if (!failure.reason.length) { failure = d_oracle_result_failure(arena, S8("host-o2"), o2, test.reject); }
+    if (!failure.reason.length && !test.reject && d_difference(o0.run, o2.run))
+    {
+        failure.reason = S8("host-o0-o2-observations-disagree");
+        failure.failure_phase = S8("host-o0/run+host-o2/run");
+    }
+    if (!failure.reason.length && test.require_zero && !test.reject && (o0.run.status != 0 || o2.run.status != 0))
+    {
+        failure.reason = S8("host-oracle-nonzero-exit");
+        failure.failure_phase = o0.run.status != 0 ? S8("host-o0/run") : S8("host-o2/run");
+    }
+    return failure;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_oracle_valid(Arena* arena, DResult o0, DResult o2, DCase test)
+{
+    DOracleFailure failure = d_oracle_failure_reason(arena, o0, o2, test);
+    return !failure.reason.length;
+}
+
+BUSTER_GLOBAL_LOCAL void d_sort_elapsed_samples(u64* values, u32 count)
+{
+    for (u32 index = 1; index < count; index += 1)
+    {
+        u64 value = values[index];
+        u32 before = index;
+        while (before && values[before - 1] > value)
+        {
+            values[before] = values[before - 1];
+            before -= 1;
+        }
+        values[before] = value;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL u64 d_elapsed_percentile(u64* sorted_values, u32 count, u32 percentile)
+{
+    u32 rank = (count * percentile + 99) / 100;
+    u32 index = rank ? rank - 1 : 0;
+    u64 result = sorted_values[BUSTER_MIN(index, count - 1)];
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool d_measure_reference_samples(DSettings* settings, DCase test, String8 directory, bool optimize)
+{
+    Arena* arena = settings->arena;
+    u32 sample_count = settings->reference_samples;
+    u64* elapsed = arena_allocate(arena, u64, sample_count);
+    String8 optimization = optimize ? S8("o2") : S8("o0");
+    bool valid = true;
+    for (u32 index = 0; valid && index < sample_count; index += 1)
+    {
+        String8 sample_name = string_format(arena, S8("reference-samples/{S8}-{u32}"), optimization, index);
+        String8 sample_directory = path_join(arena, directory, sample_name);
+        String8 object = path_join(arena, sample_directory, S8("subject.obj"));
+        make_directory_recursive(arena, sample_directory);
+        String8* argv = arena_allocate(arena, String8, 40 + settings->library_paths.length);
+        u64 argument_count = d_reference_compile_arguments(settings, test, test.source, object, optimize, argv);
+        String8 prefix = path_join(arena, sample_directory, S8("compile"));
+        DObservation observation = d_observe_with_timeout(settings,
+            (SliceString8){.pointer = argv, .length = argument_count}, prefix,
+            d_process_timeout_seconds(settings, true));
+        if (!d_success(observation))
+        {
+            DOracleFailure failure = d_observation_failure(arena,
+                string_format(arena, S8("reference-{S8}-compile"), optimization), prefix, observation);
+            String8 process_record = path_join(arena, directory, S8("processes.tsv"));
+            d_log(settings, string_format(arena,
+                S8("DIFFERENTIAL_FAIL case={S8} reference_sampling=invalid reason={S8} reference_timeout_seconds={u32} failure_phase={S8} case_evidence={S8} process_record={S8}\n"),
+                test.name, failure.reason, settings->reference_timeout_seconds, failure.failure_phase, directory, process_record));
+            valid = false;
+        }
+        else { elapsed[index] = observation.elapsed_microseconds; }
+    }
+    if (valid)
+    {
+        d_sort_elapsed_samples(elapsed, sample_count);
+        d_log(settings, string_format(arena,
+            S8("MSVC_REFERENCE_TIMING case={S8} optimization={S8} samples={u32} min_us={u64} p50_us={u64} p90_us={u64} max_us={u64}\n"),
+            test.name, optimize ? S8("O2") : S8("O0"), sample_count, elapsed[0],
+            d_elapsed_percentile(elapsed, sample_count, 50), d_elapsed_percentile(elapsed, sample_count, 90),
+            elapsed[sample_count - 1]));
+    }
+    return valid;
 }
 
 // Source reduction never rewrites fixed ABI callers. Preserve the exact runtime
@@ -974,7 +1273,7 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
             String8 trial = path_join(arena, directory, string_format(arena, S8("trial-{u32}"), trials++));
             DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, trial, S8("host-o0")), (String8){0});
             DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, trial, S8("host-o2")), (String8){0});
-            if (d_oracle_valid(o0, o2, reduced))
+            if (d_oracle_valid(arena, o0, o2, reduced))
             {
                 DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, trial, S8("buster")), (String8){0});
                 if (d_classify(actual, o0, false) == signature)
@@ -994,7 +1293,7 @@ BUSTER_GLOBAL_LOCAL void d_reduce(DSettings* settings, DCase test, DConfig confi
     DResult o0 = d_execute(settings, reduced, config, true, false, path_join(arena, directory, S8("final-host-o0")), (String8){0});
     DResult o2 = d_execute(settings, reduced, config, true, true, path_join(arena, directory, S8("final-host-o2")), (String8){0});
     DResult actual = d_execute(settings, reduced, config, false, false, path_join(arena, directory, S8("final-buster")), (String8){0});
-    bool confirmed = d_oracle_valid(o0, o2, reduced) && d_classify(actual, o0, false) == signature;
+    bool confirmed = d_oracle_valid(arena, o0, o2, reduced) && d_classify(actual, o0, false) == signature;
     d_write_evidence(settings, path_join(arena, directory, S8("reduction.txt")),
         string_format(arena, S8("version=1 original_bytes={u64} reduced_bytes={u64} trials={u32} signature={u32} confirmed={u32}\n"),
             input.length, best.length, trials, signature, (u32)confirmed));
@@ -1022,16 +1321,30 @@ BUSTER_GLOBAL_LOCAL u32 d_case_run(DSettings* settings, DCase test, DConfig* con
         ByteSlice fixed = file_read(arena, test.host, (FileReadOptions){0});
         d_write_evidence(settings, path_join(arena, directory, S8("host.c")), (String8){.pointer = (char8*)fixed.pointer, .length = fixed.length});
     }
+    bool samples_o0_valid = true, samples_o2_valid = true;
+    if (settings->reference_samples)
+    {
+        samples_o0_valid = d_measure_reference_samples(settings, test, directory, false);
+        samples_o2_valid = samples_o0_valid && d_measure_reference_samples(settings, test, directory, true);
+    }
+    bool reference_samples_valid = samples_o0_valid && samples_o2_valid;
     DResult o0 = d_execute(settings, test, configs[0], true, false, path_join(arena, directory, S8("host-o0")), (String8){0});
     DResult o2 = d_execute(settings, test, configs[0], true, true, path_join(arena, directory, S8("host-o2")), (String8){0});
-    bool trusted = d_oracle_valid(o0, o2, test);
-    u32 failures = trusted ? 0 : 1;
+    DOracleFailure oracle_failure = d_oracle_failure_reason(arena, o0, o2, test);
+    bool trusted = !oracle_failure.reason.length;
+    u32 failures = (trusted ? 0 : 1) + (reference_samples_valid ? 0 : 1);
     DObservation diagnostics = {0};
     bool reduced = false;
-    if (!trusted) { d_log(settings, string_format(arena, S8("DIFFERENTIAL_FAIL case={S8} independent_oracle=invalid\n"), test.name)); }
+    if (!trusted)
+    {
+        String8 process_record = path_join(arena, directory, S8("processes.tsv"));
+        d_log(settings, string_format(arena,
+            S8("DIFFERENTIAL_FAIL case={S8} independent_oracle=invalid reason={S8} reference_timeout_seconds={u32} failure_phase={S8} case_evidence={S8} process_record={S8}\n"),
+            test.name, oracle_failure.reason, settings->reference_timeout_seconds, oracle_failure.failure_phase, directory, process_record));
+    }
     String8 caller_object = {0};
-    bool ready = trusted;
-    if (trusted && test.host.length && !test.reject)
+    bool ready = trusted && reference_samples_valid;
+    if (ready && test.host.length && !test.reject)
     {
         // Allocate before row scratch checkpoints. The object is case-local,
         // freshly built, and never enters the independent reference/reducer.
@@ -1939,8 +2252,32 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
     errors += d_classify(result, result, false) == 0; // Shared rejection is not a pass.
     result.compile.status = 0; result.run.status = 37;
     errors += d_classify(result, result, false) != 0; // An agreed nonzero program exit is valid.
-    errors += d_oracle_valid(result, result, (DCase){.require_zero = true});
-    errors += !d_oracle_valid(result, result, (DCase){0});
+    errors += d_oracle_valid(arena, result, result, (DCase){.require_zero = true});
+    errors += !d_oracle_valid(arena, result, result, (DCase){0});
+    DResult oracle_pair = {.compile = {.kind = D_EXIT}, .ran = true, .run = {.kind = D_EXIT}};
+    DResult timed_out_oracle = oracle_pair;
+    timed_out_oracle.compile.kind = D_TIMEOUT;
+    DOracleFailure oracle_failure = d_oracle_failure_reason(arena, timed_out_oracle, oracle_pair, (DCase){0});
+    errors += !string_equal(oracle_failure.reason, S8("host-o0-compile-timeout")) ||
+        !string_equal(oracle_failure.failure_phase, S8("host-o0/compile"));
+    DResult spawn_failed_oracle = oracle_pair;
+    spawn_failed_oracle.compile.kind = D_SPAWN;
+    oracle_failure = d_oracle_failure_reason(arena, spawn_failed_oracle, oracle_pair, (DCase){0});
+    errors += !string_equal(oracle_failure.reason, S8("host-o0-compile-spawn-failure"));
+    DResult disagreeing_oracle = oracle_pair;
+    disagreeing_oracle.run.output = S8("different");
+    oracle_failure = d_oracle_failure_reason(arena, oracle_pair, disagreeing_oracle, (DCase){0});
+    errors += !string_equal(oracle_failure.reason, S8("host-o0-o2-observations-disagree"));
+    DResult timed_out_caller = oracle_pair;
+    timed_out_caller.caller_compiled = true;
+    timed_out_caller.caller_compile.kind = D_TIMEOUT;
+    oracle_failure = d_oracle_failure_reason(arena, timed_out_caller, oracle_pair, (DCase){0});
+    errors += !string_equal(oracle_failure.reason, S8("host-o0-caller-compile-timeout"));
+    u64 elapsed_samples[] = {500, 100, 400, 300, 200};
+    d_sort_elapsed_samples(elapsed_samples, BUSTER_ARRAY_LENGTH(elapsed_samples));
+    errors += elapsed_samples[0] != 100 || elapsed_samples[4] != 500 ||
+        d_elapsed_percentile(elapsed_samples, BUSTER_ARRAY_LENGTH(elapsed_samples), 50) != 300 ||
+        d_elapsed_percentile(elapsed_samples, BUSTER_ARRAY_LENGTH(elapsed_samples), 90) != 500;
     result.ran = false;
     errors += d_classify(result, result, false) != 150; // No artifact/run cannot pass.
     result.linked = true; result.link.status = 1;
@@ -1968,7 +2305,12 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
                       matrix[left].promotion == matrix[right].promotion;
         }
     }
-    DSettings settings = {.arena = arena, .timeout_seconds = 1};
+    DSettings timeout_settings = {.timeout_seconds = 10, .reference_timeout_seconds = 60};
+    DSettings inherited_timeout_settings = {.timeout_seconds = 17};
+    errors += d_process_timeout_seconds(&timeout_settings, false) != 10 ||
+        d_process_timeout_seconds(&timeout_settings, true) != 60 ||
+        d_process_timeout_seconds(&inherited_timeout_settings, true) != 17;
+    DSettings settings = {.arena = arena, .timeout_seconds = 5, .reference_timeout_seconds = 1};
     String8 caller_library_paths[] = {S8("first library"), S8("second-library")};
     DSettings caller_settings = {.arena = arena, .cc = S8("compiler with spaces"), .include = S8("global include"),
                                  .library_paths = (SliceString8)BUSTER_ARRAY_TO_SLICE(caller_library_paths)};
@@ -1977,7 +2319,7 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
     {
         caller_settings.sanitize_oracle = sanitize != 0;
         String8 argv[40];
-        u64 argc = d_caller_arguments(&caller_settings, caller_case, true, argv);
+        u64 argc = d_caller_arguments(&caller_settings, caller_case, true, false, argv);
         String8 expected[] = {S8("compiler with spaces"), S8("-O0"), S8("-fwrapv"), S8("-fno-strict-aliasing"), S8("-funsigned-char")};
         errors += argc != 9 + sanitize * 2;
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expected); index += 1) { errors += !string_equal(argv[index], expected[index]); }
@@ -1990,7 +2332,7 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         errors += !string_equal(argv[argc - 3], S8("-Iglobal include"));
         errors += !string_equal(argv[argc - 2], S8("-Lfirst library"));
         errors += !string_equal(argv[argc - 1], S8("-Lsecond-library"));
-        argc = d_caller_arguments(&caller_settings, caller_case, false, argv);
+        argc = d_caller_arguments(&caller_settings, caller_case, false, false, argv);
         errors += argc != 3 + sanitize * 2 || !string_equal(argv[0], caller_settings.cc);
         if (sanitize)
         {
@@ -1999,6 +2341,50 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         }
         errors += !string_equal(argv[argc - 2], S8("-Lfirst library"));
         errors += !string_equal(argv[argc - 1], S8("-Lsecond-library"));
+    }
+    DSettings msvc_settings = caller_settings;
+    msvc_settings.reference_dialect = D_REFERENCE_MSVC;
+    msvc_settings.sanitize_oracle = false;
+    errors += !d_reference_capabilities(&msvc_settings, true, true);
+    errors += d_reference_capabilities(&msvc_settings, false, true);
+    errors += d_reference_capabilities(&msvc_settings, true, false);
+    msvc_settings.sanitize_oracle = true;
+    errors += d_reference_capabilities(&msvc_settings, true, true);
+    msvc_settings.sanitize_oracle = false;
+    msvc_settings.reduce_limit = 1;
+    errors += d_reference_capabilities(&msvc_settings, true, true);
+    msvc_settings.reduce_limit = 0;
+    {
+        String8 argv[40];
+        String8 compile_expected[] = {S8("compiler with spaces"), S8("/nologo"), S8("/std:c11"), S8("/TC"),
+            S8("/J"), S8("/Od"), S8("/Isource include"), S8("/Iglobal include"), S8("fixed caller.c"),
+            S8("/c"), S8("/Foobject path/caller.obj")};
+        u64 argc = d_reference_compile_arguments(&msvc_settings, caller_case, caller_case.host,
+            S8("object path/caller.obj"), false, argv);
+        errors += argc != BUSTER_ARRAY_LENGTH(compile_expected);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(compile_expected); index += 1)
+        {
+            errors += !string_equal(argv[index], compile_expected[index]);
+        }
+        argc = d_reference_compile_arguments(&msvc_settings, caller_case, S8("subject path/source.c"),
+            S8("object path/subject.obj"), true, argv);
+        errors += argc != BUSTER_ARRAY_LENGTH(compile_expected) || !string_equal(argv[5], S8("/O2")) ||
+            !string_equal(argv[8], S8("subject path/source.c")) ||
+            !string_equal(argv[10], S8("/Foobject path/subject.obj"));
+        String8 link_expected[] = {S8("compiler with spaces"), S8("/nologo"), S8("object path/caller.obj"),
+            S8("object path/subject.obj"), S8("/Feoutput path/program.exe"), S8("/link"),
+            S8("/LIBPATH:first library"), S8("/LIBPATH:second-library"), S8("legacy_stdio_definitions.lib")};
+        argc = d_reference_link_arguments(&msvc_settings, caller_case, S8("object path/caller.obj"),
+            S8("object path/subject.obj"), S8("output path/program.exe"), false, argv);
+        errors += argc != BUSTER_ARRAY_LENGTH(link_expected);
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_expected); index += 1)
+        {
+            errors += !string_equal(argv[index], link_expected[index]);
+        }
+        argc = d_reference_link_arguments(&msvc_settings, caller_case, (String8){0},
+            S8("object path/subject.obj"), S8("output path/program.exe"), false, argv);
+        errors += argc != BUSTER_ARRAY_LENGTH(link_expected) - 1 ||
+            !string_equal(argv[2], S8("object path/subject.obj"));
     }
     DObservation caller_compile = {.kind = D_EXIT};
     errors += !d_caller_ready(caller_compile, true, false);
@@ -2032,14 +2418,21 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
             // the one-second timeout control. Keep the real crash path, but do
             // not let scheduling latency misclassify it as the timeout case.
             if (string_equal(modes[index], S8("crash"))) { observation_settings.timeout_seconds = 5; }
-            DObservation child = d_observe(&observation_settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
-                                           path_join(arena, directory, modes[index]));
+            String8 child_prefix = path_join(arena, directory, modes[index]);
+            DObservation child = index == 3 ?
+                d_observe_with_timeout(&observation_settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv), child_prefix,
+                    d_process_timeout_seconds(&observation_settings, true)) :
+                d_observe(&observation_settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv), child_prefix);
             if (index == 0) { errors += child.kind != D_EXIT || child.status != 7 || !string_equal(child.output, S8("a\0b")) || !string_equal(child.error, S8("child stderr\n")); }
             if (index == 1) { errors += child.kind != D_EXIT || child.status != 0 || child.sanitizer || !d_success(child) ||
                 !string_equal(child.output, sanitizer_names) || child.error.length; }
             if (index == 2) { errors += child.kind != D_EXIT || child.status != 0 || child.sanitizer || !d_success(child) ||
                 child.output.length || !string_equal(child.error, sanitizer_names); }
-            if (index == 3) { errors += child.kind != D_TIMEOUT; }
+            if (index == 3)
+            {
+                errors += child.kind != D_TIMEOUT;
+                if (child.kind == D_TIMEOUT) { string_print(S8("DIFFERENTIAL_TIMEOUT_CONTROL reference_timeout_seconds=1 result=timeout\n")); }
+            }
             if (index == 4) { errors += child.kind != D_SIGNAL; }
             if (errors != before_child)
             {
@@ -2067,8 +2460,10 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
         }
 #endif
         DConfig config = {.allocator = 0};
-        DObservation telemetry = {.output = S8("warning\nCODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n")};
-        errors += !d_verification(&settings, &telemetry, config) || !string_equal(telemetry.output, S8("warning\n"));
+        DObservation telemetry = {.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=none\n"),
+                                  .error = S8("warning\n")};
+        errors += !d_verification(&settings, &telemetry, config) || telemetry.output.length ||
+                  !string_equal(telemetry.error, S8("warning\n"));
         telemetry.output = S8("CODEGEN_VERIFY version=1 ir=0 mir=0 scheduled=0 allocator=none\n");
         errors += d_verification(&settings, &telemetry, config);
         telemetry.output = S8("CODEGEN_VERIFY version=1 ir=1 mir=0 scheduled=0 allocator=fast\n");
@@ -2119,10 +2514,11 @@ BUSTER_GLOBAL_LOCAL u32 d_self_test(Arena* arena)
 BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 arguments)
 {
     DSettings settings = {.arena = arena, .ide = S8("build/Release/ide"), .cc = S8("clang"),
-        .out = S8("build/differential"), .timeout_seconds = 10, .reduce_limit = 64, .verify = true};
+        .out = S8("build/differential"), .timeout_seconds = 10, .reference_timeout_seconds = 10,
+        .reduce_limit = 64, .verify = true};
     settings.library_paths.pointer = arena_allocate(arena, String8, arguments.length);
     DCase custom = {.name = S8("custom")};
-    bool list = false, self_test = false, valid = true;
+    bool list = false, self_test = false, valid = true, generated_explicit = false;
     String8 child_mode = {0}, self_test_path = {0}, cancellation_test = {0};
     u32 cancellation_signal = 0;
     u32 generated = 4, seed = 1, requested_jobs = 1, jobs = 1, self_test_index = 0, self_test_count = 0;
@@ -2146,6 +2542,12 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
             else if (string_equal(arg, S8("--self-test-count"))) { valid &= d_number(value, &self_test_count); }
             else if (string_equal(arg, S8("--ide"))) { settings.ide = value; }
             else if (string_equal(arg, S8("--cc"))) { settings.cc = value; }
+            else if (string_equal(arg, S8("--reference-dialect")))
+            {
+                if (string_equal(value, S8("gnu"))) { settings.reference_dialect = D_REFERENCE_GNU; }
+                else if (string_equal(value, S8("msvc"))) { settings.reference_dialect = D_REFERENCE_MSVC; }
+                else { valid = false; }
+            }
             else if (string_equal(arg, S8("--out"))) { settings.out = value; }
             else if (string_equal(arg, S8("--source"))) { custom.source = value; }
             else if (string_equal(arg, S8("--host"))) { custom.host = value; }
@@ -2155,16 +2557,53 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                 valid &= value.length != 0;
                 if (value.length) { settings.library_paths.pointer[settings.library_paths.length++] = value; }
             }
-            else if (string_equal(arg, S8("--generated"))) { valid &= d_number(value, &generated) && generated <= 10000; }
+            else if (string_equal(arg, S8("--generated")))
+            {
+                generated_explicit = true;
+                valid &= d_number(value, &generated) && generated <= 10000;
+            }
             else if (string_equal(arg, S8("--jobs"))) { valid &= d_number(value, &requested_jobs); }
             else if (string_equal(arg, S8("--seed"))) { valid &= d_number(value, &seed); }
             else if (string_equal(arg, S8("--minimize"))) { valid &= d_number(value, &settings.reduce_limit) && settings.reduce_limit <= 10000; }
-            else if (string_equal(arg, S8("--timeout"))) { valid &= d_number(value, &settings.timeout_seconds) && settings.timeout_seconds > 0 && settings.timeout_seconds <= 3600; }
+            else if (string_equal(arg, S8("--timeout")))
+            {
+                bool timeout_valid = d_number(value, &settings.timeout_seconds) &&
+                    settings.timeout_seconds > 0 && settings.timeout_seconds <= 3600;
+                valid &= timeout_valid;
+                if (timeout_valid && !settings.reference_timeout_explicit)
+                {
+                    settings.reference_timeout_seconds = settings.timeout_seconds;
+                }
+            }
+            else if (string_equal(arg, S8("--reference-timeout")))
+            {
+                bool timeout_valid = d_number(value, &settings.reference_timeout_seconds) &&
+                    settings.reference_timeout_seconds > 0 && settings.reference_timeout_seconds <= 3600;
+                valid &= timeout_valid;
+                settings.reference_timeout_explicit |= timeout_valid;
+            }
+            else if (string_equal(arg, S8("--reference-samples"))) { valid &= d_number(value, &settings.reference_samples) && settings.reference_samples > 0 && settings.reference_samples <= 64; }
             else { valid = false; }
         }
     }
     if (child_mode.length) { d_self_test_child(arena, child_mode, self_test_path, self_test_index, self_test_count); valid = false; }
     valid &= !(custom.host.length && custom.reject) && (!(custom.host.length || custom.reject) || custom.source.length);
+    if (settings.reference_dialect == D_REFERENCE_MSVC && !custom.reject) { custom.require_zero = true; }
+    if (settings.reference_dialect == D_REFERENCE_MSVC && generated_explicit && generated != 0)
+    {
+        string_print(S8("error: MSVC reference does not support requested generated cases; use --generated 0 with --source\n"));
+        valid = false;
+    }
+    if (settings.reference_samples && (settings.reference_dialect != D_REFERENCE_MSVC || !custom.source.length || custom.reject))
+    {
+        string_print(S8("error: --reference-samples requires a non-reject custom source with --reference-dialect msvc\n"));
+        valid = false;
+    }
+    if (valid && !list && !self_test && !d_reference_capabilities(&settings, BUSTER_WINDOWS, custom.source.length != 0))
+    {
+        string_print(S8("error: MSVC reference requires native Windows, --source, --minimize 0, and no --sanitize-oracle; only reviewed standard-C/Windows-ABI sources are admitted\n"));
+        valid = false;
+    }
     valid &= d_jobs(requested_jobs, os_get_logical_thread_count(), os_get_environment_variable(S8("BUSTER_TEST_JOBS")), &jobs);
     u32 total_cases = custom.source.length ? 1 : (u32)BUSTER_ARRAY_LENGTH(d_builtin_cases) + generated;
     jobs = BUSTER_MIN(jobs, total_cases);
@@ -2175,7 +2614,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
     if (cancellation_test.length) { failures = d_cancellation_self_test(arena, cancellation_test); }
     else if (!valid)
     {
-        string_print(S8("usage: test_differential [--ide path] [--cc clang-or-gcc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--library-path dir]... [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
+        string_print(S8("usage: test_differential [--ide path] [--cc compiler] [--reference-dialect gnu|msvc] [--out new-directory] [--source C-file [--host fixed-C-file] [--reject]] [--include dir] [--library-path dir]... [--generated N] [--seed N] [--minimize N] [--timeout seconds] [--reference-timeout seconds] [--reference-samples 1..64] [--jobs 1..64] [--sanitize-oracle] [--strict-mir] [--no-verify] [--list-configurations] [--self-test]\n"));
         failures = 1;
     }
     else if (self_test) { failures = d_self_test(arena); }
@@ -2192,7 +2631,20 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
         {
             settings.ide = os_path_absolute(arena, settings.ide, true);
             settings.cc = d_reference_compiler(arena, settings.cc);
-            if (!path_exists(arena, settings.ide) || !settings.cc.length || !d_create_output(arena, settings.out))
+            bool compiler_ready = path_exists(arena, settings.ide) && settings.cc.length;
+            if (compiler_ready && settings.reference_dialect == D_REFERENCE_MSVC)
+            {
+                MatrixCoverageCapability capability = {0};
+                compiler_ready = matrix_coverage_probe(arena, matrix_coverage_target_current(), BUILD_COMPILER_CL,
+                    settings.cc, &capability) && d_contains(capability.version, S8("Microsoft (R) C/C++ Optimizing Compiler Version"));
+                if (compiler_ready)
+                {
+                    settings.cc_version = capability.version;
+                    settings.cc_target = capability.target;
+                }
+                else { string_print(S8("error: MSVC reference probe failed (require cl.exe and a native-target Visual Studio developer environment)\n")); }
+            }
+            if (!compiler_ready || !d_create_output(arena, settings.out))
             {
                 string_print(S8("error: compiler missing or output directory already exists (refusing stale evidence)\n"));
                 failures = 1;
@@ -2213,10 +2665,16 @@ BUSTER_GLOBAL_LOCAL ProcessResult differential_main(Arena* arena, SliceString8 a
                         failures += 1;
                     }
                     settings.io_failed |= fprintf(settings.report, "prefix\tkind_0exit_1signal_2timeout_3spawn_4wait\tstatus\traw_status\tsanitizer\telapsed_us\n") < 0;
-                    String8 manifest = string_format(arena, S8("version=1\nide={S8}\ncc={S8}\nconfigurations={u32}\nseed={u32}\ngenerated={u32}\nverify={u32}\nsanitize_oracle={u32}\nstrict_mir={u32}\n"),
+                    String8 manifest = string_format(arena, S8("version=1\nide={S8}\ncc={S8}\nconfigurations={u32}\nseed={u32}\ngenerated={u32}\nverify={u32}\nsanitize_oracle={u32}\nstrict_mir={u32}\ntimeout_seconds={u32}\nreference_timeout_seconds={u32}\nreference_samples={u32}\n"),
                         settings.ide, settings.cc, count, seed, custom.source.length ? 0 : generated,
-                        (u32)settings.verify, (u32)settings.sanitize_oracle, (u32)settings.strict_mir);
-                    manifest = string_format(arena, S8("{S8}jobs_requested={u32} jobs_effective={u32} cases={u32}\n"), manifest, requested_jobs, jobs, total_cases);
+                        (u32)settings.verify, (u32)settings.sanitize_oracle, (u32)settings.strict_mir,
+                        settings.timeout_seconds, settings.reference_timeout_seconds, settings.reference_samples);
+                    String8 dialect = settings.reference_dialect == D_REFERENCE_MSVC ? S8("msvc") : S8("gnu");
+                    String8 capabilities = settings.reference_dialect == D_REFERENCE_MSVC ?
+                        S8("custom-standard-c-windows-abi;no-sanitizer;no-reduction") : S8("existing-corpus;asan-ubsan-reduction");
+                    manifest = string_format(arena, S8("{S8}reference_dialect={S8}\nreference_version={S8}\nreference_target={S8}\nreference_capabilities={S8}\nenvironment_policy=inherited-with-per-child-sanitizer-report-options\ninclude={S8}\njobs_requested={u32} jobs_effective={u32} cases={u32}\n"),
+                        manifest, dialect, settings.cc_version, settings.cc_target, capabilities, settings.include,
+                        requested_jobs, jobs, total_cases);
                     manifest = string_format(arena, S8("{S8}library_path_count={u64}\n"), manifest, settings.library_paths.length);
                     for (u64 index = 0; index < settings.library_paths.length; index += 1)
                     {

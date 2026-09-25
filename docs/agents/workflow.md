@@ -201,6 +201,17 @@ same head still shows a green status. The default-branch refresh rewrites the
 status for open PRs, and the later merge-group admission path must validate its
 own exact combined head rather than reuse a historical PR-head result.
 
+The default-branch sweep retries selected transient GET failures at most three
+times within a 240-second refresh budget, using bounded backoff and server
+rate-limit timing when safe. Status POSTs are sent once: a timeout after a write
+may leave publication uncertain. A per-PR lookup failure retains an error JSON
+and allows later independent PRs to be checked; a systemic rate limit or spent
+budget leaves the rest unattempted. The retained `refresh.json` and job summary
+count completed, failed, and unattempted work. Incomplete coverage exits 2;
+ordinary blocking PR conflicts do not fail the main-push sweep. A missing
+lookup never authorizes a status, and a green result for an older main remains
+stale until that exact PR is successfully refreshed.
+
 The preflight never checks out, rebases, merges or updates a PR branch. It uses
 `git merge-tree` plumbing, reports every unmerged path and Git's conflict kind,
 and does not choose `ours`, `theirs`, a union driver or a semantic resolution.
@@ -268,13 +279,23 @@ from verified writer output and regenerates against current main; enqueue the
 replacement head after its checks pass. No manual generated-file repair is needed.
 
 The main merge queue was enabled and read back on 2026-09-22 after #945 landed.
-All eight documented checks are required from GitHub Actions, with one build and
-one merge at a time, ALLGREEN, merge commits, and no bypass. Live acceptance is
-tracked in #867 and remains distinct from activation. Keep
+All eight documented checks are required from GitHub Actions. The repository
+contract permits up to 20 speculative combined-head builds while allowing only
+one validated candidate to merge at a time. `ALLGREEN` requires every queued
+group's checks, and `MERGE` retains merge commits. The initial activation had
+one build slot and no bypass; the administrator must read back the current live
+settings before relying on them. On 2026-09-24 the administrator added two
+standing `always` bypass actors to the live main ruleset: Repository admin
+(role 5) and `davidgmbb` (user 39247043). The reviewed contract now expects
+exactly these actors; a bypass action is not passing queue evidence. Live
+acceptance is tracked in #867 and remains
+distinct from activation. Keep
 `strict_required_status_checks_policy: false`: a conflict-free branch does not
 need a manual update just because main advanced. Use the queue to validate the
 new combined tree; never reuse the original PR-head green as that evidence. The required-check audit,
 fork and cancellation policy, activation/read-back steps, remaining live
 acceptance tests, and emergency restrictions are in
-[serialized main integration](../merge-queue-admission.md). No manual success
-status or temporary bypass is authorized by that guide.
+[serialized main integration](../merge-queue-admission.md). Land the repository
+build-limit policy through the old trusted-base queue contract before raising
+the live build limit; the exact rollout and read-back are documented there.
+No manual success status or temporary bypass is authorized by that guide.

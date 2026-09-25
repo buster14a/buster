@@ -1,0 +1,33 @@
+{
+  "id": 5417,
+  "name": "benchmark-policy",
+  "target": "actions",
+  "source_type": "Repository",
+  "enforcement": "active",
+  "conditions": {
+    "workflow_path": {
+      "include": [".github/workflows/9700x-service-dispatch.yml"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "restrict_actions_actors",
+      "parameters": {
+        "allowed_actors": [
+          {"id": 5, "type": "RepositoryRole"},
+          {"id": 39247043, "type": "User"},
+          {"id": 158946652, "type": "IntegrationInstallation"},
+          {"id": 159756060, "type": "IntegrationInstallation"},
+          {"id": 161964061, "type": "IntegrationInstallation"}
+        ]
+      }
+    },
+    {
+      "type": "restrict_action_events",
+      "parameters": {
+        "allowed_events": ["workflow_dispatch"]
+      }
+    }
+  ]
+}

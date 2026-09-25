@@ -1,0 +1,16 @@
+base 24,608,306,038 (100.0%)  PROGRAM TOTALS
+base    658,139,904 ( 2.67%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_encode_x86_64 [/home/ubuntu/census/bin/base-v3]
+base    214,255,266 ( 0.87%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x64_emit_exact_recipe [/home/ubuntu/census/bin/base-v3]
+base     95,294,160 ( 0.39%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x64_emit_exact_frame_chunk [/home/ubuntu/census/bin/base-v3]
+base     94,699,033 ( 0.38%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x86_64_exact_prewarm [/home/ubuntu/census/bin/base-v3]
+base      4,134,894 ( 0.02%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x64_emit_variable_memory_encoding [/home/ubuntu/census/bin/base-v3]
+s 24,563,939,400 (100.0%)  PROGRAM TOTALS
+s    622,838,980 ( 2.54%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_encode_x86_64 [/home/ubuntu/census/bin/s-v3]
+s    214,255,266 ( 0.87%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x64_emit_exact_recipe [/home/ubuntu/census/bin/s-v3]
+s     94,701,080 ( 0.39%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x86_64_exact_prewarm [/home/ubuntu/census/bin/s-v3]
+s      4,134,894 ( 0.02%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x64_emit_variable_memory_encoding [/home/ubuntu/census/bin/s-v3]
+p 24,547,855,911 (100.0%)  PROGRAM TOTALS
+p    606,743,302 ( 2.47%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_encode_x86_64 [/home/ubuntu/census/bin/p-v3]
+p    213,864,344 ( 0.87%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x64_emit_exact_recipe [/home/ubuntu/census/bin/p-v3]
+p     94,713,269 ( 0.39%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x86_64_exact_prewarm [/home/ubuntu/census/bin/p-v3]
+p      3,890,324 ( 0.02%)  src/buster/lib/compiler/codegen/machine_x86_64.c:machine_x64_emit_variable_memory_encoding [/home/ubuntu/census/bin/p-v3]

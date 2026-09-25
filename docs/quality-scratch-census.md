@@ -33,7 +33,9 @@ not an A/B performance improvement. The prior baseline diagnostic binary will
 naturally lack the new keys. Missing keys mean unavailable, not zero.
 
 The keys are additive source-metrics version-1 fields under `quality_census`;
-`quality_census.version=1` identifies this counter schema. The native runner keeps
+`quality_census.version=2` identifies this counter schema. Version 2 keeps the
+keys but redefines `candidate_region_clear_bytes` and `region_selection_cells` for
+the sparse region rows described below; version-1 values are not comparable. The native runner keeps
 them in `artifacts/*.metrics`; it does not add them to the legacy allocation CSV
 columns or derive a new throughput verdict from them. Preserve the run's input
 and compiler hashes, commands, host metadata and all raw files.
@@ -74,19 +76,22 @@ boundaries. A value spanning two regions counts in both, not once globally.
 estimate omitted benefit. `empty_candidate_functions` records the existing empty
 heap/empty-instruction early return. This does not repair #313's prefix policy.
 
-`candidate_region_cells` is the allocated dense table population;
-`candidate_region_updates` counts weighted spill/reload additions to that table;
-`candidate_region_nonzero_cells` counts its final nonzero u64 cells. Density bins
+`candidate_region_cells` is the logical candidate-by-region population
+(candidates times merged regions); no dense table of that size is allocated.
+`candidate_region_updates` counts weighted spill/reload additions to the sparse
+per-candidate region rows; `candidate_region_nonzero_cells` counts their final
+nonzero u64 entries. Density bins
 `region_table_{zero,sparse,mixed,dense}_functions` partition constructed tables into
 zero, (0, 1/8], (1/8, 1/2], and (1/2, 1] occupancy. Integer thresholds are floor
-`cells/8` and `cells/2`, with no multiplication overflow. A diagnostic-only extra
-walk observes final occupancy. Exact u64 traffic prevents the former #298
+`cells/8` and `cells/2`, with no multiplication overflow. Each row stores exactly the distinct regions
+holding its edits, so occupancy is read from the row lengths. Exact u64 traffic prevents the former #298
 wrapped-to-zero cells: the u32 edit-count bound and maximum weight of 4096 keep
-every sum below 2^44. Nonzero cells are **not** an exact first-touch count.
+every sum below 2^44. Nonzero entries are **not** an exact first-touch count.
 
 ## Clears, copies and lazy work
 
-`candidate_region_clear_bytes` is table zeroing (8 bytes/cell).
+`candidate_region_clear_bytes` is the initialization of the two per-candidate
+row-index arrays (8 bytes/candidate); rows are written before they are read.
 `initial_value_clear_bytes` covers baseline traffic, raw traffic and the candidate
 inverse-map initialization (one u64 and two u32 arrays, 16 bytes/value). It
 excludes the separately counted initial pin-map initialization, prepass allocations and
@@ -130,11 +135,15 @@ pins retained in the final result. `split_cost_rejections` counts failed modeled
 split comparisons; costs and tie rules are unchanged (#311).
 
 `split_candidates` counts candidates reaching regional search.
-`region_selection_passes` and `region_selection_cells` count complete dense-row
-selection scans, **including the final unsuccessful scan**. `selected_regions`
+`region_selection_passes` counts selection passes, **including the final
+unsuccessful pass**; `region_selection_cells` counts row entries those passes read
+(one per successful pass). `selected_regions`
 counts selected nonzero cells, before legality/budget/cost checks;
 `region_legality_rejections` combines entry/coverage and required-exit legality
-failures. No next-region ordering is precomputed or changed.
+failures. Each row is ordered once at construction — descending traffic,
+ascending region ties — exactly the sequence repeated dense `region_next` queries
+return; the traffic it ranks is immutable during split probing, and a pass
+reads the next entry whether the previous region was accepted or rejected.
 
 `placement_probes` counts pinned FAST placement trials; the baseline FAST pass is
 excluded. `placement_cost_rejections` includes invalid trial placements and
@@ -146,7 +155,7 @@ of every popped candidate.
 ## Acceptance and next experiments
 
 The existing split fixture checks one-call counter identities, histogram
-partitions, dense-cell/clear and repeated-scan relations, heap snapshot/restore
+partitions, row-index clear and selection relations, heap snapshot/restore
 accounting, and identical counter deltas and ordered placement output after dirty
 scratch reuse. Counter boundary controls include zero and UINT64_MAX overflow;
 the no-target early return must not fabricate prepass/table work. Enabled builds
