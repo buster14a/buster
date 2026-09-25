@@ -18794,7 +18794,11 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     {
         CToken token = preprocess.tokens[index];
         bool direct_identifier_assignment = index > start && c_parse_assignment_punctuator(token) &&
-                                            preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER;
+            preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER &&
+            !(index > start + 1 && (c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_DOT) ||
+                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_ARROW) ||
+                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_STAR) ||
+                                    c_token_is_punctuator(&preprocess.tokens[index - 2], C_PUNCTUATOR_AMPERSAND));
         if ((declaration_tokens[index - start] && !direct_identifier_assignment) ||
             ((skipped && skipped[index - start]) && !direct_identifier_assignment))
         {
@@ -19040,8 +19044,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         arena_set_position(machine->scratch_arena, query_mark);
         CTypeId assignment_type_id = type_id;
         bool assignment_typed = typed && type_id.value < result->type_count;
-        if (assignment && !assignment_typed && operand_start < operand_end && operand_start + 1 == operand_end &&
-            preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER && entity &&
+        if (assignment && !assignment_typed && direct_identifier_assignment && entity &&
             (entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER || entity->kind == C_ENTITY_OBJECT) &&
             entity->type.value < result->type_count)
         {
