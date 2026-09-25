@@ -22741,6 +22741,94 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
     return result;
 }
 
+// Check the expression separately from the atomic object: a narrow RMW can
+// store the wrapped byte while its promoted arithmetic result is still 256.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_result_source = S8_INITIALIZER(
+    "static _Atomic(unsigned char) byte;\n"
+    "static _Atomic(unsigned short) half;\n"
+    "static unsigned rhs_hits;\n"
+    "static int rhs(void) { rhs_hits += 1; return 1; }\n"
+    "int main(void) {\n"
+    "    int failed = 0;\n"
+    "    int types_ok = _Generic((byte += 1), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((++byte), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((byte++), unsigned char: 1, default: 0) &&\n"
+    "        _Generic((half += 1), unsigned short: 1, default: 0);\n"
+    "    failed |= !types_ok || byte != 0 || half != 0;\n"
+    "    byte = 255; int observed = (byte += rhs());\n"
+    "    failed |= observed != 0 || byte != 0 || rhs_hits != 1;\n"
+    "    byte = 0; observed = (byte -= 1);\n"
+    "    failed |= observed != 255 || byte != 255;\n"
+    "    half = 65535; observed = (half += 1);\n"
+    "    failed |= observed != 0 || half != 0;\n"
+    "    byte = 255; observed = ++byte;\n"
+    "    failed |= observed != 0 || byte != 0;\n"
+    "    byte = 255; failed |= ++byte != 0 || byte != 0;\n"
+    "    byte = 255; observed = byte++;\n"
+    "    failed |= observed != 255 || byte != 0;\n"
+    "    byte = 255; observed = (unsigned char)(byte += 1);\n"
+    "    failed |= observed != 0 || byte != 0;\n"
+    "    byte = 3; observed = (byte += 2);\n"
+    "    failed |= observed != 5 || byte != 5;\n"
+    "    unsigned char ordinary = 255; observed = (ordinary += 1);\n"
+    "    failed |= observed != 0 || ordinary != 0;\n"
+    "    return failed;\n"
+    "}\n");
+#endif
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 source = buster_test_temporary_path(arguments->arena, S8("atomic-compound-result"), S8(".c"));
+    String8 allocators[] = {S8("-fregister-allocator=none"), S8("-fregister-allocator=mir-stack"),
+                           S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 frontends[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 optimizations[] = {S8("-O0"), S8("-O2")};
+    if (BUSTER_REQUIRE(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(c_test_atomic_compound_result_source))))
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(frontends); form += 1)
+            {
+                for (u32 optimization = 0; optimization < BUSTER_ARRAY_LENGTH(optimizations); optimization += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_path(temporary.arena, S8("atomic-compound-result-run"), S8(".exe"));
+                    String8 command[] = {S8("-nostdinc"), S8("-std=c17"), S8("-fverify-codegen"), allocators[allocator],
+                                        frontends[form], optimizations[optimization], S8("-o"), output, source};
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                    invocation.reject_machine_fallback = allocator != 0;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("atomic compound {S8} {S8} {S8}: {S8}"),
+                                      allocators[allocator], frontends[form], optimizations[optimization], compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS,
+                                string_format(temporary.arena, S8("atomic result {S8} {S8} {S8}: status={u32} timed_out={u32}"),
+                                              allocators[allocator], frontends[form], optimizations[optimization],
+                                              execution.platform_status, (u32)execution.timed_out));
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Buster deliberately selects signed __int128 for decimal magnitudes above
 // INT64_MAX. Test that established extension, not Clang's different raw-literal
 // policy, and retain explicit unsigned suffixes/casts as independent controls.
@@ -23098,6 +23186,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_semantic_basics);
     BUSTER_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     BUSTER_TEST_FIXTURE(arguments, c_test_compound_assignment_conversions);
+    BUSTER_TEST_FIXTURE(arguments, c_test_atomic_compound_result);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_global_types);
     BUSTER_TEST_FIXTURE(arguments, c_test_global_array_sizeof_bound);
     BUSTER_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
