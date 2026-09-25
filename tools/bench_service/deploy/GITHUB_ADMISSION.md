@@ -108,6 +108,19 @@ alone do not prove the host is safe.
 
 ## 4. Activate and dispatch
 
+The dispatch workflow uses one constant concurrency group with `queue: max`.
+GitHub retains at most 100 pending runs in that group; additional runs are
+cancelled when it is full. Waiting order follows when runs enter the concurrency
+group and does not promise dispatch order. An environment approval wait may
+extend a request's lifetime. Operators must inspect each run's actual state and
+record cancellations, rejections and supersessions rather than treating a
+submitted workflow ID as service admission. Once the fixed gateway reports a
+job and attempt, the service's own lease and durable journal control execution
+and cleanup even if the Actions client disconnects or is cancelled. The service
+itself retains at most eight pending jobs and 64 jobs for its journal lifetime;
+its capacity failures require an explicit retained disposition, not a journal
+reset. See [GitHub's concurrency reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+
 After the host checks pass and evidence is retained, enable the repository
 variable once:
 
