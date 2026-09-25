@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 8
+          fetch-depth: 16
           persist-credentials: false
       - name: Freeze inputs and verify independent detector
         shell: bash
@@ -28,6 +28,10 @@ jobs:
           "$RUNNER_TEMP/half-oracle-gcc" self-test | tee "$RUNNER_TEMP/half-evidence/sensitivity-gcc.txt"
           "$RUNNER_TEMP/half-oracle" emit design "$RUNNER_TEMP/half-evidence/design.c"
           "$RUNNER_TEMP/half-oracle" emit heldout "$RUNNER_TEMP/half-evidence/heldout.c"
+          printf 'const _Float16 witness = 0x1.00200000000001p0F16;\n' > "$RUNNER_TEMP/half-evidence/minimal.c"
+          printf 'const _Float16 witness = 0x1.00200000000001p0;\n' > "$RUNNER_TEMP/half-evidence/double-control.c"
+          printf 'const _Float16 witness = 0x1.002p0F16;\n' > "$RUNNER_TEMP/half-evidence/tie-control.c"
+          printf '#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\nextern const _Float16 witness;\nint main(void) { uint16_t bits; memcpy(&bits, &witness, sizeof(bits)); printf("%%04x\\n", (unsigned)bits); return 0; }\n' > "$RUNNER_TEMP/half-evidence/minimal-observer.c"
           sha256sum tests/oracle_half_exact/*.c "$RUNNER_TEMP/half-evidence/"*.c | tee "$RUNNER_TEMP/half-evidence/frozen-inputs.sha256"
       - name: Independent reference control
         shell: bash
@@ -35,7 +39,7 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/half-evidence"
           for family in design heldout; do
-            clang -std=gnu11 -O0 -ffloat16-excess-precision=none -c "$family.c" -o "$family.clang.o"
+            clang -std=gnu11 -O0 -Xclang -ffloat16-excess-precision=none -c "$family.c" -o "$family.clang.o" > "$family.clang-compile.log" 2>&1
             clang -std=gnu11 -O1 -Wall -Wextra -Werror observer.c "$family.clang.o" -o "$family.clang-observer"
             "./$family.clang-observer" > "$family.clang.values"
             "$RUNNER_TEMP/half-oracle" check "$family" "$family.clang.values" > "$family.clang.csv" 2> "$family.clang.summary"
@@ -58,11 +62,29 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
           git diff --exit-code
           git rev-parse HEAD HEAD^{tree} | tee "$RUNNER_TEMP/half-evidence/compiler-identity.txt"
-          grep -n -A120 -B8 'c_test_float16_type' src/buster/tests/compiler/frontend/c/c_test.c | tee "$RUNNER_TEMP/half-evidence/existing-half-test.txt"
+          grep -n -A170 -B8 'c_test_float16_type' src/buster/tests/compiler/frontend/c/c_test.c | tee "$RUNNER_TEMP/half-evidence/existing-half-test.txt"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/half-build"
           "$RUNNER_TEMP/half-build" generate --cc clang 2>&1 | tee "$RUNNER_TEMP/half-evidence/configure.log"
           "$RUNNER_TEMP/half-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/half-evidence/build.log"
           sha256sum build/Release/ide | tee "$RUNNER_TEMP/half-evidence/compiler-binary.sha256"
+      - name: Reduce and distinguish the source type
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/half-evidence"
+          for case_name in minimal double-control tie-control; do
+            "$RUNNER_TEMP/half-pinned/build/Release/ide" cc -c "$case_name.c" -o "$case_name.buster.o" > "$case_name.buster-compile.log" 2>&1
+            clang -std=gnu11 -O1 minimal-observer.c "$case_name.buster.o" -o "$case_name.buster-observer"
+            "./$case_name.buster-observer" | tee "$case_name.buster.value"
+            clang -std=gnu11 -O0 -Xclang -ffloat16-excess-precision=none -c "$case_name.c" -o "$case_name.clang.o"
+            clang -std=gnu11 -O1 minimal-observer.c "$case_name.clang.o" -o "$case_name.clang-observer"
+            "./$case_name.clang-observer" | tee "$case_name.clang.value"
+            objdump -s "$case_name.buster.o" > "$case_name.buster.objdump"
+            objdump -s "$case_name.clang.o" > "$case_name.clang.objdump"
+          done
+          test "$(cat minimal.clang.value)" = 3c01
+          test "$(cat double-control.clang.value)" = 3c00
+          test "$(cat tie-control.clang.value)" = 3c00
       - name: Apply detector to pinned Buster
         shell: bash
         run: |
