@@ -32,8 +32,22 @@ jobs:
           set -euo pipefail
           mkdir -p "$ARCH_EVIDENCE"
           git -C transport rev-parse HEAD HEAD^{tree} > "$ARCH_EVIDENCE/transport-identity.txt"
-          cp transport/.github/research/architecture_boundary_probe.py "$ARCH_EVIDENCE/experiment.py"
-          python3 -u transport/.github/research/architecture_boundary_probe.py "$GITHUB_WORKSPACE/source"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          source = Path('transport/.github/research/architecture_boundary_probe.py').read_text()
+          # Attempt 36183313870 retained: Clang derives a precise size through
+          # side-effecting comma operands. Only evaluation is the common oracle.
+          anchor = '    for label, expression, expected, expected_hits in rows:\n'
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, anchor + '        if "__builtin_object_size" in expression:\n            expected = None\n')
+          # This mixed sibling is a new counterexample, not a passing control.
+          anchor = '\n\ndef fixture(path, rows):'
+          assert source.count(anchor) == 1
+          source = source.replace(anchor, '\n\nNEW.append(CONTROLS.pop())' + anchor)
+          Path(os.environ['ARCH_EVIDENCE'], 'experiment.py').write_text(source)
+          PY
+          python3 -u "$ARCH_EVIDENCE/experiment.py" "$GITHUB_WORKSPACE/source"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
