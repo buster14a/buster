@@ -396,7 +396,7 @@ BUSTER_GLOBAL_LOCAL bool meta_native_target(MetaTarget target)
 
 BUSTER_GLOBAL_LOCAL bool meta_output_present(String8 path, bool require_content)
 {
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = true}, (OpenPermissions){0});
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = true }, (OsFileCreateMode){0}, (OsFileShareFlags){0});
     bool result = file != 0;
     if (file)
     {

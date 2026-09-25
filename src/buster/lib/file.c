@@ -73,9 +73,10 @@ BUSTER_GLOBAL_LOCAL const char* buster_ios_bundle_resource_path(void)
 }
 #endif
 
-OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OpenPermissions permissions)
+OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OsFileCreateMode create_mode, OsFileShareFlags share_flags)
 {
-    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.write = 1, .create = 1, .truncate = 1}, permissions);
+    OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.create = 1, .truncate = 1},
+                                                   (OsFileAccess){.write = 1}, create_mode, share_flags);
     OsFileTransferResult result = {.error = opened.error};
     if (opened.file)
     {
@@ -88,7 +89,9 @@ OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OpenPer
 
 bool file_write(String8 path, ByteSlice content)
 {
-    return !file_write_checked(path, content, (OpenPermissions){.read = 1, .write = 1}).error.v;
+    OsFileCreateMode create_mode = {.kind = OS_FILE_CREATE_MODE_DEFAULT};
+    OsFileShareFlags share_flags = {.read = 1, .write = 1, .delete = 1};
+    return !file_write_checked(path, content, create_mode, share_flags).error.v;
 }
 
 // Once publication has failed or been refused, later close/delete failures are
@@ -108,7 +111,7 @@ BUSTER_GLOBAL_LOCAL void file_publish_record(FilePublishResult* result, OsError 
     }
 }
 
-FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions)
+FilePublishResult file_publish_checked(String8 path, ByteSlice content, OsFileCreateMode create_mode, OsFileShareFlags share_flags)
 {
     FilePublishResult result = {0};
     FileStats target = os_file_replacement_target_stats(path);
@@ -136,7 +139,7 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
     OsFileStagingResult staging = {0};
     if (stages && !result.error.v)
     {
-        staging = os_file_staging_create(scratch.arena, path, permissions);
+        staging = os_file_staging_create(scratch.arena, path, create_mode, share_flags);
         result.error = staging.error;
     }
     if (staging.file)
@@ -145,13 +148,22 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
         if (replaces && !result.error.v)
         {
             u32 final_permissions = target.permissions;
-            if (permissions.execute)
+            switch (create_mode.kind)
             {
-                final_permissions |= 0111;
-            }
-            else
-            {
-                final_permissions &= ~0111u;
+                case OS_FILE_CREATE_MODE_DEFAULT:
+                    final_permissions &= ~0111u;
+                    break;
+                case OS_FILE_CREATE_MODE_PRIVATE:
+                    final_permissions = 0600;
+                    break;
+                case OS_FILE_CREATE_MODE_EXECUTABLE:
+                    final_permissions |= 0111;
+                    break;
+                case OS_FILE_CREATE_MODE_EXPLICIT_POSIX:
+                    final_permissions = create_mode.posix_permissions;
+                    break;
+                default:
+                    BUSTER_UNREACHABLE();
             }
             result.error = os_file_set_permissions(staging.file, final_permissions);
         }
@@ -189,13 +201,17 @@ FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPerm
 
 bool file_publish(String8 path, ByteSlice content)
 {
-    FilePublishResult result = file_publish_checked(path, content, (OpenPermissions){.read = 1, .write = 1});
+    OsFileCreateMode create_mode = {.kind = OS_FILE_CREATE_MODE_DEFAULT};
+    OsFileShareFlags share_flags = {.read = 1, .write = 1, .delete = 1};
+    FilePublishResult result = file_publish_checked(path, content, create_mode, share_flags);
     return result.status == FILE_PUBLISH_PUBLISHED;
 }
 
 bool file_publish_executable(String8 path, ByteSlice content)
 {
-    FilePublishResult result = file_publish_checked(path, content, (OpenPermissions){.read = 1, .write = 1, .execute = 1});
+    OsFileCreateMode create_mode = {.kind = OS_FILE_CREATE_MODE_EXECUTABLE};
+    OsFileShareFlags share_flags = {.read = 1, .write = 1, .delete = 1};
+    FilePublishResult result = file_publish_checked(path, content, create_mode, share_flags);
     return result.status == FILE_PUBLISH_PUBLISHED;
 }
 
@@ -244,7 +260,7 @@ FileMapRead file_map_read(Arena* arena, String8 path, FileReadOptions options)
     {
 #if BUSTER_WINDOWS
     {
-        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
         if (file)
         {
             FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1, .identity = 1});
@@ -407,7 +423,7 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
     if (!asset_resolved)
 #endif
     {
-        OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult opened = os_file_open_checked(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){.read = 1});
         result.error = opened.error;
         if (opened.file)
         {
@@ -522,7 +538,12 @@ FileCopyResult file_copy_checked(CopyFileArguments arguments)
     }
     else
     {
-        OsFileOpenResult source = os_file_open_checked(arguments.original_path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult source = os_file_open_checked(
+            arguments.original_path,
+            (OpenFlags){0},
+            (OsFileAccess){.read = 1},
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){.read = 1});
         result.error = source.error;
         if (source.file)
         {
@@ -562,7 +583,11 @@ FileCopyResult file_copy_checked(CopyFileArguments arguments)
             OsFileStagingResult staging = {0};
             if (stages)
             {
-                staging = os_file_staging_create(scratch.arena, arguments.new_path, (OpenPermissions){.read = 1, .write = 1});
+                staging = os_file_staging_create(
+                    scratch.arena,
+                    arguments.new_path,
+                    (OsFileCreateMode){0},
+                    (OsFileShareFlags){.read = 1, .write = 1, .delete = 1});
                 result.error = staging.error;
             }
             bool staged = staging.file != 0;

@@ -2115,7 +2115,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_wide_hexadecimal_output(
                             }
                             else
                             {
-                                OsFileDescriptor* file = os_file_open(output, (OpenFlags){.read = 1}, (OpenPermissions){0});
+                                OsFileDescriptor* file = os_file_open(
+                                    output,
+                                    (OpenFlags){0},
+                                    (OsFileAccess){.read = 1},
+                                    (OsFileCreateMode){0},
+                                    (OsFileShareFlags){0});
                                 BUSTER_TEST(arguments, file == 0);
                                 if (file)
                                 {

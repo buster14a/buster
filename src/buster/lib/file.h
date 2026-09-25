@@ -51,7 +51,7 @@ BUSTER_F_DECL FileMapRead file_map_read(Arena* arena, String8 path, FileReadOpti
 BUSTER_F_DECL void file_map_unmap(FileMapRead map);
 // Completion includes close. On error a prefix may remain at the destination;
 // atomic replacement and crash durability are separate contracts.
-BUSTER_F_DECL OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OpenPermissions permissions);
+BUSTER_F_DECL OsFileTransferResult file_write_checked(String8 path, ByteSlice content, OsFileCreateMode create_mode, OsFileShareFlags share_flags);
 BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 
 // Atomic publication for complete in-memory artifacts. The destination is
@@ -63,11 +63,14 @@ BUSTER_F_DECL bool file_write(String8 path, ByteSlice content);
 // the primary failure.
 //
 // A directory, link/reparse point, or special destination is refused. Windows
-// also refuses the read-only attribute. A new file is created 0644 or 0755
-// before umask. On POSIX replacement preserves the old 0777 bits except that
-// all execute bits are set for an executable publication and cleared for an
-// ordinary one. Ownership, ACLs, extended attributes, timestamps, Windows
-// attributes/streams, and multi-file transactionality are not preserved.
+// also refuses the read-only attribute. POSIX creation modes are DEFAULT (0644),
+// PRIVATE (0600), EXECUTABLE (0755), or an explicit mode up to 0777, before
+// umask. Windows inherits the directory ACL for DEFAULT and EXECUTABLE; PRIVATE
+// and explicit POSIX modes fail as unsupported. On POSIX replacement, DEFAULT
+// preserves existing permissions except that it clears execute bits; EXECUTABLE
+// sets all execute bits; PRIVATE and explicit modes set the requested bits.
+// Ownership, ACLs, extended attributes, timestamps, Windows attributes/streams,
+// and multi-file transactionality are not preserved.
 // Flushing the staging file catches delayed write failures before publication;
 // the containing directory is not flushed, so power-loss durability is not
 // promised. Staging names are recognizable after an uncatchable process exit.
@@ -87,7 +90,8 @@ struct FilePublishResult
     OsError cleanup_error;
 };
 
-BUSTER_F_DECL FilePublishResult file_publish_checked(String8 path, ByteSlice content, OpenPermissions permissions);
+BUSTER_F_DECL FilePublishResult file_publish_checked(String8 path, ByteSlice content, OsFileCreateMode create_mode,
+                                                     OsFileShareFlags share_flags);
 BUSTER_F_DECL bool file_publish(String8 path, ByteSlice content);
 BUSTER_F_DECL bool file_publish_executable(String8 path, ByteSlice content);
 
