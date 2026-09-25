@@ -62,7 +62,7 @@ typedef struct BqBrokerRequest
     uint32_t operation;
     uint32_t stage;
     uint32_t signal_number;
-    uint32_t reserved;
+    uint32_t recipe;
     uint64_t job;
     uint64_t attempt;
     char base[65];
@@ -104,6 +104,22 @@ static char const* const bq_broker_stages[] = {
     "", "base-generate", "base-build", "candidate-generate", "candidate-build", "throughput"
 };
 
+static char const* bq_broker_recipe_name(uint32_t recipe)
+{
+    char const* result = recipe == 0 ? "validate-buster-v1" :
+                         recipe == 1 ? "compiler-throughput-pr-v1" : NULL;
+    return result;
+}
+
+static bool bq_broker_recipe_parse(char const* text, uint32_t* recipe)
+{
+    bool ok = text && recipe;
+    if (ok && !strcmp(text, "validate-buster-v1")) *recipe = 0;
+    else if (ok && !strcmp(text, "compiler-throughput-pr-v1")) *recipe = 1;
+    else ok = false;
+    return ok;
+}
+
 static bool bq_broker_format(char* output, size_t capacity, char const* format, ...)
 {
     va_list args;
@@ -142,7 +158,7 @@ static bool bq_broker_request_valid(BqBrokerRequest const* request)
 {
     bool start = request->operation == BQ_BROKER_START;
     bool signal = request->operation == BQ_BROKER_SIGNAL;
-    bool ok = request->magic == BQ_BROKER_MAGIC && request->version == 1 && request->reserved == 0 &&
+    bool ok = request->magic == BQ_BROKER_MAGIC && request->version == 1 && request->recipe <= 1 &&
               (start || signal) && request->stage <= BQ_BROKER_THROUGHPUT_STAGE &&
               request->job != 0 && request->attempt != 0;
     if (ok && start)
@@ -150,7 +166,8 @@ static bool bq_broker_request_valid(BqBrokerRequest const* request)
              bq_broker_revision(request->candidate);
     if (ok && signal)
     {
-        ok = (request->signal_number == BQ_BROKER_TERM || request->signal_number == BQ_BROKER_KILL);
+        ok = request->recipe == 0 &&
+             (request->signal_number == BQ_BROKER_TERM || request->signal_number == BQ_BROKER_KILL);
         for (unsigned index = 0; ok && index < sizeof(request->base); index += 1)
             ok = request->base[index] == 0 && request->candidate[index] == 0;
     }
@@ -317,7 +334,7 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerCommand* c
             bq_broker_add(command, BQ_BROKER_LEASE);
             bq_broker_add_format(command, "%" PRIu64, request->job);
             bq_broker_add_format(command, "%" PRIu64, request->attempt);
-            bq_broker_add(command, "validate-buster-v1");
+            bq_broker_add(command, bq_broker_recipe_name(request->recipe));
             bq_broker_add(command, BQ_BROKER_WORKSPACES);
             bq_broker_add(command, request->base);
             bq_broker_add(command, request->candidate);
@@ -338,14 +355,23 @@ static bool bq_broker_command(BqBrokerRequest const* request, BqBrokerCommand* c
             bq_broker_add(command, "--candidate-id");
             bq_broker_add(command, request->candidate);
             bq_broker_add(command, "--profile");
-            bq_broker_add(command, "smoke");
+            bq_broker_add(command, request->recipe == 1 ? "ci" : "smoke");
             bq_broker_add(command, "--mode");
             bq_broker_add(command, "all");
             bq_broker_add(command, "--pairs");
-            bq_broker_add(command, "1");
+            bq_broker_add(command, request->recipe == 1 ? "20" : "1");
             bq_broker_add(command, "--warmups");
-            bq_broker_add(command, "1");
-            bq_broker_add(command, "--no-guard");
+            bq_broker_add(command, request->recipe == 1 ? "2" : "1");
+            if (request->recipe == 1)
+            {
+                bq_broker_add(command, "--self-host-root");
+                bq_broker_add_format(command, "%s", paths.base_source);
+                bq_broker_add(command, "--self-host-generated");
+                bq_broker_add_format(command, "%s/generated", paths.base_build);
+                bq_broker_add(command, "--cpu");
+                bq_broker_add(command, "2");
+            }
+            else bq_broker_add(command, "--no-guard");
         }
         else
         {
@@ -557,6 +583,33 @@ static bool bq_broker_manifest(BqBrokerRequest const* request, BqBrokerPaths con
     return ok;
 }
 
+static bool bq_broker_workspace_recipe(BqBrokerRequest const* request,
+                                       BqBrokerPaths const* paths, uid_t service_uid)
+{
+    unsigned char bytes[513] = {0};
+    size_t size = 0;
+    char recipe_line[96], job_line[64], token_line[64], base_line[80], candidate_line[80];
+    bool ok = bq_broker_directory(paths->attempt, service_uid, true) &&
+              bq_broker_regular(paths->attempt, ".identity", service_uid, false,
+                                bytes, sizeof(bytes) - 1, &size);
+    if (ok)
+    {
+        bytes[size] = 0;
+        ok = size >= sizeof("BQ-WORKSPACE-V1\n") - 1 &&
+             !memcmp(bytes, "BQ-WORKSPACE-V1\n", sizeof("BQ-WORKSPACE-V1\n") - 1) &&
+             bq_broker_format(recipe_line, sizeof(recipe_line), "\nrecipe=%s\n",
+                              bq_broker_recipe_name(request->recipe)) &&
+             bq_broker_format(job_line, sizeof(job_line), "\njob=%" PRIu64 "\n", request->job) &&
+             bq_broker_format(token_line, sizeof(token_line), "\ntoken=%" PRIu64 "\n", request->attempt) &&
+             bq_broker_format(base_line, sizeof(base_line), "\nbase=%s\n", request->base) &&
+             bq_broker_format(candidate_line, sizeof(candidate_line), "\ncandidate=%s\n", request->candidate) &&
+             strstr((char const*)bytes, recipe_line) && strstr((char const*)bytes, job_line) &&
+             strstr((char const*)bytes, token_line) && strstr((char const*)bytes, base_line) &&
+             strstr((char const*)bytes, candidate_line);
+    }
+    return ok;
+}
+
 static bool bq_broker_installed_binary(char const* path)
 {
     char const* slash = strrchr(path, '/');
@@ -590,7 +643,8 @@ static bool bq_broker_state(BqBrokerRequest const* request, uid_t service_uid)
         ok = bq_broker_worker_record(request, &paths, service_uid, true);
     if (ok && request->operation == BQ_BROKER_START)
     {
-        ok = bq_broker_manifest(request, &paths, service_uid, false) &&
+        ok = bq_broker_workspace_recipe(request, &paths, service_uid) &&
+             bq_broker_manifest(request, &paths, service_uid, false) &&
              bq_broker_manifest(request, &paths, service_uid, true) &&
              bq_broker_installed_binary(BQ_BROKER_SERVICE) &&
              bq_broker_installed_binary(BQ_BROKER_BUILD) &&
@@ -1049,31 +1103,33 @@ static bool bq_broker_cli(int argc, char** argv, BqBrokerRequest* request)
     request->magic = BQ_BROKER_MAGIC;
     request->version = 1;
     bool ok = false;
-    if (argc == 6 && !strcmp(argv[1], "start-outer"))
+    if (argc == 7 && !strcmp(argv[1], "start-outer"))
     {
         request->operation = BQ_BROKER_START;
         ok = bq_broker_decimal(argv[2], &request->job) &&
              bq_broker_decimal(argv[3], &request->attempt) &&
-             (strlen(argv[4]) == 40 || strlen(argv[4]) == 64) &&
-             (strlen(argv[5]) == 40 || strlen(argv[5]) == 64);
-        if (ok)
-        {
-            memcpy(request->base, argv[4], strlen(argv[4]));
-            memcpy(request->candidate, argv[5], strlen(argv[5]));
-        }
-    }
-    else if (argc == 7 && !strcmp(argv[1], "start-stage"))
-    {
-        request->operation = BQ_BROKER_START;
-        ok = bq_broker_decimal(argv[2], &request->job) &&
-             bq_broker_decimal(argv[3], &request->attempt) &&
-             bq_broker_stage(argv[4], &request->stage) &&
+             bq_broker_recipe_parse(argv[4], &request->recipe) &&
              (strlen(argv[5]) == 40 || strlen(argv[5]) == 64) &&
              (strlen(argv[6]) == 40 || strlen(argv[6]) == 64);
         if (ok)
         {
             memcpy(request->base, argv[5], strlen(argv[5]));
             memcpy(request->candidate, argv[6], strlen(argv[6]));
+        }
+    }
+    else if (argc == 8 && !strcmp(argv[1], "start-stage"))
+    {
+        request->operation = BQ_BROKER_START;
+        ok = bq_broker_decimal(argv[2], &request->job) &&
+             bq_broker_decimal(argv[3], &request->attempt) &&
+             bq_broker_stage(argv[4], &request->stage) &&
+             bq_broker_recipe_parse(argv[5], &request->recipe) &&
+             (strlen(argv[6]) == 40 || strlen(argv[6]) == 64) &&
+             (strlen(argv[7]) == 40 || strlen(argv[7]) == 64);
+        if (ok)
+        {
+            memcpy(request->base, argv[6], strlen(argv[6]));
+            memcpy(request->candidate, argv[7], strlen(argv[7]));
         }
     }
     else if (argc == 4 && !strcmp(argv[1], "signal"))
@@ -1157,6 +1213,20 @@ static int bq_broker_self_test(void)
                                                    "--uid=buster-bench" : "--uid=buster-bench-candidate"));
         }
     }
+    request.recipe = 1;
+    request.stage = BQ_BROKER_OUTER;
+    BQ_BROKER_CHECK(bq_broker_command(&request, &command) &&
+                    bq_broker_has_argument(&command, "compiler-throughput-pr-v1"));
+    request.stage = BQ_BROKER_THROUGHPUT_STAGE;
+    BQ_BROKER_CHECK(bq_broker_command(&request, &command) &&
+                    bq_broker_has_argument(&command, "ci") &&
+                    bq_broker_has_argument(&command, "20") &&
+                    bq_broker_has_argument(&command, "--self-host-root") &&
+                    bq_broker_has_argument(&command, "--self-host-generated") &&
+                    !bq_broker_has_argument(&command, "--no-guard"));
+    request.recipe = 2;
+    BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
+    request.recipe = 0;
     request.stage = BQ_BROKER_THROUGHPUT_STAGE + 1;
     BQ_BROKER_CHECK(!bq_broker_command(&request, &command));
     request.stage = BQ_BROKER_OUTER;
@@ -1192,16 +1262,21 @@ static int bq_broker_self_test(void)
                     !bq_broker_unit_from_text("buster-bench-1-2-evil.service", &parsed));
     BQ_BROKER_CHECK(!bq_broker_decimal("0", &parsed.job) &&
                     !bq_broker_decimal("1;id", &parsed.job));
-    char* valid_cli[] = {"broker", "start-stage", "1", "2", "throughput", request.base, request.candidate};
+    char* valid_cli[] = {"broker", "start-stage", "1", "2", "throughput", "validate-buster-v1",
+                         request.base, request.candidate};
     memset(request.base, 'a', 40);
     memset(request.candidate, 'b', 40);
     request.base[40] = 0;
     request.candidate[40] = 0;
-    BQ_BROKER_CHECK(bq_broker_cli(7, valid_cli, &parsed) && parsed.stage == BQ_BROKER_THROUGHPUT_STAGE);
+    BQ_BROKER_CHECK(bq_broker_cli(8, valid_cli, &parsed) && parsed.stage == BQ_BROKER_THROUGHPUT_STAGE);
     valid_cli[4] = "shell";
-    BQ_BROKER_CHECK(!bq_broker_cli(7, valid_cli, &parsed));
-    valid_cli[4] = "throughput";
     BQ_BROKER_CHECK(!bq_broker_cli(8, valid_cli, &parsed));
+    valid_cli[4] = "throughput";
+    valid_cli[5] = "compiler-throughput-pr-v1";
+    BQ_BROKER_CHECK(bq_broker_cli(8, valid_cli, &parsed) && parsed.recipe == 1);
+    valid_cli[5] = "retirement";
+    BQ_BROKER_CHECK(!bq_broker_cli(8, valid_cli, &parsed));
+    BQ_BROKER_CHECK(!bq_broker_cli(9, valid_cli, &parsed));
     int connection[2] = {-1, -1};
     bool io_ready = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, connection) == 0;
     BQ_BROKER_CHECK(io_ready);

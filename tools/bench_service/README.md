@@ -361,6 +361,30 @@ bytes are checked against `profiles/validate-buster-v1.recipe`; it does not
 admit arbitrary build policy. The recipe's own `schema=1` field is independent of the
 journal and control schema numbers.
 
+`compiler-throughput-pr-v1` is a distinct ordinary comparison recipe under
+development for #1190. Its fixed graph builds the two installed compiler
+sources with Release Clang, runs the native throughput harness with the six
+default workloads and a frozen baseline-source self-host workload, and uses
+the ordinary `ci` profile: 20 pairs, two warmups, two rounds, all allocator
+modes, and the ordinary guard. It emits its own manifest and authenticated
+bundle. `throughput compare --output <exported throughput directory>`
+independently checks the harness seal and reconstructs the derived summary.
+The service result receipt currently reports execution outcome separately
+from `validity=not-evaluated` and `statistical-decision=not-evaluated`; a
+successful execution is not a performance verdict.
+
+Production admission for this recipe remains blocked. The present graph uses
+separate build roots and lacks the matched-root or cross-root controls and
+complete compiler/linker/resource/dependency/argv/environment provenance
+required by [benchmarking guidance](../../docs/agents/benchmarking.md).
+The immutable source closure and trusted toolchain still need independent
+admission. The recipe's local fixtures prove the materializer-to-recipe
+handoff, fixed arguments, and bundle validation; they do not qualify the
+9700X or provide a matched build. `BUSTER_BENCH_SERVICE_TEST` enables this
+recipe only inside the disposable service regression executable. Keep the
+installed service and GitHub dispatch disabled until these requirements and
+the separate host qualification gates are reviewed and satisfied.
+
 `native-retirement-performance-v1` is a recognized but deliberately blocked
 registry entry. `profiles/native-retirement-performance-v1.blocked` pins the
 landed performance contract, support declaration, binding validator and
