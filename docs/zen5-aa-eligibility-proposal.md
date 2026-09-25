@@ -119,10 +119,19 @@ profile or host is outside the policy until its applicability is reviewed.
 The later current-job A/A must cover every required #511 row and variable
 metric under its own frozen seed, two rounds, warmups and even pair count in
 the approved 60–254 range. A control capture of one compiler workload cannot
-replace it. Code bytes retain their exact deterministic #511 treatment;
-generated runtime retains #511's own required A/A and A/B applicability.
-The A/A eligibility calculation occurs after current A/A completes and before
-the first candidate A/B child. It never consumes that candidate's later data.
+replace it. For that current A/A, the proposed equivalence check reuses
+#619's two-pair block statistics and simultaneous lower/upper intervals for
+every required member in **each round and pooled**, comparing both bounds
+with a separately approved A/A equivalence band around ratio 1. The band is
+unset pending the qualified pilots; it is distinct from #511's fixed candidate
+budgets. A point estimate near 1, one green round, or no confirmed regression
+is insufficient. A valid interval crossing the band remains inconclusive.
+Code bytes retain their exact deterministic #511 treatment; generated runtime
+retains #511's own required A/A and A/B applicability. This proposed use of
+#619's existing intervals does not change its implementation, family allocation
+or candidate verdict. The A/A eligibility calculation occurs after current
+A/A completes and before the first candidate A/B child. It never consumes
+that candidate's later data.
 
 ## Operator capture and clean offline replay packet
 
