@@ -9349,16 +9349,20 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         }
         // The width is evaluated here, once, and every reader takes the stored
         // number (see CMember.bit_width). A plain decimal literal needs no
-        // evaluator; anything else -- `(3)`, an enumerator, a cast, a hex or
-        // suffixed literal, `sizeof(T) * 8 - n` -- goes through the typed
-        // evaluator enumerators use, which can run inside a machine step. A
-        // width it cannot fold stays unresolved: readers refuse to lay the
-        // aggregate out instead of taking the member for a zero-width one.
+        // evaluator -- a leading zero is octal, so `010` is not one; anything
+        // else -- `(3)`, an enumerator, a cast, a hex, octal or suffixed
+        // literal, `sizeof(T) * 8 - n` -- goes through the typed evaluator in
+        // the mode enumerators use inside a machine step, where a sizeof
+        // operand resolves machineless and cannot disturb this aggregate's
+        // in-progress records. A width it cannot fold stays unresolved:
+        // readers refuse to lay the aggregate out instead of taking the member
+        // for a zero-width one.
         bool decimal = bit_width_token_count == 1 && preprocess.tokens[declarator].kind == C_TOKEN_PREPROCESSING_NUMBER;
         u64 width = 0;
         if (decimal)
         {
             String8 spelling = c_token_spelling(preprocess.spelling_base, preprocess.tokens[declarator]);
+            decimal = spelling.length == 1 || spelling.pointer[0] != '0';
             for (u64 index = 0; decimal && index < spelling.length; index += 1)
             {
                 char8 digit = spelling.pointer[index];
@@ -9374,8 +9378,11 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         else
         {
             TemporalArena temporary = scratch_begin(0, 0);
+            bool previous_members_active = machine->enum_constant_members_active;
+            machine->enum_constant_members_active = true;
             CIntegerConstant constant = c_parse_typed_integer_constant(machine, temporary.arena, preprocess, result, frame->scope, bit_width_token_start,
                                                                        bit_width_token_start + bit_width_token_count);
+            machine->enum_constant_members_active = previous_members_active;
             scratch_end(temporary);
             if (constant.valid && !constant.is_negative && !constant.magnitude_high && constant.magnitude <= UINT32_MAX)
             {

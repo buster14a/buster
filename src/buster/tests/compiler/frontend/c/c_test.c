@@ -1258,7 +1258,9 @@ BUSTER_GLOBAL_LOCAL String8 c_test_enum_bit_field_source(Arena* arena)
 // a cast or a character constant folded as a zero-width field and moved every
 // later member, a hex or suffixed literal refused to fold at all, and
 // `_Generic(+promoted.b, ...)` saw an unpromoted `unsigned`, while the IR
-// layout evaluated the same tokens itself and was right. The expected numbers
+// layout evaluated the same tokens itself and was right. An octal width and a
+// block-scope enumerator shadowing a file-scope one pin the evaluation point:
+// the width is read where the member is declared. The expected numbers
 // are clang 18's for x86-64 Linux, not either engine's: two engines agreeing
 // with each other is not the oracle.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArguments* arguments)
@@ -1272,6 +1274,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArgu
                         "struct Hex { char c; unsigned b : 0x5; char x; };\n"
                         "struct Suffix { char c; unsigned b : 5u; char x; };\n"
                         "struct Character { char c; unsigned b : '\\5'; char x; };\n"
+                        "struct Octal { char c; unsigned b : 010; char x; };\n"
                         "struct Promoted { unsigned b : (3); };\n"
                         "static struct Promoted promoted;\n"
                         "enum {\n"
@@ -1282,9 +1285,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArgu
                         " size_Hex = sizeof(struct Hex), x_Hex = __builtin_offsetof(struct Hex, x),\n"
                         " size_Suffix = sizeof(struct Suffix), x_Suffix = __builtin_offsetof(struct Suffix, x),\n"
                         " size_Character = sizeof(struct Character), x_Character = __builtin_offsetof(struct Character, x),\n"
+                        " size_Octal = sizeof(struct Octal), x_Octal = __builtin_offsetof(struct Octal, x),\n"
                         " promoted_selection = _Generic(+promoted.b, int: 1, unsigned: 2, default: 3)\n"
                         "};\n"
                         "_Static_assert(sizeof(struct Sized) == 12, \"sized\");\n"
+                        "enum { Scope = 3 };\n"
+                        "int scoped_width(void) { enum { Scope = 20 }; struct Scoped { char c; unsigned b : Scope; char x; };\n"
+                        " enum { size_Scoped = sizeof(struct Scoped), x_Scoped = __builtin_offsetof(struct Scoped, x) };\n"
+                        " return size_Scoped + x_Scoped; }\n"
                         "int bit_field_width_authority(void) { return size_Paren + x_Paren + promoted_selection + promoted.b; }\n");
     typedef struct CBitFieldWidthCase CBitFieldWidthCase;
     struct CBitFieldWidthCase
@@ -1303,6 +1311,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_bit_field_width_authority(UnitTestArgu
         {S8("Hex"), S8("size_Hex"), S8("x_Hex"), 4, 2},
         {S8("Suffix"), S8("size_Suffix"), S8("x_Suffix"), 4, 2},
         {S8("Character"), S8("size_Character"), S8("x_Character"), 4, 2},
+        // `010` is octal: the width is eight bits, not ten.
+        {S8("Octal"), S8("size_Octal"), S8("x_Octal"), 4, 2},
+        // The block-scope enumerator shadows the file-scope one.
+        {S8("Scoped"), S8("size_Scoped"), S8("x_Scoped"), 8, 4},
     };
     Target target = target_native;
     target.cpu_arch = CPU_ARCH_X86_64;
