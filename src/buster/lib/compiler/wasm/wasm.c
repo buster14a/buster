@@ -2658,7 +2658,7 @@ static void wasm64_fe_emit_instruction(Wasm64FunctionEmitter* emitter, IrBlock* 
                         instruction->symbol);
             return;
         }
-        wasm64_fe_i64_const(emitter, (u64)record->function_index + 1);
+        wasm64_fe_i64_const(emitter, (s64)record->function_index + 1);
         wasm64_fe_emit_result_set(emitter, instruction, false, false);
     }
     break;
