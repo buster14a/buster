@@ -92,6 +92,64 @@ BUSTER_GLOBAL_LOCAL ObjectFile link_test_single_comdat(Arena* arena, Target targ
     return link_test_comdat_object(arena, target, bytes, symbols, symbol_count, relocations, relocation_count, comdat, 1);
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_thread_local_symbol_identity(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u8 ordinary_data[] = {1, 2, 3, 4};
+    u8 thread_local_data[] = {5, 6, 7, 8};
+    ObjectSymbol thread_local_reference = {
+        .name = S8("shared_value"),
+        .section = OBJECT_SECTION_UNDEFINED,
+        .kind = OBJECT_SYMBOL_DATA,
+        .global = true,
+        .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES,
+    };
+    ObjectSymbol ordinary_definition = {
+        .name = S8("shared_value"),
+        .size = sizeof(ordinary_data),
+        .section = OBJECT_SECTION_DATA,
+        .kind = OBJECT_SYMBOL_DATA,
+        .global = true,
+        .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO,
+    };
+    ObjectFile mismatched_objects[] = {
+        link_test_object_make(arguments->arena, target, (ByteSlice){0}, &thread_local_reference, 1, 0, 0),
+        link_test_object_make(arguments->arena, target, (ByteSlice){0}, &ordinary_definition, 1, 0, 0),
+    };
+    mismatched_objects[1].sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(ordinary_data);
+    mismatched_objects[1].sections[OBJECT_SECTION_DATA].virtual_size = sizeof(ordinary_data);
+    LinkObjectResult mismatch = link_objects(arguments->arena, mismatched_objects, BUSTER_ARRAY_LENGTH(mismatched_objects), (LinkOptions){0});
+    BUSTER_TEST(arguments, mismatch.error == LINK_ERROR_TLS_SYMBOL_MISMATCH);
+    BUSTER_STRING_TEST(arguments, mismatch.symbol, S8("shared_value"));
+    BUSTER_STRING_TEST(arguments, link_error_name(mismatch.error), S8("TLS/non-TLS symbol mismatch"));
+
+    ObjectSymbol unknown_reference = thread_local_reference;
+    unknown_reference.thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN;
+    ObjectSymbol thread_local_definition = {
+        .name = S8("shared_value"),
+        .size = sizeof(thread_local_data),
+        .section = OBJECT_SECTION_THREAD_LOCAL_DATA,
+        .kind = OBJECT_SYMBOL_DATA,
+        .global = true,
+        .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_YES,
+    };
+    ObjectFile resolved_objects[] = {
+        link_test_object_make(arguments->arena, target, (ByteSlice){0}, &unknown_reference, 1, 0, 0),
+        link_test_object_make(arguments->arena, target, (ByteSlice){0}, &thread_local_definition, 1, 0, 0),
+    };
+    resolved_objects[1].sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(thread_local_data);
+    resolved_objects[1].sections[OBJECT_SECTION_THREAD_LOCAL_DATA].virtual_size = sizeof(thread_local_data);
+    LinkObjectResult resolved = link_objects(arguments->arena, resolved_objects, BUSTER_ARRAY_LENGTH(resolved_objects), (LinkOptions){0});
+    BUSTER_TEST(arguments, resolved.error == LINK_ERROR_NONE && resolved.object.symbol_count == 1);
+    if (resolved.error == LINK_ERROR_NONE && resolved.object.symbol_count == 1)
+    {
+        BUSTER_TEST(arguments, resolved.object.symbols[0].section == OBJECT_SECTION_THREAD_LOCAL_DATA);
+        BUSTER_TEST(arguments, resolved.object.symbols[0].thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_coff_comdat_selection(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -3930,6 +3988,9 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult comdat_selection = link_test_coff_comdat_selection(arguments);
     result.succeeded_test_count += comdat_selection.succeeded_test_count;
     result.test_count += comdat_selection.test_count;
+    UnitTestResult thread_local_identity = link_test_thread_local_symbol_identity(arguments);
+    result.succeeded_test_count += thread_local_identity.succeeded_test_count;
+    result.test_count += thread_local_identity.test_count;
     UnitTestResult initializer_order = link_test_initializer_order(arguments);
     result.succeeded_test_count += initializer_order.succeeded_test_count;
     result.test_count += initializer_order.test_count;

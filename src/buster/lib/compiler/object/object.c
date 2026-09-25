@@ -5115,6 +5115,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                 // untyped exported text label as a callable entry point.
                 bool untyped_code = target.cpu_arch == CPU_ARCH_AARCH64 && symbol_type == 0 && binding != 0 &&
                                     section_index && section_kinds[section_index] == OBJECT_SECTION_TEXT;
+                bool section_thread_local = section_index &&
+                                             (section_kinds[section_index] == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                              section_kinds[section_index] == OBJECT_SECTION_THREAD_LOCAL_ZERO);
                 *destination = (ObjectSymbol){
                     .name = string_duplicate_arena(arena, name, false),
                     .value = symbol_value,
@@ -5123,6 +5126,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf64(Arena* arena, ByteSlice bytes, 
                     .kind = symbol_type == 2 || untyped_code ? OBJECT_SYMBOL_FUNCTION : OBJECT_SYMBOL_DATA,
                     .global = binding != 0,
                     .weak = binding == 2,
+                    .thread_local_state = symbol_type == 6 || section_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES
+                                          : !section_index && symbol_type == 0 ? OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN
+                                                                               : OBJECT_SYMBOL_THREAD_LOCAL_NO,
                     // st_other's low two bits are st_visibility; STV_HIDDEN
                     // is 2 and STV_INTERNAL 3, both of which mean the symbol
                     // does not leave the image.
@@ -10759,6 +10765,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
             .hidden = symbol->is_hidden,
+            .thread_local_state = OBJECT_SYMBOL_THREAD_LOCAL_NO,
         };
     }
     for (u32 global_index = 0; global_index < module->global_count; global_index += 1)
@@ -10794,6 +10801,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
             .hidden = symbol->is_hidden,
+            .thread_local_state = global.is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
         };
     }
     // An alias owns no storage: it is a second name for a definition this
@@ -10831,6 +10839,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = symbol->linkage != IR_LINKAGE_INTERNAL,
             .weak = symbol->is_weak,
             .hidden = symbol->is_hidden,
+            .thread_local_state = definition.thread_local_state,
         };
     }
     if (apple_thread_local)
@@ -10920,6 +10929,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                 .global = true,
                 .weak = !tls_get_addr && target_symbol->is_weak,
                 .hidden = !tls_get_addr && target_symbol->is_hidden,
+                .thread_local_state = tls_get_addr ? OBJECT_SYMBOL_THREAD_LOCAL_NO
+                                                   : target_symbol->is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES : OBJECT_SYMBOL_THREAD_LOCAL_NO,
             };
             object_symbol_name_index_add(name_index, &result.symbols[symbol_index], symbol_index);
         }
@@ -11317,8 +11328,11 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_elf64_with_capacity(Arena* arena
         ObjectSymbol* source = object->symbols + symbol;
         u64 offset = symbol_table_offset + (u64)ordered_symbol * ELF_SYMBOL_SIZE;
         object_write_u32_at(&buffer, offset, symbol_name_offsets[symbol]);
-        bool is_thread_local = source->section < object->section_count && (object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
-                                                                           object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+        bool section_thread_local = source->section < object->section_count &&
+                                    (object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_DATA ||
+                                     object->sections[source->section].kind == OBJECT_SECTION_THREAD_LOCAL_ZERO);
+        bool is_defined = source->section != OBJECT_SECTION_UNDEFINED && source->section < object->section_count;
+        bool is_thread_local = is_defined ? section_thread_local : source->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES;
         // Binding is gated on global because the symbol table is partitioned
         // local-then-global and sh_info below counts that split: a local
         // STB_WEAK entry would contradict it.

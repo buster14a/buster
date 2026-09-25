@@ -3931,6 +3931,133 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_native_tls(UnitTestArgum
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL UnitTestResult compiler_driver_test_elf_tls_cross_link(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 clang = executable_resolve_in_path(temporary.arena, S8("clang"));
+    BUSTER_TEST(arguments, clang.length != 0);
+    if (clang.length)
+    {
+        String8 clang_provider_object = buster_test_temporary_path(temporary.arena, S8("buster-tls-clang-provider"), S8(".o"));
+        String8 clang_consumer_object = buster_test_temporary_path(temporary.arena, S8("buster-tls-clang-consumer"), S8(".o"));
+        String8 buster_provider_object = buster_test_temporary_path(temporary.arena, S8("buster-tls-buster-provider"), S8(".o"));
+        String8 clang_provider_command[] = {
+            clang, S8("-fPIC"), S8("-c"), S8("tools/fixtures/basic_c_tls_identity_provider.c"), S8("-o"), clang_provider_object,
+        };
+        ProcessSpawnResult clang_provider_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_provider_command),
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        bool clang_provider_compiled = clang_provider_spawn.handle &&
+            os_process_wait_deadline(temporary.arena, clang_provider_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, clang_provider_compiled);
+        String8 clang_consumer_command[] = {
+            clang, S8("-fPIC"), S8("-c"), S8("tools/fixtures/basic_c_tls_identity_consumer.c"), S8("-o"), clang_consumer_object,
+        };
+        ProcessSpawnResult clang_consumer_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_consumer_command),
+            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        bool clang_consumer_compiled = clang_consumer_spawn.handle &&
+            os_process_wait_deadline(temporary.arena, clang_consumer_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+        BUSTER_TEST(arguments, clang_consumer_compiled);
+
+        String8 provider_command[] = {
+            S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-linux"), S8("-fPIC"), S8("-fno-machine-fallback"),
+            S8("tools/fixtures/basic_c_tls_identity_provider.c"), S8("-o"), buster_provider_object,
+        };
+        CompilerDriverInvocation provider_invocation = compiler_driver_parse_arguments(
+            temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(provider_command));
+        provider_invocation.reject_machine_fallback = true;
+        CompilerDriverResult buster_provider = compiler_driver_execute_invocation(temporary.arena, provider_invocation);
+        BUSTER_TEST_RAW(arguments, buster_provider.error == COMPILER_DRIVER_ERROR_NONE && buster_provider.has_object,
+                        buster_provider.diagnostic);
+
+        if (clang_provider_compiled && clang_consumer_compiled && buster_provider.error == COMPILER_DRIVER_ERROR_NONE)
+        {
+            String8 positions[] = {S8("-fno-pic"), S8("-fPIC")};
+            for (u32 position = 0; position < BUSTER_ARRAY_LENGTH(positions); position += 1)
+            {
+                String8 buster_consumer_object = buster_test_temporary_path(temporary.arena,
+                    position ? S8("buster-tls-buster-pic-consumer") : S8("buster-tls-buster-static-consumer"), S8(".o"));
+                String8 compile_command[] = {
+                    S8("-c"), S8("-g0"), S8("-target"), S8("x86_64-linux"), positions[position], S8("-fno-machine-fallback"),
+                    S8("tools/fixtures/basic_c_tls_identity_consumer.c"), S8("-o"), buster_consumer_object,
+                };
+                CompilerDriverInvocation compile_invocation = compiler_driver_parse_arguments(
+                    temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(compile_command));
+                compile_invocation.reject_machine_fallback = true;
+                CompilerDriverResult buster_consumer = compiler_driver_execute_invocation(temporary.arena, compile_invocation);
+                BUSTER_TEST_RAW(arguments, buster_consumer.error == COMPILER_DRIVER_ERROR_NONE && buster_consumer.has_object,
+                                buster_consumer.diagnostic);
+                ObjectSymbol const* reference = compiler_driver_test_object_symbol(&buster_consumer.object, S8("tls_identity_value"));
+                BUSTER_TEST(arguments, reference && reference->section == OBJECT_SECTION_UNDEFINED &&
+                                       reference->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES);
+                if (position && buster_consumer.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    ObjectSymbol const* tls_get_addr = compiler_driver_test_object_symbol(&buster_consumer.object, S8("__tls_get_addr"));
+                    BUSTER_TEST(arguments, tls_get_addr && tls_get_addr->section == OBJECT_SECTION_UNDEFINED &&
+                                           tls_get_addr->kind == OBJECT_SYMBOL_FUNCTION &&
+                                           tls_get_addr->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_NO);
+                }
+
+                if (buster_consumer.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    String8 clang_linked_executable = buster_test_temporary_path(temporary.arena,
+                        position ? S8("buster-tls-clang-link-pic") : S8("buster-tls-clang-link-static"), S8(".exe"));
+                    String8 clang_link_command[] = {
+                        clang, buster_consumer_object, clang_provider_object, S8("-o"), clang_linked_executable,
+                    };
+                    ProcessSpawnResult clang_link_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(clang_link_command),
+                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                    bool clang_linked = clang_link_spawn.handle &&
+                        os_process_wait_deadline(temporary.arena, clang_link_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+                    BUSTER_TEST(arguments, clang_linked);
+                    if (clang_linked)
+                    {
+                        BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, clang_linked_executable));
+                    }
+                }
+
+                String8 buster_linked_executable = buster_test_temporary_path(temporary.arena,
+                    position ? S8("buster-tls-buster-link-pic") : S8("buster-tls-buster-link-static"), S8(".exe"));
+                String8 buster_link_command[] = {
+                    positions[position], S8("-fno-machine-fallback"), S8("tools/fixtures/basic_c_tls_identity_consumer.c"),
+                    clang_provider_object, S8("-o"), buster_linked_executable,
+                };
+                CompilerDriverInvocation buster_link_invocation = compiler_driver_parse_arguments(
+                    temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_link_command));
+                buster_link_invocation.reject_machine_fallback = true;
+                CompilerDriverResult buster_linked = compiler_driver_execute_invocation(temporary.arena, buster_link_invocation);
+                BUSTER_TEST_RAW(arguments, buster_linked.error == COMPILER_DRIVER_ERROR_NONE, buster_linked.diagnostic);
+                if (buster_linked.error == COMPILER_DRIVER_ERROR_NONE)
+                {
+                    BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, buster_linked_executable));
+                }
+            }
+
+            String8 clang_linked_buster_provider = buster_test_temporary_path(
+                temporary.arena, S8("buster-tls-clang-link-buster-provider"), S8(".exe"));
+            String8 clang_link_provider_command[] = {
+                clang, clang_consumer_object, buster_provider_object, S8("-o"), clang_linked_buster_provider,
+            };
+            ProcessSpawnResult clang_link_provider_spawn = os_process_spawn(
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(clang_link_provider_command), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+            bool clang_linked_buster = clang_link_provider_spawn.handle &&
+                os_process_wait_deadline(temporary.arena, clang_link_provider_spawn, 30000000).result == PROCESS_RESULT_SUCCESS;
+            BUSTER_TEST(arguments, clang_linked_buster);
+            if (clang_linked_buster)
+            {
+                BUSTER_TEST(arguments, compiler_driver_test_process_success(temporary.arena, clang_linked_buster_provider));
+            }
+        }
+    }
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 // Keep runtime complements strict on every desktop x86-64 target.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_x86_64_i128_complement(UnitTestArguments* arguments)
 {
@@ -8785,6 +8912,9 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_wasm64_stack);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_aarch64_float_to_i128);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_native_tls);
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_elf_tls_cross_link);
+#endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_x86_64_i128_complement);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_CPU_ARCH_AARCH64 && (BUSTER_LINUX || BUSTER_MACOS) && !BUSTER_ANDROID && !BUSTER_IOS
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_atomic_pair_contention);
