@@ -175,6 +175,11 @@ index 7b623e7..5bf99e1 100644
  UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
  {
      UnitTestResult result = {0};
-@@ -23409,6 +23467,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+@@ -23212,6 +23270,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
+     BUSTER_TEST_FIXTURE(arguments, c_test_call_arity_diagnostics);
+     BUSTER_TEST_FIXTURE(arguments, c_test_unevaluated_call_arity_diagnostics);
      BUSTER_TEST_FIXTURE(arguments, c_test_choose_expr_evaluation);
 +    BUSTER_TEST_FIXTURE(arguments, c_test_architecture_preparation_replay);
+     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_update_operand_constraints);
+     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_vla_evaluation);
+     BUSTER_TEST_FIXTURE(arguments, c_test_named_call_arity_without_ir);
