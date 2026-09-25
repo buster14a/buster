@@ -15996,7 +15996,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
                 String8 fixture_path = buster_test_temporary_path(
                     fixture_temporary.arena, S8("buster-c-designator-continuation"),
                     string_format(fixture_temporary.arena, S8("-{u32}-{u32}-{u32}"), frontend_index, allocator_index, optimization_index));
-                String8 source_path = string_format(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
+                String8 source_path = string_format_z(fixture_temporary.arena, S8("{S8}.c"), fixture_path);
                 BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(c_designator_continuation_source)));
                 String8 fixture_command_line[] = {
                     S8("-std=c17"), c_flat_initializer_frontends[frontend_index], c_lz4_regression_allocators[allocator_index],
