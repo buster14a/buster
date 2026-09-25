@@ -6,6 +6,6 @@ struct Cell { long double value; };
     struct Cell record_##name = {expression}; \
     long double *local_static_##name(void) { static long double value = expression; return &value; } \
     long double automatic_##name(void) { long double value = expression; return value; } \
-    double double_##name = expression;
+    double double_##name = (double)(expression);
 #include "cases.def"
 #undef CASE

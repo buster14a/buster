@@ -79,5 +79,43 @@ for cc in clang gcc buster; do
     printf '%s\t%s\t%s\n' "$cc" "$c" "$r" | tee -a minimal-results.tsv
     if [[ $c != 0 || $r != 0 ]]; then bad=1; fi
 done
+# Sanitized reference executions; failures remain distinct from Buster verdicts.
+printf 'profile\tcompile_status\trun_status\n' > sanitized-results.tsv
+for cc in clang gcc; do
+    c=0; r=NA
+    cmd=("$cc" -std=c17 -O1 -g -Wall -Wextra -Werror -pedantic-errors -fsanitize=address,undefined -fno-sanitize-recover=all producer.c observer.c -o "sanitized-$cc")
+    printf '%q ' "${cmd[@]}" > "sanitized-$cc.command"
+    printf '\n' >> "sanitized-$cc.command"
+    timeout 180 "${cmd[@]}" > "sanitized-$cc.compile.stdout" 2> "sanitized-$cc.compile.stderr" || c=$?
+    if [[ $c == 0 ]]; then
+        r=0
+        ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 timeout 60 "./sanitized-$cc" > "sanitized-$cc.values.tsv" 2> "sanitized-$cc.stderr" || r=$?
+    fi
+    printf '%s\t%s\t%s\n' "$cc" "$c" "$r" | tee -a sanitized-results.tsv
+    if [[ $c != 0 || $r != 0 ]]; then bad=1; fi
+done
+# A separate backend consumes the same canonical globals. This is diagnostic,
+# not timing evidence, and a tool failure is not a semantic mismatch.
+cat > canonical.c <<'C'
+long double direct = -1u;
+long double parenthesized = -(1u);
+long double signed_one = -(1);
+long double unsigned_long = -(1ul);
+C
+cmd=("$ide" cc -std=c17 -target x86_64-linux -O0 -g0 -emit-llvm -c canonical.c -o canonical.buster.bc)
+printf '%q ' "${cmd[@]}" > canonical-buster.command
+printf '\n' >> canonical-buster.command
+c=0
+"${cmd[@]}" > canonical-buster.stdout 2> canonical-buster.stderr || c=$?
+printf 'buster-bitcode-status=%s\n' "$c" > canonical-status.txt
+dis=$(command -v llvm-dis || command -v llvm-dis-21 || true)
+if [[ $c == 0 && -n $dis ]]; then
+    c=0
+    "$dis" canonical.buster.bc -o canonical.buster.ll > canonical-dis.stdout 2> canonical-dis.stderr || c=$?
+    printf 'disassembler=%s status=%s\n' "$dis" "$c" >> canonical-status.txt
+fi
+c=0
+clang -std=c17 -O0 -S -emit-llvm canonical.c -o canonical.clang.ll > canonical-clang.stdout 2> canonical-clang.stderr || c=$?
+printf 'clang-ir-status=%s\n' "$c" >> canonical-status.txt
 find . -type f ! -name SHA256SUMS ! -name harness.log -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
 exit "$bad"
