@@ -1,0 +1,64 @@
+name: Issue 1183 probe fidelity validation
+on:
+  push:
+    branches: [codex/1183-probe-fidelity-validation]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Bind exact production-source blobs
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/1183-probe-logs"
+          test "$(git hash-object tools/bench_service/systemd_broker_live_test.c)" = 1e2d02794f494f04089b85bdb3e62cb74aa51308
+          test "$(git hash-object tools/bench_service/deploy/SYSTEMD_BROKER.md)" = 9dd39c025d5bce6fa9110cf3caaa6fa942d9a735
+          git cat-file -e 19af05dcdcc0c39d28e9ec33df5f7a4545d66a58^{commit}
+          git diff 19af05dcdcc0c39d28e9ec33df5f7a4545d66a58 -- tools/bench_service/systemd_broker_live_test.c tools/bench_service/deploy/SYSTEMD_BROKER.md | tee "$RUNNER_TEMP/1183-probe-logs/source-diff.txt"
+          test ! -s "$RUNNER_TEMP/1183-probe-logs/source-diff.txt"
+          uname -a | tee "$RUNNER_TEMP/1183-probe-logs/platform.txt"
+          clang --version | tee -a "$RUNNER_TEMP/1183-probe-logs/platform.txt"
+      - name: Hosted broker build and identity controls
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/1183-build"
+          "$RUNNER_TEMP/1183-build" bench_service_broker self-test 2>&1 | tee "$RUNNER_TEMP/1183-probe-logs/broker.log"
+          cat > "$RUNNER_TEMP/1183-probe-wrapper.c" <<'C'
+          #define main bq_probe_main
+          #include "tools/bench_service/systemd_broker_live_test.c"
+          #undef main
+          int main(int argc, char** argv)
+          {
+              bool ok = argc == 2;
+              BqTestIdentity service, identity;
+              if (ok) ok = bq_test_identity_load("buster-bench", &service);
+              if (ok && !strcmp(argv[1], "root")) ok = bq_test_root_rejected("1", "2");
+              else if (ok)
+              {
+                  char const* name = !strcmp(argv[1], "candidate") ? "buster-bench-candidate" :
+                                     !strcmp(argv[1], "runner") ? "buster-github-runner" : NULL;
+                  ok = name && bq_test_identity_load(name, &identity) &&
+                       bq_test_socket_verified(BQ_TEST_BROKER_SOCKET, service.uid, service.gid) &&
+                       bq_test_socket_denied_identity(&identity) == 0;
+              }
+              return ok ? 0 : 1;
+          }
+          C
+          clang -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char -I "$PWD" "$RUNNER_TEMP/1183-probe-wrapper.c" -o "$RUNNER_TEMP/1183-socket-fixture"
+      - name: Disposable PID and mount namespace identity/DAC/protocol controls
+        run: |
+          set -euo pipefail
+          sudo unshare --mount --pid --fork --mount-proc python3 "$PWD/1183-probe-fixture.py" "$PWD" "$RUNNER_TEMP" 2>&1 | tee "$RUNNER_TEMP/1183-probe-logs/fixture.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: issue-1183-probe-fidelity-${{ github.run_id }}
+          path: ${{ runner.temp }}/1183-probe-logs
+          if-no-files-found: error
+          retention-days: 14
