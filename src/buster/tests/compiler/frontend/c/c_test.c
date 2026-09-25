@@ -21352,7 +21352,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_vla_evaluation(UnitTestArgument
             {
                 CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("sizeof-vla-evaluation.c"), tokens, semantic, target,
                                                                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
-                if (BUSTER_REQUIRE(arguments, lowered.program && !lowered.diagnostic_count && lowered.program->module_count == 1))
+                bool lowered_success = lowered.program && !lowered.diagnostic_count && lowered.program->module_count == 1;
+                if (BUSTER_REQUIRE(arguments, lowered_success))
                 {
                     IrModule* module = lowered.program->modules;
                     BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
@@ -21375,6 +21376,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_vla_evaluation(UnitTestArgument
                                               name, target_index, form, calls, expected_calls[probe], stores, expected_stores[probe]));
                         }
                     }
+                }
+                else
+                {
+                    String8 diagnostic = lowered.diagnostic_count && lowered.diagnostics ? lowered.diagnostics[0].message
+                                                                                         : S8("no lowering diagnostic");
+                    arguments->show(arguments,
+                        S8("sizeof VLA lowering target={u32} form={u32} diagnostics={u32} modules={u32} first_diagnostic={S8}\n"),
+                        target_index, form, lowered.diagnostic_count, lowered.program ? lowered.program->module_count : 0, diagnostic);
                 }
             }
             scratch_end(temporary);
