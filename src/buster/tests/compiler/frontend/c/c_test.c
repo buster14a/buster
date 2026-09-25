@@ -11232,6 +11232,55 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_constant_expression(UnitTestArg
     return result;
 }
 
+// #629: the integer-range evaluator must use the source token indices. With
+// compact lexing, copying the expression under an assertion wrapper borrowed
+// the original shape sidecar and rejected this valid sizeof compound literal.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_token_view_constant_range(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 form = 0; form < 2; form += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena,
+            S8("struct TokenViewPair { int x, y; };\n"
+               "#pragma pack(push, 1)\n"
+               "struct TokenViewPacked { char c; int x; };\n"
+               "#pragma pack(pop)\n"
+               "int unrelated = 7;\n"
+               "constexpr int size = sizeof (struct TokenViewPair){1, 2};\n"
+               "constexpr int packed_size = sizeof (struct TokenViewPacked){1, 2};\n"
+               "_Static_assert(sizeof (struct TokenViewPacked){1, 2} == 5, \"compound literal, comma\");\n"
+               "int array[(size == 8 && packed_size == 5) ? 1 : -1];\n"),
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_C23});
+        CParseResult parse = c_parse(temporary.arena, preprocess);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+        {
+            bool found_size = false;
+            bool found_packed_size = false;
+            for (u32 entity_index = 0; entity_index < parse.entity_count; entity_index += 1)
+            {
+                CEntity* entity = parse.entities + entity_index;
+                found_size |= string_equal(entity->name, S8("size")) && entity->has_constant_value && entity->constant_value == 8;
+                found_packed_size |= string_equal(entity->name, S8("packed_size")) && entity->has_constant_value && entity->constant_value == 5;
+            }
+            BUSTER_TEST(arguments, found_size);
+            BUSTER_TEST(arguments, found_packed_size);
+            CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("token-view-constant.c"), preprocess, parse,
+                                                                target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST(arguments, lowered.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, lowered.program && lowered.program->module_count))
+            {
+                BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 // A type name may spell a function -- `int(void)` -- not just a pointer to one
 // -- `int (*)(void)`. The type-name resolution accepted only the pointer
 // declarator, so a bare function declarator left the whole type name unresolved
@@ -22974,6 +23023,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_enum_runtime);
     BUSTER_TEST_FIXTURE(arguments, c_test_enumerator_type_differential);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_constant_expression);
+    BUSTER_TEST_FIXTURE(arguments, c_test_token_view_constant_range);
     BUSTER_TEST_FIXTURE(arguments, c_test_sizeof_function_type_name);
     BUSTER_TEST_FIXTURE(arguments, c_test_void_object_refusals);
     BUSTER_TEST_FIXTURE(arguments, c_test_declarator_ellipsis_depth);

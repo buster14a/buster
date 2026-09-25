@@ -220,6 +220,12 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   association by token range without flattening or copying the translation
   unit, and unselected associations are never evaluated. The nested
   generic-constant cases cover this path (GitHub #797).
+- Legacy integer constant ranges and static assertions share the private
+  `c_parse_constant_expression_evaluate` walker over original token indices.
+  The shape sidecar and parse position index describe that stream; copying a
+  range into a synthesized token view while retaining either derived index
+  gives the wrong classification. Spelling, source recovery, and pack changes
+  still belong to the original preprocess result (GitHub #629).
 - Preprocessing integer-expression reductions carry signedness and a deferred
   arithmetic-fault bit in the same byte. Division by zero and signed
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
