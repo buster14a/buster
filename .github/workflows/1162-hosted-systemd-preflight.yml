@@ -43,6 +43,9 @@ jobs:
           echo "WORKFLOW_SHA=$GITHUB_SHA RUN_ID=$GITHUB_RUN_ID OS=$RUNNER_OS ARCH=$RUNNER_ARCH"
           uname -a
           sudo docker version
+          sudo docker info --format 'HOST_CGROUP_DRIVER={{.CgroupDriver}} HOST_CGROUP_VERSION={{.CgroupVersion}}'
+          printf 'HOST_PID1=%s HOST_CGROUP_FS=%s HOST_CGROUP_MOUNT=%s\n' "$(cat /proc/1/comm)" "$(stat -fc %T /sys/fs/cgroup)" "$(findmnt -no OPTIONS -T /sys/fs/cgroup)"
+          systemctl show docker.service --property=Delegate --property=ControlGroup || true
           cat > "$evidence/Dockerfile" <<'DOCKERFILE'
           FROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
           RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv util-linux python3-minimal && rm -rf /var/lib/apt/lists/*
@@ -51,7 +54,7 @@ jobs:
           DOCKERFILE
           sudo docker build --pull --no-cache -t "$image" "$evidence"
           sudo docker image inspect "$image" --format 'IMAGE_ID={{.Id}}'
-          sudo docker run -d --name "$container" --privileged --cgroupns=private --network none --env container=docker --env SYSTEMD_LOG_TARGET=console --env SYSTEMD_LOG_LEVEL=info --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:rw "$image"
+          sudo docker run -d --name "$container" --privileged --cgroup-parent=docker.slice --cgroupns=private --network none --env container=docker --env SYSTEMD_LOG_TARGET=console --env SYSTEMD_LOG_LEVEL=info --tmpfs /tmp --tmpfs /run --tmpfs /run/lock "$image"
           ready=false
           for attempt in $(seq 1 40); do
             if sudo docker exec "$container" systemctl show --property=Version --property=SystemState > "$evidence/manager.txt" 2>&1; then
