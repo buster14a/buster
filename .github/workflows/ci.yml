@@ -1051,7 +1051,8 @@ jobs:
         run: python3 tools/ci_summary.py
 
       - name: Retain mobile logs
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        # Loading a local action requires checkout, not successful build/test steps.
         # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
         uses: ./.github/actions/native-artifact-upload
         with:
