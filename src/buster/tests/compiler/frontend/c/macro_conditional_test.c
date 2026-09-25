@@ -70,7 +70,19 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                         "STR(\n#if ENABLED\nalpha beta\n#else\nwrong, )\n#endif\n)\n"
                         "CAT(\n#if ENABLED\npre\n#endif\n,\n#if ENABLED\nfix\n#endif\n)\n"
                         "VAR(head,\n#if ENABLED\n+ tail\n#else\n, wrong, )\n#endif\n)\n"
-                        "ID(\nordinary\n)\n");
+                        "ID(\nordinary\n)\n"
+                        "#if !(u'\\0' - 1 > 0)\n"
+                        "#error UTF-16 character type lost in conditional preprocessing\n"
+                        "#endif\n"
+                        "#if !(U'\\0' - 1 > 0)\n"
+                        "#error UTF-32 character type lost in conditional preprocessing\n"
+                        "#endif\n"
+                        "#if !(~u'\\0' > 0)\n"
+                        "#error conditional complement lost unsigned character type\n"
+                        "#endif\n"
+                        "#if (1 ? -1 : u'\\0') < 0\n"
+                        "#error conditional arms did not determine preprocessing type\n"
+                        "#endif\n");
     String8 expected_source = S8("if_value ifdef_value ifndef_value elif_value else_value after_inactive_directive "
                                  "nested_a (nested_b, nested_c) after_empty \"alpha beta\" prefix head + tail ordinary");
     CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_GNU17, C_PREPROCESS_DIALECT_C17};
@@ -101,6 +113,56 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         }
         scratch_end(temporary);
     }
+    // Preprocessing arithmetic widens each literal to intmax_t or uintmax_t
+    // using its target type. Keep wchar choices explicit so this catches a
+    // regression in either the decoder or the evaluator's type handoff.
+    struct
+    {
+        Target target;
+        bool wide_unsigned;
+    } targets[] = {
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX}, false},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}, true},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_MACOS}, false},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_MACOS}, false},
+        {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS}, true},
+        {{.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS}, true},
+    };
+    String8 wide_sources[] = {
+        S8("#if L'\\0' - 1 > 0\n#error signed wchar became unsigned in conditional preprocessing\n#endif\n"),
+        S8("#if !(L'\\0' - 1 > 0)\n#error unsigned wchar became signed in conditional preprocessing\n#endif\n"),
+    };
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessOptions options = {
+                .source_path = S8("prefixed-character-conditional.c"),
+                .target = targets[target_index].target,
+                .data_layout = target_data_layout(targets[target_index].target),
+                .dialect = dialects[dialect_index],
+            };
+            CPreprocessResult common = c_preprocess(temporary.arena, S8("#if !(u'\\0' - 1 > 0)\n#error unsigned UTF-16 type lost\n#endif\n"
+                                                                        "#if !(U'\\0' - 1 > 0)\n#error unsigned UTF-32 type lost\n#endif\n"
+                                                                        "#if !(~u'\\0' > 0)\n#error unsigned complement type lost\n#endif\n"
+                                                                        "#if (1 ? -1 : u'\\0') < 0\n#error conditional common type lost\n#endif\n"),
+                                                        options);
+            CPreprocessResult wide = c_preprocess(temporary.arena, wide_sources[targets[target_index].wide_unsigned], options);
+            BUSTER_TEST(arguments, common.diagnostic_count == 0);
+            BUSTER_TEST(arguments, wide.diagnostic_count == 0);
+            scratch_end(temporary);
+        }
+    }
+    TemporalArena utf8_temporary = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult utf8 = c_preprocess(utf8_temporary.arena,
+                                          S8("#if !(u8'\\0' - 1 > 0)\n#error C23 UTF-8 character type lost\n#endif\n"),
+                                          (CPreprocessOptions){.source_path = S8("utf8-character-conditional.c"),
+                                                               .target = targets[0].target,
+                                                               .data_layout = target_data_layout(targets[0].target),
+                                                               .dialect = C_PREPROCESS_DIALECT_C23});
+    BUSTER_TEST(arguments, utf8.diagnostic_count == 0);
+    scratch_end(utf8_temporary);
 #if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64
     String8 reference_names[] = {S8("clang"), S8("gcc")};
     for (u32 reference_index = 0; reference_index < BUSTER_ARRAY_LENGTH(reference_names); reference_index += 1)
@@ -192,6 +254,14 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     String8 runtime_source = S8("#define ENABLED 1\n"
                                 "#define SELECT(x) x\n"
                                 "#define VALUES(...) __VA_ARGS__\n"
+                                "#define WIDE_PROMOTES_UNSIGNED _Generic(+(L'\\0'), unsigned int: 1, default: 0)\n"
+                                "_Static_assert(sizeof(u'\\0') == 2, \"UTF-16 character width\");\n"
+                                "_Static_assert(sizeof(U'\\0') == 4, \"UTF-32 character width\");\n"
+                                "_Static_assert(!(u'\\0' - 1 > 0), \"ordinary UTF-16 promotes to int\");\n"
+                                "_Static_assert(U'\\0' - 1 > 0, \"ordinary UTF-32 keeps unsigned int\");\n"
+                                "_Static_assert((1 ? -1 : u'\\0') < 0, \"ordinary UTF-16 conditional promotes to int\");\n"
+                                "_Static_assert(~u'\\0' == -1, \"ordinary UTF-16 complement promotes to int\");\n"
+                                "_Static_assert((L'\\0' - 1 > 0) == WIDE_PROMOTES_UNSIGNED, \"ordinary wchar follows C promotions\");\n"
                                 "int main(void)\n"
                                 "{\n"
                                 "    int effects = 0;\n"
