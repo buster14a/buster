@@ -630,6 +630,23 @@ BUSTER_C_INTERNAL IrTypeId c_ir_complex_type(CIrTypeContext* context, CTypeKind 
     return type;
 }
 
+// Literal magnitudes use a u64 carrier even when their selected C type is
+// wider. Cached lowering and uncached semantic queries must admit the same
+// values; a signed 128-bit type can represent every value in that carrier.
+BUSTER_C_INTERNAL u64 c_semantic_integer_literal_limit(u32 width, bool is_signed)
+{
+    u64 result = 0;
+    if (width > 64 || (width == 64 && !is_signed))
+    {
+        result = UINT64_MAX;
+    }
+    else if (width)
+    {
+        result = (UINT64_C(1) << (width - (is_signed ? 1u : 0u))) - 1;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind)
 {
     if ((u32)kind >= C_TYPE_COUNT)
@@ -685,9 +702,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
     context->scalar_types[kind] = type;
     if (ir_kind == IR_TYPE_INTEGER)
     {
-        context->literal_limits[kind] = bit_width >= 64 ? (is_signed ? (u64)INT64_MAX : UINT64_MAX)
-                                        : is_signed     ? (((u64)1 << (bit_width - 1)) - 1)
-                                                        : (((u64)1 << bit_width) - 1);
+        context->literal_limits[kind] = c_semantic_integer_literal_limit(bit_width, is_signed);
     }
     return type;
 }
@@ -8837,9 +8852,7 @@ BUSTER_C_INTERNAL bool c_semantic_integer_literal_fits(Target target, u64 const*
         bool sign = false;
         if (c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) && width)
         {
-            limit = width > 64 ? UINT64_MAX
-                    : width == 64 ? sign ? (u64)INT64_MAX : UINT64_MAX
-                                  : (UINT64_C(1) << (width - (sign ? 1u : 0u))) - 1;
+            limit = c_semantic_integer_literal_limit(width, sign);
         }
     }
     return limit && value <= limit;
