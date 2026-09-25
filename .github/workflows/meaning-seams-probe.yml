@@ -6,15 +6,17 @@ on:
 permissions:
   contents: read
 jobs:
-  source:
+  correctness:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 25
+    env:
+      BUSTER_TEST_JOBS: '2'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Capture exact unmodified production source
+      - name: Pin and build production in an isolated worktree
         shell: bash
         run: |
           set -euo pipefail
@@ -23,11 +25,33 @@ jobs:
           test "$(git rev-parse "$pin^{tree}")" = ae9f274b6768b023fe6e0ef80a161e14b290e0a2
           git rev-parse HEAD HEAD^{tree} > evidence/transport.txt
           git rev-parse "$pin" "$pin^{tree}" > evidence/production.txt
-          git archive --format=tar "$pin" > evidence/production.tar
-          sha256sum evidence/production.tar > evidence/SHA256SUMS
+          git diff --exit-code "$pin" HEAD -- src build.c CMakeLists.txt cmake
+          git worktree add --detach "$RUNNER_TEMP/meaning-source" "$pin"
+          { uname -a; cat /etc/os-release; clang --version; gcc --version; cmake --version; ninja --version; lscpu; } > evidence/environment.txt
+          echo 'clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o $RUNNER_TEMP/meaning-build' > evidence/build-command.txt
+          cd "$RUNNER_TEMP/meaning-source"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/meaning-build" > "$GITHUB_WORKSPACE/evidence/bootstrap.stdout" 2> "$GITHUB_WORKSPACE/evidence/bootstrap.stderr"
+          "$RUNNER_TEMP/meaning-build" generate --cc clang --ci --linker DEFAULT > "$GITHUB_WORKSPACE/evidence/generate.stdout" 2> "$GITHUB_WORKSPACE/evidence/generate.stderr"
+          "$RUNNER_TEMP/meaning-build" build --config Release -t ide > "$GITHUB_WORKSPACE/evidence/build.stdout" 2> "$GITHUB_WORKSPACE/evidence/build.stderr"
+          sha256sum build/Release/ide > "$GITHUB_WORKSPACE/evidence/compiler.sha256"
+          cp build/Release/ide "$GITHUB_WORKSPACE/evidence/ide"
+          cp build/CMakeCache.txt "$GITHUB_WORKSPACE/evidence/CMakeCache.txt"
+      - name: Run independent semantic scouts on this same hosted CPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp tools/investigations/meaning-seams-20260925/{scout.c,run.py} evidence/
+          python3 -B tools/investigations/meaning-seams-20260925/run.py tools/investigations/meaning-seams-20260925/scout.c "$RUNNER_TEMP/meaning-source/build/Release/ide" evidence/scout 2>&1 | tee evidence/observer.log
+      - name: Retain all raw attempts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          find evidence -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > evidence/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: meaning-seams-source-${{ github.run_id }}-${{ github.run_attempt }}
+          name: meaning-seams-scout-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence
           retention-days: 30
           if-no-files-found: error
