@@ -377,7 +377,8 @@ class ArchivedReplayTests(unittest.TestCase):
         self.assertIn(digest((Path(__file__).resolve().parents[1] /
                               "docs/native-retirement-support-v1.tsv").read_bytes()),
                       (materializer.SUPPORT_CONTRACT_SHA256,
-                       materializer.NEXT_SUPPORT_CONTRACT_SHA256))
+                       materializer.NEXT_SUPPORT_CONTRACT_SHA256,
+                       materializer.PROPOSED_SUPPORT_CONTRACT_SHA256))
         with self.assertRaisesRegex(materializer.MaterializationError, "support contract identity mismatch"):
             materializer.materialize(self.manifest, self.root, self.root / "wrong-contract")
         self.assertFalse((self.root / "wrong-contract").exists())

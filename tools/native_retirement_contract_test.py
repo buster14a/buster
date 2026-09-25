@@ -370,7 +370,8 @@ class ContractTests(unittest.TestCase):
                     "shard_count": "4", "fixture_filter": "", "target_filter": "", "subjects": "411"}
         inputs = {f"tests/subject-{index}.c": {"role": "subject"} for index in range(contract.FULL_SUBJECT_COUNT)}
         for digest in (contract.FULL_SUPPORT_CONTRACT_SHA256,
-                       contract.NEXT_SUPPORT_CONTRACT_SHA256):
+                       contract.NEXT_SUPPORT_CONTRACT_SHA256,
+                       contract.PROPOSED_SUPPORT_CONTRACT_SHA256):
             with self.subTest(digest=digest):
                 manifest["support_contract_sha256"] = digest
                 self.assertEqual(contract.validate_profile(manifest, inputs, contract.FULL_ROW_COUNT),

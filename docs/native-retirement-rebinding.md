@@ -214,6 +214,13 @@ its exact byte/hash ledger row, and the benchmark-service profile pins. Old
 census/performance evidence remains bound to its original declaration digest;
 the matching manifest and exact declaration bytes are checked together.
 
+For #1007, the current support declaration digest remains accepted for
+historical evidence. The trusted-reader bootstrap admits the exact proposed
+successor digest `0d878bf0a3df9f0528803a5b08275d950f9edda57e373fd7618229dee264e427` alongside both prior digests. After that
+bootstrap is trusted, a separate policy transition may update only the
+`tests/basic_c_f80_machine.c` byte/hash row and benchmark-service support pins;
+all 559 inputs, 411 subjects, and 78,912 row identities remain fixed.
+
 ### Solo-maintainer authorization
 
 `authorization_mode: solo-maintainer` is explicit owner authorization of one

@@ -138,6 +138,7 @@ ROW_ELIGIBILITY_FIELDS = [
 SUPPORT_DECLARATION_PATH = "docs/native-retirement-support-v1.tsv"
 SUPPORT_DECLARATION_SHA256 = "c61bbde58c471dc0d50853f8797e05ccd1737521d342dc7376669d90e192f5b8"
 NEXT_SUPPORT_DECLARATION_SHA256 = "932fb6e2e8aeb3fdd01409e06b2f58e3b7e09d7d1cf03621e5f98d95172c1e82"
+PROPOSED_SUPPORT_DECLARATION_SHA256 = "0d878bf0a3df9f0528803a5b08275d950f9edda57e373fd7618229dee264e427"
 SUPPORT_DECLARATION_FIELDS = ["path", "role", "compile_obligation", "bytes", "sha256"]
 INPUT_FIELDS = ["path", "role", "compile_obligation", "bytes", "buster_hash_64",
                 "sha256", "fixture_recipe", "fixture_flags"]
@@ -1644,7 +1645,8 @@ def _check_support_output(root, binding, row_data, native_target=None):
         _fail("#508 support declaration path is not the frozen declaration")
     support_sha256 = support_declaration["sha256"]
     if support_sha256 not in (SUPPORT_DECLARATION_SHA256,
-                             NEXT_SUPPORT_DECLARATION_SHA256):
+                             NEXT_SUPPORT_DECLARATION_SHA256,
+                             PROPOSED_SUPPORT_DECLARATION_SHA256):
         _fail("#508 support declaration digest is not the approved immutable input")
     declaration_data = _evidence_bytes(root, support_declaration,
                                        "support.files.support_declaration")
