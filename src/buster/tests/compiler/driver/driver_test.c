@@ -7130,6 +7130,196 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_pic_argument_policy(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_common_storage_option(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("buster-common-storage-option"), S8(".c"));
+    String8 default_object_path = buster_test_temporary_path(arena, S8("buster-common-storage-default"), S8(".o"));
+    String8 no_common_object_path = buster_test_temporary_path(arena, S8("buster-common-storage-no-common"), S8(".o"));
+    String8 restored_object_path = buster_test_temporary_path(arena, S8("buster-common-storage-restored"), S8(".o"));
+    String8 provider_path = buster_test_temporary_path(arena, S8("buster-common-storage-provider"), S8(".c"));
+    String8 consumer_path = buster_test_temporary_path(arena, S8("buster-common-storage-consumer"), S8(".c"));
+    String8 source = S8("int common_storage_probe;\n");
+    bool input_written = file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source));
+    BUSTER_TEST(arguments, input_written);
+
+    String8 default_parse_arguments[] = {S8("-c"), input};
+    String8 common_parse_arguments[] = {S8("-c"), S8("-fcommon"), input};
+    String8 no_common_parse_arguments[] = {S8("-c"), S8("-fno-common"), input};
+    String8 common_then_no_common_parse_arguments[] = {S8("-c"), S8("-fcommon"), S8("-fno-common"), input};
+    String8 no_common_then_common_parse_arguments[] = {S8("-c"), S8("-fno-common"), S8("-fcommon"), input};
+    String8 preprocess_common_arguments[] = {S8("-E"), S8("-fcommon"), input};
+    String8 syntax_common_arguments[] = {S8("-fsyntax-only"), S8("-fcommon"), input};
+    CompilerDriverInvocation default_parse =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_parse_arguments));
+    CompilerDriverInvocation common_parse =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(common_parse_arguments));
+    CompilerDriverInvocation no_common_parse =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_common_parse_arguments));
+    CompilerDriverInvocation common_then_no_common_parse =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(common_then_no_common_parse_arguments));
+    CompilerDriverInvocation no_common_then_common_parse =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_common_then_common_parse_arguments));
+    CompilerDriverInvocation preprocess_common =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(preprocess_common_arguments));
+    CompilerDriverInvocation syntax_common =
+        compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_common_arguments));
+    BUSTER_TEST(arguments, default_parse.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, common_parse.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, common_parse.diagnostic, S8("unsupported option: -fcommon"));
+    BUSTER_TEST(arguments, no_common_parse.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, common_then_no_common_parse.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, no_common_then_common_parse.error == COMPILER_DRIVER_ERROR_ARGUMENT);
+    BUSTER_STRING_TEST(arguments, no_common_then_common_parse.diagnostic, S8("unsupported option: -fcommon"));
+    BUSTER_TEST(arguments, preprocess_common.error == COMPILER_DRIVER_ERROR_NONE);
+    BUSTER_TEST(arguments, syntax_common.error == COMPILER_DRIVER_ERROR_NONE);
+
+    if (input_written)
+    {
+        String8 default_object_arguments[] = {S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), default_object_path, input};
+        String8 no_common_object_arguments[] = {S8("-nostdinc"), S8("-g0"), S8("-fno-common"), S8("-c"),
+                                                S8("-o"), no_common_object_path, input};
+        String8 restored_object_arguments[] = {S8("-nostdinc"), S8("-g0"), S8("-fcommon"), S8("-fno-common"), S8("-c"),
+                                               S8("-o"), restored_object_path, input};
+        CompilerDriverResult default_object = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(default_object_arguments)));
+        CompilerDriverResult no_common_object = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(no_common_object_arguments)));
+        CompilerDriverResult restored_object = compiler_driver_execute_invocation(
+            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(restored_object_arguments)));
+        bool default_succeeded = default_object.error == COMPILER_DRIVER_ERROR_NONE && default_object.has_object;
+        bool no_common_succeeded = no_common_object.error == COMPILER_DRIVER_ERROR_NONE && no_common_object.has_object;
+        bool restored_succeeded = restored_object.error == COMPILER_DRIVER_ERROR_NONE && restored_object.has_object;
+        BUSTER_TEST_RAW(arguments, default_succeeded, default_object.diagnostic);
+        BUSTER_TEST_RAW(arguments, no_common_succeeded, no_common_object.diagnostic);
+        BUSTER_TEST_RAW(arguments, restored_succeeded, restored_object.diagnostic);
+        if (default_succeeded && no_common_succeeded && restored_succeeded)
+        {
+            ByteSlice default_bytes = file_read(arena, default_object_path, (FileReadOptions){0});
+            ByteSlice no_common_bytes = file_read(arena, no_common_object_path, (FileReadOptions){0});
+            ByteSlice restored_bytes = file_read(arena, restored_object_path, (FileReadOptions){0});
+            bool all_read = default_bytes.pointer && no_common_bytes.pointer && restored_bytes.pointer;
+            BUSTER_TEST(arguments, all_read);
+            if (all_read)
+            {
+                BUSTER_TEST(arguments, default_bytes.length && default_bytes.length == no_common_bytes.length &&
+                                          memcmp(default_bytes.pointer, no_common_bytes.pointer, default_bytes.length) == 0);
+                BUSTER_TEST(arguments, default_bytes.length == restored_bytes.length &&
+                                          memcmp(default_bytes.pointer, restored_bytes.pointer, default_bytes.length) == 0);
+            }
+        }
+
+        String8 provider = S8("int shared;\nint get_shared(void) { return shared; }\n");
+        String8 consumer = S8("int shared;\nint get_shared(void);\nint main(void) { shared = 7; return get_shared() != 7; }\n");
+        bool providers_written = file_write(provider_path, BUSTER_SLICE_TO_BYTE_SLICE(provider));
+        bool consumers_written = file_write(consumer_path, BUSTER_SLICE_TO_BYTE_SLICE(consumer));
+        BUSTER_TEST(arguments, providers_written && consumers_written);
+        if (providers_written && consumers_written)
+        {
+            String8 duplicate_default_arguments[] = {S8("-nostdinc"), S8("-g0"), provider_path, consumer_path};
+            String8 duplicate_no_common_arguments[] = {S8("-nostdinc"), S8("-g0"), S8("-fno-common"), provider_path, consumer_path};
+            CompilerDriverResult duplicate_default = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(duplicate_default_arguments)));
+            CompilerDriverResult duplicate_no_common = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(duplicate_no_common_arguments)));
+            BUSTER_TEST(arguments, duplicate_default.error == COMPILER_DRIVER_ERROR_LINK);
+            BUSTER_TEST(arguments, string_first_sequence(duplicate_default.diagnostic, S8("shared")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, duplicate_no_common.error == COMPILER_DRIVER_ERROR_LINK);
+            BUSTER_TEST(arguments, string_first_sequence(duplicate_no_common.diagnostic, S8("shared")) != BUSTER_STRING_NO_MATCH);
+        }
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+        String8 executable = {0};
+        if (program_state && program_state->input.arguments.pointer && program_state->input.arguments.length)
+        {
+            executable = program_state->input.arguments.pointer[0];
+        }
+        BUSTER_TEST(arguments, executable.length != 0);
+        if (executable.length)
+        {
+            String8 cli_restored_path = buster_test_temporary_path(arena, S8("buster-common-storage-cli-restored"), S8(".o"));
+            String8 cli_rejected_path = buster_test_temporary_path(arena, S8("buster-common-storage-cli-rejected"), S8(".o"));
+            String8 cli_restored_arguments[] = {
+                executable, S8("cc"), S8("-nostdinc"), S8("-g0"), S8("-fcommon"), S8("-fno-common"),
+                S8("-c"), S8("-o"), cli_restored_path, input,
+            };
+            ProcessSpawnResult restored_spawn = os_process_spawn(
+                (SliceString8)BUSTER_ARRAY_TO_SLICE(cli_restored_arguments), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                    .use_process_environment = true,
+                    .search_path = true,
+                });
+            BUSTER_TEST(arguments, restored_spawn.handle != 0);
+            if (restored_spawn.handle)
+            {
+                ProcessWaitResult restored_wait = os_process_wait_deadline(arena, restored_spawn, 30000000);
+                bool restored_cli_succeeded = !restored_wait.timed_out && restored_wait.result == PROCESS_RESULT_SUCCESS;
+                BUSTER_TEST(arguments, restored_cli_succeeded);
+                BUSTER_TEST(arguments, restored_wait.streams[STANDARD_STREAM_ERROR].length == 0);
+                if (restored_cli_succeeded)
+                {
+                    ByteSlice direct_bytes = file_read(arena, restored_object_path, (FileReadOptions){0});
+                    ByteSlice cli_bytes = file_read(arena, cli_restored_path, (FileReadOptions){0});
+                    bool both_read = direct_bytes.pointer && cli_bytes.pointer;
+                    BUSTER_TEST(arguments, both_read);
+                    if (both_read)
+                    {
+                        BUSTER_TEST(arguments, direct_bytes.length == cli_bytes.length && direct_bytes.length &&
+                                                  memcmp(direct_bytes.pointer, cli_bytes.pointer, direct_bytes.length) == 0);
+                    }
+                }
+            }
+
+            String8 sentinel_text = S8("existing object must survive an unsupported -fcommon request\n");
+            ByteSlice sentinel = BUSTER_SLICE_TO_BYTE_SLICE(sentinel_text);
+            bool sentinel_written = file_write(cli_rejected_path, sentinel);
+            BUSTER_TEST(arguments, sentinel_written);
+            if (sentinel_written)
+            {
+                String8 cli_rejected_arguments[] = {
+                    executable, S8("cc"), S8("-nostdinc"), S8("-g0"), S8("-fno-common"), S8("-fcommon"),
+                    S8("-c"), S8("-o"), cli_rejected_path, input,
+                };
+                ProcessSpawnResult rejected_spawn = os_process_spawn(
+                    (SliceString8)BUSTER_ARRAY_TO_SLICE(cli_rejected_arguments), (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                        .use_process_environment = true,
+                        .search_path = true,
+                    });
+                BUSTER_TEST(arguments, rejected_spawn.handle != 0);
+                if (rejected_spawn.handle)
+                {
+                    ProcessWaitResult rejected_wait = os_process_wait_deadline(arena, rejected_spawn, 30000000);
+                    BUSTER_TEST(arguments, !rejected_wait.timed_out && rejected_wait.result != PROCESS_RESULT_SUCCESS);
+                    BUSTER_TEST(arguments, rejected_wait.streams[STANDARD_STREAM_OUTPUT].length == 0);
+                    String8 diagnostic = BYTE_SLICE_TO_STRING(8, rejected_wait.streams[STANDARD_STREAM_ERROR]);
+                    BUSTER_TEST(arguments, string_first_sequence(diagnostic, S8("unsupported option: -fcommon")) != BUSTER_STRING_NO_MATCH);
+                }
+                ByteSlice after_rejection = file_read(arena, cli_rejected_path, (FileReadOptions){0});
+                bool sentinel_preserved = after_rejection.pointer && after_rejection.length == sentinel.length &&
+                                          memcmp(after_rejection.pointer, sentinel.pointer, sentinel.length) == 0;
+                BUSTER_TEST(arguments, sentinel_preserved);
+            }
+            (void)os_file_delete(cli_restored_path);
+            (void)os_file_delete(cli_rejected_path);
+        }
+#endif
+    }
+
+    (void)os_file_delete(input);
+    (void)os_file_delete(default_object_path);
+    (void)os_file_delete(no_common_object_path);
+    (void)os_file_delete(restored_object_path);
+    (void)os_file_delete(provider_path);
+    (void)os_file_delete(consumer_path);
+    scratch_end(temporary);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_validation_values(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -8513,6 +8703,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_attribute_queries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_has_builtin_targets);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pic_argument_policy);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_common_storage_option);
 #if defined(BUSTER_HOST_C_COMPILER) && BUSTER_MACOS && !BUSTER_IOS && BUSTER_LINK_LIBC
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_mach_unwind_link);
 #endif
