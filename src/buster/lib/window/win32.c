@@ -866,9 +866,12 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
     TemporalArena temp = scratch_begin(0, 0);
     u32 use_default_position = true;
     DWORD style_flags = WS_EX_APPWINDOW;
-    HWND window_handle = CreateWindowExW(style_flags, graphical_window_class_name, string16_from_string8(temp.arena, create.name, true).pointer,
-                                         WS_OVERLAPPEDWINDOW | WS_SIZEBOX, use_default_position ? CW_USEDEFAULT : 0, use_default_position ? CW_USEDEFAULT : 0,
-                                         create.size.width, create.size.height, 0, 0, windowing->instance, 0);
+    String16Z name = {0};
+    HWND window_handle = string16z_from_string8_arena(temp.arena, create.name, &name)
+                             ? CreateWindowExW(style_flags, graphical_window_class_name, name.pointer, WS_OVERLAPPEDWINDOW | WS_SIZEBOX,
+                                               use_default_position ? CW_USEDEFAULT : 0, use_default_position ? CW_USEDEFAULT : 0, create.size.width,
+                                               create.size.height, 0, 0, windowing->instance, 0)
+                             : 0;
     if (window_handle)
     {
         DragAcceptFiles(window_handle, true);
