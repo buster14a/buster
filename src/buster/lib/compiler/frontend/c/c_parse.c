@@ -18793,19 +18793,20 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     for (u32 index = start; index < end; index += 1)
     {
         CToken token = preprocess.tokens[index];
+        bool masked_assignment = declaration_tokens[index - start] || (skipped && skipped[index - start]);
         bool direct_identifier_assignment = false;
-        if (declaration_tokens[index - start] && index > start && c_parse_assignment_punctuator(token) &&
+        if (masked_assignment && index > start && c_parse_assignment_punctuator(token) &&
             preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
         {
-            u32 lhs_use_index = c_parse_identifier_use_index(result, index - 1);
-            CEntityId lhs_entity_id = lhs_use_index != C_ID_UNDERLYING_INVALID
-                                          ? result->identifier_uses[lhs_use_index].entity
-                                          : C_ENTITY_ID_INVALID;
+            CScopeId assignment_scope = c_parse_scope_for_token(result, declaration->scope, index);
+            CEntityId lhs_entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, assignment_scope,
+                                                                    &preprocess.tokens[index - 1]);
             CEntity* lhs_entity = lhs_entity_id.value < result->entity_count ? result->entities + lhs_entity_id.value : 0;
             direct_identifier_assignment = lhs_entity && lhs_entity->declaration_token_plus_one != index &&
                 (lhs_entity->kind == C_ENTITY_LOCAL || lhs_entity->kind == C_ENTITY_PARAMETER || lhs_entity->kind == C_ENTITY_OBJECT);
         }
-        if ((declaration_tokens[index - start] && !direct_identifier_assignment) || (skipped && skipped[index - start]))
+        if ((declaration_tokens[index - start] && !direct_identifier_assignment) ||
+            ((skipped && skipped[index - start]) && !direct_identifier_assignment))
         {
             continue;
         }
@@ -19017,14 +19018,16 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         {
             continue;
         }
+        CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
         u32 use_index = c_parse_identifier_use_index(result, index - 1);
         CEntityId entity_id = use_index != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use_index].entity : C_ENTITY_ID_INVALID;
+        if (entity_id.value >= result->entity_count && index > start && preprocess.tokens[index - 1].kind == C_TOKEN_IDENTIFIER)
+            entity_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[index - 1]);
         CEntity* entity = entity_id.value < result->entity_count ? result->entities + entity_id.value : 0;
         if (assignment && entity && entity->declaration_token_plus_one == index)
         {
             continue;
         }
-        CScopeId scope = c_parse_scope_for_token(result, declaration->scope, index);
         bool control_prefix = false;
         if (update && c_token_is_punctuator(&preprocess.tokens[index - 1], C_PUNCTUATOR_RIGHT_PARENTHESIS))
         {
@@ -19073,16 +19076,32 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         {
             c_parse_lowering_constraint_consider(diagnostic, S8("assignment from an incompatible function pointer type"), index, index + 1);
         }
+        CTypeId assignment_source_type = C_TYPE_ID_INVALID;
+        bool assignment_source_typed = false;
+        u32 assignment_source_end = index;
         if (assignment)
         {
-            CTypeId source = C_TYPE_ID_INVALID;
-            c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, index + 1,
-                c_parse_constraint_expression_end(result, preprocess, index + 1, end), &source, diagnostic);
+            assignment_source_end = c_parse_constraint_expression_end(result, preprocess, index + 1, end);
+            bool checked_source = c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, scope, index + 1,
+                assignment_source_end, &assignment_source_type, diagnostic);
+            assignment_source_typed = checked_source || assignment_source_type.value < result->type_count;
         }
         String8 assignment_conversion_message = {0};
         bool simple_assignment = c_token_is_punctuator(&token, C_PUNCTUATOR_EQUAL);
-        if (assignment && assignment_typed && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, assignment_type_id,
-                index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end), simple_assignment, &assignment_conversion_message))
+        bool incompatible_assignment = false;
+        if (assignment && assignment_typed && simple_assignment && assignment_source_typed)
+        {
+            assignment_conversion_message = c_parse_assignment_conversion_message(machine, result, preprocess, scope, assignment_type_id,
+                                                                                   assignment_source_type, index + 1, assignment_source_end);
+            incompatible_assignment = assignment_conversion_message.length != 0;
+        }
+        if (assignment && assignment_typed && !incompatible_assignment &&
+            c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, assignment_type_id,
+                                                 index + 1, assignment_source_end, simple_assignment, &assignment_conversion_message))
+        {
+            incompatible_assignment = true;
+        }
+        if (incompatible_assignment)
         {
             c_parse_lowering_constraint_consider(diagnostic,
                 assignment_conversion_message.length ? assignment_conversion_message : S8("assignment value is incompatible with the destination type"),
