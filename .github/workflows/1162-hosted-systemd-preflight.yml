@@ -28,6 +28,7 @@ jobs:
           cleanup() {
             result=$?
             trap - EXIT
+            sudo docker inspect "$container" --format '{{json .State}}' > "$evidence/container-state.json" 2>&1 || true
             sudo docker logs "$container" > "$evidence/container.log" 2>&1 || true
             sudo docker rm -f "$container" || true
             if sudo docker ps -a --format '{{.Names}}' | grep -Fx "$container"; then
@@ -50,13 +51,14 @@ jobs:
           DOCKERFILE
           sudo docker build --pull --no-cache -t "$image" "$evidence"
           sudo docker image inspect "$image" --format 'IMAGE_ID={{.Id}}'
-          sudo docker run -d --name "$container" --privileged --cgroupns=private --network none --env container=docker --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:rw "$image"
+          sudo docker run -d --name "$container" --privileged --cgroupns=private --network none --env container=docker --env SYSTEMD_LOG_TARGET=console --env SYSTEMD_LOG_LEVEL=info --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:rw "$image"
           ready=false
           for attempt in $(seq 1 40); do
             if sudo docker exec "$container" systemctl show --property=Version --property=SystemState > "$evidence/manager.txt" 2>&1; then
               ready=true
               break
             fi
+            if test "$(sudo docker inspect "$container" --format '{{.State.Running}}')" != true; then break; fi
             sleep 1
           done
           cat "$evidence/manager.txt"
