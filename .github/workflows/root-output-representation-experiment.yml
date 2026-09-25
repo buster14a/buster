@@ -1,0 +1,81 @@
+name: Root output representation experiment
+on:
+  push:
+    branches: [research/representation-ledger-d9e736e2-20260925]
+    paths: [.github/workflows/root-output-representation-experiment.yml]
+permissions:
+  contents: read
+jobs:
+  experiment:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [release, sanitizer]
+    env:
+      BUSTER_TEST_JOBS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Freeze source and isolated worktrees
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rep-evidence"
+          {
+            git rev-parse HEAD 'HEAD^{tree}'
+            clang --version
+            cmake --version
+            ninja --version
+            uname -a
+            lscpu
+            free -b
+            sha256sum "$(command -v clang)"
+          } > "$RUNNER_TEMP/rep-evidence/host-and-transport.txt"
+          git fetch --no-tags --depth=1 origin d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          git worktree add --detach "$RUNNER_TEMP/rep-build" d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          git worktree add --detach "$RUNNER_TEMP/rep-frozen" d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          test "$(git -C "$RUNNER_TEMP/rep-build" rev-parse 'HEAD^{tree}')" = ae9f274b6768b023fe6e0ef80a161e14b290e0a2
+          cp tools/research/root_output_*.py "$RUNNER_TEMP/rep-evidence/"
+      - name: Bootstrap hosted native build driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/rep-build"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/rep-build-driver" > "$RUNNER_TEMP/rep-evidence/bootstrap.stdout" 2> "$RUNNER_TEMP/rep-evidence/bootstrap.stderr"
+          sha256sum "$RUNNER_TEMP/rep-build-driver" > "$RUNNER_TEMP/rep-evidence/build-driver.sha256"
+      - name: Run serial matched-source experiment without timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ '${{ matrix.kind }}' = sanitizer ]; then extra+=(--sanitize); fi
+          python3 tools/research/root_output_experiment.py \
+            --work "$RUNNER_TEMP/rep-build" \
+            --frozen "$RUNNER_TEMP/rep-frozen" \
+            --out "$RUNNER_TEMP/rep-evidence" \
+            --prototype "$GITHUB_WORKSPACE/tools/research/root_output_prototype.py" \
+            --build-driver "$RUNNER_TEMP/rep-build-driver" "${extra[@]}" \
+            2>&1 | tee "$RUNNER_TEMP/rep-evidence/runner.log"
+      - name: Retain partial evidence and source differences
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rep-evidence"
+          if [ -d "$RUNNER_TEMP/rep-build" ]; then
+            git -C "$RUNNER_TEMP/rep-build" diff > "$RUNNER_TEMP/rep-evidence/final-worktree.diff"
+            find "$RUNNER_TEMP/rep-build/build" -name compile_commands.json -exec cp '{}' "$RUNNER_TEMP/rep-evidence/compile_commands.json" ';' || true
+          fi
+          find "$RUNNER_TEMP/rep-evidence" -type f ! -name files.sha256 -print0 | sort -z | xargs -0 sha256sum > "$RUNNER_TEMP/rep-evidence/files.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: root-output-${{ matrix.kind }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rep-evidence
+          retention-days: 30
+          if-no-files-found: error
+          compression-level: 6
