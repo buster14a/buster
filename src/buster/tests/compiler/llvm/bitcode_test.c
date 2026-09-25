@@ -112,6 +112,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
     {
         String8 source;
         String8 caller;
+        bool generated;
     } LlvmBitcodeConsumerFixture;
     LlvmBitcodeConsumerFixture fixtures[] = {
         {.source = S8("tests/basic_c_llvm_scalars.c")},
@@ -127,6 +128,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
          .caller = S8("src/buster/tests/compiler/llvm/fixtures/basic_c_llvm_unaligned_pointer_caller.c")},
 #endif
 #endif
+        {.generated = true},
 #if BUSTER_CPU_ARCH_X86_64
         {.source = S8("tests/basic_c_llvm_aggregate_abi_callee.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_caller.c")},
         {.source = S8("tests/basic_c_llvm_aggregate_abi_caller.c"), .caller = S8("tests/basic_c_llvm_aggregate_abi_callee.c")},
@@ -139,56 +141,130 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         Arena* arena = temporary.arena;
         String8 output = buster_test_temporary_path(arena, S8("buster-llvm-consumer"), S8(".bc"));
-        String8 command[] = {S8("-emit-llvm"), S8("-o"), output, fixtures[fixture].source};
+        bool bit_counts = fixtures[fixture].generated;
+        String8 source = fixtures[fixture].source;
+        String8 caller = fixtures[fixture].caller;
+        if (bit_counts)
+        {
+            // The Android test app packages the test module, not arbitrary
+            // source fixtures. Write both sides of this LLVM execution oracle
+            // into the test's own temporary directory.
+            String8 source_code = S8(
+                "unsigned bit_counts32(unsigned value)\n"
+                "{\n"
+                "    unsigned count = (unsigned)__builtin_popcount(value);\n"
+                "    if (value != 0)\n"
+                "    {\n"
+                "        count += (unsigned)__builtin_clz(value);\n"
+                "        count += (unsigned)__builtin_ctz(value);\n"
+                "    }\n"
+                "    return count;\n"
+                "}\n"
+                "unsigned long long bit_counts64(unsigned long long value)\n"
+                "{\n"
+                "    unsigned long long count = (unsigned)__builtin_popcountll(value);\n"
+                "    if (value != 0)\n"
+                "    {\n"
+                "        count += (unsigned)__builtin_clzll(value);\n"
+                "        count += (unsigned)__builtin_ctzll(value);\n"
+                "    }\n"
+                "    return count;\n"
+                "}\n"
+                "int bit_first32(int value) { return __builtin_ffs(value); }\n"
+                "int bit_first64(long long value) { return __builtin_ffsll(value); }\n");
+            String8 caller_code = S8(
+                "extern unsigned bit_counts32(unsigned);\n"
+                "extern unsigned long long bit_counts64(unsigned long long);\n"
+                "extern int bit_first32(int);\n"
+                "extern int bit_first64(long long);\n"
+                "int main(void)\n"
+                "{\n"
+                "    unsigned inputs32[] = {0, 1, 0x80000000u, 0xaaaaaaaau, 0xffffffffu};\n"
+                "    unsigned expected32[] = {0, 32, 32, 17, 32};\n"
+                "    unsigned long long inputs64[] = {0, 1, 0x8000000000000000ull, 0xaaaaaaaaaaaaaaaaull, 0xffffffffffffffffull};\n"
+                "    unsigned long long expected64[] = {0, 64, 64, 33, 64};\n"
+                "    int failures = 0;\n"
+                "    for (unsigned index = 0; index < 5; index += 1)\n"
+                "    {\n"
+                "        failures += bit_counts32(inputs32[index]) != expected32[index];\n"
+                "        failures += bit_counts64(inputs64[index]) != expected64[index];\n"
+                "    }\n"
+                "    failures += bit_first32(0) != 0;\n"
+                "    failures += bit_first32(1) != 1;\n"
+                "    failures += bit_first32(0x80000000u) != 32;\n"
+                "    failures += bit_first64(0) != 0;\n"
+                "    failures += bit_first64(1) != 1;\n"
+                "    failures += bit_first64(0x8000000000000000ull) != 64;\n"
+                "    return failures;\n"
+                "}\n");
+            source = buster_test_temporary_path(arena, S8("buster-llvm-bit-counts"), S8(".c"));
+            caller = buster_test_temporary_path(arena, S8("buster-llvm-bit-counts-main"), S8(".c"));
+            BUSTER_TEST(arguments, file_write(source, (ByteSlice){.pointer = (u8*)source_code.pointer, .length = source_code.length}));
+            BUSTER_TEST(arguments, file_write(caller, (ByteSlice){.pointer = (u8*)caller_code.pointer, .length = caller_code.length}));
+        }
+        String8 command[5];
+        u32 command_count = 0;
+        command[command_count++] = S8("-emit-llvm");
+        if (bit_counts && BUSTER_CPU_ARCH_X86_64)
+        {
+            command[command_count++] = S8("-mattr=+popcnt");
+        }
+        command[command_count++] = S8("-o");
+        command[command_count++] = output;
+        command[command_count++] = source;
         CompilerDriverResult emitted = compiler_driver_execute_invocation(
-            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+            arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = command, .length = command_count}));
         if (emitted.error != COMPILER_DRIVER_ERROR_NONE)
         {
-            arguments->show(arguments, S8("LLVM fixture {S8}: {S8}\n"), fixtures[fixture].source, emitted.diagnostic);
+            arguments->show(arguments, S8("LLVM fixture {S8}: {S8}\n"), source, emitted.diagnostic);
         }
         BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
         if (compiler.length && emitted.error == COMPILER_DRIVER_ERROR_NONE)
         {
-            String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-consumer"),
+            u32 optimization_count = bit_counts ? 2 : 1;
+            for (u32 optimization = 0; optimization < optimization_count; optimization += 1)
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-llvm-consumer"),
 #if BUSTER_WINDOWS
-                                                          S8(".exe"));
+                                                              S8(".exe"));
 #else
-                                                          S8(""));
+                                                              S8(""));
 #endif
-            String8 compile[6];
-            u64 compile_count = 0;
-            compile[compile_count++] = compiler;
-            compile[compile_count++] = S8("-O2");
-            compile[compile_count++] = output;
-            if (fixtures[fixture].caller.length)
-            {
-                compile[compile_count++] = fixtures[fixture].caller;
-            }
-            compile[compile_count++] = S8("-o");
-            compile[compile_count++] = executable;
-            ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = compile, .length = compile_count}, (SliceString8){0}, (SliceString8){0},
-                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
-                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
-            BUSTER_TEST(arguments, spawned.handle != 0);
-            if (spawned.handle)
-            {
-                ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
-                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                String8 compile[6];
+                u64 compile_count = 0;
+                compile[compile_count++] = compiler;
+                compile[compile_count++] = optimization == 0 && bit_counts ? S8("-O0") : S8("-O2");
+                compile[compile_count++] = output;
+                if (caller.length)
                 {
-                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
-                    arguments->show(arguments, S8("LLVM consumer rejected {S8}: {S8}\n"), fixtures[fixture].source,
-                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    compile[compile_count++] = caller;
                 }
-                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
-                if (compiled.result == PROCESS_RESULT_SUCCESS)
+                compile[compile_count++] = S8("-o");
+                compile[compile_count++] = executable;
+                ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = compile, .length = compile_count}, (SliceString8){0}, (SliceString8){0},
+                    (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                BUSTER_TEST(arguments, spawned.handle != 0);
+                if (spawned.handle)
                 {
-                    String8 run[] = {executable};
-                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
-                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
-                    BUSTER_TEST(arguments, child.handle != 0);
-                    if (child.handle)
+                    ProcessWaitResult compiled = os_process_wait_sync(arena, spawned);
+                    if (compiled.result != PROCESS_RESULT_SUCCESS)
                     {
-                        BUSTER_TEST(arguments, os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS);
+                        ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                        arguments->show(arguments, S8("LLVM consumer rejected {S8}: {S8}\n"), source,
+                                        (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                    }
+                    BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    if (compiled.result == PROCESS_RESULT_SUCCESS)
+                    {
+                        String8 run[] = {executable};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                            (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+                        BUSTER_TEST(arguments, child.handle != 0);
+                        if (child.handle)
+                        {
+                            BUSTER_TEST(arguments, os_process_wait_sync(arena, child).result == PROCESS_RESULT_SUCCESS);
+                        }
                     }
                 }
             }
@@ -926,6 +1002,208 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    IrType types[3] = {
+        {.kind = IR_TYPE_VOID, .layout = {.resolved = true}},
+        {.id = {.value = 1}, .kind = IR_TYPE_INTEGER, .bit_width = 32, .layout = {.size = 4, .alignment = 4, .resolved = true}},
+        {.id = {.value = 2}, .kind = IR_TYPE_FUNCTION, .return_type = {.value = 1},
+         .calling_convention = IR_CALLING_CONVENTION_C, .layout = {.resolved = true}},
+    };
+    IrSymbol symbol = {.name = S8("canonical_counts"), .link_name = S8("canonical_counts"),
+                       .type = {.value = 2}, .kind = IR_SYMBOL_FUNCTION, .linkage = IR_LINKAGE_EXTERNAL, .is_definition = true};
+    u64 constant_immediate = 1;
+    IrValueId operands[4] = {{.value = 0}, {.value = 1}, {.value = 2}, {.value = 3}};
+    IrValueId returned = {.value = 4};
+    IrUnaryOperation operations[4] = {
+        IR_UNARY_INTEGER_COUNT_LEADING_ZEROS, IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS,
+        IR_UNARY_INTEGER_POPULATION_COUNT, IR_UNARY_INTEGER_POPULATION_COUNT,
+    };
+    IrInstruction instructions[6] = {0};
+    instructions[0] = (IrInstruction){
+        .opcode = IR_OPCODE_CONSTANT_INTEGER, .canonical_type = {.value = 1}, .result = {.value = 0},
+        .immediates = &constant_immediate, .immediate_count = 1, .next = {.value = 1},
+        .conversion_operation = IR_CONVERSION_COUNT, .unary_operation = IR_UNARY_COUNT, .binary_operation = IR_BINARY_COUNT,
+    };
+    for (u32 index = 0; index < 4; index += 1)
+    {
+        instructions[index + 1] = (IrInstruction){
+            .opcode = IR_OPCODE_UNARY, .canonical_type = {.value = 1}, .result = {.value = index + 1},
+            .operands = operands + index, .operand_count = 1, .unary_operation = (u8)operations[index],
+            .next = {.value = index + 2},
+            .conversion_operation = IR_CONVERSION_COUNT, .binary_operation = IR_BINARY_COUNT,
+        };
+    }
+    instructions[5] = (IrInstruction){
+        .opcode = IR_OPCODE_RETURN, .canonical_type = {.value = 0}, .result = IR_VALUE_ID_INVALID,
+        .operands = &returned, .operand_count = 1, .next = IR_INSTRUCTION_ID_INVALID,
+        .conversion_operation = IR_CONVERSION_COUNT, .unary_operation = IR_UNARY_COUNT, .binary_operation = IR_BINARY_COUNT,
+    };
+    IrValue values[5] = {0};
+    for (u32 index = 0; index < 5; index += 1)
+    {
+        values[index] = (IrValue){.canonical_type = {.value = 1}, .definition = {.value = index}, .category = IR_VALUE_VALUE};
+    }
+    IrBlock block = {.first_instruction = {.value = 0}, .last_instruction = {.value = 5}, .terminated = true, .sealed = true};
+    IrFunction function = {
+        .name = S8("canonical_counts"), .symbol = {.value = 0}, .canonical_type = {.value = 2}, .entry = {.value = 0},
+        .blocks = &block, .instructions = instructions, .values = values, .block_count = 1,
+        .instruction_count = 6, .value_count = 5, .state = IR_FUNCTION_LOWERED,
+    };
+    IrModule module = {.name = S8("integer_counts"), .functions = &function, .function_count = 1, .lowered_function_count = 1};
+    IrProgram program = {.arena = arena, .modules = &module, .module_count = 1,
+                         .types = {.types = types, .count = 3}, .symbols = {.symbols = &symbol, .count = 1}, .lowered_function_count = 1};
+    LlvmBitcodeOptions options = LLVM_BITCODE_OPTIONS_DEFAULT;
+    options.target_triple = S8("x86_64-unknown-linux-gnu");
+    options.validate_ir = false;
+    String8 compiler = executable_resolve_in_path(arena, S8("clang"));
+    for (u32 width = 1; width <= 128; width = width == 64 ? 128 : width + 1)
+    {
+        types[1].bit_width = width;
+        types[1].layout.size = (width + 7) / 8;
+        types[1].layout.alignment = width == 64 ? 8 : width == 32 ? 4 : width == 16 ? 2 : 1;
+        constant_immediate = width & 1 ? 0 : 1;
+        LlvmBitcodeArtifact first = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
+        LlvmBitcodeArtifact second = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
+        if (width > 64)
+        {
+            BUSTER_TEST(arguments, first.error.code == LLVM_BITCODE_ERROR_UNSUPPORTED_INSTRUCTION &&
+                                  string_first_sequence(first.error.message, S8("width from 1 to 64")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, !first.success && !first.bytes.length && !second.success && !second.bytes.length);
+        }
+        else
+        {
+            BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(first) && llvm_bitcode_artifact_is_valid(second));
+            BUSTER_TEST(arguments, first.bytes.length == second.bytes.length &&
+                                  !memcmp(first.bytes.pointer, second.bytes.pointer, first.bytes.length));
+            BUSTER_TEST(arguments, first.stats.function_count == 4 && first.stats.defined_function_count == 1);
+            BUSTER_TEST(arguments, first.stats.instruction_count == 6);
+            if (compiler.length && first.success && (width == 1 || width == 8 || width == 16 || width == 32 || width == 64))
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                Arena* scratch = temporary.arena;
+                String8 bitcode = buster_test_temporary_path(scratch, S8("buster-count-canonical"), S8(".bc"));
+                String8 object = buster_test_temporary_path(scratch, S8("buster-count-canonical"), S8(".o"));
+                BUSTER_TEST(arguments, file_write(bitcode, first.bytes));
+                for (u32 optimization = 0; optimization < 2; optimization += 1)
+                {
+                    String8 command[] = {compiler, optimization ? S8("-O2") : S8("-O0"), S8("-c"), bitcode, S8("-o"), object};
+                    ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+                    BUSTER_TEST(arguments, spawned.handle != 0);
+                    if (spawned.handle)
+                    {
+                        ProcessWaitResult compiled = os_process_wait_sync(scratch, spawned);
+                        if (compiled.result != PROCESS_RESULT_SUCCESS)
+                        {
+                            ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                            arguments->show(arguments, S8("LLVM count i{u32} -O{u32}: {S8}\n"), width, optimization ? 2u : 0u,
+                                            (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                        }
+                        BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+                    }
+                }
+                scratch_end(temporary);
+            }
+        }
+    }
+    // Combine two widths in one module so the declarations, constants, and
+    // relative call operands also work when their value IDs are interleaved.
+    types[1].bit_width = 8;
+    types[1].layout.size = 1;
+    types[1].layout.alignment = 1;
+    IrType mixed_types[5] = {types[0], types[1], types[2], types[1], types[2]};
+    mixed_types[3].id.value = 3;
+    mixed_types[3].bit_width = 64;
+    mixed_types[3].layout.size = 8;
+    mixed_types[3].layout.alignment = 8;
+    mixed_types[4].id.value = 4;
+    mixed_types[4].return_type.value = 3;
+    IrInstruction wide_instructions[6];
+    memcpy(wide_instructions, instructions, sizeof(instructions));
+    u64 wide_immediate = 1;
+    wide_instructions[0].immediates = &wide_immediate;
+    for (u32 index = 0; index < 6; index += 1)
+    {
+        if (wide_instructions[index].canonical_type.value == 1)
+        {
+            wide_instructions[index].canonical_type.value = 3;
+        }
+    }
+    IrValue wide_values[5];
+    memcpy(wide_values, values, sizeof(values));
+    for (u32 index = 0; index < 5; index += 1)
+    {
+        wide_values[index].canonical_type.value = 3;
+    }
+    IrSymbol mixed_symbols[2] = {symbol, symbol};
+    mixed_symbols[1].id.value = 1;
+    mixed_symbols[1].name = S8("canonical_counts64");
+    mixed_symbols[1].link_name = S8("canonical_counts64");
+    mixed_symbols[1].type.value = 4;
+    IrFunction mixed_functions[2] = {function, function};
+    mixed_functions[1].name = S8("canonical_counts64");
+    mixed_functions[1].symbol.value = 1;
+    mixed_functions[1].canonical_type.value = 4;
+    mixed_functions[1].instructions = wide_instructions;
+    mixed_functions[1].values = wide_values;
+    IrModule mixed_module = module;
+    mixed_module.functions = mixed_functions;
+    mixed_module.function_count = 2;
+    mixed_module.lowered_function_count = 2;
+    IrProgram mixed_program = program;
+    mixed_program.modules = &mixed_module;
+    mixed_program.types.types = mixed_types;
+    mixed_program.types.count = BUSTER_ARRAY_LENGTH(mixed_types);
+    mixed_program.symbols.symbols = mixed_symbols;
+    mixed_program.symbols.count = BUSTER_ARRAY_LENGTH(mixed_symbols);
+    mixed_program.lowered_function_count = 2;
+    LlvmBitcodeArtifact mixed = llvm_bitcode_emit_with_options(arena, &mixed_program, &mixed_module, 1, options);
+    LlvmBitcodeArtifact repeated = llvm_bitcode_emit_with_options(arena, &mixed_program, &mixed_module, 1, options);
+    BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(mixed) && llvm_bitcode_artifact_is_valid(repeated));
+    BUSTER_TEST(arguments, mixed.bytes.length == repeated.bytes.length &&
+                          !memcmp(mixed.bytes.pointer, repeated.bytes.pointer, mixed.bytes.length));
+    BUSTER_TEST(arguments, mixed.stats.function_count == 8 && mixed.stats.defined_function_count == 2);
+    if (compiler.length && mixed.success)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* scratch = temporary.arena;
+        String8 bitcode = buster_test_temporary_path(scratch, S8("buster-count-mixed"), S8(".bc"));
+        String8 object = buster_test_temporary_path(scratch, S8("buster-count-mixed"), S8(".o"));
+        BUSTER_TEST(arguments, file_write(bitcode, mixed.bytes));
+        for (u32 optimization = 0; optimization < 2; optimization += 1)
+        {
+            String8 command[] = {compiler, optimization ? S8("-O2") : S8("-O0"), S8("-c"), bitcode, S8("-o"), object};
+            ProcessSpawnResult spawned = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                (ProcessSpawnOptions){.use_process_environment = true, .search_path = true,
+                    .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR)});
+            BUSTER_TEST(arguments, spawned.handle != 0);
+            if (spawned.handle)
+            {
+                ProcessWaitResult compiled = os_process_wait_sync(scratch, spawned);
+                if (compiled.result != PROCESS_RESULT_SUCCESS)
+                {
+                    ByteSlice errors = compiled.streams[STANDARD_STREAM_ERROR];
+                    arguments->show(arguments, S8("LLVM mixed count -O{u32}: {S8}\n"), optimization ? 2u : 0u,
+                                    (String8){.pointer = (char8*)errors.pointer, .length = errors.length});
+                }
+                BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
+            }
+        }
+        scratch_end(temporary);
+    }
+    types[1].bit_width = 32;
+    types[1].layout.size = 4;
+    types[1].layout.alignment = 4;
+    instructions[1].unary_operation = IR_UNARY_COUNT;
+    LlvmBitcodeArtifact malformed = llvm_bitcode_emit_with_options(arena, &program, &module, 1, options);
+    BUSTER_TEST(arguments, !malformed.success && !malformed.bytes.length && malformed.error.code != LLVM_BITCODE_ERROR_NONE);
+    return result;
+}
+
 UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1114,6 +1392,9 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult relocations = llvm_bitcode_test_relocated_globals(arguments);
     result.test_count += relocations.test_count;
     result.succeeded_test_count += relocations.succeeded_test_count;
+    UnitTestResult integer_counts = llvm_bitcode_test_integer_counts(arguments);
+    result.test_count += integer_counts.test_count;
+    result.succeeded_test_count += integer_counts.succeeded_test_count;
     return result;
 }
 #endif

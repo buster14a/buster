@@ -1,6 +1,6 @@
 #pragma once
 
-// Private test seams for production constexpr, call arity, expression typing, binding, and aggregate-tag queries.
+// Private test seams for production constexpr, call arity, expression typing, binding, aggregate-tag and label-provenance gate queries.
 // Tests own their storage and observe production behavior, not a duplicate
 // implementation. No declarations enter production builds.
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -17,4 +17,7 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKi
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 BUSTER_F_DECL bool c_test_parse_direct_expression_type(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                      u32 start, u32 end, CTypeId* type_out);
+// Whether c_parse_validate_label_values would walk this function body's
+// values; the analysis must already have built the scope index.
+BUSTER_F_DECL bool c_test_parse_label_values_needed(CParseResult* result, CPreprocessResult preprocess, CDeclaration const* declaration);
 #endif

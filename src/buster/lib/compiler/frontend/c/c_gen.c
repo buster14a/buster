@@ -630,6 +630,23 @@ BUSTER_C_INTERNAL IrTypeId c_ir_complex_type(CIrTypeContext* context, CTypeKind 
     return type;
 }
 
+// Literal magnitudes use a u64 carrier even when their selected C type is
+// wider. Cached lowering and uncached semantic queries must admit the same
+// values; a signed 128-bit type can represent every value in that carrier.
+BUSTER_C_INTERNAL u64 c_semantic_integer_literal_limit(u32 width, bool is_signed)
+{
+    u64 result = 0;
+    if (width > 64 || (width == 64 && !is_signed))
+    {
+        result = UINT64_MAX;
+    }
+    else if (width)
+    {
+        result = (UINT64_C(1) << (width - (is_signed ? 1u : 0u))) - 1;
+    }
+    return result;
+}
+
 BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind kind)
 {
     if ((u32)kind >= C_TYPE_COUNT)
@@ -685,9 +702,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_scalar_type(CIrTypeContext* context, CTypeKind k
     context->scalar_types[kind] = type;
     if (ir_kind == IR_TYPE_INTEGER)
     {
-        context->literal_limits[kind] = bit_width >= 64 ? (is_signed ? (u64)INT64_MAX : UINT64_MAX)
-                                        : is_signed     ? (((u64)1 << (bit_width - 1)) - 1)
-                                                        : (((u64)1 << bit_width) - 1);
+        context->literal_limits[kind] = c_semantic_integer_literal_limit(bit_width, is_signed);
     }
     return type;
 }
@@ -6931,7 +6946,12 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_split_bit_field_load(CIntegerIrBuilder* bu
         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SHIFT_LEFT, source);
         assembled = c_ir_emit_binary_value(builder, assembled, shift, signed_type, IR_BINARY_SIGNED_SHIFT_RIGHT, source);
     }
-    IrValueId result = c_ir_emit_cast(builder, assembled, type, source);
+    // A bit-field place may be volatile even though the value of its read is
+    // not qualified. Keep the split path's result type in step with the
+    // ordinary load path; otherwise a multi-piece access leaks the qualified
+    // field type into arithmetic, returns, and call arguments.
+    IrTypeId result_type = value_type->is_atomic || value_type->is_volatile ? value_type->unqualified_type : type;
+    IrValueId result = c_ir_emit_cast(builder, assembled, result_type, source);
     c_ir_mark_unsigned_bit_field_value(builder, result, field);
     return result;
 }
@@ -8837,9 +8857,7 @@ BUSTER_C_INTERNAL bool c_semantic_integer_literal_fits(Target target, u64 const*
         bool sign = false;
         if (c_ir_scalar_type_properties(target, kind, &ir_kind, &width, &sign, &alignment) && width)
         {
-            limit = width > 64 ? UINT64_MAX
-                    : width == 64 ? sign ? (u64)INT64_MAX : UINT64_MAX
-                                  : (UINT64_C(1) << (width - (sign ? 1u : 0u))) - 1;
+            limit = c_semantic_integer_literal_limit(width, sign);
         }
     }
     return limit && value <= limit;
@@ -17932,6 +17950,12 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
     u32* active_calls = arena_allocate(builder->temporary_arena, u32, active_capacity);
     u32 active_call_count = 0;
     u32 last_root = UINT32_MAX;
+    // Calls after a comma are lowered with their expression so the left side
+    // cannot be overtaken. Argument separators also use commas; there the
+    // expression walk's source-order choice is one valid order for unsequenced
+    // arguments. Keep the outermost comma's delimiter level until it closes
+    // or its statement ends, so unrelated later expressions prepare normally.
+    u32 comma_sequence_depth = UINT32_MAX;
     // A call in an operand only a taken branch runs is left unprepared here:
     // hoisting runs it unconditionally. The branch's own lowering prepares it
     // inside the block that runs, the way c_ir_lower_conditional_value_step
@@ -17958,6 +17982,19 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         // children of an enclosing call, so the prepared-call emitter can
         // temporarily clear preparation while lowering that body.
         c_ir_lazy_operand_scan_step(builder, &lazy, start, end, index);
+        if (c_token_is_punctuator(&token, C_PUNCTUATOR_COMMA))
+        {
+            if (comma_sequence_depth == UINT32_MAX)
+            {
+                comma_sequence_depth = lazy.depth;
+            }
+        }
+        else if (comma_sequence_depth != UINT32_MAX &&
+                 (lazy.depth < comma_sequence_depth ||
+                  (c_token_is_punctuator(&token, C_PUNCTUATOR_SEMICOLON) && lazy.depth == comma_sequence_depth)))
+        {
+            comma_sequence_depth = UINT32_MAX;
+        }
         // Every shape prepared below -- a named, builtin, indexed, member or
         // parenthesized callee -- is the token right before a `(`, and the
         // rejection at the bottom refuses anything else.  That one byte is
@@ -18205,7 +18242,7 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_discover(CIntegerIrBuilder* builder, u
         {
             continue;
         }
-        if (c_ir_lazy_operand_scan_deferred(lazy))
+        if (c_ir_lazy_operand_scan_deferred(lazy) || comma_sequence_depth != UINT32_MAX)
         {
             if (active_call_count)
             {
@@ -29401,6 +29438,54 @@ BUSTER_C_INTERNAL void c_ir_lower_condition_step(CIntegerIrBuilder* builder)
             {
                 c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
                 return;
+            }
+            // A literal left operand determines whether the right operand is
+            // reached. Avoid creating and lowering a disconnected right block:
+            // its edge into the join would make a value defined only on the
+            // live path appear to be used before its definition in machine IR.
+            u32 left_start = task.start;
+            u32 left_end = operation;
+            while (left_start + 2 < left_end &&
+                   c_token_is_punctuator(&builder->preprocess.tokens[left_start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                   !c_ir_group_is_statement_expression(builder, left_start, left_end) &&
+                   c_ir_matching_delimiter_cached(builder, left_start, left_end, C_PUNCTUATOR_LEFT_PARENTHESIS,
+                                                  C_PUNCTUATOR_RIGHT_PARENTHESIS) == left_end - 1)
+            {
+                left_start += 1;
+                left_end -= 1;
+            }
+            if (left_start + 1 == left_end)
+            {
+                CToken leaf = builder->preprocess.tokens[left_start];
+                bool literal = leaf.kind == C_TOKEN_PREPROCESSING_NUMBER ||
+                               (leaf.kind == C_TOKEN_IDENTIFIER &&
+                                (string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("true")) ||
+                                 string_equal(c_token_spelling(builder->preprocess.spelling_base, leaf), S8("false"))));
+                u64 constant = 0;
+                if (literal && c_ir_constant_condition_evaluate(builder, left_start, left_end, &constant))
+                {
+                    bool is_or = operation == logical_or;
+                    if ((constant != 0) == is_or)
+                    {
+                        IrBlockId target = is_or ? task.true_block : task.false_block;
+                        if (!c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, frame->as.condition.source))
+                        {
+                            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        tasks[frame->as.condition.task_count++] = (CIrConditionTask){
+                            .start = operation + 1,
+                            .end = task.end,
+                            .block = task.block,
+                            .true_block = task.true_block,
+                            .false_block = task.false_block,
+                        };
+                    }
+                    continue;
+                }
             }
             IrBlockId right = c_ir_block_create(builder);
             if (right.value == IR_ID_UNDERLYING_INVALID)

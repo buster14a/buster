@@ -69,7 +69,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_diagnostic_test_write_failures(UnitT
     {
         ProcessWaitResult waited = os_process_wait_deadline(arguments->arena, child, 30000000);
         BUSTER_TEST(arguments, !waited.timed_out && waited.result != PROCESS_RESULT_SUCCESS);
-        String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_OUTPUT]);
+        BUSTER_TEST(arguments, waited.streams[STANDARD_STREAM_OUTPUT].length == 0);
+        String8 diagnostic = BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]);
         BUSTER_TEST(arguments, string_first_sequence(diagnostic, S8("could not write")) < diagnostic.length);
     }
 #endif
