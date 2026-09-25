@@ -3833,7 +3833,11 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             .code = compiler_driver_codegen_error_name(code.error), .backend = &backend,
             .primary = compiler_driver_backend_location(lowered.program, module, code.failed_function, code.failed_instruction),
         };
-        diagnostic.message = code.failed_machine_verification.error != MACHINE_VERIFY_NONE
+        diagnostic.message = code.failed_opcode == IR_OPCODE_INLINE_ASSEMBLY &&
+                                     code.error == CODEGEN_ERROR_UNSUPPORTED_INSTRUCTION &&
+                                     !string_equal(code.failure_reason, codegen_fallback_reason_string(CODEGEN_FALLBACK_OPCODE))
+            ? string_format(arena, S8("C code generation refused in function '{S8}': {S8}"), backend.function, code.failure_reason)
+            : code.failed_machine_verification.error != MACHINE_VERIFY_NONE
             ? string_format(arena,
                 S8("C code generation refused: kind={S8} target={S8} allocator={S8} reason={S8} function='{S8}' opcode={S8} operation={S8} verifier={S8} error={S8} ({u32}) block={u32} instruction={u32} operand={u32}"),
                 diagnostic.code, backend.target, backend.allocator, backend.reason.length ? backend.reason : S8("not-applicable"),

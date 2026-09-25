@@ -1573,6 +1573,9 @@ struct MachineSelectResult
 {
     MachineFunction function;
     IrOpcode failed_opcode;
+    // Rule-specific selector refusal, if present. The caller copies these
+    // bytes before releasing the selector's scratch arena.
+    String8 failure_detail;
     bool supported;
     bool returns_value;
     // Set only after a target selector has finished all typed-builder streams

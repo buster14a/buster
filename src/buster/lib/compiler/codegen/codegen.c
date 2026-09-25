@@ -7688,6 +7688,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         bool machine_function_emitted = false;
         CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
         IrOpcode fallback_opcode = IR_OPCODE_COUNT;
+        String8 fallback_detail = {0};
         // The descriptor is a shell until this path knows its unwind shape.
         // Every public allocator mode reaches machine selection, placement,
         // and encoding; a failure leaves this attempt unpublished and returns
@@ -7721,6 +7722,12 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 fallback_reason = selected.signature_rejected ? CODEGEN_FALLBACK_SIGNATURE
                                   : fallback_opcode < IR_OPCODE_COUNT ? CODEGEN_FALLBACK_OPCODE
                                                                       : CODEGEN_FALLBACK_SELECTION_OTHER;
+                if (fallback_reason == CODEGEN_FALLBACK_OPCODE && selected.failure_detail.length)
+                {
+                    // The selector's scratch arena ends below. Keep the exact
+                    // refusal in this attempt's output arena for the driver.
+                    fallback_detail = string_duplicate_arena(arena, selected.failure_detail, false);
+                }
             }
             // The target selectors publish a complete machine function only
             // after their typed builder streams and side tables are closed.
@@ -8352,7 +8359,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             return result;
         }
         result.failed_opcode = fallback_opcode;
-        result.failure_reason = codegen_fallback_reason_string(fallback_reason);
+        result.failure_reason = fallback_detail.length ? fallback_detail : codegen_fallback_reason_string(fallback_reason);
         if (fallback_opcode < IR_OPCODE_COUNT)
         {
             for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
