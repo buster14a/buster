@@ -18637,7 +18637,8 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
             String8 target_name = c_parse_assignment_conversion_type_name(result->arena, result, destination, false);
             message = string_format(result->arena, S8("cannot convert from '{S8}' to '{S8}'"), source_name, target_name);
         }
-        else if (!message.length && target_pointer && source_pointer)
+        else if (!message.length && target_pointer && source_pointer &&
+                 !c_parse_range_is_null_pointer_constant(machine->scratch_arena, preprocess, result, scope, source, start, end))
         {
             CTypeId target_pointee = target.element_type;
             CTypeId source_pointee = from.kind == C_TYPE_POINTER || from.kind == C_TYPE_ARRAY ? from.element_type : source;
