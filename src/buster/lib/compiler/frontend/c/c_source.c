@@ -5573,9 +5573,11 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
     return true;
 }
 
+// Parse-side constant queries share the reducer but retain their existing
+// semantics; only conditional-inclusion arithmetic widens decoded types.
 BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena, CSpellingSpace* space, CSymbolTable* symbols, CMacro* first_macro,
                                                                      CPpStampTable* stamps, CPpToken* tokens, u32 token_count, u32 expansion_limit,
-                                                                     CPreprocessResult* result,
+                                                                     bool preprocessor_arithmetic, CPreprocessResult* result,
                                                                      CPreprocessOptions* options, String8 including_path,
                                                                      CIncludeSearchOrigin including_origin, u64* value_out)
 {
@@ -5649,8 +5651,8 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                 if (valid)
                 {
                     // The literal is uintmax_t when it says so or when its
-                    // value does not fit intmax_t. Characters and keywords
-                    // below remain signed regardless of their bit patterns.
+                    // value does not fit intmax_t. Character constants carry
+                    // their decoded type only in preprocessing arithmetic.
                     bool literal_unsigned = value > (u64)INT64_MAX;
                     for (u64 suffix_index = 0; suffix_index < number_spelling.length; suffix_index += 1)
                     {
@@ -5666,9 +5668,20 @@ BUSTER_C_INTERNAL bool c_integer_expression_evaluate_with_features(Arena* arena,
                 u64 character = 0;
                 CTypeKind character_kind = C_TYPE_INVALID;
                 valid = expect_operand && c_ir_decode_character_value(arena, base, token, result->target, &character, &character_kind);
+                bool character_unsigned = false;
+                if (valid && preprocessor_arithmetic)
+                {
+                    IrTypeKind character_ir_kind;
+                    u32 character_width = 0;
+                    u32 character_alignment = 0;
+                    bool character_signed = true;
+                    valid = c_ir_scalar_type_properties(result->target, character_kind, &character_ir_kind, &character_width,
+                                                        &character_signed, &character_alignment);
+                    character_unsigned = valid && !character_signed;
+                }
                 if (valid)
                 {
-                    value_flags[value_count] = 0;
+                    value_flags[value_count] = character_unsigned ? C_CONDITIONAL_VALUE_UNSIGNED : 0;
                     values[value_count++] = character;
                     expect_operand = false;
                 }
@@ -5795,7 +5808,7 @@ BUSTER_C_SHARED bool c_integer_expression_evaluate(Arena* arena, char8 const* sp
             .token = tokens[token_index],
         };
     }
-    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, result, 0, (String8){0},
+    return c_integer_expression_evaluate_with_features(arena, &view, 0, 0, 0, wrapped, token_count, expansion_limit, false, result, 0, (String8){0},
                                                        (CIncludeSearchOrigin){0}, value_out);
 }
 
@@ -5805,7 +5818,7 @@ BUSTER_C_INTERNAL bool c_conditional_evaluate(Arena* arena, CSpellingSpace* spac
 {
     u64 value = 0;
     bool valid =
-        c_integer_expression_evaluate_with_features(arena, space, symbols, first_macro, stamps, tokens, token_count, expansion_limit, result, &options, including_path,
+        c_integer_expression_evaluate_with_features(arena, space, symbols, first_macro, stamps, tokens, token_count, expansion_limit, true, result, &options, including_path,
                                                     including_origin, &value);
     *value_out = value != 0;
     return valid;

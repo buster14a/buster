@@ -254,6 +254,15 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
     String8 runtime_source = S8("#define ENABLED 1\n"
                                 "#define SELECT(x) x\n"
                                 "#define VALUES(...) __VA_ARGS__\n"
+                                "#if !(u'\\0' - 1 > 0)\n"
+                                "#error UTF-16 character type lost in driver preprocessing\n"
+                                "#endif\n"
+                                "#if !(U'\\0' - 1 > 0)\n"
+                                "#error UTF-32 character type lost in driver preprocessing\n"
+                                "#endif\n"
+                                "#if (1 ? -1 : u'\\0') < 0\n"
+                                "#error conditional common type lost in driver preprocessing\n"
+                                "#endif\n"
                                 "#define WIDE_PROMOTES_UNSIGNED _Generic(+(L'\\0'), unsigned int: 1, default: 0)\n"
                                 "_Static_assert(sizeof(u'\\0') == 2, \"UTF-16 character width\");\n"
                                 "_Static_assert(sizeof(U'\\0') == 4, \"UTF-32 character width\");\n"
@@ -262,6 +271,11 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                                 "_Static_assert((1 ? -1 : u'\\0') < 0, \"ordinary UTF-16 conditional promotes to int\");\n"
                                 "_Static_assert(~u'\\0' == -1, \"ordinary UTF-16 complement promotes to int\");\n"
                                 "_Static_assert((L'\\0' - 1 > 0) == WIDE_PROMOTES_UNSIGNED, \"ordinary wchar follows C promotions\");\n"
+                                "enum { ORDINARY_UTF16_NEGATIVE = u'\\0' - 1 < 0 };\n"
+                                "static int ordinary_utf16_initializer = u'\\0' - 1 < 0;\n"
+                                "static int ordinary_utf16_designator[2] = { [u'\\0' - 1 < 0] = 17 };\n"
+                                "static int ordinary_utf16_bound[(u'\\0' - 1 < 0) ? 2 : 1];\n"
+                                "static int ordinary_utf16_return(void) { return u'\\0' - 1 < 0; }\n"
                                 "int main(void)\n"
                                 "{\n"
                                 "    int effects = 0;\n"
@@ -280,7 +294,11 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
                                 "#endif\n"
                                 "    )\n"
                                 "    return effects != 1 || sizeof(values) / sizeof(values[0]) != 3 ||\n"
-                                "           values[0] != 3 || values[1] != 9 || values[2] != 6;\n"
+                                "           values[0] != 3 || values[1] != 9 || values[2] != 6 ||\n"
+                                "           ORDINARY_UTF16_NEGATIVE != 1 || ordinary_utf16_initializer != 1 ||\n"
+                                "           ordinary_utf16_designator[0] != 0 || ordinary_utf16_designator[1] != 17 ||\n"
+                                "           sizeof(ordinary_utf16_bound) / sizeof(ordinary_utf16_bound[0]) != 2 ||\n"
+                                "           ordinary_utf16_return() != 1;\n"
                                 "}\n");
     String8 frontend_flags[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
     for (u32 frontend_index = 0; frontend_index < BUSTER_ARRAY_LENGTH(frontend_flags); frontend_index += 1)
@@ -290,7 +308,7 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         String8 output_path = buster_test_temporary_path(temporary.arena, S8("buster-c-macro-conditional"), S8(""));
         BUSTER_TEST(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(runtime_source)));
         String8 command[] = {
-            S8("-nostdinc"), frontend_flags[frontend_index], S8("-o"), output_path, source_path,
+            S8("-nostdinc"), S8("-std=c17"), frontend_flags[frontend_index], S8("-o"), output_path, source_path,
         };
         CompilerDriverResult compiled = compiler_driver_execute_invocation(
             temporary.arena, compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));

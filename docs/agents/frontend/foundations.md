@@ -225,8 +225,13 @@ semantic certificate. See [publication and lifetime details](../../canonical-cfg
   `INT64_MIN / -1` (including remainder) never execute as host arithmetic.
   `&&`, `||` and `?:` propagate faults only from evaluated operands; the
   conditional's common unsigned type still depends on both arms. Syntax
-  validation remains unconditional. `c_test_preprocessor_short_circuit` covers
-  generated `#if`/`#elif`, live-fault and malformed-dead-operand controls;
+  validation remains unconditional. Character constants obtain their
+  preprocessing signedness from the decoded target scalar type, including
+  target-dependent `L` and C23 `u8` literals. Parse-side constant folds retain
+  ordinary C promotions and do not inherit this `intmax_t`/`uintmax_t` widening.
+  `c_macro_conditional_tests` covers those character types alongside ordinary C
+  controls; `c_test_preprocessor_short_circuit` covers generated `#if`/`#elif`,
+  live-fault and malformed-dead-operand controls;
   `tests/basic_c_preprocessor_short_circuit.c` runs in the existing native
   allocator matrix (GitHub #147, #258).
 - A folded conditional expression converts its selected value to the common
