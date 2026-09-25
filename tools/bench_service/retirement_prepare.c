@@ -18,6 +18,7 @@
 #define BQ_RETIREMENT_INVENTORY_CAP 4096u
 #define BQ_RETIREMENT_PREPARATION_RECORD_CAP 2048u
 #define BQ_RETIREMENT_COPY_OVERHEAD (1024ull * 1024ull)
+#define BQ_RETIREMENT_EXTRA_METADATA_NODES 8u
 
 typedef struct BqRetirementWalk
 {
@@ -248,6 +249,60 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_inventory(String8 text, String8 profile, 
         String8 expected = string_from_pointer(preparation->subjects[subject].commit);
         ok = string_equal(selected, expected);
     }
+    /* The archived direct-native source and MIR candidate must be different
+     * immutable trees, even if two commit names happen to refer to the same
+     * contents. The inventory digest itself still needs independent review. */
+    ok = ok && strcmp(preparation->subjects[0].commit, preparation->subjects[1].commit) &&
+         strcmp(preparation->subjects[0].tree, preparation->subjects[1].tree);
+    return ok;
+}
+
+/* At peak, both materialized subjects exist while a second verification copy
+ * is being made. Charge two complete copies of every verified file and
+ * directory, including both source manifests, at the workspace filesystem's
+ * allocation unit. The fixed margin covers the attempt's seal, preparation
+ * record and temporary directory bookkeeping; compiler build/output storage
+ * remains a separate admission requirement. Preflight also checks enough free
+ * inodes to create every charged file and directory. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_source_reservation(BqRetirementPreparation const* preparation,
+    u64 filesystem_block, u64* required)
+{
+    u64 bytes = 0, nodes = BQ_RETIREMENT_EXTRA_METADATA_NODES;
+    bool ok = preparation && required && filesystem_block > 0;
+    for (u32 subject = 0; ok && subject < 2; subject += 1)
+    {
+        BqRetirementSource const* source = &preparation->subjects[subject];
+        u64 current_nodes = (u64)source->entries + source->directories + 1u;
+        ok = source->bytes > 0 && source->entries > 0 && source->directories > 0 &&
+             source->manifest_bytes > 0 && source->bytes <= UINT64_MAX - bytes &&
+             source->manifest_bytes <= UINT64_MAX - bytes - source->bytes &&
+             current_nodes <= UINT64_MAX - nodes;
+        if (ok)
+        {
+            bytes += source->bytes + source->manifest_bytes;
+            nodes += current_nodes;
+        }
+    }
+    if (ok)
+    {
+        /* The conservative per-entry round-up also covers small directory
+         * entries without depending on the installed filesystem's st_blocks. */
+        ok = bytes <= UINT64_MAX / 2u && nodes <= UINT64_MAX / 2u &&
+             2u * nodes <= UINT64_MAX / filesystem_block;
+        if (ok)
+        {
+            u64 metadata = 2u * nodes * filesystem_block;
+            ok = 2u * bytes <= UINT64_MAX - metadata &&
+                 BQ_RETIREMENT_COPY_OVERHEAD <= UINT64_MAX - metadata - 2u * bytes;
+            if (ok) *required = 2u * bytes + metadata + BQ_RETIREMENT_COPY_OVERHEAD;
+        }
+    }
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_source_capacity(u64 required, u64 block, u64 available_blocks)
+{
+    bool ok = block > 0 && available_blocks >= required / block + (required % block != 0);
     return ok;
 }
 
@@ -428,14 +483,22 @@ BUSTER_GLOBAL_LOCAL BqError bq_retirement_preflight_pinned_impl(int installed, i
     }
     if (result == BQ_OK)
     {
-        u64 sum = preparation->subjects[0].bytes + preparation->subjects[1].bytes +
-                  preparation->subjects[0].manifest_bytes + preparation->subjects[1].manifest_bytes;
-        u64 entries = preparation->subjects[0].entries + preparation->subjects[1].entries;
-        preparation->source_reservation_bytes = 2 * sum + entries * 8192 + BQ_RETIREMENT_COPY_OVERHEAD;
         struct statvfs space = {0};
-        result = !reserve_space || (fstatvfs(workspaces, &space) == 0 && space.f_frsize != 0 &&
-                 space.f_bavail >= (preparation->source_reservation_bytes + space.f_frsize - 1) / space.f_frsize) ?
-                 BQ_OK : BQ_RESOURCE_MISMATCH;
+        bool available = fstatvfs(workspaces, &space) == 0 && space.f_frsize > 0 && space.f_bsize > 0;
+        u64 block = available ? (space.f_frsize > space.f_bsize ? space.f_frsize : space.f_bsize) : 0;
+        if (block < 8192u) block = 8192u;
+        available = available && bq_retirement_source_reservation(preparation, block,
+                                                                  &preparation->source_reservation_bytes);
+        if (available && reserve_space)
+        {
+            u64 required_nodes = 2u * (BQ_RETIREMENT_EXTRA_METADATA_NODES + 2u +
+                (u64)preparation->subjects[0].entries + preparation->subjects[1].entries +
+                preparation->subjects[0].directories + preparation->subjects[1].directories);
+            available = bq_retirement_source_capacity(preparation->source_reservation_bytes,
+                                                       space.f_frsize, space.f_bavail) &&
+                        (u64)space.f_favail >= required_nodes;
+        }
+        result = available ? BQ_OK : BQ_RESOURCE_MISMATCH;
     }
     if (file >= 0 && close(file) != 0 && result == BQ_OK) result = BQ_CONFIGURATION_MISMATCH;
     if (recipes >= 0 && close(recipes) != 0 && result == BQ_OK) result = BQ_CONFIGURATION_MISMATCH;

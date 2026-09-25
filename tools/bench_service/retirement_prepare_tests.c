@@ -2030,6 +2030,48 @@ int main(void)
         BqRetirementSource verified_base = preparation.subjects[0];
         BQ_PREP_CHECK(preparation.subjects[0].entries == 1 && preparation.subjects[1].entries == 1 &&
                       preparation.source_reservation_bytes > BQ_RETIREMENT_COPY_OVERHEAD);
+        struct statvfs filesystem = {0};
+        u64 reservation = 0, block = 0;
+        BQ_PREP_CHECK(fstatvfs(output, &filesystem) == 0);
+        block = filesystem.f_frsize > filesystem.f_bsize ? filesystem.f_frsize : filesystem.f_bsize;
+        if (block < 8192u) block = 8192u;
+        BQ_PREP_CHECK(bq_retirement_source_reservation(&preparation, block, &reservation) &&
+                      reservation == preparation.source_reservation_bytes);
+        u64 payload = preparation.subjects[0].bytes + preparation.subjects[1].bytes +
+                      preparation.subjects[0].manifest_bytes + preparation.subjects[1].manifest_bytes;
+        u64 nodes = BQ_RETIREMENT_EXTRA_METADATA_NODES +
+                    preparation.subjects[0].entries + preparation.subjects[1].entries +
+                    preparation.subjects[0].directories + preparation.subjects[1].directories + 2u;
+        BQ_PREP_CHECK(reservation == 2u * payload + 2u * nodes * block + BQ_RETIREMENT_COPY_OVERHEAD);
+        u64 blocks = reservation / filesystem.f_frsize + (reservation % filesystem.f_frsize != 0);
+        BQ_PREP_CHECK(blocks > 0 && bq_retirement_source_capacity(reservation, filesystem.f_frsize, blocks) &&
+                      !bq_retirement_source_capacity(reservation, filesystem.f_frsize, blocks - 1u) &&
+                      !bq_retirement_source_capacity(reservation, 0, UINT64_MAX));
+        BQ_PREP_CHECK(!bq_retirement_source_reservation(&preparation, UINT64_MAX, &reservation));
+        BqRetirementPreparation oversized = preparation;
+        oversized.subjects[0].bytes = UINT64_MAX;
+        BQ_PREP_CHECK(!bq_retirement_source_reservation(&oversized, block, &reservation));
+        oversized = preparation;
+        oversized.subjects[1].manifest_bytes = 0;
+        BQ_PREP_CHECK(!bq_retirement_source_reservation(&oversized, block, &reservation));
+        char same_tree_inventory[1024];
+        int duplicate_length = snprintf(same_tree_inventory, sizeof(same_tree_inventory),
+                          "BQ-RETIREMENT-INPUTS-V1\nrepository=buster14a/buster\n"
+                          "support-sha256=%.64s\ncontract-sha256=%.64s\n"
+                          "base=%s %s %s %u %" PRIu64 " %u %u %u\n"
+                          "candidate=%s %s %s %u %" PRIu64 " %u %u %u\n",
+                          "1111111111111111111111111111111111111111111111111111111111111111",
+                          "2222222222222222222222222222222222222222222222222222222222222222",
+                          subjects[0].commit, subjects[0].tree, subjects[0].manifest_sha256,
+                          subjects[0].entries, (uint64_t)subjects[0].bytes, subjects[0].directories,
+                          subjects[0].max_path, subjects[0].max_depth,
+                          subjects[1].commit, subjects[0].tree, subjects[1].manifest_sha256,
+                          subjects[1].entries, (uint64_t)subjects[1].bytes, subjects[1].directories,
+                          subjects[1].max_path, subjects[1].max_depth);
+        BqRetirementPreparation refused = {0};
+        BQ_PREP_CHECK(duplicate_length > 0 && (u32)duplicate_length < sizeof(same_tree_inventory) &&
+                      !bq_retirement_inventory(string_from_pointer(same_tree_inventory), pinned,
+                                               &request, &refused));
         BQ_PREP_CHECK(bq_retirement_campaign_service_test(input, output, &preparation, profile));
         bq_prep_test_ready_handoff(input, output, installed, workspaces, &preparation, profile);
 
