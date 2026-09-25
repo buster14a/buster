@@ -1,0 +1,56 @@
+name: Interner large-header census e84c
+on:
+  push:
+    branches: [astra/60-interner-scaling-20260925-e84c]
+    paths: [.github/workflows/interner-header-census-e84c.yml]
+permissions:
+  contents: read
+jobs:
+  header-counter-census:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 8
+          persist-credentials: false
+      - name: Count frozen largest-header identifier populations
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          base=d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$base" HEAD
+          test "$(git rev-parse HEAD:src/buster/lib/compiler/frontend/c/c_source.c)" = 7d3d9e83e4273e669107819d721c18f15183a1eb
+          root="$RUNNER_TEMP/interner-header-e84c"
+          mkdir -p "$root"
+          git worktree add --detach "$root/source" "$base"
+          printf 'SOURCE=%s TREE=%s EXPERIMENT=%s RUN=%s ATTEMPT=%s\n' "$base" "$(git rev-parse "$base^{tree}")" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          git ls-tree -r --long "$base" src/ > "$root/source-tree.txt"
+          awk '$2 == "blob" && $5 ~ /[.]h$/ {print $4 "\t" $5 "\t" $3}' "$root/source-tree.txt" | sort -k1,1nr -k2,2 | sed -n '1,40p' > "$root/header-manifest.tsv"
+          awk '{sum += $1; if ($1 > 16777216) exit 1} END {if (NR != 40 || sum > 67108864) exit 1; printf "HEADER_BYTES=%d FILES=%d\n", sum, NR}' "$root/header-manifest.tsv"
+          cat "$root/header-manifest.tsv"
+          files=()
+          while IFS=$'\t' read -r bytes path blob; do
+            files+=("$root/source/$path")
+          done < "$root/header-manifest.tsv"
+          probe="$GITHUB_WORKSPACE/tools/experiments/interner_scaling"
+          source="$root/source/src/buster/lib/compiler/frontend/c/c_source.c"
+          flags=(-std=c11 -O2 -g -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char)
+          clang "${flags[@]}" "$probe/prepare.c" -o "$root/prepare"
+          "$root/prepare" "$source" "$root/kernel.inc"
+          sha256sum "$probe/prepare.c" "$probe/probe.c" "$root/kernel.inc" "$root/header-manifest.tsv"
+          for cc in clang gcc; do
+            "$cc" --version
+            for mode in 0 1; do
+              "$cc" "${flags[@]}" -I"$root" -DPROBE_ALTERNATIVE="$mode" "$probe/probe.c" -o "$root/$cc-$mode"
+              printf '\nRAW_HEADERS cc=%s alternative=%s\n' "$cc" "$mode"
+              timeout 90s "$root/$cc-$mode" "${files[@]}" | tee "$root/$cc-$mode.csv"
+              cut -d, -f1-6,16-19 "$root/$cc-$mode.csv" > "$root/$cc-$mode-identities"
+            done
+            cmp "$root/$cc-0-identities" "$root/$cc-1-identities"
+          done
+          cmp "$root/clang-0.csv" "$root/gcc-0.csv"
+          cmp "$root/clang-1.csv" "$root/gcc-1.csv"
+          printf '\nCOMPLETED: 40 separate source-header lexical censuses, not preprocessed translation units or compiler timing. No production/generated file modified.\n'
