@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <stddef.h>
 #include <pwd.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -25,14 +26,32 @@
 #include <sys/stat.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #define BQ_TEST_BROKER "/usr/local/libexec/buster-bench-systemd-broker"
+#define BQ_TEST_BROKER_SOCKET "/run/buster-bench-systemd-broker/control.sock"
 #define BQ_TEST_STATE "/var/lib/buster-bench"
 #define BQ_TEST_GROUP_CAP 64
+
+/* Mirror the broker's fixed wire envelope. The probe sends an otherwise
+ * valid signal request so the reachable root peer is rejected by the server,
+ * and accepts only an actual framed status on that same connection. */
+typedef struct BqTestBrokerRequest
+{
+    uint32_t magic, version, operation, stage, signal_number, reserved;
+    uint64_t job, attempt;
+    char base[65], candidate[65];
+} BqTestBrokerRequest;
+
+typedef struct BqTestBrokerStatus
+{
+    uint32_t kind, length;
+    int32_t status;
+} BqTestBrokerStatus;
 
 typedef struct BqTestIdentity
 {
@@ -164,14 +183,30 @@ static bool bq_test_denied_search(char const* path)
     return denied;
 }
 
+static bool bq_test_existing_payload(char const* path, uid_t owner, gid_t group)
+{
+    struct stat before = {0}, opened = {0};
+    bool ok = lstat(path, &before) == 0 && S_ISREG(before.st_mode) &&
+              before.st_uid == owner && before.st_gid == group && before.st_nlink == 1 &&
+              (before.st_mode & 0777) == 0400;
+    int fd = ok ? open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    ok = ok && fd >= 0 && fstat(fd, &opened) == 0 &&
+         opened.st_dev == before.st_dev && opened.st_ino == before.st_ino &&
+         opened.st_uid == before.st_uid && opened.st_gid == before.st_gid &&
+         (opened.st_mode & 07777) == (before.st_mode & 07777);
+    if (fd >= 0) close(fd);
+    if (!ok) fprintf(stderr, "BROKER_PRIVATE_PAYLOAD absent or invalid path=%s errno=%d\n", path, errno);
+    return ok;
+}
+
 static int bq_test_private_access(BqTestIdentity const* identity, char const* worker,
-                                   char const* instance, char const* result)
+                                   char const* instance, char const* result, char const* payload)
 {
     pid_t child = fork();
     if (child == 0)
     {
         bool ok = bq_test_enter_identity(identity);
-        char const* files[] = {worker, instance, BQ_TEST_STATE "/lease/host.lock"};
+        char const* files[] = {worker, instance, BQ_TEST_STATE "/lease/host.lock", payload};
         for (unsigned index = 0; ok && index < sizeof(files) / sizeof(files[0]); index += 1)
             ok = bq_test_denied_open(files[index], O_RDONLY) && bq_test_denied_open(files[index], O_WRONLY) &&
                  bq_test_denied_open(files[index], O_RDWR);
@@ -180,21 +215,82 @@ static int bq_test_private_access(BqTestIdentity const* identity, char const* wo
         for (unsigned index = 0; ok && index < sizeof(directories) / sizeof(directories[0]); index += 1)
             ok = bq_test_denied_open(directories[index], O_RDONLY | O_DIRECTORY) &&
                  bq_test_denied_search(directories[index]);
-        /* Refusing result-directory search also refuses every result payload,
-         * including those not yet produced by the running outer unit. */
         _exit(ok ? 0 : 1);
     }
     return bq_test_wait(child);
 }
 
-static bool bq_test_socket_reachable(void)
+static bool bq_test_authorization_denied(bool created, int connected, int error)
+{
+    bool ok = created && connected < 0 && bq_test_permission_error(error);
+    return ok;
+}
+
+static bool bq_test_socket_denied(char const* path)
 {
     int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    int create_error = errno;
     struct sockaddr_un address = {.sun_family = AF_UNIX};
-    char const path[] = "/run/buster-bench-systemd-broker/control.sock";
-    memcpy(address.sun_path, path, sizeof(path));
-    bool ok = fd >= 0 && connect(fd, (struct sockaddr*)&address, sizeof(address)) == 0;
+    bool valid_path = strlen(path) < sizeof(address.sun_path);
+    if (valid_path) memcpy(address.sun_path, path, strlen(path) + 1);
+    errno = 0;
+    int connected = fd >= 0 && valid_path ? connect(fd, (struct sockaddr*)&address, sizeof(address)) : -1;
+    int error = errno;
+    bool ok = valid_path && bq_test_authorization_denied(fd >= 0, connected, error);
     if (fd >= 0) close(fd);
+    fprintf(stderr, "BROKER_SOCKET_DAC path=%s socket_errno=%d connect=%d errno=%d authorization_denied=%s\n",
+            path, fd >= 0 ? 0 : create_error, connected, error, ok ? "yes" : "no");
+    return ok;
+}
+
+static int bq_test_socket_denied_identity(BqTestIdentity const* identity)
+{
+    pid_t child = fork();
+    if (child == 0)
+    {
+        bool ok = bq_test_enter_identity(identity) &&
+                  !bq_test_socket_denied("/proc/self/bq-broker-missing.sock") &&
+                  bq_test_socket_denied(BQ_TEST_BROKER_SOCKET);
+        _exit(ok ? 0 : 1);
+    }
+    return bq_test_wait(child);
+}
+
+static bool bq_test_rejection_frame(BqTestBrokerStatus const* frame, ssize_t size)
+{
+    bool ok = size == (ssize_t)sizeof(*frame) && frame->kind == 3 &&
+              frame->length == sizeof(frame->status) && frame->status == 126;
+    return ok;
+}
+
+static bool bq_test_root_rejected(char const* job, char const* attempt)
+{
+    errno = 0;
+    char* job_end = NULL;
+    unsigned long long job_number = strtoull(job, &job_end, 10);
+    bool ok = errno == 0 && job_end != job && *job_end == 0 && job_number != 0;
+    errno = 0;
+    char* attempt_end = NULL;
+    unsigned long long attempt_number = strtoull(attempt, &attempt_end, 10);
+    ok = ok && errno == 0 && attempt_end != attempt && *attempt_end == 0 && attempt_number != 0 &&
+         getuid() == 0 && geteuid() == 0;
+    BqTestBrokerRequest request = {.magic = 0x42515344u, .version = 1, .operation = 2,
+                                   .signal_number = 3, .job = job_number, .attempt = attempt_number};
+    int fd = ok ? socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0) : -1;
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    memcpy(address.sun_path, BQ_TEST_BROKER_SOCKET, sizeof(BQ_TEST_BROKER_SOCKET));
+    struct timeval timeout = {.tv_sec = 5};
+    ok = ok && fd >= 0 &&
+         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0 &&
+         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+         connect(fd, (struct sockaddr*)&address, sizeof(address)) == 0 &&
+         send(fd, &request, sizeof(request), MSG_NOSIGNAL) == (ssize_t)sizeof(request);
+    BqTestBrokerStatus frame = {0};
+    ssize_t size = ok ? recv(fd, &frame, sizeof(frame), MSG_TRUNC) : -1;
+    ok = ok && bq_test_rejection_frame(&frame, size);
+    if (fd >= 0) close(fd);
+    fprintf(stderr, "BROKER_ROOT_PEER_REJECTION received=%zd kind=%u length=%u status=%d verified=%s\n",
+            size, frame.kind, frame.length, frame.status, ok ? "yes" : "no");
     return ok;
 }
 
@@ -236,6 +332,24 @@ static int bq_test_self_test(void)
     BQ_IDENTITY_CHECK(bq_test_permission_error(EPERM));
     BQ_IDENTITY_CHECK(!bq_test_permission_error(ENOENT));
     BQ_IDENTITY_CHECK(!bq_test_permission_error(EIO));
+    BQ_IDENTITY_CHECK(bq_test_authorization_denied(true, -1, EACCES));
+    BQ_IDENTITY_CHECK(bq_test_authorization_denied(true, -1, EPERM));
+    BQ_IDENTITY_CHECK(!bq_test_authorization_denied(false, -1, EPERM));
+    BQ_IDENTITY_CHECK(!bq_test_authorization_denied(true, 0, EACCES));
+    BQ_IDENTITY_CHECK(!bq_test_authorization_denied(true, -1, ENOENT));
+    BQ_IDENTITY_CHECK(!bq_test_authorization_denied(true, -1, ECONNREFUSED));
+    BqTestBrokerStatus frame = {.kind = 3, .length = sizeof(int32_t), .status = 126};
+    BQ_IDENTITY_CHECK(bq_test_rejection_frame(&frame, sizeof(frame)));
+    BQ_IDENTITY_CHECK(!bq_test_rejection_frame(&frame, sizeof(frame) - 1));
+    frame.kind = 2;
+    BQ_IDENTITY_CHECK(!bq_test_rejection_frame(&frame, sizeof(frame)));
+    frame.kind = 3;
+    frame.length = 1;
+    BQ_IDENTITY_CHECK(!bq_test_rejection_frame(&frame, sizeof(frame)));
+    frame.length = sizeof(frame.status);
+    frame.status = 0;
+    BQ_IDENTITY_CHECK(!bq_test_rejection_frame(&frame, sizeof(frame)));
+    BQ_IDENTITY_CHECK(!bq_test_existing_payload("/proc/self/bq-broker-missing-payload", 0, 0));
 #undef BQ_IDENTITY_CHECK
     printf("BROKER_IDENTITY_SELF_TEST checks=%u failures=%u\n", checks, failures);
     return failures ? 1 : 0;
@@ -304,16 +418,19 @@ static int bq_test_live(int argc, char** argv)
     if (!ok) fprintf(stderr, "BROKER_ISOLATION precondition or account/group policy failed\n");
     uid_t service_uid = ok ? service.uid : (uid_t)-1;
     gid_t service_gid = ok ? service.gid : (gid_t)-1;
-    char unit[128], wrong_unit[128], result[256], worker[256], instance[256];
+    char unit[128], wrong_unit[128], result[256], payload[272], worker[256], instance[256];
     int unit_size = ok ? snprintf(unit, sizeof(unit), "buster-bench-%s-%s.service", job, attempt) : -1;
     char const* wrong_attempt = ok && !strcmp(attempt, "999999") ? "999998" : "999999";
     int wrong_size = ok ? snprintf(wrong_unit, sizeof(wrong_unit), "buster-bench-%s-%s.service", job, wrong_attempt) : -1;
     int result_size = ok ? snprintf(result, sizeof(result), BQ_TEST_STATE "/workspaces/results/job-%s-attempt-%s", job, attempt) : -1;
+    int payload_size = ok && result_size > 0 && (size_t)result_size < sizeof(result) ?
+                       snprintf(payload, sizeof(payload), "%s/payload", result) : -1;
     int worker_size = ok ? snprintf(worker, sizeof(worker), BQ_TEST_STATE "/queue/worker-%s", job) : -1;
     int instance_size = ok ? snprintf(instance, sizeof(instance), BQ_TEST_STATE "/queue/worker-instance-%s", job) : -1;
     ok = ok && unit_size > 0 && (size_t)unit_size < sizeof(unit) &&
          wrong_size > 0 && (size_t)wrong_size < sizeof(wrong_unit) &&
-         result_size > 0 && (size_t)result_size < sizeof(result) &&
+          result_size > 0 && (size_t)result_size < sizeof(result) &&
+          payload_size > 0 && (size_t)payload_size < sizeof(payload) &&
          worker_size > 0 && (size_t)worker_size < sizeof(worker) &&
          instance_size > 0 && (size_t)instance_size < sizeof(instance);
     unsigned checks = 0;
@@ -325,10 +442,11 @@ static int bq_test_live(int argc, char** argv)
         BQ_LIVE_CHECK(bq_test_path(BQ_TEST_STATE "/lease/host.lock", service_uid, service_gid, 0640, false));
         BQ_LIVE_CHECK(bq_test_path(BQ_TEST_STATE "/workspaces/results", service_uid, service_gid, 0710, true));
         BQ_LIVE_CHECK(bq_test_path(result, service_uid, service_gid, 0700, true));
+        BQ_LIVE_CHECK(bq_test_existing_payload(payload, service_uid, service_gid));
         BQ_LIVE_CHECK(bq_test_path(worker, service_uid, service_gid, 0440, false));
         BQ_LIVE_CHECK(bq_test_path(instance, service_uid, service_gid, 0440, false));
-        BQ_LIVE_CHECK(bq_test_private_access(&candidate, worker, instance, result) == 0);
-        BQ_LIVE_CHECK(bq_test_private_access(&runner, worker, instance, result) == 0);
+        BQ_LIVE_CHECK(bq_test_private_access(&candidate, worker, instance, result, payload) == 0);
+        BQ_LIVE_CHECK(bq_test_private_access(&runner, worker, instance, result, payload) == 0);
     }
     if (ok && !isolation_only)
     {
@@ -338,12 +456,11 @@ static int bq_test_live(int argc, char** argv)
         BQ_LIVE_CHECK(bq_test_run(&root, active) == 0);
         char* resume[] = {BQ_TEST_BROKER, "signal", unit, "CONT", NULL};
         BQ_LIVE_CHECK(bq_test_run(&service, resume) == 0);
-        /* Root can reach the socket, but is not an admitted service peer.
-         * Keep this distinct from the candidate/runner DAC-denial checks. */
-        BQ_LIVE_CHECK(bq_test_socket_reachable());
-        BQ_LIVE_CHECK(bq_test_run(&root, resume) == 126);
-        BQ_LIVE_CHECK(bq_test_run(&candidate, resume) == 126);
-        BQ_LIVE_CHECK(bq_test_run(&runner, resume) == 126);
+        /* Connect denial and a server frame on the request-bearing root
+         * connection are separate boundaries; CLI 126 proves neither one. */
+        BQ_LIVE_CHECK(bq_test_root_rejected(job, attempt));
+        BQ_LIVE_CHECK(bq_test_socket_denied_identity(&candidate) == 0);
+        BQ_LIVE_CHECK(bq_test_socket_denied_identity(&runner) == 0);
         char* wrong_instance[] = {BQ_TEST_BROKER, "signal", wrong_unit, "CONT", NULL};
         BQ_LIVE_CHECK(bq_test_run(&service, wrong_instance) == 126);
         char* wrong_signal[] = {BQ_TEST_BROKER, "signal", unit, "HUP", NULL};

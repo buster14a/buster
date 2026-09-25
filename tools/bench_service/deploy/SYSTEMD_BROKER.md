@@ -90,10 +90,12 @@ run that test as root while its outer unit is active with
 CANDIDATE_REVISION`. It starts the constrained broker socket and makes an
 exact outer `CONT` request. It checks queue/result/lease modes and records,
 then rejects candidate and runner peers, wrong instance, wrong source and
-unlisted signal requests. It also proves that root can reach the socket but
-is rejected as a non-service peer, separately from candidate/runner socket
-DAC denial. Its container and environment gates prevent an ordinary host test
-invocation.
+unlisted signal requests. It also sends a valid request as root and requires
+a complete server rejection frame on that same connection; candidate and
+runner must instead receive `EACCES` or `EPERM` from their own socket
+`connect` calls. A missing endpoint, refused connection or malformed response
+fails the probe. Its container and environment gates prevent an ordinary host
+test invocation.
 
 Account resolution uses the full supplementary membership list, not just
 primary GIDs. Candidate and runner must not have the service or root group;
@@ -104,9 +106,14 @@ A membership change between capture and execution fails the probe.
 Candidate/runner children try read-only, write-only and read-write opens of
 both worker records and the lease; no create, truncate or write is attempted.
 They separately test listing and searching the queue, lease and result
-directories. Result-leaf search denial protects payloads that the running job
-has not produced yet. Only `EACCES`/`EPERM` counts as denial, never a missing
-fixture. Metadata-only `O_PATH` access to a leaf is not treated as traversal.
+directories. Before dropping credentials, the probe verifies an existing
+service-owned regular `payload` in the result leaf with mode `0400` and one
+link. Candidate and runner then attempt read, write and read-write opens of
+that exact file without creating, truncating or modifying it. Provision the
+payload as part of the disposable fixture before running either live or
+`--isolation-only`; the probe does not create it. A missing payload fails the
+fixture rather than counting as a denial. Only `EACCES`/`EPERM` counts as
+denial. Metadata-only `O_PATH` access to a leaf is not treated as traversal.
 
 `BUSTER_BROKER_LIVE_TEST=1 systemd-broker-live-test --isolation-only JOB ATTEMPT`
 performs just the account/private-hierarchy checks in a disposable provisioned
