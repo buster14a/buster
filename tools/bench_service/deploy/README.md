@@ -80,6 +80,9 @@ The worker then requires the recorded invocation where available and proof
 that the original cgroup leaf is absent. For a collected unit, it uses the
 bounded `systemd-run --wait` process status for the outcome before finalizing;
 `LoadState=not-found` does not carry the full set of active-unit properties.
+Manager collection can precede removal of the cgroup leaf. The worker waits
+up to the fixed stop deadline for the recorded leaf to disappear, and waits
+for an inactive stage unit to be collected without sending it another signal.
 
 Recipe stages use deterministic sibling service names and bind their lifetime
 to the outer worker with `PartOf=`, `BindsTo=` and `After=` and are collected

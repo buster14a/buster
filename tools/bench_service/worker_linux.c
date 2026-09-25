@@ -3329,6 +3329,27 @@ BUSTER_GLOBAL_LOCAL bool bq_worker_cgroup_absent(BqWorkerConfig const* config,
     return absent;
 }
 
+BUSTER_GLOBAL_LOCAL BqError bq_worker_wait_cgroup_absent(BqWorkerConfig const* config,
+                                                          BqWorkerBackend* backend,
+                                                          BqWorkerObserved const* identity, u64 deadline)
+{
+    BqError error = BQ_OK;
+    bool absent = bq_worker_cgroup_absent(config, identity);
+    u32 attempts = 0;
+    while (error == BQ_OK && !absent && backend->clock(backend) < deadline &&
+           attempts < BQ_WORKER_STOP_MILLISECONDS / BQ_WORKER_POLL_MILLISECONDS)
+    {
+        attempts += 1;
+        u64 now = backend->clock(backend);
+        u64 available = deadline - now;
+        u32 delay = available < BQ_WORKER_POLL_MILLISECONDS ? (u32)available : BQ_WORKER_POLL_MILLISECONDS;
+        error = delay ? backend->delay(backend, delay) : BQ_OK;
+        if (error == BQ_OK) absent = bq_worker_cgroup_absent(config, identity);
+    }
+    if (error == BQ_OK && !absent) error = BQ_CLEANUP_FAILED;
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_worker_instance_matches(BqWorkerConfig const* config,
                                                      BqWorkerObserved const* identity,
                                                      BqWorkerObserved* observed)
@@ -3369,8 +3390,8 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_poll_empty(BqWorkerConfig const* config, B
         if (error == BQ_OK) error = backend->observe(backend, identity->unit, observed, deadline);
         if (error == BQ_OK && observed->unit_found && !bq_worker_instance_matches(config, identity, observed))
             error = BQ_WORKER_MISMATCH;
-        if (error == BQ_OK && !observed->unit_found && !bq_worker_cgroup_absent(config, identity))
-            error = BQ_CLEANUP_FAILED;
+        if (error == BQ_OK && !observed->unit_found)
+            error = bq_worker_wait_cgroup_absent(config, backend, identity, deadline);
     }
     return error;
 }
@@ -3478,7 +3499,7 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_child_poll_absent(BqWorkerConfig const* co
     {
         BqWorkerObserved expected;
         bq_worker_child_expected(&expected, parent, identity->unit);
-        if (!bq_worker_cgroup_absent(config, &expected)) error = BQ_CLEANUP_FAILED;
+        error = bq_worker_wait_cgroup_absent(config, backend, &expected, deadline);
     }
     return error;
 }
@@ -3505,9 +3526,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
             if (!bq_worker_child_matches(config, parent, &expected, &observed)) error = BQ_WORKER_MISMATCH;
             else identity = observed;
         }
-        else if (error == BQ_OK && !bq_worker_cgroup_absent(config, &expected))
+        else if (error == BQ_OK)
         {
-            error = BQ_CLEANUP_FAILED;
+            error = bq_worker_wait_cgroup_absent(config, backend, &expected,
+                bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
         }
         if (error == BQ_OK && observed.unit_found && (observed.active || observed.populated))
         {
@@ -3518,7 +3540,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop_children(BqWorkerConfig const* config
             if (error == BQ_OK)
                 error = bq_worker_child_poll_absent(config, backend, parent, &identity, &observed, deadline);
         }
-        if (error == BQ_OK && observed.unit_found)
+        if (error == BQ_OK && observed.unit_found && !observed.active && !observed.populated)
+        {
+            u64 deadline = bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS);
+            error = bq_worker_child_poll_absent(config, backend, parent, &identity, &observed, deadline);
+        }
+        if (error == BQ_OK && observed.unit_found && (observed.active || observed.populated))
         {
             error = backend->signal(backend, unit, "KILL",
                                     bq_worker_deadline(backend->clock(backend),
@@ -3539,6 +3566,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop(BqWorkerConfig const* config, BqWorke
     BqError error = !identity || !backend->delay ? BQ_BAD_REQUEST : BQ_OK;
     if (error == BQ_OK && observed->unit_found && !bq_worker_instance_matches(config, identity, observed))
         error = BQ_WORKER_MISMATCH;
+    if (error == BQ_OK && !observed->unit_found)
+        error = bq_worker_wait_cgroup_absent(config, backend, identity,
+            bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
     if (error == BQ_OK && (observed->active || observed->populated))
     {
         error = backend->signal(backend, identity->unit, "TERM",
@@ -3575,9 +3605,10 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_stop(BqWorkerConfig const* config, BqWorke
             if (!bq_worker_instance_matches(config, identity, &final)) error = BQ_WORKER_MISMATCH;
             else if (final.active || final.populated) error = BQ_CLEANUP_FAILED;
         }
-        else if (error == BQ_OK && !bq_worker_cgroup_absent(config, identity))
+        else if (error == BQ_OK)
         {
-            error = BQ_CLEANUP_FAILED;
+            error = bq_worker_wait_cgroup_absent(config, backend, identity,
+                bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
         }
     }
     BqError result = error == BQ_WORKER_MISMATCH ? error :
@@ -3610,8 +3641,9 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_recover(BqQueue* queue, BqWorkerConfig con
             bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
         if (error == BQ_OK && observed.unit_found && !bq_worker_instance_matches(config, &identity, &observed))
             error = BQ_WORKER_MISMATCH;
-        if (error == BQ_OK && !observed.unit_found && !bq_worker_cgroup_absent(config, &identity))
-            error = BQ_WORKER_MISMATCH;
+        if (error == BQ_OK && !observed.unit_found)
+            error = bq_worker_wait_cgroup_absent(config, backend, &identity,
+                bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
         if (error == BQ_OK) error = bq_worker_stop(config, backend, &identity, &observed, lease_path, lease);
     }
     if (error == BQ_OK && config && config->production_path)
@@ -3820,15 +3852,17 @@ BqError bq_worker_run(BqQueue* queue, BqWorkerConfig const* config, u64* id)
         bq_worker_deadline(backend->clock(backend), BQ_WORKER_COMMAND_MILLISECONDS));
     if (error == BQ_OK && !recovering && !signal_cancelled)
     {
-        bool exact = observed.unit_found ? bq_worker_instance_matches(config, &identity, &observed) :
-                     bq_worker_cgroup_absent(config, &identity);
-        if (!exact) error = BQ_WORKER_MISMATCH;
-        else if (!observed.unit_found)
+        if (observed.unit_found && !bq_worker_instance_matches(config, &identity, &observed))
+            error = BQ_WORKER_MISMATCH;
+        if (error == BQ_OK && !observed.unit_found)
         {
+            error = bq_worker_wait_cgroup_absent(config, backend, &identity,
+                bq_worker_deadline(backend->clock(backend), BQ_WORKER_STOP_MILLISECONDS));
             /* --wait reports the service exit status, while --collect may
              * remove its manager record before the post-join observation. */
-            observed.result = WIFEXITED(status) && WEXITSTATUS(status) == 0 ?
-                              BQ_WORKER_SUCCEEDED : BQ_WORKER_EXECUTION_FAILED;
+            if (error == BQ_OK)
+                observed.result = WIFEXITED(status) && WEXITSTATUS(status) == 0 ?
+                                  BQ_WORKER_SUCCEEDED : BQ_WORKER_EXECUTION_FAILED;
         }
     }
     if (error == BQ_OK && !recovering && !signal_cancelled)
