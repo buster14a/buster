@@ -1504,7 +1504,8 @@ BUSTER_GLOBAL_LOCAL void make_directory_recursive(Arena* arena, String8 path)
             if (i > start)
             {
                 String8 part = string_duplicate_arena(arena, string_slice(path, 0, i), true);
-                os_make_directory(part);
+                OsDirectoryCreateResult directory = os_make_directory(part);
+                BUSTER_CHECK(!directory.error.v && (directory.created || directory.existing_directory));
             }
         }
     }

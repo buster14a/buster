@@ -205,6 +205,38 @@ UnitTestResult string_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, pages != 0);
         bool committed = pages && os_commit(pages, page_size, (ProtectionFlags){.read = 1, .write = 1}, false);
         BUSTER_TEST(arguments, committed);
+        {
+            char8 suffixed[] = {'f', 'o', 'o', 'b', 'a', 'r'};
+            String8Z bounded_copy = {0};
+            bool bounded_valid = string8z_copy_arena(arguments->arena, (String8){suffixed, 3}, &bounded_copy);
+            String8 bounded_text = {.pointer = bounded_copy.pointer, .length = bounded_copy.length};
+            BUSTER_TEST(arguments, bounded_valid && string_equal(bounded_text, S8("foo")) && bounded_copy.pointer[bounded_copy.length] == 0);
+
+            char8 embedded_nul[] = {'f', 'o', 0, 'o'};
+            String8Z rejected = bounded_copy;
+            bool embedded_valid = string8z_copy_arena(arguments->arena, (String8){embedded_nul, BUSTER_ARRAY_LENGTH(embedded_nul)}, &rejected);
+            BUSTER_TEST(arguments, !embedded_valid && !rejected.pointer && !rejected.length);
+            bool null_valid = string8z_copy_arena(arguments->arena, (String8){.length = 1}, &rejected);
+            BUSTER_TEST(arguments, !null_valid && !rejected.pointer && !rejected.length);
+
+            String16Z wide_copy = {0};
+            bool wide_valid = string16z_from_string8_arena(arguments->arena, (String8){suffixed, 3}, &wide_copy);
+            String16 wide_text = {.pointer = wide_copy.pointer, .length = wide_copy.length};
+            String16 expected_wide = string16_from_string8(arguments->arena, S8("foo"), false);
+            BUSTER_TEST(arguments, wide_valid && string16_equal(wide_text, expected_wide) && wide_copy.pointer[wide_copy.length] == 0);
+
+            if (committed)
+            {
+                char8* last_bytes = pages + page_size - 3;
+                last_bytes[0] = 'e';
+                last_bytes[1] = 'n';
+                last_bytes[2] = 'd';
+                String8Z guarded_copy = {0};
+                bool guarded_valid = string8z_copy_arena(arguments->arena, (String8){last_bytes, 3}, &guarded_copy);
+                String8 guarded_text = {.pointer = guarded_copy.pointer, .length = guarded_copy.length};
+                BUSTER_TEST(arguments, guarded_valid && string_equal(guarded_text, S8("end")) && guarded_copy.pointer[guarded_copy.length] == 0);
+            }
+        }
         for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(parsers); i += 1)
         {
             StringIntegerParserCase parser = parsers[i];
