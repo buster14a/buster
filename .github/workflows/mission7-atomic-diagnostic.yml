@@ -100,7 +100,7 @@ jobs:
               require(label + '-diff-check', ['git', 'diff', '--cached', '--check'], directory)
               driver = pathlib.Path(os.environ['RUNNER_TEMP']) / ('mission7-driver-' + label)
               require(label + '-bootstrap', ['clang', '-Isrc', '-Wall', '-Werror', '-Wno-unused-function', '-Wno-unused-variable', '-g', 'build.c', '-o', driver], directory)
-              require(label + '-configure', [driver, 'generate', '--cc', 'clang'], directory)
+              require(label + '-configure', [driver, 'generate', '--cc', 'clang', '--config', 'Release', '--linker', 'DEFAULT'], directory)
               require(label + '-build', [driver, 'build', '--config', 'Release', '-t', 'ide'], directory)
               compiler = directory / 'build/Release/ide'
               print('COMPILER_SHA256', label, hashlib.sha256(compiler.read_bytes()).hexdigest(), flush=True)
