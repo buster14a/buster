@@ -1,0 +1,11 @@
+base  744a948f41291b4238d1755b1507678799f1206d (PR #1082 merge)
+branch 1074d63f0db63205a898399e3a350f48d0072319 (production + tests)
+4bfa901fbb6cd49b0bbcb9bbdcd6a3083339ca9e19af181e6265bac22dc10f6a  base-native
+06d90f5bc99a98bcd8453c69b2391dfd14a5dd346caac5d837322f99a55cb69f  base-v3
+0fee02e2b62534afcafee816d278efa691af97ce714e11e9b1fb575d3e5150f9  s-native
+770df1de553bb4ee4eb4131cd56f5666a11b70fc8d1ea14c001bc2c4f03373e1  s-v3
+789713e49ecb851e3eb03ff1177fcf88cca9ee8fe4f919e970a432b11a0edc20  p-native
+13f28eb77e6890448e3fe82738a179d74ade8c6afb1eee2f7f763c9a7d7a5966  p-v3
+6818063dee48d1e0c67a8e1309b2f02a32269f35b73616e6be68f7c358eb3b28  build/Release/ide at 1074d63f
+92c1c795ba7c33c0a945f4ccac5aacc67c20368de627e5c3f3bcc13e84843a18  stage-1 output of frozen 744a948f source, base-native and build/Release/ide at 1074d63f
+Clang 18.1.8 (Ubuntu), valgrind 3.18.1, perf 6.8.12, GNU as (binutils 2.38), LLVM MC 18

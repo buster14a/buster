@@ -270,6 +270,123 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_movabs(UnitTestArgument
     return result;
 }
 
+// Independent goldens: GNU as and LLVM MC agree on every row. Each row is the
+// instruction before its disp32 for -0x1000(%rbp): loads (MOVZX r64 for one
+// and two bytes, MOV otherwise) then stores, widths 1/2/4/8, registers 0-15.
+// The reference is the metadata exact form the prepared records are copied
+// from; bytes past the instruction but inside capacity are the emitter's
+// spare record bytes and are not compared.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_prepared_frame_chunk(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    BUSTER_TEST(arguments, machine_x64_test_frame_chunk_prepared());
+    static u8 const goldens[2][4][16][5] = {
+        {
+            {{4, 0x48, 0x0f, 0xb6, 0x85}, {4, 0x48, 0x0f, 0xb6, 0x8d}, {4, 0x48, 0x0f, 0xb6, 0x95}, {4, 0x48, 0x0f, 0xb6, 0x9d}, {4, 0x48, 0x0f, 0xb6, 0xa5}, {4, 0x48, 0x0f, 0xb6, 0xad}, {4, 0x48, 0x0f, 0xb6, 0xb5}, {4, 0x48, 0x0f, 0xb6, 0xbd}, {4, 0x4c, 0x0f, 0xb6, 0x85}, {4, 0x4c, 0x0f, 0xb6, 0x8d}, {4, 0x4c, 0x0f, 0xb6, 0x95}, {4, 0x4c, 0x0f, 0xb6, 0x9d}, {4, 0x4c, 0x0f, 0xb6, 0xa5}, {4, 0x4c, 0x0f, 0xb6, 0xad}, {4, 0x4c, 0x0f, 0xb6, 0xb5}, {4, 0x4c, 0x0f, 0xb6, 0xbd}},
+            {{4, 0x48, 0x0f, 0xb7, 0x85}, {4, 0x48, 0x0f, 0xb7, 0x8d}, {4, 0x48, 0x0f, 0xb7, 0x95}, {4, 0x48, 0x0f, 0xb7, 0x9d}, {4, 0x48, 0x0f, 0xb7, 0xa5}, {4, 0x48, 0x0f, 0xb7, 0xad}, {4, 0x48, 0x0f, 0xb7, 0xb5}, {4, 0x48, 0x0f, 0xb7, 0xbd}, {4, 0x4c, 0x0f, 0xb7, 0x85}, {4, 0x4c, 0x0f, 0xb7, 0x8d}, {4, 0x4c, 0x0f, 0xb7, 0x95}, {4, 0x4c, 0x0f, 0xb7, 0x9d}, {4, 0x4c, 0x0f, 0xb7, 0xa5}, {4, 0x4c, 0x0f, 0xb7, 0xad}, {4, 0x4c, 0x0f, 0xb7, 0xb5}, {4, 0x4c, 0x0f, 0xb7, 0xbd}},
+            {{2, 0x8b, 0x85}, {2, 0x8b, 0x8d}, {2, 0x8b, 0x95}, {2, 0x8b, 0x9d}, {2, 0x8b, 0xa5}, {2, 0x8b, 0xad}, {2, 0x8b, 0xb5}, {2, 0x8b, 0xbd}, {3, 0x44, 0x8b, 0x85}, {3, 0x44, 0x8b, 0x8d}, {3, 0x44, 0x8b, 0x95}, {3, 0x44, 0x8b, 0x9d}, {3, 0x44, 0x8b, 0xa5}, {3, 0x44, 0x8b, 0xad}, {3, 0x44, 0x8b, 0xb5}, {3, 0x44, 0x8b, 0xbd}},
+            {{3, 0x48, 0x8b, 0x85}, {3, 0x48, 0x8b, 0x8d}, {3, 0x48, 0x8b, 0x95}, {3, 0x48, 0x8b, 0x9d}, {3, 0x48, 0x8b, 0xa5}, {3, 0x48, 0x8b, 0xad}, {3, 0x48, 0x8b, 0xb5}, {3, 0x48, 0x8b, 0xbd}, {3, 0x4c, 0x8b, 0x85}, {3, 0x4c, 0x8b, 0x8d}, {3, 0x4c, 0x8b, 0x95}, {3, 0x4c, 0x8b, 0x9d}, {3, 0x4c, 0x8b, 0xa5}, {3, 0x4c, 0x8b, 0xad}, {3, 0x4c, 0x8b, 0xb5}, {3, 0x4c, 0x8b, 0xbd}},
+        },
+        {
+            {{2, 0x88, 0x85}, {2, 0x88, 0x8d}, {2, 0x88, 0x95}, {2, 0x88, 0x9d}, {3, 0x40, 0x88, 0xa5}, {3, 0x40, 0x88, 0xad}, {3, 0x40, 0x88, 0xb5}, {3, 0x40, 0x88, 0xbd}, {3, 0x44, 0x88, 0x85}, {3, 0x44, 0x88, 0x8d}, {3, 0x44, 0x88, 0x95}, {3, 0x44, 0x88, 0x9d}, {3, 0x44, 0x88, 0xa5}, {3, 0x44, 0x88, 0xad}, {3, 0x44, 0x88, 0xb5}, {3, 0x44, 0x88, 0xbd}},
+            {{3, 0x66, 0x89, 0x85}, {3, 0x66, 0x89, 0x8d}, {3, 0x66, 0x89, 0x95}, {3, 0x66, 0x89, 0x9d}, {3, 0x66, 0x89, 0xa5}, {3, 0x66, 0x89, 0xad}, {3, 0x66, 0x89, 0xb5}, {3, 0x66, 0x89, 0xbd}, {4, 0x66, 0x44, 0x89, 0x85}, {4, 0x66, 0x44, 0x89, 0x8d}, {4, 0x66, 0x44, 0x89, 0x95}, {4, 0x66, 0x44, 0x89, 0x9d}, {4, 0x66, 0x44, 0x89, 0xa5}, {4, 0x66, 0x44, 0x89, 0xad}, {4, 0x66, 0x44, 0x89, 0xb5}, {4, 0x66, 0x44, 0x89, 0xbd}},
+            {{2, 0x89, 0x85}, {2, 0x89, 0x8d}, {2, 0x89, 0x95}, {2, 0x89, 0x9d}, {2, 0x89, 0xa5}, {2, 0x89, 0xad}, {2, 0x89, 0xb5}, {2, 0x89, 0xbd}, {3, 0x44, 0x89, 0x85}, {3, 0x44, 0x89, 0x8d}, {3, 0x44, 0x89, 0x95}, {3, 0x44, 0x89, 0x9d}, {3, 0x44, 0x89, 0xa5}, {3, 0x44, 0x89, 0xad}, {3, 0x44, 0x89, 0xb5}, {3, 0x44, 0x89, 0xbd}},
+            {{3, 0x48, 0x89, 0x85}, {3, 0x48, 0x89, 0x8d}, {3, 0x48, 0x89, 0x95}, {3, 0x48, 0x89, 0x9d}, {3, 0x48, 0x89, 0xa5}, {3, 0x48, 0x89, 0xad}, {3, 0x48, 0x89, 0xb5}, {3, 0x48, 0x89, 0xbd}, {3, 0x4c, 0x89, 0x85}, {3, 0x4c, 0x89, 0x8d}, {3, 0x4c, 0x89, 0x95}, {3, 0x4c, 0x89, 0x9d}, {3, 0x4c, 0x89, 0xa5}, {3, 0x4c, 0x89, 0xad}, {3, 0x4c, 0x89, 0xb5}, {3, 0x4c, 0x89, 0xbd}},
+        },
+    };
+    u32 const chunks[4] = {1, 2, 4, 8};
+    u32 const offsets[] = {0, 8, 0x7f, 0x80, 0x1000, 0x12345678, 0x7fffffff, 0xfffffff8u};
+    u32 const frame_bases[] = {0, 0x30, 0x12345};
+    u32 const starts[] = {0, 1, 7, 15, 16, 17};
+    for (u32 direction = 0; direction < 2; direction += 1)
+    {
+        bool load = direction == 0;
+        for (u32 width_slot = 0; width_slot < 4; width_slot += 1)
+        {
+            for (u32 reg = 0; reg < 16; reg += 1)
+            {
+                u8 const* golden = goldens[direction][width_slot][reg];
+                u32 length = golden[0] + (u32)sizeof(u32);
+                u8 bytes[64];
+                memset(bytes, 0xa5, sizeof(bytes));
+                MachineEncodeResult emitted = machine_x64_test_emit_frame_chunk(bytes, sizeof(bytes), 0, 0, load, reg, 0x1000, chunks[width_slot], false);
+                u8 const displacement[4] = {0x00, 0xf0, 0xff, 0xff};
+                BUSTER_TEST(arguments, emitted.valid && emitted.byte_count == length && memcmp(bytes, golden + 1, golden[0]) == 0 &&
+                                           memcmp(bytes + golden[0], displacement, sizeof(displacement)) == 0);
+
+                bool row_matches = true;
+                for (u32 offset_index = 0; offset_index < BUSTER_ARRAY_LENGTH(offsets); offset_index += 1)
+                {
+                    for (u32 base_index = 0; base_index < BUSTER_ARRAY_LENGTH(frame_bases); base_index += 1)
+                    {
+                        u32 offset = offsets[offset_index];
+                        u32 frame_base = frame_bases[base_index];
+                        u32 value = (0u - offset) + frame_base;
+                        for (u32 start_index = 0; start_index < BUSTER_ARRAY_LENGTH(starts); start_index += 1)
+                        {
+                            u32 start = starts[start_index];
+                            for (u32 available = 0; available <= 17; available += 1)
+                            {
+                                u32 capacity = start + available;
+                                bool valid = available >= length;
+                                u8 reference[64];
+                                memset(bytes, 0xa5, sizeof(bytes));
+                                memset(reference, 0xa5, sizeof(reference));
+                                MachineEncodeResult prepared =
+                                    machine_x64_test_emit_frame_chunk(bytes, capacity, start, frame_base, load, reg, offset, chunks[width_slot], false);
+                                MachineEncodeResult oracle =
+                                    machine_x64_test_emit_frame_chunk(reference, capacity, start, frame_base, load, reg, offset, chunks[width_slot], true);
+                                row_matches &= prepared.valid == valid && oracle.valid == valid;
+                                row_matches &= prepared.byte_count == start + (valid ? length : 0u) && prepared.byte_count == oracle.byte_count;
+                                row_matches &= prepared.exact_attempts == 1 && prepared.exact_successes == (u32)valid &&
+                                               prepared.exact_failures == (u32)!valid;
+                                if (valid)
+                                {
+                                    row_matches &= oracle.exact_attempts == 1 && oracle.exact_successes == 1 && oracle.exact_failures == 0;
+                                    row_matches &= memcmp(bytes, reference, start + length) == 0;
+                                    row_matches &= memcmp(bytes + start, golden + 1, golden[0]) == 0;
+                                    u32 patched;
+                                    memcpy(&patched, bytes + start + golden[0], sizeof(patched));
+                                    row_matches &= patched == value;
+                                }
+                                for (u32 index = 0; index < sizeof(bytes); index += 1)
+                                {
+                                    bool untouched = index < start || index >= capacity || !valid;
+                                    row_matches &= !untouched || bytes[index] == 0xa5;
+                                }
+                            }
+                        }
+                    }
+                }
+                BUSTER_TEST(arguments, row_matches);
+            }
+        }
+    }
+    // An encoder already past its capacity and a register outside the dense
+    // records both keep the metadata path's refusal and accounting.
+    u32 const refused_registers[] = {0, 16, UINT32_MAX};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused_registers); index += 1)
+    {
+        u32 reg = refused_registers[index];
+        u32 start = reg == 0 ? 33u : 0u;
+        u8 bytes[32];
+        u8 reference[32];
+        u8 expected[32];
+        memset(bytes, 0xa5, sizeof(bytes));
+        memset(reference, 0xa5, sizeof(reference));
+        memset(expected, 0xa5, sizeof(expected));
+        MachineEncodeResult prepared = machine_x64_test_emit_frame_chunk(bytes, sizeof(bytes), start, 0, true, reg, 8, 8, false);
+        MachineEncodeResult oracle = machine_x64_test_emit_frame_chunk(reference, sizeof(reference), start, 0, true, reg, 8, 8, reg != 0);
+        BUSTER_TEST(arguments, !prepared.valid && prepared.byte_count == start && prepared.exact_attempts == 1 && prepared.exact_successes == 0 &&
+                                   prepared.exact_failures == 1);
+        BUSTER_TEST(arguments, prepared.valid == oracle.valid && prepared.byte_count == oracle.byte_count &&
+                                   prepared.exact_attempts == oracle.exact_attempts && prepared.exact_successes == oracle.exact_successes &&
+                                   prepared.exact_failures == oracle.exact_failures);
+        BUSTER_TEST(arguments, memcmp(bytes, expected, sizeof(bytes)) == 0 && memcmp(reference, expected, sizeof(reference)) == 0);
+    }
+    return result;
+}
+
 // Compiles one C source through the C frontend into a canonical IrProgram
 // for machine-selection tests. Diagnostics fail the caller's assertions.
 BUSTER_GLOBAL_LOCAL IrProgram* machine_test_compile_c_with_options(Arena* arena, String8 name, String8 source, Target target, CIRLowerOptions options)
@@ -7774,6 +7891,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
     BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
+    BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_frame_chunk);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes.
