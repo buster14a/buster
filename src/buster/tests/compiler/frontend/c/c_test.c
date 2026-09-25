@@ -11763,7 +11763,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_sizeof_control_preparation(UnitTestArg
                     break;
                 case 5:
                     body = string_format(arguments->arena,
-                        S8("return ({ unsigned long value = ({S8}); value; });"), expression);
+                        S8("return ({{ unsigned long value = ({S8}); value; }});"), expression);
                     break;
                 }
                 u32 probe = probe_count++;
