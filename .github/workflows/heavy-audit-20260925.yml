@@ -1,0 +1,57 @@
+name: Heavy audit semantic probes
+
+on:
+  push:
+    branches: [research/heavy-audit-20260925-ade6ac4-astra]
+    paths:
+      - .github/workflows/heavy-audit-20260925.yml
+      - tools/investigations/heavy-audit-20260925/probe.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Recover hash-pinned exploratory compiler
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh run download 36183831330 --repo buster14a/buster --name meaning-seams-confirm-36183831330-1 --dir "$RUNNER_TEMP/buster-baseline"
+          printf '%s  %s\n' '57cc0f0ec6876bf8d591ea5eddb663da6cfbb4dc84da00e47bad686eceb20e80' "$RUNNER_TEMP/buster-baseline/ide" | sha256sum -c -
+          mkdir -p heavy-audit-evidence/provenance
+          cp "$RUNNER_TEMP/buster-baseline/production.txt" heavy-audit-evidence/provenance/original-production.txt
+          cp "$RUNNER_TEMP/buster-baseline/compiler.sha256" heavy-audit-evidence/provenance/original-compiler.sha256
+          git rev-parse HEAD HEAD^{tree} > heavy-audit-evidence/provenance/experiment-git.txt
+          python3 -m py_compile tools/investigations/heavy-audit-20260925/probe.py
+      - name: Independent-consumer correctness probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/investigations/heavy-audit-20260925/probe.py "$RUNNER_TEMP/buster-baseline/ide" "$GITHUB_WORKSPACE/heavy-audit-evidence"
+      - name: Preserve outcome distinctions
+        if: always()
+        shell: bash
+        run: |
+          if test -f heavy-audit-evidence/summary.md; then
+            cat heavy-audit-evidence/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '%s\n' 'Probe setup did not produce a summary. This is not compiler correctness evidence.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: heavy-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: heavy-audit-evidence
+          retention-days: 30
+          if-no-files-found: warn
