@@ -712,6 +712,81 @@ BUSTER_GLOBAL_LOCAL bool bq_prep_test_swap_build_root(int attempt)
     return ok;
 }
 
+/* Check the freeze's held output against the name and metadata the child
+ * produced. These changes leave the held descriptor valid while invalidating
+ * the pathname or rewriting the file without changing its size. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_build_output_stability(int root)
+{
+    int release = root >= 3 ? openat(root, "Release",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int input = release >= 3 ? openat(release, "ide", O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    struct stat first = {0};
+    bool ok = release >= 3 && input >= 3 && fstat(input, &first) == 0 &&
+              bq_retirement_build_output_stable(root, release, input, &first);
+    BQ_PREP_CHECK(ok);
+    if (ok)
+    {
+        bool moved = renameat(root, "Release", root, "held-release") == 0;
+        bool refused = moved && !bq_retirement_build_output_stable(root, release, input, &first);
+        bool restored = moved && renameat(root, "held-release", root, "Release") == 0;
+        BQ_PREP_CHECK(moved && refused && restored &&
+            bq_retirement_build_output_stable(root, release, input, &first));
+        ok = restored;
+    }
+    if (ok)
+    {
+        int copy = openat(release, "ide-replacement",
+            O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        bool copied = copy >= 3;
+        u8 bytes[16384];
+        u64 offset = 0;
+        while (copied && offset < (u64)first.st_size)
+        {
+            size_t wanted = (u64)first.st_size - offset < sizeof(bytes) ?
+                            (size_t)((u64)first.st_size - offset) : sizeof(bytes);
+            ssize_t count = pread(input, bytes, wanted, (off_t)offset);
+            if (count < 0 && errno == EINTR) continue;
+            copied = count > 0 && bq_write_all(copy, bytes, (u32)count);
+            if (copied) offset += (u64)count;
+        }
+        copied = copied && fchmod(copy, first.st_mode & 07777) == 0;
+        if (copy >= 0 && close(copy) != 0) copied = false;
+        bool moved = copied && renameat(release, "ide", release, "held-ide") == 0;
+        bool replaced = moved && renameat(release, "ide-replacement", release, "ide") == 0;
+        bool refused = replaced && !bq_retirement_build_output_stable(root, release, input, &first);
+        bool removed = replaced && renameat(release, "ide", release, "ide-replacement") == 0;
+        bool restored = moved && renameat(release, "held-ide", release, "ide") == 0;
+        bool refreshed = restored && fstat(input, &first) == 0;
+        BQ_PREP_CHECK(copied && moved && replaced && refused && removed && refreshed &&
+            bq_retirement_build_output_stable(root, release, input, &first));
+        ok = refreshed && unlinkat(release, "ide-replacement", 0) == 0;
+        BQ_PREP_CHECK(ok);
+    }
+    if (ok)
+    {
+        u8 original = 0, changed = 0;
+        int writer = openat(release, "ide", O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+        bool writable = writer >= 3 && pread(input, &original, 1, 0) == 1;
+        changed = original ^ 0xffu;
+        struct timespec timestamp[2] = {
+            {.tv_nsec = UTIME_OMIT}, {.tv_sec = first.st_mtime == 1 ? 2 : 1, .tv_nsec = 0}};
+        bool rewritten = writable && pwrite(writer, &changed, 1, 0) == 1 &&
+            futimens(writer, timestamp) == 0;
+        struct stat after = {0};
+        bool refused = rewritten && fstat(input, &after) == 0 &&
+            after.st_size == first.st_size && after.st_ino == first.st_ino &&
+            !bq_retirement_build_output_stable(root, release, input, &first);
+        bool restored = rewritten && pwrite(writer, &original, 1, 0) == 1;
+        if (writer >= 0 && close(writer) != 0) restored = false;
+        struct stat fresh = {0};
+        BQ_PREP_CHECK(writable && rewritten && refused && restored &&
+            fstat(input, &fresh) == 0 &&
+            bq_retirement_build_output_stable(root, release, input, &fresh));
+    }
+    if (input >= 0) close(input);
+    if (release >= 0) close(release);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const* original,
     int installed, int workspaces, char const* installed_path, char const* workspace_path,
     char const* original_profile,
@@ -948,6 +1023,8 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_matched_build(BqQueue* queue, BqJob const*
             if (ok)
             {
                 int held_root = process.build_root;
+                if (trial == 1 && stage == 1)
+                    bq_prep_test_build_output_stability(held_root);
                 if ((trial == 12 && stage == 1) || (trial == 13 && stage == 3))
                 {
                     struct stat original = {0}, replacement_stat = {0};

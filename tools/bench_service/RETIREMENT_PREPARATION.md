@@ -240,10 +240,12 @@ build so another process cannot replace the name during the attempt.
 The helper holds the configured build directory's descriptor and device/inode
 identity from each build launch through completion, preventing inode reuse.
 The freeze step verifies the expected name still resolves to that held root,
-reads `Release/ide` through the descriptor, and verifies the name again after
-copying the executable. Replacing the configured root with another directory
-containing even the same executable inode fails the stage and cannot publish
-binary records.
+reads `Release/ide` through held directory and file descriptors, and rechecks
+both names after copying the executable. It also rejects changes to the input
+file's size, mode, owner, links, and nanosecond modification/change times
+during the copy. Replacing the configured root, `Release` directory, or
+`ide` name during the freeze, even with byte-equal content, fails the stage
+and cannot publish binary records.
 The #923 worker must apply its fixed containment, separate candidate identity,
 deadlines and cancellation to the launched child. `complete` stores each
 command/exit/log as an immutable queue log plus receipt, reimports A, freezes
@@ -303,3 +305,7 @@ produces no log and poisons the build. An unexpectedly reaped child cannot becom
 successful stage and releases its local descriptors after failing the build.
 The native and sanitizer service suites register this dedicated test; verify
 the exact submitted head on hosted runners.
+The build fixture also replaces the generated `ide` name with a byte-equal
+inode, moves its `Release` directory, and rewrites one byte without changing
+the file size. Each change invalidates the held output observation before the
+fixture restores the executable and completes the normal stage.
