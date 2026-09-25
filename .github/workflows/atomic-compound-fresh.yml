@@ -18,7 +18,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 16
-      - name: Freeze source and retain producer environment
+      - name: Freeze current source and reconcile intervening VLA change
         shell: bash
         run: |
           set -euo pipefail
@@ -27,10 +27,31 @@ jobs:
           cp tools/investigations/atomic_compound_*.py "$RUNNER_TEMP/"
           cp tools/investigations/atomic_compound_*.py "$PROBE_OUT/"
           python3 -m py_compile "$RUNNER_TEMP/atomic_compound_confirm.py"
-          git checkout --detach 83c5f229288ecd8e23588c11b9ad19edc8bf4be2
-          test "$(git rev-parse HEAD^{tree})" = b310e6573e6c89c618f8466941be4b995021a410
+          git show 83c5f229288ecd8e23588c11b9ad19edc8bf4be2:src/buster/lib/compiler/frontend/c/c_gen.c > "$RUNNER_TEMP/original-c_gen.c"
+          git fetch --no-tags --depth=1 origin 8ab1e194026dbb7c5391b25e68292743f4b96efb
+          git checkout --detach 8ab1e194026dbb7c5391b25e68292743f4b96efb
+          test "$(git rev-parse HEAD^{tree})" = a98734a3c1de9448e563afd588a1996cf8bb8b69
           git diff --exit-code
           git rev-parse HEAD HEAD^{tree} > "$PROBE_OUT/production-source.txt"
+          git diff 83c5f229288ecd8e23588c11b9ad19edc8bf4be2 HEAD -- docs/agents/frontend/foundations.md src/buster/lib/compiler/frontend/c/c_gen.c src/buster/tests/compiler/frontend/c/c_test.c > "$PROBE_OUT/main-reconciliation.diff"
+          cp src/buster/lib/compiler/frontend/c/c_gen.c "$PROBE_OUT/current-c_gen.c"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          old = (Path(os.environ['RUNNER_TEMP']) / 'original-c_gen.c').read_text().splitlines()
+          new = Path('src/buster/lib/compiler/frontend/c/c_gen.c').read_text().splitlines()
+          def extract(lines, name):
+              start = next(i for i, line in enumerate(lines) if line.startswith('BUSTER_C_INTERNAL ') and name + '(' in line)
+              end = next(i for i in range(start + 1, len(lines)) if lines[i] == '}')
+              text = '\n'.join(lines[start:end + 1]) + '\n'
+              return {'line_start': start + 1, 'line_end': end + 1, 'sha256': hashlib.sha256(text.encode()).hexdigest()}
+          rows = []
+          for name in ('c_ir_emit_compound_assignment', 'c_ir_apply_operation', 'c_ir_atomic_operation', 'c_ir_emit_atomic_float_update', 'c_ir_emit_increment', 'c_ir_bit_field_assignment_value'):
+              before, after = extract(old, name), extract(new, name)
+              rows.append({'symbol': name, 'before': before, 'after': after, 'identical': before['sha256'] == after['sha256']})
+          (Path(os.environ['PROBE_OUT']) / 'atomic-source-equivalence.json').write_text(json.dumps(rows, indent=2) + '\n')
+          assert all(row['identical'] for row in rows)
+          PY
           lscpu --json > "$PROBE_OUT/cpu.json"
           cat /proc/cpuinfo > "$PROBE_OUT/cpuinfo.txt"
           printf '%s\n' 'BUSTER_TEST_JOBS=2' > "$PROBE_OUT/selected-environment.txt"
