@@ -48,7 +48,7 @@ jobs:
           systemctl show docker.service --property=Delegate --property=ControlGroup || true
           cat > "$evidence/Dockerfile" <<'DOCKERFILE'
           FROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4
-          RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv util-linux python3-minimal && rm -rf /var/lib/apt/lists/*
+          RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd systemd-sysv dbus util-linux python3-minimal && rm -rf /var/lib/apt/lists/*
           STOPSIGNAL SIGRTMIN+3
           CMD ["/sbin/init"]
           DOCKERFILE
@@ -73,8 +73,11 @@ jobs:
             for controller in cpu memory pids cpuset; do grep -qw "$controller" /sys/fs/cgroup/cgroup.controllers; done
             printf "PID1=%s\nCGROUP_CONTROLLERS=%s\nCGROUP_MOUNT=%s\n" "$(cat /proc/1/comm)" "$(cat /sys/fs/cgroup/cgroup.controllers)" "$(findmnt -no OPTIONS -T /sys/fs/cgroup)"
             systemctl is-system-running
-            dpkg-query --show systemd systemd-sysv util-linux python3-minimal
+            dpkg-query --show systemd systemd-sysv dbus util-linux python3-minimal
           ' | tee "$evidence/guest.txt"
+          sudo docker exec "$container" systemctl start dbus.socket
+          sudo docker exec "$container" test -S /run/dbus/system_bus_socket
+          sudo docker exec "$container" systemctl show dbus.socket --property=ActiveState --property=Listen | tee "$evidence/system-bus.txt"
           unit="issue1162-$GITHUB_RUN_ID.service"
           sudo docker exec "$container" systemd-run --unit="$unit" --property=AllowedCPUs=2 --property=MemoryMax=8589934592 --property=MemorySwapMax=0 --property=TasksMax=256 --property=RestrictSUIDSGID=yes --property=NoNewPrivileges=yes -- /usr/bin/sleep 90
           sudo docker exec "$container" systemctl show "$unit" --all > "$evidence/unit.txt"
@@ -120,9 +123,21 @@ jobs:
           print("POLICY_PASS", flush=True)
           PY
           sudo docker exec -i "$container" python3 - "$unit" < "$evidence/check.py" | tee "$evidence/effective.txt"
+          unit_cgroup="$(sudo docker exec "$container" systemctl show "$unit" --property=ControlGroup --value)"
+          test -n "$unit_cgroup"
+          sudo docker exec "$container" test -d "/sys/fs/cgroup$unit_cgroup"
           sudo docker exec "$container" systemctl stop "$unit"
           sudo docker exec "$container" systemctl show "$unit" --property=LoadState --property=ActiveState | tee "$evidence/stopped-unit.txt"
           test "$(sudo docker exec "$container" systemctl show "$unit" --property=LoadState --value)" = not-found
+          for attempt in $(seq 1 10); do
+            if ! sudo docker exec "$container" test -e "/sys/fs/cgroup$unit_cgroup"; then break; fi
+            sleep 1
+          done
+          if sudo docker exec "$container" test -e "/sys/fs/cgroup$unit_cgroup"; then
+            echo "FAIL: stopped transient child cgroup remains: $unit_cgroup"
+            exit 1
+          fi
+          echo "CHILD_CGROUP_REMOVED=$unit_cgroup"
           sudo docker exec "$container" systemd-run --wait --pipe --unit="issue1162-control-$GITHUB_RUN_ID" --property=RestrictSUIDSGID=no -- /bin/sh -c 'd=$(mktemp -d); chmod 2770 "$d"; result=$?; rmdir "$d"; exit "$result"' | tee "$evidence/suid-control.txt"
           set +e
           sudo docker exec "$container" systemd-run --wait --pipe --unit="issue1162-restrict-$GITHUB_RUN_ID" --property=RestrictSUIDSGID=yes -- /bin/sh -c 'd=$(mktemp -d); chmod 2770 "$d"; result=$?; rmdir "$d"; exit "$result"' > "$evidence/suid-restrict.txt" 2>&1
