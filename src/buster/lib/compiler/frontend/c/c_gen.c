@@ -17146,6 +17146,14 @@ BUSTER_C_INTERNAL bool c_ir_prepared_control_expression_contains_range(CIntegerI
     return false;
 }
 
+// An operand of sizeof or _Alignof is not prepared by either prepass. Its
+// owner decides whether a VLA expression operand must be lowered.
+#define C_IR_UNEVALUATED_OPERAND_WORDS                                                              \
+    (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) |                            \
+     C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
+
+BUSTER_C_INTERNAL u32 c_ir_unevaluated_operand_end(CIntegerIrBuilder* builder, u32 cursor, u32 end);
+
 BUSTER_C_INTERNAL CSymbolBuiltin c_ir_token_builtin_kind(CIntegerIrBuilder* builder, CToken token);
 
 BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
@@ -17176,6 +17184,18 @@ BUSTER_C_INTERNAL void c_ir_prepare_control_expressions_step(CIntegerIrBuilder* 
     while (frame->as.prepare_control.index < frame->as.prepare_control.end)
     {
         u32 index = frame->as.prepare_control.index++;
+        CToken token = builder->preprocess.tokens[index];
+        // The sizeof owner decides whether a VLA expression must run. When it
+        // does, it lowers the operand in a child expression frame, which runs
+        // its own preparation pass. This scan must not hoist control groups
+        // from a fixed-size sizeof or unevaluated _Alignof operand.
+        if (token.kind == C_TOKEN_IDENTIFIER &&
+            c_token_in_well_known_set(builder->preprocess.spelling_base, token, C_IR_UNEVALUATED_OPERAND_WORDS))
+        {
+            frame->as.prepare_control.index =
+                c_ir_unevaluated_operand_end(builder, index + 1, frame->as.prepare_control.end);
+            continue;
+        }
         c_ir_lazy_operand_scan_step(builder, &frame->as.prepare_control.lazy, frame->as.prepare_control.start,
                                     frame->as.prepare_control.end, index);
         if (index + 1 < frame->as.prepare_control.end &&
@@ -17721,13 +17741,6 @@ BUSTER_C_INTERNAL bool c_ir_atomic_compare_orders_valid(IrMemoryOrder success, I
 
     return false;
 }
-
-// The words whose operand is never evaluated, as a well-known set: a call
-// inside one must not be prepared by the discover scan below, or its side
-// effects run even though the operand itself only ever folds to a constant.
-#define C_IR_UNEVALUATED_OPERAND_WORDS                                                              \
-    (C_SYMBOL_WELL_KNOWN_BIT(SIZEOF) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF) |                            \
-     C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU) | C_SYMBOL_WELL_KNOWN_BIT(ALIGNOF_GNU_ALT))
 
 // Where the unevaluated operand of the sizeof or _Alignof word ending at
 // `cursor - 1` stops: the first token index past one unary-expression.
