@@ -11794,6 +11794,25 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, c_atomic_wait.result == PROCESS_RESULT_SUCCESS);
         }
     }
+    // The frozen basic_c_atomic fixture uses disjoint fetch-or operands, for
+    // which OR and XOR agree. Run an overlapping-bit witness separately.
+    String8 atomic_or_overlap_path = buster_test_temporary_path(arguments->arena, S8("buster-c-atomic-or-overlap"),
+#if BUSTER_WINDOWS
+                                                                S8(".exe"));
+#else
+                                                                S8(""));
+#endif
+    String8 atomic_or_overlap_command[] = {
+        S8("-o"), atomic_or_overlap_path, S8("tools/fixtures/atomic_or_overlap.c"),
+    };
+    CompilerDriverResult atomic_or_overlap = compiler_driver_execute_invocation(
+        arguments->arena, compiler_driver_parse_arguments(arguments->arena,
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(atomic_or_overlap_command)));
+    BUSTER_TEST_RAW(arguments, atomic_or_overlap.error == COMPILER_DRIVER_ERROR_NONE, atomic_or_overlap.diagnostic);
+    if (atomic_or_overlap.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        BUSTER_TEST(arguments, compiler_driver_test_process_success(arguments->arena, atomic_or_overlap_path));
+    }
     // `_Atomic` over an aggregate is a *wider* type than its operand, because
     // the promotion pads it up to the next power of two (#731), so the bitcode
     // writer has to wrap the operand rather than hand back its id: an LLVM
