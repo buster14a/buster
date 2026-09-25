@@ -265,7 +265,8 @@ class RetirementEligibilityTests(unittest.TestCase):
         data = (root / binding.SUPPORT_DECLARATION_PATH).read_bytes()
         self.assertIn(hashlib.sha256(data).hexdigest(),
                       (census.FULL_SUPPORT_CONTRACT_SHA256,
-                       census.NEXT_SUPPORT_CONTRACT_SHA256))
+                       census.NEXT_SUPPORT_CONTRACT_SHA256,
+                       census.PROPOSED_SUPPORT_CONTRACT_SHA256))
         with (root / binding.SUPPORT_DECLARATION_PATH).open() as stream:
             subjects = [row for row in csv.DictReader(stream, delimiter="\t")
                         if row["role"] == "subject"]
