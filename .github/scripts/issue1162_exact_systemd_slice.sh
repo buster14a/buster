@@ -23,8 +23,9 @@ retain() {
     sudo docker exec "$guest" systemctl list-units --all 'buster-bench*' >"$evidence/units-final.txt" 2>&1
     sudo docker exec "$guest" sh -c 'find /var/lib/buster-bench -xdev -printf "%m %u:%g %s %p\n" | sort' >"$evidence/state-inventory.txt" 2>&1
     sudo docker exec "$guest" sh -c 'stat -c "lease device=%d inode=%i links=%h mode=%a owner=%u:%g" /var/lib/buster-bench/lease/host.lock' >"$evidence/lease-final.txt" 2>&1
-    sudo docker exec "$guest" tar -C /var/lib -czf /tmp/issue1162-retained-state.tgz buster-bench >"$evidence/state-tar.log" 2>&1
-    sudo docker cp "$guest:/tmp/issue1162-retained-state.tgz" "$evidence/retained-state.tgz" >>"$evidence/state-tar.log" 2>&1
+    sudo docker exec "$guest" tar -C /var/lib -czf - buster-bench >"$evidence/retained-state.tgz" 2>"$evidence/state-tar.log"
+    tar -tzf "$evidence/retained-state.tgz" >"$evidence/state-tar-inventory.txt" 2>>"$evidence/state-tar.log"
+    sha256sum "$evidence/retained-state.tgz" >"$evidence/state-tar-sha256.txt"
     sudo docker rm -f "$guest" >"$evidence/container-removal.txt" 2>&1
     if sudo docker ps -a --format '{{.Names}}' | grep -Fx "$guest"; then result=1; fi
   fi
@@ -109,6 +110,11 @@ chmod 0644 /etc/systemd/system/buster-bench*
 cp /root/issue1162-install/units/buster-bench.tmpfiles.conf /etc/tmpfiles.d/issue1162-buster-bench.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/issue1162-buster-bench.conf
 install -d -m 0710 -o buster-bench -g buster-bench /var/lib/buster-bench/workspaces/results
+# GNU install preserves the parent's setgid bit on this filesystem. The
+# installed results root must have exactly 0710 for the production worker.
+chmod 0710 /var/lib/buster-bench/workspaces/results
+test "$(stat -c %a /var/lib/buster-bench/workspaces/results)" = 710
+test "$(stat -c %u:%g /var/lib/buster-bench/workspaces/results)" = 65000:65000
 install -d -m 0750 -o root -g buster-bench /opt/buster-bench
 install -d -m 0550 -o root -g buster-bench /opt/buster-bench/installed
 cp -a /root/issue1162-install/sources /opt/buster-bench/installed/
@@ -159,6 +165,11 @@ for attempt in $(seq 1 360); do
   cat "$evidence/status-latest.txt"
   sudo docker exec "$guest" systemctl list-units --all --plain 'buster-bench*' >>"$evidence/units-observed.txt" 2>&1
   if grep -q 'phase=finished' "$evidence/status-latest.txt"; then finished=true; break; fi
+  failure="$(sed -nE 's/^job=.* failure=([^ ]+).*/\1/p' "$evidence/status-latest.txt" | head -1)"
+  if grep -q 'phase=preparing' "$evidence/status-latest.txt" && [[ -n "$failure" && "$failure" != ok ]]; then
+    echo 'EARLY_FAILURE: preparing job has a recorded non-ok failure; retain the guest evidence.'
+    exit 1
+  fi
   sleep 5
 done
 test "$finished" = true
