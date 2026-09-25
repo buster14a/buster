@@ -1163,7 +1163,7 @@ static bool wasm64_apply_data_relocation(Wasm64Context* context, Wasm64DataRecor
         {
             wasm64_fail(context, WASM64_ERROR_UNRESOLVED_SYMBOL, wasm64_s8("unresolved Wasm64 data relocation"), 0, 0, 0, symbol);
         }
-        if (wasm64_failed(context))
+        if (wasm64_failed(context) || !function_target)
         {
             return false;
         }
