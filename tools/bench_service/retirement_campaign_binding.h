@@ -9,7 +9,19 @@
 #include "../throughput/retirement_campaign.h"
 
 #ifdef __linux__
-static int bq_retirement_campaign_bind(BqRetirementCorrectness const* gate,
+/* The only service-side launch path for a bound campaign. Retain the seal
+ * captured at freeze; rehash the complete gate before the first A/A and A/B
+ * child, rather than once for each of millions of timed invocations. The
+ * service keeps the gate's underlying arrays immutable through collection. */
+typedef struct BqRetirementCampaignBinding
+{
+    BqRetirementCorrectness const* gate;
+    TpRetirementCampaign* campaign;
+    char sealed_sha256[65];
+} BqRetirementCampaignBinding;
+
+static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
+    BqRetirementCorrectness const* gate,
     TpRetirementCampaign* campaign, TpRetirementPlan const* plan,
     TpRetirementSamples* aa, TpRetirementSamples* ab,
     TpRetirementExecutable const* baseline, TpRetirementExecutable const* candidate,
@@ -21,7 +33,8 @@ static int bq_retirement_campaign_bind(BqRetirementCorrectness const* gate,
 {
     TpRetirementExecution const* execution = aa && aa->transcript ? aa->transcript->execution : NULL;
     unsigned dense = 0, runtime = 0;
-    int ok = gate && bq_retirement_correctness_ready(gate) && execution &&
+    int ok = binding && !binding->campaign && gate &&
+        bq_retirement_correctness_ready(gate) && execution &&
         baseline && candidate && baseline->valid && candidate->valid &&
         !strcmp(baseline->sha256, gate->prepared.binary_sha256[0]) &&
         !strcmp(candidate->sha256, gate->prepared.binary_sha256[1]) &&
@@ -75,11 +88,50 @@ static int bq_retirement_campaign_bind(BqRetirementCorrectness const* gate,
         ok = tp_retirement_campaign_freeze(campaign, plan, aa, ab, baseline, baseline, candidate,
             aa_commands, ab_commands, command_workspace, command_count, identity_workspace,
             identity_count, gate->prepared.rows, plan_sha256, context_sha256);
+    if (ok)
+    {
+        binding->gate = gate;
+        binding->campaign = campaign;
+        memcpy(binding->sealed_sha256, gate->sealed_sha256, sizeof(binding->sealed_sha256));
+    }
     if (!ok)
     {
         if (campaign) tp_retirement_campaign_poison(campaign);
         if (aa) tp_retirement_samples_poison(aa);
         if (ab && ab != aa) tp_retirement_samples_poison(ab);
+    }
+    return ok;
+}
+
+/* A changed preflight fact or freshly poisoned gate must stop the actual first
+ * launch, even when the #619 plan was frozen earlier. The first invocation of
+ * A/B is checked again after the independently admitted A/A interval. */
+static int bq_retirement_campaign_run(BqRetirementCampaignBinding const* binding,
+    TpRetirementMeasuredCommand const* command, TpProcessInputs const* inputs,
+    int output_directory, TpRetirementMeasurementResult* result)
+{
+    TpRetirementCampaign* campaign = binding ? binding->campaign : NULL;
+    BqRetirementCorrectness const* gate = binding ? binding->gate : NULL;
+    unsigned stage = campaign && campaign->phase == TP_RETIREMENT_CAMPAIGN_AB ? 1 : 0;
+    TpRetirementSamples* samples = campaign ? campaign->samples[stage] : NULL;
+    TpRetirementExecution const* execution = samples && samples->transcript ?
+        samples->transcript->execution : NULL;
+    int ok = campaign && gate && execution && gate->finished && !gate->failed &&
+        !memcmp(binding->sealed_sha256, gate->sealed_sha256, sizeof(binding->sealed_sha256)) &&
+        campaign->population_rows == gate->prepared.rows &&
+        campaign->rows == gate->eligible_rows;
+    if (ok && !execution->sequence)
+        ok = bq_retirement_correctness_ready(gate) &&
+            !strcmp(campaign->binary_sha256[0][0], gate->prepared.binary_sha256[0]) &&
+            !strcmp(campaign->binary_sha256[0][1], gate->prepared.binary_sha256[0]) &&
+            !strcmp(campaign->binary_sha256[1][0], gate->prepared.binary_sha256[0]) &&
+            !strcmp(campaign->binary_sha256[1][1], gate->prepared.binary_sha256[1]);
+    if (ok) ok = tp_retirement_campaign_run(campaign, command, inputs, output_directory, result);
+    else
+    {
+        if (result) *result = (TpRetirementMeasurementResult){
+            .status = TP_RETIREMENT_MEASUREMENT_PLAN_INVALID, .process = {.exit_code = -1}};
+        if (campaign) tp_retirement_campaign_poison(campaign);
     }
     return ok;
 }
