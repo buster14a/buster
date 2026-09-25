@@ -15,15 +15,35 @@ and skip sidecars. It recomputes the raw identities, checks the complete fixed
 matrix and report class-row partition, and requires the exact source-derived
 non-executed set. For full-census it requires the approved source applicability
 ledger digest/count and exactly four shards. It then checks projection object
-ordinals against the supplied B row inventory.
+ordinals against the supplied B row inventory. It derives classes, reasons, and
+ownership for default rows missing from the source applicability ledger using
+the raw row obligations, allocator role, and retained direct-reference failure
+set; it does not replay baseline shard results or independent supplements. It
+also fails closed on candidate and final reference failure rows, checks that
+acceptance failures match unresolved `unavailable` rows, checks
+`clean_acceptance`, requires both acceptance flags for full-census, and rejects
+nonempty defect arrays. A report with retained
+direct-reference failures and four supplement digests remains only a staged
+projection; independent supplemental proof and the separate #508 binding are
+required before admission.
 
 This importer is not a C replay of every #508 shard, result, argv, environment,
-supported-gap ledger, residual, or report field. It also does not authenticate
-per-row configuration identities, compiler/runtime command plans, #509
+supported-gap ledger contents, residual TSV bytes, or report field. It checks
+the supported-gap report list against the approved full-census count/digest
+and permits no gaps in the self-test profile. The current hosted full-census
+validator uses four reference supplements. The projection checks their digest
+syntax and count but cannot grant their correctness authority until the
+service reopens and replays independent supplement evidence. With no held
+residual-file descriptor in this service boundary, it permits only the canonical zero-row,
+untruncated residual summary and matching header-only digest; it does not read
+the residual TSV. It also does not authenticate per-row configuration
+identities, compiler/runtime command plans, #509
 required-check receipt bytes/digests, or independent-oracle bytes. A valid
 projection therefore returns fail-closed `BQ_RECIPE_MISMATCH` before the
-correctness gate begins. The checked-in production profile lacks the new
-validator pins and fails earlier. The low-level fixture probe tests projection
+correctness gate begins. Before the validator projection, the production entry
+reimports the durable A preparation and fixed matched-build/binary records and
+compares their identities to B's declaration. The checked-in production profile
+lacks the new validator pins and fails earlier. The low-level fixture probe tests projection
 mechanics only; it does not authorize readiness or a timed launch.
 The separate `_built_pinned` fixture seam can import matched-build evidence and
 acquire held binaries for lower-level tests. The production `begin_service`

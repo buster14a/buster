@@ -24,10 +24,13 @@ import native_retirement_contract_test as contract_test
 import native_retirement_performance_binding as binding
 
 
-EXPECTED_PROBE_OUTPUT = "VALIDATOR_ELIGIBILITY rows=192 eligible=176 skipped=16"
+EXPECTED_PROBE_OUTPUT = "VALIDATOR_ELIGIBILITY rows=192 eligible=160 skipped=32"
 INAPPLICABLE_RECORD = (
     "tests/unit.c", "x86_64-apple-ios", "platform-inapplicable",
     "source-registration-test",
+)
+UNAVAILABLE_RECORD = (
+    "tests/unit.c", "x86_64-unknown-linux-gnu", "unavailable", "missing-native-oracle",
 )
 
 
@@ -65,8 +68,13 @@ def run_validator(shards, output):
             "fixture candidate rows are not clean")
     require(report.get("rows_validated") == 192,
             "fixture does not cover its complete 192-row matrix")
-    require(report.get("applicability_skip_rows") == list(range(128, 144)),
-            "validator did not derive the expected 16 platform skips")
+    require(report.get("applicability_skip_rows") ==
+            list(range(16)) + list(range(128, 144)),
+            "validator did not derive the source-ledger unavailable and platform skip sets")
+    require(report.get("acceptance_failure_rows") == list(range(16)),
+            "validator acceptance failures do not match the unavailable ledger rows")
+    require(report.get("clean_acceptance") is False,
+            "validator did not retain the unresolved unavailable acceptance state")
     return report
 
 
@@ -183,6 +191,62 @@ def mutate_report(data, mutation):
     return (json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+def mutate_applicability_cell(data, row_number, updates):
+    lines = data.decode("ascii").splitlines()
+    columns = lines[0].split("\t")
+    positions = {name: index for index, name in enumerate(columns)}
+    found = False
+    for index in range(1, len(lines)):
+        fields = lines[index].split("\t")
+        if fields[positions["row"]] == str(row_number):
+            for name, value in updates.items():
+                fields[positions[name]] = value
+            lines[index] = "\t".join(fields)
+            found = True
+            break
+    require(found, f"applicability fixture has no row {row_number}")
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def rebind_applicability_digest(report_data, applicability_data):
+    return mutate_report(report_data, lambda report:
+        report.__setitem__("applicability_sha256", sha256(applicability_data)))
+
+
+def mutate_manifest_gap_summary(data, row_numbers):
+    properties = dict(line.split("=", 1) for line in data.decode("ascii").splitlines())
+    properties["supported_gap_count"] = str(len(row_numbers))
+    properties["supported_gap_sha256"] = contract_test.contract.canonical_rows_digest(row_numbers)
+    return "".join(f"{key}={value}\n" for key, value in properties.items()).encode("ascii")
+
+
+def expect_tamper_rejected_many(probe, artifacts, replacements, label):
+    originals = {name: artifacts[name].read_bytes() for name in replacements}
+    modes = {name: stat.S_IMODE(artifacts[name].stat().st_mode) for name in replacements}
+    profile = artifacts["profile"]
+    original_profile = profile.read_bytes()
+    original_profile_mode = stat.S_IMODE(profile.stat().st_mode)
+    try:
+        for name, changed in replacements.items():
+            path = artifacts[name]
+            path.chmod(modes[name] | stat.S_IWUSR)
+            path.write_bytes(changed)
+            path.chmod(modes[name])
+        write_profile(profile, artifacts)
+        result = probe_result(probe, artifacts)
+        require(result.returncode != 0,
+                f"compiled C eligibility probe accepted tampered {label} evidence")
+    finally:
+        for name, original in originals.items():
+            path = artifacts[name]
+            path.chmod(modes[name] | stat.S_IWUSR)
+            path.write_bytes(original)
+            path.chmod(modes[name])
+        profile.chmod(original_profile_mode | stat.S_IWUSR)
+        profile.write_bytes(original_profile)
+        profile.chmod(original_profile_mode)
+
+
 def expect_missing_profile_pin_rejected(probe, artifacts, key):
     profile = artifacts["profile"]
     original = profile.read_bytes()
@@ -211,19 +275,21 @@ def execute(probe):
     fixture = contract_test.ContractTests(methodName="runTest")
     fixture.setUp()
     try:
-        fixture.install_applicability({INAPPLICABLE_RECORD})
+        fixture.install_applicability({INAPPLICABLE_RECORD, UNAVAILABLE_RECORD})
         report_path = fixture.root / "validator-report.json"
         report = run_validator(fixture.shards, report_path)
         projection_evidence = independently_replay_python(
             fixture.root, report, fixture.shards[0])
 
-        expected_skips = set(range(128, 144))
+        expected_skips = set(range(16)) | set(range(128, 144))
         require(projection_evidence["artifacts"][1]["path"] == "applicability-skips.tsv",
                 "independent Python replay did not bind the expected skip artifact")
         require(set(report["applicability_skip_rows"]) == expected_skips,
-                "expected platform-inapplicable object rows are not all skipped")
+                "expected source-ledger unavailable and platform rows are not all skipped")
         require(report["applicability_counts"]["platform-inapplicable"] == 16,
                 "fixture applicability projection does not contain exactly 16 platform rows")
+        require(report["applicability_counts"]["unavailable"] == 16,
+                "fixture applicability projection does not contain exactly 16 unavailable rows")
 
         shard = fixture.shards[0]
         artifacts = {
@@ -266,6 +332,89 @@ def execute(probe):
             lambda data: mutate_report(data, lambda report:
                 report["applicability_skip_rows"].pop(0)),
             "validator report skip set")
+        for field in ("candidate_failure_rows", "direct_reference_failure_rows",
+                      "reference_failure_rows", "fallback_defect_rows",
+                      "telemetry_defect_rows", "execution_defect_rows",
+                      "artifact_defect_rows", "unexpected_failure_rows",
+                      "reference_supplement_sha256"):
+            expect_tamper_rejected(
+                probe, artifacts, artifacts["report"],
+                lambda data, field=field: mutate_report(data, lambda report:
+                    report[field].append(17)),
+                f"nonempty {field}")
+        expect_tamper_rejected(
+            probe, artifacts, artifacts["report"],
+            lambda data: mutate_report(data, lambda report:
+                report.__setitem__("clean_acceptance", True)),
+            "clean-acceptance summary")
+
+        wrong_acceptance = mutate_applicability_cell(
+            artifacts["applicability"].read_bytes(), 17, {"acceptance_failure": "1"})
+        wrong_acceptance_report = mutate_report(
+            artifacts["report"].read_bytes(), lambda report:
+                report["acceptance_failure_rows"].append(17))
+        wrong_acceptance_report = rebind_applicability_digest(wrong_acceptance_report,
+                                                              wrong_acceptance)
+        expect_tamper_rejected_many(probe, artifacts,
+            {"applicability": wrong_acceptance, "report": wrong_acceptance_report},
+            "acceptance failure outside the unavailable class")
+
+        missing_unavailable_failure = mutate_applicability_cell(
+            artifacts["applicability"].read_bytes(), 0, {"acceptance_failure": "0"})
+        missing_unavailable_report = mutate_report(
+            artifacts["report"].read_bytes(), lambda report:
+                report["acceptance_failure_rows"].remove(0))
+        missing_unavailable_report = rebind_applicability_digest(
+            missing_unavailable_report, missing_unavailable_failure)
+        expect_tamper_rejected_many(probe, artifacts,
+            {"applicability": missing_unavailable_failure, "report": missing_unavailable_report},
+            "missing acceptance failure for an unavailable row")
+
+        absent_ledger_classification = mutate_applicability_cell(
+            artifacts["applicability"].read_bytes(), 17,
+            {"applicability": "unavailable", "admission": "unavailable",
+             "reason": "compile-obligation-not-admitted", "ownership": "admission",
+             "acceptance_failure": "1"})
+        def classify_unledgered_row_unavailable(report):
+            for key in ("applicability_rows_by_class", "admission_rows_by_class"):
+                report[key]["admitted-supported"].remove(17)
+                report[key]["unavailable"].append(17)
+                report[key]["unavailable"].sort()
+            for key in ("applicability_counts", "admission_counts"):
+                report[key]["admitted-supported"] -= 1
+                report[key]["unavailable"] += 1
+            report["acceptance_failure_rows"].append(17)
+            report["acceptance_failure_rows"].sort()
+        absent_ledger_report = mutate_report(artifacts["report"].read_bytes(),
+                                            classify_unledgered_row_unavailable)
+        absent_ledger_report = rebind_applicability_digest(absent_ledger_report,
+                                                           absent_ledger_classification)
+        expect_tamper_rejected_many(probe, artifacts,
+            {"applicability": absent_ledger_classification, "report": absent_ledger_report},
+            "unledgered row reclassification")
+
+        changed_manifest = mutate_manifest_gap_summary(artifacts["manifest"].read_bytes(), [17])
+        changed_report = mutate_report(artifacts["report"].read_bytes(), lambda report: (
+            report.__setitem__("supported_gap_rows", [17]),
+            report.__setitem__("supported_gap_count", 1),
+            report.__setitem__("supported_gap_sha256",
+                               contract_test.contract.canonical_rows_digest([17])),
+            report.__setitem__("manifest_identity_sha256",
+                contract_test.contract.manifest_identity_digest(
+                    dict(line.split("=", 1) for line in changed_manifest.decode("ascii").splitlines())))))
+        expect_tamper_rejected_many(probe, artifacts,
+            {"manifest": changed_manifest, "report": changed_report}, "supported-gap summary")
+        expect_tamper_rejected(
+            probe, artifacts, artifacts["report"],
+            lambda data: mutate_report(data, lambda report: (
+                report.__setitem__("residual_rows", 1),
+                report.__setitem__("residual_truncated", True))),
+            "nonempty residual summary")
+        expect_tamper_rejected(
+            probe, artifacts, artifacts["report"],
+            lambda data: mutate_report(data, lambda report:
+                report.__setitem__("residual_sha256", "0" * 64)),
+            "residual digest")
         expect_missing_profile_pin_rejected(
             probe, artifacts, "validator-source-applicability-sha256")
         expect_probe_success(probe, artifacts)
@@ -280,7 +429,7 @@ def main():
     arguments = parser.parse_args()
     execute(arguments.probe.resolve())
     print("schema-2 validator eligibility fixture passed "
-          "(192 rows, 176 eligible, 16 skipped; positive and tamper probes)")
+          "(192 rows, 160 eligible, 32 skipped; positive and tamper probes)")
 
 
 if __name__ == "__main__":

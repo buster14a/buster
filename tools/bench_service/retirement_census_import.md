@@ -10,11 +10,27 @@ cross-checks the source ledger digest/count in the manifest and report. For
 full-census it requires the approved 374-entry ledger digest and four shards.
 It checks the report's schema, profile, binary/support identities, row/group
 counts, complete partition, exact class names/maps/membership, clean-candidate
-flags, and candidate/reference/acceptance failure rows against the
-applicability sidecar.
+flags, and failure arrays. Candidate and final reference failures,
+fallback/telemetry/execution/artifact defects, and unexpected failures must
+be empty. It retains the direct-reference failures recorded before supplemental
+resolution and uses their group-level pattern to derive the
+`retained-reference` class. The current full-census hosted recipe uses
+`--reference-supplements`; this staged projection checks four canonical
+supplement digest strings, but does not independently authenticate or replay
+the supplemental bytes. For retained direct-reference failures that the report
+says were resolved, it checks the validator's rewritten reason, ownership, and
+acceptance flag while preserving the original class. Other acceptance failures
+must match the `unavailable` class; `clean_acceptance` must agree with the
+resulting set. Full-census requires both `require_clean_acceptance` and
+`clean_acceptance`, as in the hosted producer. The separate #508 performance
+binding's stricter admission checks still apply before trusted use.
 
 The source ledger and authenticated non-object source obligation determine the
-exact expected non-executed set, class, and reason. The report skip IDs and
+exact expected non-executed set, class, and reason. For rows absent from that
+ledger, the C projection derives its default class, reason, and ownership from
+the row's execution and compile obligations, allocator role, and retained
+direct-reference failure set. It does not replay baseline results or the
+supplemental controls from the shards. The report skip IDs and
 `applicability-skips.tsv` must match that set row by row. In particular, every
 ledger-declared platform-inapplicable/unavailable row must be skipped, and an
 ordinary supported object row cannot be skipped as a retained control. The
@@ -23,16 +39,20 @@ and creates row-bound skip proofs from the pinned report digest and skip row.
 
 This is a staged validator projection, not a C replay of the #508 producer.
 It does not inspect/replay every shard's object, result, argv, environment,
-supported-gap ledger, residual evidence, or every schema-2 report field. In
-particular, it does not derive default applicability classes for rows absent
-from the source ledger, replay fallback/telemetry/execution/artifact defect
-arrays, or establish `clean_acceptance` from independent result replay. The
-real schema-2 fixture runs the repository validator
-and Python replay before exercising the C projection; it proves importer
-mechanics only. The low-level C probe accepts the `self-test` profile for this
-purpose. The production service entry additionally requires
-`profile=full-census`, but still returns a fail-closed error after a valid
-projection because the remaining B/#509 authorities are not joined.
+supported-gap ledger contents, or the residual TSV bytes. For full-census it
+checks the report's supported-gap row list against the approved count and
+canonical digest, ties the report ledger digest to the manifest and approved
+ledger digest, and requires every listed row to remain admitted supported
+object work. The `self-test` profile must declare no supported gaps. Since no
+held residual-file descriptor is part of this service boundary, the projection
+accepts only the canonical zero-row residual summary: matching evidence-path
+aliases, zero rows, no truncation, the fixed retention limit, and the SHA-256
+of the header-only TSV. It does not read that TSV itself. The real schema-2
+fixture runs the repository validator and Python replay before exercising the
+C projection; it proves importer mechanics only. The low-level C probe accepts
+the `self-test` profile for this purpose. The production service entry also
+requires `profile=full-census`, but still returns a fail-closed error after a
+valid projection because the remaining B/#509 authorities are not joined.
 
 The projection checks the complete fixed target, frontend, PIC, and allocator
 matrix; zero-based row and group order; fixture path, recipe, and compile
@@ -71,8 +91,11 @@ current-source full census artifact has established these exact pins. The checke
 declaration currently contains 411 subjects, which project to 78,912 object
 rows at 192 rows per subject.
 
-The production service entry checks projection ordinals against the supplied B
-rows but does not overwrite them or call the correctness-gate begin function.
+The production service entry reimports the durable A preparation, fixed
+matched-build and frozen-binary records, then checks their source and binary
+identities against the supplied B declaration. It checks projection ordinals
+against the supplied B rows but does not overwrite them, acquire launchable
+binary descriptors, or call the correctness-gate begin function.
 Even a valid full-census projection returns `BQ_RECIPE_MISMATCH` until the
 separate authority joins are implemented. Missing facts include an approved
 #508 per-row `configuration_sha256` serializer, independent verification of
@@ -89,7 +112,9 @@ remains blocked; do not treat the staged projection as full authority.
 `retirement_validator_eligibility_test.py` generates genuine #508 schema-2
 validator output from a miniature source fixture, runs the Python evidence
 checks/replay, then invokes the C probe with runtime-computed pins. Its positive
-case exercises the importer mechanics; re-pinned tamper cases change class-map
-membership, skip membership/sidecar data, and required pins. It does not grant
-production authority. The separate private fixture in
+case includes both unavailable and platform-inapplicable rows; re-pinned
+tamper cases cover failure arrays, acceptance/unavailable equality,
+`clean_acceptance`, absent-ledger classification, supported-gap and residual
+summaries, class-map membership, skip membership/sidecar data, and required
+pins. It does not grant production authority. The separate private fixture in
 `retirement_prepare_tests.c` continues to test the raw support/input/row join.

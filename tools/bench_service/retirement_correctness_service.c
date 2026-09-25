@@ -1,7 +1,8 @@
 /* Service-side A -> B entry for #881.
  * The _pinned and _built_pinned functions remain lower-level fixture seams for
- * matched-build import and held binaries. Production begin_service validates
- * the raw #508 identity and staged source-ledger eligibility projection, then
+ * matched-build import and held binaries. Production begin_service reimports
+ * the durable A preparation, matched-build and binary records, then validates
+ * the raw #508 identity and staged source-ledger eligibility projection. It
  * fails closed before acquiring binaries or beginning correctness because
  * full validator, configuration, command, #509, and oracle authority is not
  * yet imported.
@@ -22,9 +23,16 @@
 #define BQ_RETIREMENT_CENSUS_ALLOCATOR_COUNT 4u
 #define BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT (12u * 2u * 2u * 4u)
 #define BQ_RETIREMENT_FULL_APPLICABILITY_LEDGER_COUNT 374u
+#define BQ_RETIREMENT_FULL_SUPPORTED_GAP_COUNT 192u
 
 BUSTER_GLOBAL_LOCAL char const bq_retirement_full_applicability_ledger_sha256[] =
     "934be981e866fe3dbbdb4a5b9e551c052b4546487bb04245fac24bb271be78fa";
+BUSTER_GLOBAL_LOCAL char const bq_retirement_full_supported_gap_sha256[] =
+    "0f531b1cf7c7922ea891e15703971bcb2ddf95f398f628e0b2681831d7cbf81e";
+BUSTER_GLOBAL_LOCAL char const bq_retirement_full_supported_gap_ledger_sha256[] =
+    "e67ef103035b1b99e97ae640de2ef0b7a84add2705758cb2431a4855b303dfc3";
+BUSTER_GLOBAL_LOCAL char const bq_retirement_empty_residual_sha256[] =
+    "a4b667fab9df2e5e5a1e24f3395904d3ec77fd306a7e4c8e85153dbff6a30818";
 
 typedef struct BqRetirementValidatorEligibility BqRetirementValidatorEligibility;
 struct BqRetirementValidatorEligibility
@@ -1074,12 +1082,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_string_value(String8 json,
     return ok;
 }
 
-BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_skip_rows(String8 json, u32 row_count,
-    u8* skips, u32* skip_count)
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_row_set(String8 json, String8 key, u32 row_count,
+    u8* rows, u32* row_count_output)
 {
     u64 value_offset = 0;
-    bool ok = skips && skip_count && row_count > 0 &&
-              bq_retirement_validator_json_top_value(json, S8("applicability_skip_rows"), NULL, &value_offset) &&
+    bool ok = rows && row_count_output && row_count > 0 &&
+              bq_retirement_validator_json_top_value(json, key, NULL, &value_offset) &&
               value_offset < json.length && json.pointer[value_offset] == '[';
     u32 count = 0;
     u64 cursor = value_offset + 1;
@@ -1114,10 +1122,10 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_skip_rows(String8 json, u3
             u64 row = 0;
             ok = cursor > start && count < row_count &&
                  bq_retirement_number((String8){json.pointer + start, cursor - start}, &row) && row < row_count &&
-                 !skips[row] && (!count || row > previous_row);
+                 !rows[row] && (!count || row > previous_row);
             if (ok)
             {
-                skips[row] = 1;
+                rows[row] = 1;
                 count += 1;
                 previous_row = row;
                 need_value = false;
@@ -1134,8 +1142,50 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_skip_rows(String8 json, u3
         }
     }
     ok = ok && closed && count <= row_count;
-    if (ok) *skip_count = count;
-    else *skip_count = 0;
+    if (ok) *row_count_output = count;
+    else *row_count_output = 0;
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_skip_rows(String8 json, u32 row_count,
+    u8* skips, u32* skip_count)
+{
+    return bq_retirement_validator_json_row_set(json, S8("applicability_skip_rows"), row_count,
+                                                 skips, skip_count);
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_row_set_sha256(u8 const* rows, u32 row_count,
+    char digest[SHA256_HEX_CAPACITY])
+{
+    bool ok = rows && row_count > 0 && digest;
+    Sha256 hash;
+    sha256_init(&hash);
+    if (ok) sha256_add(&hash, "[", 1);
+    bool first = true;
+    for (u32 row = 0; ok && row < row_count; row += 1)
+    {
+        if (rows[row])
+        {
+            if (!first) sha256_add(&hash, ",", 1);
+            char digits[16] = {0};
+            u32 length = 0, value = row;
+            do
+            {
+                digits[length++] = (char)('0' + value % 10u);
+                value /= 10u;
+            }
+            while (value && length < BUSTER_ARRAY_LENGTH(digits));
+            ok = length > 0 && length < BUSTER_ARRAY_LENGTH(digits);
+            while (ok && length) sha256_add(&hash, digits + --length, 1);
+            first = false;
+        }
+    }
+    if (ok)
+    {
+        sha256_add(&hash, "]", 1);
+        sha256_finish_hex(&hash, (char8*)digest);
+    }
+    else if (digest) memset(digest, 0, SHA256_HEX_CAPACITY);
     return ok;
 }
 
@@ -1148,6 +1198,79 @@ BUSTER_GLOBAL_LOCAL u32 bq_retirement_validator_class(String8 value)
     else if (string_equal(value, S8("platform-inapplicable"))) result = 4;
     else if (string_equal(value, S8("unavailable"))) result = 5;
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_classification_expected(
+    BqRetirementValidatorRawRow const* raw, BqRetirementApplicabilityLedgerRecord const* auth,
+    bool supported_gap, bool baseline_unresolved, bool supplement_resolved, u32 actual_class,
+    String8 actual_reason, String8 actual_ownership)
+{
+    String8 expected_reason = {0}, expected_ownership = {0};
+    u32 expected_class = 0;
+    bool ok = raw != NULL;
+    String8 const* source = raw ? raw->fields : NULL;
+    if (ok && supported_gap)
+    {
+        expected_class = 1;
+        expected_reason = S8("supported-object-zero-fallback");
+        expected_ownership = S8("candidate-compiler");
+        ok = (!auth || string_equal(auth->classification, S8("admitted-supported"))) &&
+             string_equal(source[12], S8("supported-object-zero-fallback")) &&
+             !string_equal(source[7], S8("none"));
+    }
+    else if (ok && auth)
+    {
+        expected_class = bq_retirement_validator_class(auth->classification);
+        expected_reason = auth->reason;
+        expected_ownership = S8("applicability-manifest");
+        ok = expected_class != 0;
+    }
+    else if (ok && string_equal(source[14], S8("unavailable-platform-control")))
+    {
+        expected_class = 4;
+        expected_reason = S8("native-execution-owner-unavailable");
+        expected_ownership = S8("platform-execution");
+    }
+    else if (ok && string_equal(source[12], S8("registered-non-object-control")))
+    {
+        expected_class = 2;
+        expected_reason = S8("registered-non-object-control");
+        expected_ownership = S8("source-registration");
+    }
+    else if (ok && !string_equal(source[12], S8("supported-object-zero-fallback")))
+    {
+        expected_class = 5;
+        expected_reason = S8("compile-obligation-not-admitted");
+        expected_ownership = S8("admission");
+    }
+    else if (ok && baseline_unresolved)
+    {
+        expected_class = 3;
+        expected_reason = S8("direct-reference-unresolved");
+        expected_ownership = S8("reference-compiler");
+    }
+    else if (ok && string_equal(source[7], S8("none")))
+    {
+        expected_class = 2;
+        expected_reason = S8("direct-reference-control");
+        expected_ownership = S8("reference-compiler");
+    }
+    else if (ok)
+    {
+        expected_class = 1;
+        expected_reason = S8("supported-object-zero-fallback");
+        expected_ownership = S8("candidate-compiler");
+    }
+    /* The aggregate validator retains the original class, then replaces
+     * reason/ownership for each independently resolved reference-failure row. */
+    if (ok && supplement_resolved)
+    {
+        expected_reason = S8("direct-reference-unresolved-clang-control-passed");
+        expected_ownership = S8("clang-reference");
+    }
+    ok = ok && actual_class == expected_class && expected_class != 0 &&
+         string_equal(actual_reason, expected_reason) && string_equal(actual_ownership, expected_ownership);
+    return ok;
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_class_counts(String8 json, String8 key,
@@ -1353,6 +1476,40 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_string_array_equals(String
     return ok;
 }
 
+/* The official full census retains one supplemental reference digest per
+ * shard, including when a direct-reference failure was later resolved. The
+ * projection validates only the canonical shape; independent supplement and
+ * shard replay remains a separate production authority. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_sha256_array(String8 json, String8 key,
+    u32 expected_count)
+{
+    u64 cursor = 0;
+    bool ok = bq_retirement_validator_json_top_value(json, key, NULL, &cursor) &&
+              cursor < json.length && json.pointer[cursor++] == '[';
+    for (u32 index = 0; ok && index < expected_count; index += 1)
+    {
+        while (cursor < json.length && (json.pointer[cursor] == ' ' || json.pointer[cursor] == '\n' ||
+                                         json.pointer[cursor] == '\r' || json.pointer[cursor] == '\t')) cursor += 1;
+        if (index) ok = cursor < json.length && json.pointer[cursor++] == ',';
+        while (ok && cursor < json.length && (json.pointer[cursor] == ' ' || json.pointer[cursor] == '\n' ||
+                                                json.pointer[cursor] == '\r' || json.pointer[cursor] == '\t')) cursor += 1;
+        ok = ok && cursor < json.length && json.pointer[cursor++] == '"' &&
+             cursor + 64 < json.length &&
+             bq_retirement_hex((String8){json.pointer + cursor, 64}, 64) &&
+             json.pointer[cursor + 64] == '"';
+        if (ok) cursor += 65;
+    }
+    while (ok && cursor < json.length && (json.pointer[cursor] == ' ' || json.pointer[cursor] == '\n' ||
+                                            json.pointer[cursor] == '\r' || json.pointer[cursor] == '\t')) cursor += 1;
+    ok = ok && cursor < json.length && json.pointer[cursor++] == ']';
+    while (ok && cursor < json.length && json.pointer[cursor] != '\n')
+    {
+        ok = json.pointer[cursor] == ' ' || json.pointer[cursor] == '\r' || json.pointer[cursor] == ',';
+        if (ok) cursor += 1;
+    }
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_json_rows_match_flags(String8 json, String8 key,
     u32 row_count, u8 const* expected_flags)
 {
@@ -1528,13 +1685,19 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_support_inputs_join(String8 sup
 }
 
 BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String8 report,
-    String8 report_sha256, String8 applicability, String8 skips_text,
+    String8 report_sha256, String8 census_profile, String8 applicability, String8 skips_text,
     BqRetirementValidatorRawRow const* raw_rows, BqRetirementSupportSubject const* subjects,
     u32 subject_count, BqRetirementApplicabilityLedgerRecord const* ledger, u32 ledger_count,
     u32 row_count, BqRetirementValidatorEligibility* projection)
 {
     static String8 const app_header = S8_INITIALIZER("row\tgroup\tfixture\ttarget\tcpu\tfrontend\tallocator\tPIC\tapplicability\tadmission\tdisposition\treason\townership\tcandidate_failure\treference_failure\tacceptance_failure");
     static String8 const skips_header = S8_INITIALIZER("row\tgroup\tfixture\ttarget\tallocator\tapplicability\treason");
+    static String8 const failure_arrays[] = {
+        S8_INITIALIZER("candidate_failure_rows"),
+        S8_INITIALIZER("reference_failure_rows"), S8_INITIALIZER("fallback_defect_rows"),
+        S8_INITIALIZER("telemetry_defect_rows"), S8_INITIALIZER("execution_defect_rows"),
+        S8_INITIALIZER("artifact_defect_rows"), S8_INITIALIZER("unexpected_failure_rows")
+    };
     bool ok = report.pointer && report_sha256.length == 64 && applicability.pointer && skips_text.pointer &&
               raw_rows && subjects && subject_count > 0 && ledger && ledger_count <= BQ_RETIREMENT_VALIDATOR_LEDGER_RECORD_CAP &&
               row_count > 0 && projection;
@@ -1542,13 +1705,57 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
     u8* candidate_failures = ok ? calloc(row_count, 1) : NULL;
     u8* reference_failures = ok ? calloc(row_count, 1) : NULL;
     u8* acceptance_failures = ok ? calloc(row_count, 1) : NULL;
-    ok = ok && observed_skips && candidate_failures && reference_failures && acceptance_failures;
-    u32 report_skip_count = 0;
+    u8* supported_gap_rows = ok ? calloc(row_count, 1) : NULL;
+    u8* inapplicable_rows = ok ? calloc(row_count, 1) : NULL;
+    u8* direct_reference_failures = ok ? calloc(row_count, 1) : NULL;
+    ok = ok && observed_skips && candidate_failures && reference_failures && acceptance_failures &&
+         supported_gap_rows && inapplicable_rows && direct_reference_failures;
+    u32 report_skip_count = 0, supported_gap_count = 0, acceptance_failure_count = 0;
+    u32 direct_failure_count = 0;
     if (ok) ok = bq_retirement_validator_json_skip_rows(report, row_count, observed_skips,
-                                                         &report_skip_count);
+                                                         &report_skip_count) &&
+                 bq_retirement_validator_json_row_set(report, S8("supported_gap_rows"), row_count,
+                    supported_gap_rows, &supported_gap_count) &&
+                 bq_retirement_validator_json_row_set(report, S8("direct_reference_failure_rows"),
+                    row_count, direct_reference_failures, &direct_failure_count);
     u32 report_counts[5] = {0}, admission_counts[5] = {0}, app_counts[5] = {0};
     if (ok) ok = bq_retirement_validator_class_counts(report, S8("applicability_counts"), report_counts) &&
                  bq_retirement_validator_class_counts(report, S8("admission_counts"), admission_counts);
+    char supported_gap_sha256[SHA256_HEX_CAPACITY] = {0};
+    if (ok) ok = bq_retirement_validator_row_set_sha256(supported_gap_rows, row_count,
+                                                          supported_gap_sha256) &&
+                 bq_retirement_validator_json_report_scalar(report, S8("supported_gap_count"),
+                                                             supported_gap_count) &&
+                 bq_retirement_validator_json_matches_hex(report, S8("supported_gap_sha256"),
+                                                          supported_gap_sha256);
+    if (ok && string_equal(census_profile, S8("full-census")))
+        ok = supported_gap_count == BQ_RETIREMENT_FULL_SUPPORTED_GAP_COUNT &&
+             !memcmp(supported_gap_sha256, bq_retirement_full_supported_gap_sha256,
+                     SHA256_HEX_CAPACITY) &&
+             bq_retirement_validator_json_sha256_array(report, S8("reference_supplement_sha256"), 4);
+    else if (ok && string_equal(census_profile, S8("self-test")))
+        ok = supported_gap_count == 0 && direct_failure_count == 0 &&
+             bq_retirement_validator_json_sha256_array(report, S8("reference_supplement_sha256"), 0);
+    else if (ok) ok = false;
+    String8 residual_evidence = {0}, residual_tsv = {0};
+    bool residual_truncated = true, require_clean_acceptance = false, clean_acceptance = false;
+    if (ok) ok = bq_retirement_validator_json_string_value(report, S8("residual_evidence"),
+                                                            &residual_evidence) &&
+                 bq_retirement_validator_json_string_value(report, S8("residual_tsv"), &residual_tsv) &&
+                 residual_evidence.length > 0 && string_equal(residual_evidence, residual_tsv) &&
+                 bq_retirement_validator_json_report_scalar(report, S8("residual_rows"), 0) &&
+                 bq_retirement_validator_json_report_scalar(report, S8("residual_limit"), 256) &&
+                 bq_retirement_validator_json_bool(report, S8("residual_truncated"), &residual_truncated) &&
+                 !residual_truncated &&
+                 bq_retirement_validator_json_matches_hex(report, S8("residual_sha256"),
+                                                          bq_retirement_empty_residual_sha256) &&
+                 bq_retirement_validator_json_bool(report, S8("require_clean_acceptance"),
+                                                   &require_clean_acceptance) &&
+                 bq_retirement_validator_json_bool(report, S8("clean_acceptance"), &clean_acceptance);
+    if (ok && string_equal(census_profile, S8("full-census")))
+        ok = require_clean_acceptance && clean_acceptance;
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(failure_arrays); index += 1)
+        ok = bq_retirement_validator_json_empty_array(report, failure_arrays[index]);
     u64 offset = 0;
     String8 line = {0};
     if (ok) ok = bq_next_line(applicability, &offset, &line) && string_equal(line, app_header);
@@ -1568,22 +1775,24 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
                  string_equal(fields[3], source[3]) && string_equal(fields[4], source[5]) &&
                  string_equal(fields[5], source[8]) && string_equal(fields[6], source[7]) &&
                  string_equal(fields[7], source[9]) && string_equal(fields[9], fields[8]) &&
-                 (string_equal(fields[13], S8("0")) || string_equal(fields[13], S8("1"))) &&
-                 (string_equal(fields[14], S8("0")) || string_equal(fields[14], S8("1"))) &&
-                 (string_equal(fields[15], S8("0")) || string_equal(fields[15], S8("1"))) &&
-                 string_equal(fields[13], S8("0"));
+                 string_equal(fields[13], S8("0")) && string_equal(fields[14], S8("0"));
         u32 classification = ok ? bq_retirement_validator_class(fields[8]) : 0;
         ok = ok && classification >= 1 && classification <= 5;
-        bool candidate_failure = string_equal(fields[13], S8("1"));
-        bool reference_failure = string_equal(fields[14], S8("1"));
-        bool acceptance_failure = string_equal(fields[15], S8("1"));
-        ok = ok && (!candidate_failure || acceptance_failure) &&
-             (!reference_failure || acceptance_failure) &&
-             (classification != 5 || acceptance_failure);
         u32 subject_index = raw_index / BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT;
         BqRetirementApplicabilityLedgerRecord const* auth = NULL;
         if (ok && subject_index < subject_count)
             auth = bq_retirement_validator_ledger_find(ledger, ledger_count, source[2], source[3]);
+        bool supported_gap = supported_gap_rows[raw_index] != 0;
+        bool baseline_unresolved = direct_reference_failures[raw_index / 4u * 4u] != 0;
+        bool supplement_resolved = direct_reference_failures[raw_index] != 0;
+        bool acceptance_failure = classification == 5 && !supplement_resolved;
+        bool inapplicable = string_equal(source[14], S8("unavailable-platform-control")) ||
+            (auth && string_equal(auth->classification, S8("platform-inapplicable")));
+        ok = ok && bq_retirement_validator_classification_expected(raw, auth, supported_gap,
+            baseline_unresolved, supplement_resolved, classification, fields[11], fields[12]) &&
+             (direct_reference_failures[raw_index] != 0) ==
+                 (baseline_unresolved && !observed_skips[raw_index]) &&
+             string_equal(fields[15], acceptance_failure ? S8("1") : S8("0"));
         bool source_control = string_equal(source[12], S8("registered-non-object-control"));
         bool authenticated_skip = source_control ||
             (auth && (string_equal(auth->classification, S8("platform-inapplicable")) ||
@@ -1591,15 +1800,14 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
         ok = ok && subject_index < subject_count &&
              string_equal(source[2], string_from_pointer(subjects[subject_index].path)) &&
              string_equal(source[12], string_from_pointer(subjects[subject_index].compile_obligation)) &&
-             observed_skips[raw_index] == authenticated_skip &&
-             (!auth || classification == bq_retirement_validator_class(auth->classification));
+             observed_skips[raw_index] == authenticated_skip;
         if (ok)
         {
             app_counts[classification - 1] += 1;
             projection->classification[raw_index] = (u8)classification;
-            candidate_failures[raw_index] = candidate_failure;
-            reference_failures[raw_index] = reference_failure;
             acceptance_failures[raw_index] = acceptance_failure;
+            inapplicable_rows[raw_index] = inapplicable;
+            acceptance_failure_count += acceptance_failure;
             app_rows += ok;
         }
     }
@@ -1615,7 +1823,11 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
                  bq_retirement_validator_json_rows_match_flags(report, S8("reference_failure_rows"),
                                                                row_count, reference_failures) &&
                  bq_retirement_validator_json_rows_match_flags(report, S8("acceptance_failure_rows"),
-                                                               row_count, acceptance_failures);
+                                                               row_count, acceptance_failures) &&
+                 bq_retirement_validator_json_rows_match_flags(report, S8("inapplicable_rows"),
+                                                               row_count, inapplicable_rows) &&
+                 clean_acceptance == (acceptance_failure_count == 0) &&
+                 (!require_clean_acceptance || clean_acceptance);
     u64 skips_offset = 0;
     if (ok) ok = bq_next_line(skips_text, &skips_offset, &line) && string_equal(line, skips_header);
     u32 skipped = 0;
@@ -1680,6 +1892,9 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_applicability_projection(String
     free(candidate_failures);
     free(reference_failures);
     free(acceptance_failures);
+    free(supported_gap_rows);
+    free(inapplicable_rows);
+    free(direct_reference_failures);
     return ok;
 }
 
@@ -1767,20 +1982,42 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
         properties, property_count, S8("applicability_ledger_sha256"));
     BqRetirementManifestProperty* manifest_ledger_entry_property = bq_retirement_manifest_find(
         properties, property_count, S8("applicability_ledger_entries"));
+    BqRetirementManifestProperty* manifest_gap_path = bq_retirement_manifest_find(
+        properties, property_count, S8("supported_gap_ledger"));
+    BqRetirementManifestProperty* manifest_gap_sha = bq_retirement_manifest_find(
+        properties, property_count, S8("supported_gap_ledger_sha256"));
+    BqRetirementManifestProperty* manifest_gap_count = bq_retirement_manifest_find(
+        properties, property_count, S8("supported_gap_count"));
+    BqRetirementManifestProperty* manifest_gap_rows_sha = bq_retirement_manifest_find(
+        properties, property_count, S8("supported_gap_sha256"));
+    u64 manifest_supported_gap_count = 0;
     ok = ok && profile_property && rows_property && inputs_property && shards_property &&
          manifest_support && manifest_compiler && manifest_baseline && manifest_ledger_path &&
-         manifest_ledger_sha && manifest_ledger_entry_property && ledger &&
+         manifest_ledger_sha && manifest_ledger_entry_property && manifest_gap_path && manifest_gap_sha &&
+         manifest_gap_count && manifest_gap_rows_sha && ledger &&
          bq_retirement_number(rows_property->value, &manifest_rows) &&
          bq_retirement_number(inputs_property->value, &manifest_inputs) &&
          bq_retirement_number(shards_property->value, &manifest_shards) &&
          bq_retirement_number(manifest_ledger_entry_property->value, &manifest_ledger_entries) &&
+         bq_retirement_number(manifest_gap_count->value, &manifest_supported_gap_count) &&
          manifest_rows > 0 && manifest_rows <= BQ_RETIREMENT_CORRECTNESS_ROWS_CAP &&
          manifest_rows % BQ_RETIREMENT_CENSUS_ALLOCATOR_COUNT == 0 &&
          manifest_inputs > 0 && manifest_inputs <= BQ_RETIREMENT_INVENTORY_CAP && manifest_shards > 0 &&
          manifest_ledger_entries <= BQ_RETIREMENT_VALIDATOR_LEDGER_RECORD_CAP &&
          string_equal(manifest_ledger_path->value, S8("docs/native-retirement-applicability-v1.tsv")) &&
          bq_retirement_hex(manifest_ledger_sha->value, 64) &&
-         string_equal(manifest_ledger_sha->value, string_from_pointer(source_ledger_sha));
+         string_equal(manifest_ledger_sha->value, string_from_pointer(source_ledger_sha)) &&
+         string_equal(manifest_gap_path->value, S8("docs/native-retirement-supported-gaps-v1.tsv")) &&
+         bq_retirement_hex(manifest_gap_sha->value, 64) &&
+         bq_retirement_hex(manifest_gap_rows_sha->value, 64);
+    if (ok && string_equal(profile_property->value, S8("full-census")))
+        ok = string_equal(manifest_gap_sha->value,
+                          string_from_pointer(bq_retirement_full_supported_gap_ledger_sha256)) &&
+             manifest_supported_gap_count == BQ_RETIREMENT_FULL_SUPPORTED_GAP_COUNT &&
+             string_equal(manifest_gap_rows_sha->value,
+                          string_from_pointer(bq_retirement_full_supported_gap_sha256));
+    else if (ok && string_equal(profile_property->value, S8("self-test")))
+        ok = manifest_supported_gap_count == 0;
     if (ok)
     {
         manifest_profile = profile_property->value;
@@ -1818,6 +2055,12 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
              bq_retirement_validator_json_matches_hex(report_text, S8("input_ledger_sha256"), input_identity) &&
              bq_retirement_validator_json_matches_hex(report_text, S8("applicability_ledger_sha256"), source_ledger_sha) &&
              bq_retirement_validator_json_report_scalar(report_text, S8("applicability_ledger_entries"), ledger_count) &&
+             bq_retirement_validator_json_matches_string(report_text, S8("supported_gap_ledger_sha256"),
+                                                         manifest_gap_sha->value) &&
+             bq_retirement_validator_json_report_scalar(report_text, S8("supported_gap_count"),
+                                                         manifest_supported_gap_count) &&
+             bq_retirement_validator_json_matches_string(report_text, S8("supported_gap_sha256"),
+                                                         manifest_gap_rows_sha->value) &&
              bq_retirement_validator_json_matches_hex(report_text, S8("applicability_sha256"), applicability_sha);
         for (u32 index = 0; ok && index < row_count; index += 1)
             ok = bq_retirement_census_row_projection(raw_rows[index].fields, index, subjects, subject_count);
@@ -1837,8 +2080,8 @@ BUSTER_GLOBAL_LOCAL bool bq_retirement_validator_eligibility_projection(int supp
             ok = projection->compiler_eligible && projection->classification &&
                  projection->skip_proof_sha256 &&
                  bq_retirement_validator_applicability_projection(report_text,
-                    string_from_pointer(report_sha), applicability_text, skips_text, raw_rows, subjects,
-                    subject_count, ledger, ledger_count, row_count, projection);
+                    string_from_pointer(report_sha), manifest_profile, applicability_text, skips_text,
+                    raw_rows, subjects, subject_count, ledger, ledger_count, row_count, projection);
         }
         if (ok)
         {
@@ -1967,13 +2210,6 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
     BqRetirementHeldBinaries* held, BqRetirementCorrectness* gate)
 {
     String8 profile = job ? bq_recipe_profile(bq_request_recipe(&job->request)) : (String8){0};
-    (void)queue;
-    (void)installed;
-    (void)workspaces;
-    (void)workspace_root;
-    (void)preparation_sha256;
-    (void)record_sha256;
-    (void)build_record_sha256;
     (void)checks;
     (void)check_count;
     (void)check_facts;
@@ -1982,12 +2218,37 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
     (void)identity_slots;
     (void)census_workspace;
     (void)census_slots;
-    (void)held;
-    bool fresh = gate && !gate->check_count && !gate->failed && !gate->finished;
+    bool fresh = gate && !gate->check_count && !gate->failed && !gate->finished &&
+        held && !held->owned;
+    BqRetirementPreparation preparation = {0};
+    BqRetirementMatchedBuild build = {0};
+    BqRetirementBinaries binaries = {0};
+    BqError a_result = fresh && prepared ?
+        bq_retirement_preparation_import(queue, job, installed, workspaces,
+            preparation_sha256, &preparation) : BQ_RECIPE_MISMATCH;
+    if (a_result == BQ_OK)
+        a_result = bq_retirement_matched_build_import(queue, job, installed, workspaces,
+            workspace_root, preparation_sha256, record_sha256, build_record_sha256, &build);
+    if (a_result == BQ_OK)
+        a_result = bq_retirement_binaries_import(queue, job, installed, workspaces,
+            preparation_sha256, record_sha256, &binaries);
+    bool joined_a = a_result == BQ_OK &&
+        !memcmp(prepared->preparation_sha256, preparation_sha256, SHA256_HEX_CAPACITY) &&
+        !memcmp(prepared->preparation_sha256, build.preparation_sha256, SHA256_HEX_CAPACITY) &&
+        !memcmp(prepared->preparation_sha256, binaries.preparation_sha256, SHA256_HEX_CAPACITY);
+    for (u32 side = 0; joined_a && side < 2; side += 1)
+        joined_a = !memcmp(prepared->source_sha256[side],
+                           preparation.subjects[side].manifest_sha256, SHA256_HEX_CAPACITY) &&
+                   !memcmp(prepared->source_sha256[side],
+                           build.prepared_source[side].manifest_sha256, SHA256_HEX_CAPACITY) &&
+                   !memcmp(prepared->source_sha256[side],
+                           binaries.source_sha256[side], SHA256_HEX_CAPACITY) &&
+                   !memcmp(prepared->binary_sha256[side],
+                           binaries.binary_sha256[side], SHA256_HEX_CAPACITY);
     char census_inputs_sha256[SHA256_HEX_CAPACITY] = {0};
     char census_rows_sha256[SHA256_HEX_CAPACITY] = {0};
     BqRetirementValidatorEligibility eligibility = {0};
-    bool authenticated_raw = fresh && prepared && rows &&
+    bool authenticated_raw = joined_a && rows &&
         bq_retirement_census_projection(support_declaration, census_inputs, census_rows, profile,
                                         prepared, rows, census_inputs_sha256, census_rows_sha256) &&
         !memcmp(prepared->census_sha256, census_rows_sha256, SHA256_HEX_CAPACITY);
@@ -2024,6 +2285,7 @@ BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job
      * receipt bytes, command plans, or the oracle. A valid projection still
      * fails closed before caller facts can enter the correctness gate. */
     BqError result = !fresh ? BQ_RECIPE_MISMATCH :
+                     a_result != BQ_OK ? a_result :
                      joined ? BQ_RECIPE_MISMATCH : BQ_SOURCE_MISMATCH;
     free(eligibility.compiler_eligible);
     free(eligibility.classification);
