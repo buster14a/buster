@@ -132,6 +132,19 @@ admitted oracle path, never from the candidate. A foreign target keeps its
 compiler and code facts but has no local runtime invocation. A zero-byte code
 section remains zero; a zero baseline has no code ratio denominator.
 
+The second A/A baseline label can have a distinct output path. Before `begin`,
+the importer also authenticates its compiler and applicable runtime commands
+from the frozen service plan and commits their aggregate SHA-256 in
+`aa_second_commands_sha256`. The byte stream starts with the ASCII domain
+`bq-retirement-aa-second-commands-v1` without a terminator. For each eligible
+row in canonical order it appends its four-byte little-endian row ID, the 64
+ASCII lowercase hex bytes of the second A/A compiler command digest, one byte
+for runtime applicability (zero or one), and, when applicable, the 64 ASCII
+lowercase hex bytes of the second A/A runtime command digest. The gate seals
+this commitment and the A→D binder compares it before freezing any campaign.
+The aggregate has no authority on its own: the service importer must verify
+the frozen plan independently of candidate or request supplied values.
+
 ## Call sequence and ownership
 
 1. Import and authenticate the whole immutable preparation, population,

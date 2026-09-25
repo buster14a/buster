@@ -34,6 +34,9 @@ typedef enum BqRetirementStage
 typedef struct BqRetirementPrepared
 {
     char preparation_sha256[65], support_sha256[65], census_sha256[65];
+    /* Predeclared baseline-label-2 compiler and applicable runtime commands
+     * in canonical eligible-row order; the service authenticates the plan. */
+    char aa_second_commands_sha256[65];
     char source_sha256[2][65], binary_sha256[2][65];
     uint32_t rows, object_rows, native_target;
 } BqRetirementPrepared;

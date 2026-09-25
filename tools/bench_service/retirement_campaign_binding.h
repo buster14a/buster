@@ -33,6 +33,10 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
 {
     TpRetirementExecution const* execution = aa && aa->transcript ? aa->transcript->execution : NULL;
     unsigned dense = 0, runtime = 0;
+    Sha256 second_hash;
+    sha256_init(&second_hash);
+    static char const second_domain[] = "bq-retirement-aa-second-commands-v1";
+    sha256_add(&second_hash, second_domain, sizeof(second_domain) - 1);
     int ok = binding && !binding->campaign && gate &&
         bq_retirement_correctness_ready(gate) && execution &&
         baseline && candidate && baseline->valid && candidate->valid &&
@@ -65,12 +69,13 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
                         (stage ? ab_commands : aa_commands) + dense * 4 + kind * 2 + variant;
                     BqRetirementObservedSide const* side = &fact->side[stage ? variant : 0];
                     if (kind && !fact->runtime_eligible) continue;
-                    /* The second A/A label may use a different frozen path.
-                     * #1020 supplies one correctness command for the baseline;
-                     * the service must authenticate the full #619 plan too. */
+                    /* The second A/A label can use a different output path.
+                     * Bind its exact hash through the separately authenticated
+                     * aggregate of baseline-label-2 command identities. */
                     ok = command->row == i && command->kind == kind && command->variant == variant &&
                         command->command_sha256 && command->output_sha256 &&
-                        (!stage && variant ? 1 : !strcmp(command->command_sha256,
+                        (!stage && variant ? tp_retirement_digest(command->command_sha256) :
+                         !strcmp(command->command_sha256,
                             kind ? side->runtime_command_sha256 : side->compiler_command_sha256)) &&
                         !strcmp(command->output_sha256, kind ? trusted->independent_oracle_sha256 :
                                                              side->artifact_sha256);
@@ -80,7 +85,24 @@ static int bq_retirement_campaign_bind(BqRetirementCampaignBinding* binding,
                                 !strcmp(command->code_section_sha256, side->code_sha256) :
                                 !command->code_section_sha256);
                 }
+        if (ok)
+        {
+            uint8_t ordinal[4] = {(uint8_t)i, (uint8_t)(i >> 8),
+                (uint8_t)(i >> 16), (uint8_t)(i >> 24)};
+            uint8_t applicable_runtime = fact->runtime_eligible ? 1 : 0;
+            sha256_add(&second_hash, ordinal, sizeof(ordinal));
+            sha256_add(&second_hash, aa_commands[dense * 4 + 1].command_sha256, 64);
+            sha256_add(&second_hash, &applicable_runtime, sizeof(applicable_runtime));
+            if (applicable_runtime)
+                sha256_add(&second_hash, aa_commands[dense * 4 + 3].command_sha256, 64);
+        }
         dense += 1;
+    }
+    char second_digest[65] = {0};
+    if (ok)
+    {
+        sha256_finish_hex(&second_hash, second_digest);
+        ok = !strcmp(second_digest, gate->prepared.aa_second_commands_sha256);
     }
     if (ok) ok = dense == execution->rows && runtime == execution->runtime_count &&
                   bq_retirement_correctness_ready(gate);
