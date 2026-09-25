@@ -18753,6 +18753,48 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     u32 start = declaration->body_start;
     u32 end = BUSTER_MIN((u32)preprocess.token_count, start + declaration->body_token_count);
     u64 mark = machine->scratch_arena->position;
+    for (u32 assignment_index = start; assignment_index < end; assignment_index += 1)
+    {
+        CToken assignment_token = preprocess.tokens[assignment_index];
+        if (!c_token_is_punctuator(&assignment_token, C_PUNCTUATOR_EQUAL) || assignment_index <= start ||
+            preprocess.tokens[assignment_index - 1].kind != C_TOKEN_IDENTIFIER)
+        {
+            continue;
+        }
+        if (assignment_index > start + 1 &&
+            (c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_DOT) ||
+             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_ARROW) ||
+             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_STAR) ||
+             c_token_is_punctuator(&preprocess.tokens[assignment_index - 2], C_PUNCTUATOR_AMPERSAND)))
+        {
+            continue;
+        }
+        CScopeId assignment_scope = c_parse_scope_for_token(result, declaration->scope, assignment_index);
+        CEntityId destination_id = c_parse_lookup_entity_token(result, preprocess.spelling_base, assignment_scope,
+                                                                &preprocess.tokens[assignment_index - 1]);
+        if (destination_id.value >= result->entity_count)
+        {
+            continue;
+        }
+        CEntity destination = result->entities[destination_id.value];
+        if (destination.declaration_token_plus_one == assignment_index ||
+            (destination.kind != C_ENTITY_LOCAL && destination.kind != C_ENTITY_PARAMETER && destination.kind != C_ENTITY_OBJECT) ||
+            destination.type.value >= result->type_count)
+        {
+            continue;
+        }
+        u32 source_end = c_parse_constraint_expression_end(result, preprocess, assignment_index + 1, end);
+        CTypeId source_type = C_TYPE_ID_INVALID;
+        c_parse_checked_expression_type(machine, machine->scratch_arena, preprocess, result, assignment_scope, assignment_index + 1,
+                                        source_end, &source_type, diagnostic);
+        if (source_type.value < result->type_count)
+        {
+            String8 conversion_message = c_parse_assignment_conversion_message(machine, result, preprocess, assignment_scope,
+                                                                                 destination.type, source_type, assignment_index + 1, source_end);
+            if (conversion_message.length)
+                c_parse_lowering_constraint_consider(diagnostic, conversion_message, assignment_index, assignment_index + 1);
+        }
+    }
     u32* openers = arena_allocate(machine->scratch_arena, u32, end - start);
     u8* declaration_tokens = arena_allocate(machine->scratch_arena, u8, end - start);
     memset(declaration_tokens, 0, end - start);
