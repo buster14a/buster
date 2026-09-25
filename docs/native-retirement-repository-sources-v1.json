@@ -81,8 +81,8 @@
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.c",
-      "bytes": 163072,
-      "sha256": "9425dda634bd68b46b918097cd6e07ddee2df92d10fee0b38f568dd54cd839e2"
+      "bytes": 170831,
+      "sha256": "5240a34c3a569b3fbb65908bf89e0d70495e74b5ba2508278a57e031202cf2f0"
     },
     {
       "source": "src/buster/lib/compiler/wasm/wasm.h",
