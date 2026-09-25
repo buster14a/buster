@@ -1260,8 +1260,9 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     // rather than on first touch; the compiler itself never needs this walk.
     buster_x86_metadata_prewarm_all_forms();
     // The metadata and machine suites exercise x86 emission on every host,
-    // including AArch64 CI. Prepare the exact-plan tables before their lanes.
-    machine_x86_64_exact_prewarm();
+    // including AArch64 CI. Prepare the exact-plan tables, with every shape
+    // resolved, before their lanes.
+    machine_x86_64_exact_prewarm_all_shapes();
     // Every lane in the gang below is an aarch64 suite, and each one queries
     // canonical form validity per encode and per decode.
     buster_aarch64_prewarm();

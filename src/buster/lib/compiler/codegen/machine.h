@@ -1856,6 +1856,7 @@ BUSTER_F_DECL MachineX64CanonicalAuthoritySite const* machine_x86_64_canonical_a
 BUSTER_F_DECL u32 machine_x86_64_neutral_patch_site_count(void);
 BUSTER_F_DECL MachineX64NeutralPatchSite const* machine_x86_64_neutral_patch_site(u32 ordinal);
 BUSTER_F_DECL void machine_x86_64_exact_prewarm(void);
+BUSTER_F_DECL void machine_x86_64_exact_prewarm_all_shapes(void);
 BUSTER_F_DECL MachineOpcodeInfo const* machine_opcode_info(u16 opcode);
 BUSTER_F_DECL MachineMemoryEffect machine_opcode_memory_effect(MachineOpcodeInfo const* info);
 BUSTER_F_DECL bool machine_opcode_is_memory(MachineOpcodeInfo const* info);
@@ -2131,6 +2132,9 @@ typedef struct MachineX64MetadataShapeCacheAudit MachineX64MetadataShapeCacheAud
 struct MachineX64MetadataShapeCacheAudit
 {
     u32 prepared_rows;
+    u32 registered_queries;
+    u32 resolved_rows;
+    u32 pending_rows;
     u32 invalid_rows;
     bool valid;
     u8 reserved[3];

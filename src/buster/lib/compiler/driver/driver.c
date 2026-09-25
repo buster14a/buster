@@ -4073,6 +4073,7 @@ void compiler_parallel_prewarm(void)
     // parked. Prepare both native families before the first worker exists;
     // this opt-in cold cost must not leak into ordinary serial compilation.
     codegen_prewarm_for_target((Target){.cpu_arch = CPU_ARCH_X86_64});
+    machine_x86_64_exact_prewarm_all_shapes();
     buster_x86_metadata_prewarm_all_forms();
     buster_aarch64_prewarm();
     buster_aarch64_semantics_prewarm();

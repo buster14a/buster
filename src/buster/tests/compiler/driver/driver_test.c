@@ -401,6 +401,101 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocess_boundaries(Un
     return result;
 }
 
+// A fresh `cc` process registers the closed x86-64 shape set and resolves
+// each shape on its first serial lookup; this process resolves every shape
+// before compiling.  The two must write the same object bytes for code whose
+// expansions reach the shape bridge (x87, division, atomics, conversions and
+// flag materialization), under every machine allocator.  -fno-machine-fallback turns
+// an unresolved shape into a failed compile instead of a silent canonical
+// fallback.  A child running the opt-in unit gang must resolve every shape
+// before its workers start, or its first worker lookup aborts; its linked
+// output must match the serial child's.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    machine_x86_64_exact_prewarm_all_shapes();
+    String8 input = buster_test_temporary_path(arena, S8("lazy-x86-shapes"), S8(".c"));
+    String8 local_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-local"), S8(".o"));
+    String8 child_output = buster_test_temporary_path(arena, S8("lazy-x86-shapes-child"), S8(".o"));
+    String8 source = S8("typedef long long i64;\n"
+                        "typedef unsigned long long u64;\n"
+                        "long double ld_mix(long double a, long double b) { return a * b + a / b - (a < b ? a : -b); }\n"
+                        "int ld_compare(long double a, long double b) { return (a < b) + (a == b) * 2 + (a >= b) * 4; }\n"
+                        "i64 ld_to_integer(long double a) { return (i64)a; }\n"
+                        "long double integer_to_ld(i64 a) { return (long double)a; }\n"
+                        "u64 unsigned_divide(u64 a, u64 b) { return a / b + a % b; }\n"
+                        "int signed_divide(int a, int b) { return a / b + a % b; }\n"
+                        "int fetch_nand(int* p, int v) { return __atomic_fetch_nand(p, v, __ATOMIC_SEQ_CST); }\n"
+                        "i64 compare_exchange(i64* p, i64 e, i64 d)\n"
+                        "{ __atomic_compare_exchange_n(p, &e, d, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return e; }\n"
+                        "float integer_to_float(int x) { return (float)x; }\n"
+                        "int double_less(double a, double b) { return a < b; }\n"
+                        "unsigned char nonzero(unsigned x) { return (unsigned char)(x != 0); }\n");
+    ProcessSpawnOptions capture = {.capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                   .use_process_environment = 1, .search_path = 1};
+    // Only the machine allocators reach the shape bridge; the canonical
+    // `none` path neither uses it nor accepts -fno-machine-fallback.
+    String8 allocators[] = {S8("-fregister-allocator=mir-stack"), S8("-fregister-allocator=fast"),
+                            S8("-fregister-allocator=quality")};
+    if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+        {
+            u64 attempt_position = arena->position;
+            String8 local_command[] = {S8("-target"), S8("x86_64-unknown-linux"), allocators[mode], S8("-fno-machine-fallback"),
+                                       S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"), local_output, input};
+            CompilerDriverResult local = compiler_driver_execute_invocation(
+                arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(local_command)));
+            BUSTER_TEST_RAW(arguments, local.error == COMPILER_DRIVER_ERROR_NONE, local.diagnostic);
+            String8 child_command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-target"), S8("x86_64-unknown-linux"),
+                                       allocators[mode], S8("-fno-machine-fallback"), S8("-nostdinc"), S8("-g0"), S8("-c"), S8("-o"),
+                                       child_output, input};
+            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_command),
+                                                        (SliceString8){0}, (SliceString8){0}, capture);
+            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+            {
+                ProcessWaitResult compiled = os_process_wait_deadline(arena, child, 30000000);
+                BUSTER_TEST_RAW(arguments, !compiled.timed_out && compiled.result == PROCESS_RESULT_SUCCESS,
+                                BYTE_SLICE_TO_STRING(8, compiled.streams[STANDARD_STREAM_ERROR]));
+                String8 local_bytes = BYTE_SLICE_TO_STRING(8, file_read(arena, local_output, (FileReadOptions){0}));
+                String8 child_bytes = BYTE_SLICE_TO_STRING(8, file_read(arena, child_output, (FileReadOptions){0}));
+                BUSTER_TEST_RAW(arguments, local_bytes.length != 0 && string_equal(local_bytes, child_bytes),
+                                string_format(arena, S8("allocator={S8} local={u64} child={u64}"), allocators[mode], local_bytes.length,
+                                              child_bytes.length));
+            }
+            arena_set_position(arena, attempt_position);
+        }
+    }
+    String8 linked[2];
+    String8 jobs[] = {S8("-fcompile-jobs=1"), S8("-fcompile-jobs=2")};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(jobs); index += 1)
+    {
+        linked[index] = (String8){0};
+        String8 program = buster_test_temporary_path(arena, S8("lazy-x86-shapes-jobs"), S8(".out"));
+        String8 link_command[] = {program_state->input.arguments.pointer[0], S8("cc"), S8("-target"), S8("x86_64-unknown-linux"),
+                                  jobs[index], S8("-fno-machine-fallback"), S8("-nostdinc"), S8("-g0"), S8("-o"), program,
+                                  S8("tests/basic_c_constructor_order.c"), S8("tests/basic_c_constructor_order_second.c")};
+        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(link_command), (SliceString8){0},
+                                                    (SliceString8){0}, capture);
+        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+        {
+            ProcessWaitResult waited = os_process_wait_deadline(arena, child, 30000000);
+            BUSTER_TEST_RAW(arguments, !waited.timed_out && waited.result == PROCESS_RESULT_SUCCESS,
+                            BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+            linked[index] = BYTE_SLICE_TO_STRING(8, file_read(arena, program, (FileReadOptions){0}));
+        }
+    }
+    BUSTER_TEST(arguments, linked[0].length != 0 && string_equal(linked[0], linked[1]));
+    arena_set_position(arena, position);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_diagnostic_streams(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9101,6 +9196,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     UnitTestResult result = {0};
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_preprocess_boundaries);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_diagnostic_streams);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_include_population);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_archive_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_fast);
