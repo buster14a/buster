@@ -3004,10 +3004,9 @@ BUSTER_C_INTERNAL CSymbolPredefined const c_symbol_predefined[] = {
     { S8_INITIALIZER("__builtin___memmove_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin___memset_chk"), C_SYMBOL_BUILTIN_MEMORY },
     { S8_INITIALIZER("__builtin_clz"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
-    // The `l` spellings sit between the int and long long ones and lower the
-    // same way -- the operand's own width decides the operation -- so their
-    // absence only ever surfaces on an LP64 target where a caller reached
-    // for the `unsigned long` form (CPython's _Py_bit_length does).
+    // The `l` spellings take unsigned long, which is target-dependent (LP64
+    // versus LLP64). The shared signature policy below selects their operand
+    // width before the count operation; all these spellings return int.
     { S8_INITIALIZER("__builtin_clzl"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_clzll"), C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS },
     { S8_INITIALIZER("__builtin_ctz"), C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS },
@@ -3066,6 +3065,21 @@ BUSTER_C_SHARED CSymbolBuiltin c_symbol_builtin_from_spelling(String8 spelling)
     }
 
     return C_SYMBOL_BUILTIN_NONE;
+}
+
+// Fixed GNU signatures for clz/ctz/popcount. The operation kind is shared by
+// three spellings; the suffix determines the parameter width, while the C
+// result type is always int. CTypeKind retains the target's long data model.
+CTypeKind c_semantic_integer_count_parameter_kind(CSymbolBuiltin builtin, String8 spelling)
+{
+    CTypeKind result = C_TYPE_INVALID;
+    if (builtin == C_SYMBOL_BUILTIN_COUNT_LEADING_ZEROS || builtin == C_SYMBOL_BUILTIN_COUNT_TRAILING_ZEROS ||
+        builtin == C_SYMBOL_BUILTIN_POPULATION_COUNT)
+    {
+        result = string_ends_with_sequence(spelling, S8("ll")) ? C_TYPE_UNSIGNED_LONG_LONG :
+                 string_ends_with_sequence(spelling, S8("l")) ? C_TYPE_UNSIGNED_LONG : C_TYPE_UNSIGNED_INT;
+    }
+    return result;
 }
 
 // One probe entry of the intern table. The identity of a name is its first
