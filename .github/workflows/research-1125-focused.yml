@@ -1,0 +1,85 @@
+name: Research 1125 focused evidence
+
+on:
+  push:
+    branches:
+      - research/1125-serial-tests-d9e736e2-20260925
+
+permissions:
+  contents: read
+
+concurrency:
+  group: research-1125-focused-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  focused:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '1'
+      BUSTER_TEST_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          persist-credentials: false
+          path: source
+      - name: Matched Debug observation oracle and plain candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/core"
+          python3 control/tools/research_1125/core.py "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/core" 2>&1 | tee "$RUNNER_TEMP/core/controller.log"
+      - name: Retain complete or partial core evidence before the longer suites
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -R control/tools/research_1125 "$RUNNER_TEMP/core/experiment-tools"
+          git -C control rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/core/control-identity.txt"
+          git -C source diff --binary > "$RUNNER_TEMP/core/final-source-diff.patch"
+          mkdir -p "$RUNNER_TEMP/core/experimental-headers"
+          find source/src/buster/lib/compiler/codegen -maxdepth 1 -name 'research_1125_*.h' -exec cp {} "$RUNNER_TEMP/core/experimental-headers/" \;
+          cd "$RUNNER_TEMP/core"
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: research-1125-focused-core-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/core
+          retention-days: 30
+          if-no-files-found: error
+          compression-level: 6
+      - name: Corrected full suites and Debug self-host
+        shell: bash
+        run: |
+          set -uo pipefail
+          test -f "$RUNNER_TEMP/core/complete.json" || exit 1
+          mkdir -p "$RUNNER_TEMP/validation"
+          cd source
+          failed=0
+          for variant in oracle candidate; do
+            timeout 900 "$RUNNER_TEMP/core/binaries/$variant" test --verbose=0 --ci=1 > "$RUNNER_TEMP/validation/$variant.stdout" 2> "$RUNNER_TEMP/validation/$variant.stderr"
+            result=$?
+            printf '%s\n' "$result" > "$RUNNER_TEMP/validation/$variant.exit"
+            test "$result" = 0 || failed=1
+          done
+          timeout 900 "$RUNNER_TEMP/core/buster-build" test_self_host --config Debug > "$RUNNER_TEMP/validation/self-host.stdout" 2> "$RUNNER_TEMP/validation/self-host.stderr"
+          result=$?
+          printf '%s\n' "$result" > "$RUNNER_TEMP/validation/self-host.exit"
+          test "$result" = 0 || failed=1
+          sha256sum "$RUNNER_TEMP/core/binaries/"* > "$RUNNER_TEMP/validation/compiler-sha256.txt"
+          exit "$failed"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: research-1125-focused-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/validation
+          retention-days: 30
+          if-no-files-found: warn
+          compression-level: 6
