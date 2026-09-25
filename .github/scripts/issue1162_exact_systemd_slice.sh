@@ -110,9 +110,10 @@ chmod 0644 /etc/systemd/system/buster-bench*
 cp /root/issue1162-install/units/buster-bench.tmpfiles.conf /etc/tmpfiles.d/issue1162-buster-bench.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/issue1162-buster-bench.conf
 install -d -m 0710 -o buster-bench -g buster-bench /var/lib/buster-bench/workspaces/results
-# GNU install preserves the parent's setgid bit on this filesystem. The
-# installed results root must have exactly 0710 for the production worker.
+# GNU install and chmod preserve the parent's setgid bit on this filesystem.
+# The installed results root must have exactly 0710 for the production worker.
 chmod 0710 /var/lib/buster-bench/workspaces/results
+chmod g-s /var/lib/buster-bench/workspaces/results
 test "$(stat -c %a /var/lib/buster-bench/workspaces/results)" = 710
 test "$(stat -c %u:%g /var/lib/buster-bench/workspaces/results)" = 65000:65000
 install -d -m 0750 -o root -g buster-bench /opt/buster-bench
