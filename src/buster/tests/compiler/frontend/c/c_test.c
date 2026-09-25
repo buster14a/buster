@@ -22602,6 +22602,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_compound_assignment_conversions(UnitTe
 
 // Check the expression separately from the atomic object: a narrow RMW can
 // store the wrapped byte while its promoted arithmetic result is still 256.
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
 BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_result_source = S8_INITIALIZER(
     "static _Atomic(unsigned char) byte;\n"
     "static _Atomic(unsigned short) half;\n"
@@ -22631,6 +22632,7 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_atomic_compound_result_source = S8_INIT
     "    failed |= observed != 0 || ordinary != 0;\n"
     "    return failed;\n"
     "}\n");
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_atomic_compound_result(UnitTestArguments* arguments)
 {
