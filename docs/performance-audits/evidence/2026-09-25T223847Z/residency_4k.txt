@@ -1,0 +1,177 @@
+### after_preprocess: monotonic_ranges=504 resident=107.0MB | scratch_regions=1 resident_lb=6.1MB span_ub=6.9MB
+  mono res=   44.41MB handed=    384.2MB n=  144 c_source.c:2651:c_lex_dispatch
+  mono res=   23.24MB handed=     23.0MB n=   45 c_source.c:103:c_space_allocate
+  mono res=   17.23MB handed=     20.9MB n=    8 c_source.c:266:c_source_map_append
+  mono res=    6.03MB handed=    384.2MB n=  144 c_source.c:647:c_translate_source
+  mono res=    5.52MB handed=      5.5MB n=    3 c_source.c:3218:c_symbol_intern
+  mono res=    3.73MB handed=     30.0MB n=   48 c_source.c:2652:c_lex_dispatch
+  mono res=    2.33MB handed=    126.2MB n=   92 c_source.c:648:c_translate_source
+  mono res=    1.49MB handed=      2.0MB n=    4 c_source.c:3207:c_symbol_intern
+  mono res=    1.00MB handed=      1.0MB n=    4 c_source.c:2855:c_macro_index_rebuild
+  mono res=    0.68MB handed=      0.7MB n=    1 c_source.c:361:c_source_map_publish
+  mono res=    0.48MB handed=      0.5MB n=    4 c_source.c:869:c_translate_source
+  mono res=    0.40MB handed=      0.4MB n=    1 c_source.c:3371:c_symbol_table_create
+  mono res=    0.15MB handed=      0.2MB n=    3 c_source.c:3961:c_macro_expansion_tasks_reserve
+  mono res=    0.14MB handed=      0.1MB n=    1 c_source.c:9457:c_preprocess
+  mono res=    0.10MB handed=      0.1MB n=    1 c_source.c:3602:c_token_stream_reserve
+  mono res=    0.07MB handed=      0.1MB n=    1 c_source.c:3370:c_symbol_table_create
+  scratch region 73: span=6.9MB max_single_res=6.1MB ranges=2 sites=[('c_source.c:103:c_space_allocate', 2)]
+### after_parse: monotonic_ranges=505 resident=107.0MB | scratch_regions=1 resident_lb=6.1MB span_ub=6.9MB
+  mono res=   44.41MB handed=    384.2MB n=  144 c_source.c:2651:c_lex_dispatch
+  mono res=   23.24MB handed=     23.0MB n=   45 c_source.c:103:c_space_allocate
+  mono res=   17.23MB handed=     20.9MB n=    8 c_source.c:266:c_source_map_append
+  mono res=    6.03MB handed=    384.2MB n=  144 c_source.c:647:c_translate_source
+  mono res=    5.52MB handed=      5.5MB n=    3 c_source.c:3218:c_symbol_intern
+  mono res=    3.73MB handed=     30.0MB n=   48 c_source.c:2652:c_lex_dispatch
+  mono res=    2.33MB handed=    126.2MB n=   92 c_source.c:648:c_translate_source
+  mono res=    1.49MB handed=      2.0MB n=    4 c_source.c:3207:c_symbol_intern
+  mono res=    1.00MB handed=      1.0MB n=    4 c_source.c:2855:c_macro_index_rebuild
+  mono res=    0.68MB handed=      0.7MB n=    1 c_source.c:361:c_source_map_publish
+  mono res=    0.48MB handed=      0.5MB n=    4 c_source.c:869:c_translate_source
+  mono res=    0.40MB handed=      0.4MB n=    1 c_source.c:3371:c_symbol_table_create
+  mono res=    0.15MB handed=      0.2MB n=    3 c_source.c:3961:c_macro_expansion_tasks_reserve
+  mono res=    0.14MB handed=      0.1MB n=    1 c_source.c:9457:c_preprocess
+  mono res=    0.10MB handed=      0.1MB n=    1 c_source.c:3602:c_token_stream_reserve
+  mono res=    0.07MB handed=      0.1MB n=    1 c_source.c:3370:c_symbol_table_create
+  mono res=    0.01MB handed=     14.4MB n=    1 c_parse.c:16919:c_parse_ast
+  scratch region 73: span=6.9MB max_single_res=6.1MB ranges=2 sites=[('c_source.c:103:c_space_allocate', 2)]
+### after_analyze: monotonic_ranges=2773 resident=424.7MB | scratch_regions=5 resident_lb=26.3MB span_ub=119.9MB
+  mono res=   84.17MB handed=    297.3MB n= 1172 c_gen.c:50655:c_lower_to_ir_with_options
+  mono res=   44.41MB handed=    384.2MB n=  144 c_source.c:2651:c_lex_dispatch
+  mono res=   25.19MB handed=     25.0MB n=   46 c_parse.c:1512:c_parse_type_layout_core
+  mono res=   25.10MB handed=     25.1MB n=    8 c_gen.c:5048:c_ir_ssa_grow_slots
+  mono res=   23.24MB handed=     23.0MB n=   45 c_source.c:103:c_space_allocate
+  mono res=   18.36MB handed=     46.4MB n=  235 c_gen.c:50663:c_lower_to_ir_with_options
+  mono res=   17.23MB handed=     20.9MB n=    8 c_source.c:266:c_source_map_append
+  mono res=   13.69MB handed=     14.4MB n=    1 c_parse.c:452:c_parse_position_index_build
+  mono res=   12.97MB handed=    633.7MB n=    1 c_parse.c:22623:c_analyze_semantics_core
+  mono res=   12.67MB handed=     12.5MB n=   46 c_parse.c:1513:c_parse_type_layout_core
+  mono res=    9.72MB handed=     14.4MB n=    1 c_gen.c:48612:c_lower_to_ir_with_options
+  mono res=    9.48MB handed=    108.3MB n=    1 c_parse.c:22630:c_analyze_semantics_core
+  mono res=    9.37MB handed=     14.4MB n=    1 c_parse.c:22679:c_analyze_semantics_core
+  mono res=    8.84MB handed=     30.8MB n=  164 c_gen.c:50661:c_lower_to_ir_with_options
+  mono res=    8.48MB handed=     14.4MB n=    1 c_gen.c:49871:c_lower_to_ir_with_options
+  mono res=    7.88MB handed=     68.8MB n=  329 c_gen.c:50653:c_lower_to_ir_with_options
+  mono res=    6.66MB handed=     45.4MB n=    1 ir.c:2860:ir_program_initialize
+  mono res=    6.03MB handed=    384.2MB n=  144 c_source.c:647:c_translate_source
+  mono res=    5.52MB handed=      5.5MB n=    3 c_source.c:3218:c_symbol_intern
+  mono res=    4.62MB handed=      9.6MB n=    1 c_parse.c:22678:c_analyze_semantics_core
+  mono res=    3.73MB handed=     30.0MB n=   48 c_source.c:2652:c_lex_dispatch
+  mono res=    3.24MB handed=      4.1MB n=    6 c_gen.c:5049:c_ir_ssa_grow_slots
+  scratch region 2835: span=80.7MB max_single_res=5.8MB ranges=18959 sites=[('c_gen.c:17515:c_ir_types_compatible', 6951), ('c_gen.c:24702:c_ir_lower_nested_compound_literal_step', 3493), ('c_parse.c:2660:c_parse_member_type', 2767), ('c_parse.c:2661:c_parse_member_type', 2767)]
+  scratch region 0: span=28.2MB max_single_res=14.1MB ranges=2411 sites=[('c_gen.c:50700:c_lower_to_ir_with_options', 1563), ('c_gen.c:36981:c_ir_lower_body_initialize', 393), ('c_gen.c:5048:c_ir_ssa_grow_slots', 122), ('c_gen.c:43241:c_ir_constant_initializer_bytes_core', 38)]
+  scratch region 73: span=6.9MB max_single_res=6.1MB ranges=2 sites=[('c_source.c:103:c_space_allocate', 2)]
+  scratch region 2834: span=3.5MB max_single_res=0.0MB ranges=129980 sites=[('c_parse.c:12664:c_parse_types_compatible_core', 107039), ('c_gen.c:25797:c_ir_promoted_member_path', 22941)]
+  scratch region 1571: span=0.5MB max_single_res=0.3MB ranges=6 sites=[('c_gen.c:21832:c_ir_value_integer_constant_evaluate', 3), ('c_gen.c:21833:c_ir_value_integer_constant_evaluate', 3)]
+### after_prepare: monotonic_ranges=2778 resident=426.1MB | scratch_regions=5 resident_lb=26.3MB span_ub=119.9MB
+  mono res=   84.17MB handed=    297.3MB n= 1172 c_gen.c:50655:c_lower_to_ir_with_options
+  mono res=   44.41MB handed=    384.2MB n=  144 c_source.c:2651:c_lex_dispatch
+  mono res=   25.19MB handed=     25.0MB n=   46 c_parse.c:1512:c_parse_type_layout_core
+  mono res=   25.10MB handed=     25.1MB n=    8 c_gen.c:5048:c_ir_ssa_grow_slots
+  mono res=   23.24MB handed=     23.0MB n=   45 c_source.c:103:c_space_allocate
+  mono res=   18.38MB handed=     46.4MB n=  235 c_gen.c:50663:c_lower_to_ir_with_options
+  mono res=   17.23MB handed=     20.9MB n=    8 c_source.c:266:c_source_map_append
+  mono res=   13.69MB handed=     14.4MB n=    1 c_parse.c:452:c_parse_position_index_build
+  mono res=   12.97MB handed=    633.7MB n=    1 c_parse.c:22623:c_analyze_semantics_core
+  mono res=   12.67MB handed=     12.5MB n=   46 c_parse.c:1513:c_parse_type_layout_core
+  mono res=    9.72MB handed=     14.4MB n=    1 c_gen.c:48612:c_lower_to_ir_with_options
+  mono res=    9.48MB handed=    108.3MB n=    1 c_parse.c:22630:c_analyze_semantics_core
+  mono res=    9.37MB handed=     14.4MB n=    1 c_parse.c:22679:c_analyze_semantics_core
+  mono res=    8.84MB handed=     30.8MB n=  164 c_gen.c:50661:c_lower_to_ir_with_options
+  mono res=    8.48MB handed=     14.4MB n=    1 c_gen.c:49871:c_lower_to_ir_with_options
+  mono res=    7.88MB handed=     68.8MB n=  329 c_gen.c:50653:c_lower_to_ir_with_options
+  mono res=    6.66MB handed=     45.4MB n=    1 ir.c:2860:ir_program_initialize
+  mono res=    6.03MB handed=    384.2MB n=  144 c_source.c:647:c_translate_source
+  mono res=    5.52MB handed=      5.5MB n=    3 c_source.c:3218:c_symbol_intern
+  mono res=    4.62MB handed=      9.6MB n=    1 c_parse.c:22678:c_analyze_semantics_core
+  mono res=    3.73MB handed=     30.0MB n=   48 c_source.c:2652:c_lex_dispatch
+  mono res=    3.24MB handed=      4.1MB n=    6 c_gen.c:5049:c_ir_ssa_grow_slots
+  scratch region 2835: span=80.7MB max_single_res=5.8MB ranges=19002 sites=[('c_gen.c:17515:c_ir_types_compatible', 6951), ('c_gen.c:24702:c_ir_lower_nested_compound_literal_step', 3493), ('c_parse.c:2660:c_parse_member_type', 2767), ('c_parse.c:2661:c_parse_member_type', 2767)]
+  scratch region 0: span=28.2MB max_single_res=14.1MB ranges=2411 sites=[('c_gen.c:50700:c_lower_to_ir_with_options', 1563), ('c_gen.c:36981:c_ir_lower_body_initialize', 393), ('c_gen.c:5048:c_ir_ssa_grow_slots', 122), ('c_gen.c:43241:c_ir_constant_initializer_bytes_core', 38)]
+  scratch region 73: span=6.9MB max_single_res=6.1MB ranges=2 sites=[('c_source.c:103:c_space_allocate', 2)]
+  scratch region 2834: span=3.5MB max_single_res=0.0MB ranges=129980 sites=[('c_parse.c:12664:c_parse_types_compatible_core', 107039), ('c_gen.c:25797:c_ir_promoted_member_path', 22941)]
+  scratch region 1571: span=0.5MB max_single_res=0.3MB ranges=6 sites=[('c_gen.c:21832:c_ir_value_integer_constant_evaluate', 3), ('c_gen.c:21833:c_ir_value_integer_constant_evaluate', 3)]
+### after_codegen: monotonic_ranges=2813 resident=490.0MB | scratch_regions=5 resident_lb=51.0MB span_ub=119.9MB
+  mono res=   84.17MB handed=    297.3MB n= 1172 c_gen.c:50655:c_lower_to_ir_with_options
+  mono res=   44.41MB handed=    384.2MB n=  144 c_source.c:2651:c_lex_dispatch
+  mono res=   25.19MB handed=     25.0MB n=   46 c_parse.c:1512:c_parse_type_layout_core
+  mono res=   25.10MB handed=     25.1MB n=    8 c_gen.c:5048:c_ir_ssa_grow_slots
+  mono res=   23.24MB handed=     23.0MB n=   45 c_source.c:103:c_space_allocate
+  mono res=   21.42MB handed=     64.6MB n=    1 codegen.c:11592:codegen_generate_canonical_module_attempt
+  mono res=   18.38MB handed=     46.4MB n=  235 c_gen.c:50663:c_lower_to_ir_with_options
+  mono res=   17.23MB handed=     20.9MB n=    8 c_source.c:266:c_source_map_append
+  mono res=   13.73MB handed=     13.7MB n=    1 codegen.c:11277:codegen_generate_canonical_module_attempt
+  mono res=   13.69MB handed=     14.4MB n=    1 c_parse.c:452:c_parse_position_index_build
+  mono res=   12.97MB handed=    633.7MB n=    1 c_parse.c:22623:c_analyze_semantics_core
+  mono res=   12.67MB handed=     12.5MB n=   46 c_parse.c:1513:c_parse_type_layout_core
+  mono res=   10.53MB handed=   1305.6MB n=    1 codegen.c:11608:codegen_generate_canonical_module_attempt
+  mono res=    9.72MB handed=     14.4MB n=    1 c_gen.c:48612:c_lower_to_ir_with_options
+  mono res=    9.48MB handed=    108.3MB n=    1 c_parse.c:22630:c_analyze_semantics_core
+  mono res=    9.37MB handed=     14.4MB n=    1 c_parse.c:22679:c_analyze_semantics_core
+  mono res=    8.84MB handed=     30.8MB n=  164 c_gen.c:50661:c_lower_to_ir_with_options
+  mono res=    8.48MB handed=     14.4MB n=    1 c_gen.c:49871:c_lower_to_ir_with_options
+  mono res=    7.88MB handed=     68.8MB n=  329 c_gen.c:50653:c_lower_to_ir_with_options
+  mono res=    7.46MB handed=     16.1MB n=    1 codegen.c:11607:codegen_generate_canonical_module_attempt
+  mono res=    6.66MB handed=     45.4MB n=    1 ir.c:2860:ir_program_initialize
+  mono res=    6.03MB handed=    384.2MB n=  144 c_source.c:647:c_translate_source
+  scratch region 2835: span=80.7MB max_single_res=28.8MB ranges=19824 sites=[('c_gen.c:17515:c_ir_types_compatible', 6951), ('c_gen.c:24702:c_ir_lower_nested_compound_literal_step', 3493), ('c_parse.c:2660:c_parse_member_type', 2767), ('c_parse.c:2661:c_parse_member_type', 2767)]
+  scratch region 0: span=28.2MB max_single_res=14.1MB ranges=2411 sites=[('c_gen.c:50700:c_lower_to_ir_with_options', 1563), ('c_gen.c:36981:c_ir_lower_body_initialize', 393), ('c_gen.c:5048:c_ir_ssa_grow_slots', 122), ('c_gen.c:43241:c_ir_constant_initializer_bytes_core', 38)]
+  scratch region 73: span=6.9MB max_single_res=6.1MB ranges=2 sites=[('c_source.c:103:c_space_allocate', 2)]
+  scratch region 2834: span=3.5MB max_single_res=1.8MB ranges=130008 sites=[('c_parse.c:12664:c_parse_types_compatible_core', 107039), ('c_gen.c:25797:c_ir_promoted_member_path', 22941), ('machine.c:2712:machine_debug_facts_build', 24), ('machine.c:2571:machine_function_compact_virtual_registers', 1)]
+  scratch region 1571: span=0.5MB max_single_res=0.3MB ranges=6 sites=[('c_gen.c:21832:c_ir_value_integer_constant_evaluate', 3), ('c_gen.c:21833:c_ir_value_integer_constant_evaluate', 3)]
+### after_object: monotonic_ranges=2846 resident=561.2MB | scratch_regions=5 resident_lb=51.0MB span_ub=119.9MB
+  mono res=   84.17MB handed=    297.3MB n= 1172 c_gen.c:50655:c_lower_to_ir_with_options
+  mono res=   44.41MB handed=    384.2MB n=  144 c_source.c:2651:c_lex_dispatch
+  mono res=   25.19MB handed=     25.0MB n=   46 c_parse.c:1512:c_parse_type_layout_core
+  mono res=   25.10MB handed=     25.1MB n=    8 c_gen.c:5048:c_ir_ssa_grow_slots
+  mono res=   23.24MB handed=     23.0MB n=   45 c_source.c:103:c_space_allocate
+  mono res=   21.42MB handed=     64.6MB n=    1 codegen.c:11592:codegen_generate_canonical_module_attempt
+  mono res=   21.41MB handed=     21.4MB n=    1 object.c:10462:object_from_canonical_codegen_module
+  mono res=   18.38MB handed=     46.4MB n=  235 c_gen.c:50663:c_lower_to_ir_with_options
+  mono res=   17.23MB handed=     20.9MB n=    8 c_source.c:266:c_source_map_append
+  mono res=   13.73MB handed=     13.7MB n=    1 codegen.c:11277:codegen_generate_canonical_module_attempt
+  mono res=   13.69MB handed=     14.4MB n=    1 c_parse.c:452:c_parse_position_index_build
+  mono res=   12.97MB handed=    633.7MB n=    1 c_parse.c:22623:c_analyze_semantics_core
+  mono res=   12.67MB handed=     12.5MB n=   46 c_parse.c:1513:c_parse_type_layout_core
+  mono res=   10.53MB handed=   1305.6MB n=    1 codegen.c:11608:codegen_generate_canonical_module_attempt
+  mono res=    9.72MB handed=     14.4MB n=    1 c_gen.c:48612:c_lower_to_ir_with_options
+  mono res=    9.48MB handed=    108.3MB n=    1 c_parse.c:22630:c_analyze_semantics_core
+  mono res=    9.37MB handed=     14.4MB n=    1 c_parse.c:22679:c_analyze_semantics_core
+  mono res=    8.84MB handed=     30.8MB n=  164 c_gen.c:50661:c_lower_to_ir_with_options
+  mono res=    8.48MB handed=     14.4MB n=    1 c_gen.c:49871:c_lower_to_ir_with_options
+  mono res=    7.88MB handed=     68.8MB n=  329 c_gen.c:50653:c_lower_to_ir_with_options
+  mono res=    7.67MB handed=     85.7MB n=    1 dwarf.c:1754:dwarf_build_model
+  mono res=    7.48MB handed=      7.5MB n=    1 debug.c:579:debug_model_build
+  scratch region 2835: span=80.7MB max_single_res=28.8MB ranges=19826 sites=[('c_gen.c:17515:c_ir_types_compatible', 6951), ('c_gen.c:24702:c_ir_lower_nested_compound_literal_step', 3493), ('c_parse.c:2660:c_parse_member_type', 2767), ('c_parse.c:2661:c_parse_member_type', 2767)]
+  scratch region 0: span=28.2MB max_single_res=14.1MB ranges=2411 sites=[('c_gen.c:50700:c_lower_to_ir_with_options', 1563), ('c_gen.c:36981:c_ir_lower_body_initialize', 393), ('c_gen.c:5048:c_ir_ssa_grow_slots', 122), ('c_gen.c:43241:c_ir_constant_initializer_bytes_core', 38)]
+  scratch region 73: span=6.9MB max_single_res=6.1MB ranges=2 sites=[('c_source.c:103:c_space_allocate', 2)]
+  scratch region 2834: span=3.5MB max_single_res=1.8MB ranges=130008 sites=[('c_parse.c:12664:c_parse_types_compatible_core', 107039), ('c_gen.c:25797:c_ir_promoted_member_path', 22941), ('machine.c:2712:machine_debug_facts_build', 24), ('machine.c:2571:machine_function_compact_virtual_registers', 1)]
+  scratch region 1571: span=0.5MB max_single_res=0.3MB ranges=6 sites=[('c_gen.c:21832:c_ir_value_integer_constant_evaluate', 3), ('c_gen.c:21833:c_ir_value_integer_constant_evaluate', 3)]
+### after_emit: monotonic_ranges=2850 resident=613.4MB | scratch_regions=5 resident_lb=51.0MB span_ub=119.9MB
+  mono res=   84.17MB handed=    297.3MB n= 1172 c_gen.c:50655:c_lower_to_ir_with_options
+  mono res=   51.94MB handed=     63.0MB n=    1 object.c:11196:object_write_elf64_with_capacity
+  mono res=   44.41MB handed=    384.2MB n=  144 c_source.c:2651:c_lex_dispatch
+  mono res=   25.19MB handed=     25.0MB n=   46 c_parse.c:1512:c_parse_type_layout_core
+  mono res=   25.10MB handed=     25.1MB n=    8 c_gen.c:5048:c_ir_ssa_grow_slots
+  mono res=   23.24MB handed=     23.0MB n=   45 c_source.c:103:c_space_allocate
+  mono res=   21.42MB handed=     64.6MB n=    1 codegen.c:11592:codegen_generate_canonical_module_attempt
+  mono res=   21.41MB handed=     21.4MB n=    1 object.c:10462:object_from_canonical_codegen_module
+  mono res=   18.38MB handed=     46.4MB n=  235 c_gen.c:50663:c_lower_to_ir_with_options
+  mono res=   17.23MB handed=     20.9MB n=    8 c_source.c:266:c_source_map_append
+  mono res=   13.73MB handed=     13.7MB n=    1 codegen.c:11277:codegen_generate_canonical_module_attempt
+  mono res=   13.69MB handed=     14.4MB n=    1 c_parse.c:452:c_parse_position_index_build
+  mono res=   12.97MB handed=    633.7MB n=    1 c_parse.c:22623:c_analyze_semantics_core
+  mono res=   12.67MB handed=     12.5MB n=   46 c_parse.c:1513:c_parse_type_layout_core
+  mono res=   10.53MB handed=   1305.6MB n=    1 codegen.c:11608:codegen_generate_canonical_module_attempt
+  mono res=    9.72MB handed=     14.4MB n=    1 c_gen.c:48612:c_lower_to_ir_with_options
+  mono res=    9.48MB handed=    108.3MB n=    1 c_parse.c:22630:c_analyze_semantics_core
+  mono res=    9.37MB handed=     14.4MB n=    1 c_parse.c:22679:c_analyze_semantics_core
+  mono res=    8.84MB handed=     30.8MB n=  164 c_gen.c:50661:c_lower_to_ir_with_options
+  mono res=    8.48MB handed=     14.4MB n=    1 c_gen.c:49871:c_lower_to_ir_with_options
+  mono res=    7.88MB handed=     68.8MB n=  329 c_gen.c:50653:c_lower_to_ir_with_options
+  mono res=    7.67MB handed=     85.7MB n=    1 dwarf.c:1754:dwarf_build_model
+  scratch region 2835: span=80.7MB max_single_res=28.8MB ranges=19826 sites=[('c_gen.c:17515:c_ir_types_compatible', 6951), ('c_gen.c:24702:c_ir_lower_nested_compound_literal_step', 3493), ('c_parse.c:2660:c_parse_member_type', 2767), ('c_parse.c:2661:c_parse_member_type', 2767)]
+  scratch region 0: span=28.2MB max_single_res=14.1MB ranges=2411 sites=[('c_gen.c:50700:c_lower_to_ir_with_options', 1563), ('c_gen.c:36981:c_ir_lower_body_initialize', 393), ('c_gen.c:5048:c_ir_ssa_grow_slots', 122), ('c_gen.c:43241:c_ir_constant_initializer_bytes_core', 38)]
+  scratch region 73: span=6.9MB max_single_res=6.1MB ranges=2 sites=[('c_source.c:103:c_space_allocate', 2)]
+  scratch region 2834: span=3.5MB max_single_res=1.8MB ranges=130008 sites=[('c_parse.c:12664:c_parse_types_compatible_core', 107039), ('c_gen.c:25797:c_ir_promoted_member_path', 22941), ('machine.c:2712:machine_debug_facts_build', 24), ('machine.c:2571:machine_function_compact_virtual_registers', 1)]
+  scratch region 1571: span=0.5MB max_single_res=0.3MB ranges=6 sites=[('c_gen.c:21832:c_ir_value_integer_constant_evaluate', 3), ('c_gen.c:21833:c_ir_value_integer_constant_evaluate', 3)]
