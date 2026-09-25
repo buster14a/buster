@@ -37,9 +37,9 @@
 #define BQ_TEST_STATE "/var/lib/buster-bench"
 #define BQ_TEST_GROUP_CAP 64
 
-/* Mirror the broker's fixed wire envelope. The probe sends an otherwise
- * valid signal request so the reachable root peer is rejected by the server,
- * and accepts only an actual framed status on that same connection. */
+/* Mirror the broker's fixed wire envelope. The probe offers an otherwise
+ * valid signal request, but the server may reject the root peer before reading
+ * it. Only an actual framed status on that same connection proves refusal. */
 typedef struct BqTestBrokerRequest
 {
     uint32_t magic, version, operation, stage, signal_number, reserved;
@@ -52,6 +52,14 @@ typedef struct BqTestBrokerStatus
     uint32_t kind, length;
     int32_t status;
 } BqTestBrokerStatus;
+
+typedef struct BqTestRejectionResult
+{
+    ssize_t sent, received;
+    int send_error;
+    BqTestBrokerStatus frame;
+    bool valid;
+} BqTestRejectionResult;
 
 _Static_assert(sizeof(BqTestBrokerRequest) == 176, "broker request envelope changed");
 _Static_assert(sizeof(BqTestBrokerStatus) == 12, "broker status envelope changed");
@@ -283,6 +291,23 @@ static bool bq_test_rejection_frame(BqTestBrokerStatus const* frame, ssize_t siz
     return ok;
 }
 
+static BqTestRejectionResult bq_test_rejection_exchange(int fd, BqTestBrokerRequest const* request)
+{
+    BqTestRejectionResult result;
+    result.frame = (BqTestBrokerStatus){0};
+    errno = 0;
+    result.sent = send(fd, request, sizeof(*request), MSG_NOSIGNAL);
+    result.send_error = errno;
+    /* SO_PEERCRED is checked before recvmsg by the real broker. A complete
+     * refusal can already be queued when send observes the peer closing. */
+    result.received = recv(fd, &result.frame, sizeof(result.frame), MSG_TRUNC);
+    bool request_sent = result.sent == (ssize_t)sizeof(*request);
+    bool early_refusal = result.sent < 0 && (result.send_error == EPIPE || result.send_error == ECONNRESET);
+    result.valid = (request_sent || early_refusal) &&
+                   bq_test_rejection_frame(&result.frame, result.received);
+    return result;
+}
+
 static bool bq_test_root_rejected(char const* job, char const* attempt)
 {
     errno = 0;
@@ -303,14 +328,14 @@ static bool bq_test_root_rejected(char const* job, char const* attempt)
     ok = ok && fd >= 0 &&
          setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0 &&
          setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
-         connect(fd, (struct sockaddr*)&address, sizeof(address)) == 0 &&
-         send(fd, &request, sizeof(request), MSG_NOSIGNAL) == (ssize_t)sizeof(request);
-    BqTestBrokerStatus frame = {0};
-    ssize_t size = ok ? recv(fd, &frame, sizeof(frame), MSG_TRUNC) : -1;
-    ok = ok && bq_test_rejection_frame(&frame, size);
+         connect(fd, (struct sockaddr*)&address, sizeof(address)) == 0;
+    BqTestRejectionResult exchange = ok ? bq_test_rejection_exchange(fd, &request) :
+                                       (BqTestRejectionResult){.received = -1};
+    ok = ok && exchange.valid;
     if (fd >= 0) close(fd);
-    fprintf(stderr, "BROKER_ROOT_PEER_REJECTION received=%zd kind=%u length=%u status=%d verified=%s\n",
-            size, frame.kind, frame.length, frame.status, ok ? "yes" : "no");
+    fprintf(stderr, "BROKER_ROOT_PEER_REJECTION sent=%zd send_errno=%d received=%zd kind=%u length=%u status=%d verified=%s\n",
+            exchange.sent, exchange.send_error, exchange.received, exchange.frame.kind,
+            exchange.frame.length, exchange.frame.status, ok ? "yes" : "no");
     return ok;
 }
 
@@ -370,6 +395,46 @@ static int bq_test_self_test(void)
     frame.length = sizeof(frame.status);
     frame.status = 0;
     BQ_IDENTITY_CHECK(!bq_test_rejection_frame(&frame, sizeof(frame)));
+    for (unsigned variant = 0; variant < 4; variant += 1)
+    {
+        int pair[2] = {-1, -1};
+        bool fixture = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, pair) == 0;
+        BqTestBrokerStatus refusal = {.kind = 3, .length = sizeof(int32_t),
+                                      .status = variant == 3 ? 125 : 126};
+        BqTestBrokerRequest control_request = {0};
+        pid_t reader = -1;
+        if (fixture && variant == 0)
+        {
+            reader = fork();
+            if (reader == 0)
+            {
+                close(pair[0]);
+                BqTestBrokerRequest received_request = {0};
+                bool handled = recv(pair[1], &received_request, sizeof(received_request), MSG_TRUNC) ==
+                               (ssize_t)sizeof(received_request) &&
+                               memcmp(&received_request, &control_request, sizeof(control_request)) == 0;
+                if (handled)
+                    handled = send(pair[1], &refusal, sizeof(refusal), MSG_NOSIGNAL) == (ssize_t)sizeof(refusal);
+                close(pair[1]);
+                _exit(handled ? 0 : 1);
+            }
+            fixture = reader > 0;
+        }
+        else if (fixture && variant != 2)
+            fixture = send(pair[1], &refusal, sizeof(refusal), MSG_NOSIGNAL) == (ssize_t)sizeof(refusal);
+        if (pair[1] >= 0)
+        {
+            close(pair[1]);
+            pair[1] = -1;
+        }
+        BqTestRejectionResult exchange = fixture ? bq_test_rejection_exchange(pair[0], &control_request) :
+                                                   (BqTestRejectionResult){.received = -1};
+        if (pair[0] >= 0) close(pair[0]);
+        if (reader > 0) fixture = fixture && bq_test_wait(reader) == 0;
+        BQ_IDENTITY_CHECK(fixture && (variant < 2 ? exchange.valid : !exchange.valid) &&
+                          (variant == 0 ? exchange.sent == (ssize_t)sizeof(control_request) :
+                           exchange.sent < 0 && exchange.send_error == EPIPE));
+    }
     BQ_IDENTITY_CHECK(!bq_test_existing_payload("/proc/self/bq-broker-missing-payload", 0, 0));
 #undef BQ_IDENTITY_CHECK
     printf("BROKER_IDENTITY_SELF_TEST checks=%u failures=%u\n", checks, failures);
@@ -478,8 +543,8 @@ static int bq_test_live(int argc, char** argv)
         BQ_LIVE_CHECK(bq_test_run(&root, active) == 0);
         char* resume[] = {BQ_TEST_BROKER, "signal", unit, "CONT", NULL};
         BQ_LIVE_CHECK(bq_test_run(&service, resume) == 0);
-        /* Connect denial and a server frame on the request-bearing root
-         * connection are separate boundaries; CLI 126 proves neither one. */
+        /* Connect denial and a server frame on the root connection are
+         * separate boundaries; CLI 126 proves neither one. */
         BQ_LIVE_CHECK(bq_test_root_rejected(job, attempt));
         BQ_LIVE_CHECK(bq_test_socket_denied_identity(&candidate) == 0);
         BQ_LIVE_CHECK(bq_test_socket_denied_identity(&runner) == 0);

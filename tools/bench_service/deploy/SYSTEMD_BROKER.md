@@ -90,8 +90,9 @@ run that test as root while its outer unit is active with
 CANDIDATE_REVISION`. It starts the constrained broker socket and makes an
 exact outer `CONT` request. It checks queue/result/lease modes and records,
 then rejects candidate and runner peers, wrong instance, wrong source and
-unlisted signal requests. It also sends a valid request as root and requires
-a complete server rejection frame on that same connection; candidate and
+unlisted signal requests. It offers a valid request as root and requires
+a complete server rejection frame on that same connection, including when
+the broker rejects the peer before reading the request; candidate and
 runner must instead receive `EACCES` or `EPERM` from their own socket
 `connect` calls. A missing endpoint, refused connection or malformed response
 fails the probe. The root preflight verifies the real service-owned socket
