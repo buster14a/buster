@@ -138,7 +138,7 @@ BUSTER_GLOBAL_LOCAL bool object_test_coff_section_characteristics(ByteSlice byte
 }
 
 BUSTER_GLOBAL_LOCAL bool object_test_coff_named_section(ByteSlice bytes, String8 name, u32* raw_offset, u32* relocation_offset,
-                                                         u16* relocation_count)
+                                                         u16* relocation_count, u32* characteristics)
 {
     u16 section_count = 0;
     if (!bytes.pointer || !raw_offset || !relocation_offset || !relocation_count || name.length > 8 || bytes.length < 20)
@@ -159,6 +159,10 @@ BUSTER_GLOBAL_LOCAL bool object_test_coff_named_section(ByteSlice bytes, String8
             memcpy(raw_offset, bytes.pointer + section + 20, sizeof(*raw_offset));
             memcpy(relocation_offset, bytes.pointer + section + 24, sizeof(*relocation_offset));
             memcpy(relocation_count, bytes.pointer + section + 32, sizeof(*relocation_count));
+            if (characteristics)
+            {
+                memcpy(characteristics, bytes.pointer + section + 36, sizeof(*characteristics));
+            }
             return *raw_offset <= bytes.length && *relocation_offset <= bytes.length &&
                    (u64)*relocation_count * 10 <= bytes.length - *relocation_offset;
         }
@@ -455,6 +459,7 @@ enum
     OBJECT_TEST_COFF_SECTION_COUNT = 4,
     OBJECT_TEST_COFF_SYMBOL_COUNT = 8,
     OBJECT_TEST_COFF_SECTION_DATA = 4,
+    OBJECT_TEST_COFF_SECTION_LINK_NRELOC_OVFL = 0x01000000,
 };
 
 BUSTER_GLOBAL_LOCAL void object_test_coff_write_u16(u8* bytes, u64 offset, u16 value)
@@ -528,6 +533,49 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_coff_comdat_object(Arena* arena)
     object_test_coff_section_definition(bytes, symbol_table, 5, 1);
     object_test_coff_symbol(bytes, symbol_table, 6, S8("strict1"), 3, 2, 0);
     object_test_coff_symbol(bytes, symbol_table, 7, S8("pending"), 4, 2, 0);
+    object_test_coff_write_u32(bytes, string_table, 4);
+
+    return (ByteSlice){.pointer = bytes, .length = length};
+}
+
+BUSTER_GLOBAL_LOCAL ByteSlice object_test_coff_relocation_count_object(Arena* arena, CpuArch architecture, u32 relocation_count)
+{
+    bool relocation_overflow = relocation_count > UINT16_MAX;
+    u64 section_data_offset = OBJECT_TEST_COFF_HEADER_SIZE + OBJECT_TEST_COFF_SECTION_SIZE;
+    u64 raw_size = (u64)relocation_count * sizeof(u64);
+    u64 relocation_offset = section_data_offset + raw_size;
+    u64 symbol_table = relocation_offset + ((u64)relocation_count + relocation_overflow) * 10;
+    u64 string_table = symbol_table + OBJECT_TEST_COFF_SYMBOL_SIZE;
+    u64 length = string_table + 4;
+    u8* bytes = arena_allocate(arena, u8, length);
+    memset(bytes, 0, length);
+    object_test_coff_write_u16(bytes, 0, architecture == CPU_ARCH_AARCH64 ? 0xaa64 : 0x8664);
+    object_test_coff_write_u16(bytes, 2, 1);
+    object_test_coff_write_u32(bytes, 8, (u32)symbol_table);
+    object_test_coff_write_u32(bytes, 12, 1);
+    object_test_coff_write_name(bytes, OBJECT_TEST_COFF_HEADER_SIZE, S8(".data"));
+    object_test_coff_write_u32(bytes, OBJECT_TEST_COFF_HEADER_SIZE + 16, (u32)raw_size);
+    object_test_coff_write_u32(bytes, OBJECT_TEST_COFF_HEADER_SIZE + 20, (u32)section_data_offset);
+    object_test_coff_write_u32(bytes, OBJECT_TEST_COFF_HEADER_SIZE + 24, (u32)relocation_offset);
+    object_test_coff_write_u16(bytes, OBJECT_TEST_COFF_HEADER_SIZE + 32,
+                               (u16)(relocation_overflow ? UINT16_MAX : relocation_count));
+    object_test_coff_write_u32(bytes, OBJECT_TEST_COFF_HEADER_SIZE + 36,
+                               0xc0300040 | (relocation_overflow ? OBJECT_TEST_COFF_SECTION_LINK_NRELOC_OVFL : 0));
+    if (relocation_overflow)
+    {
+        object_test_coff_write_u32(bytes, relocation_offset, relocation_count + 1u);
+    }
+    for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
+    {
+        u64 data_offset = section_data_offset + (u64)relocation_index * sizeof(u64);
+        u64 relocation = relocation_offset + (relocation_overflow ? 10 : 0) + (u64)relocation_index * 10;
+        s64 addend = relocation_index == 0 ? -17 : relocation_index + 1 == relocation_count ? 23 : 0;
+        memcpy(bytes + data_offset, &addend, sizeof(addend));
+        object_test_coff_write_u32(bytes, relocation, (u32)((u64)relocation_index * sizeof(u64)));
+        object_test_coff_write_u32(bytes, relocation + 4, 0);
+        object_test_coff_write_u16(bytes, relocation + 8, architecture == CPU_ARCH_AARCH64 ? 0x000e : 0x0001);
+    }
+    object_test_coff_symbol(bytes, symbol_table, 0, S8("external"), 0, 2, 0);
     object_test_coff_write_u32(bytes, string_table, 4);
 
     return (ByteSlice){.pointer = bytes, .length = length};
@@ -2030,6 +2078,153 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             BUSTER_STRING_TEST(arguments, coff_roundtrip.symbols[coff_roundtrip.relocations[0].symbol].name, S8("object_callee"));
         }
     }
+
+    {
+        // The standard COFF count is a 16-bit real-entry count. In overflow
+        // form it stays 0xffff and the first record's VirtualAddress is N+1,
+        // since that 32-bit count includes the marker itself.
+        u32 coff_relocation_counts[] = {UINT16_MAX - 1, UINT16_MAX, UINT16_MAX + 1, UINT16_MAX + 2};
+        CpuArch coff_architectures[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+        for (u32 architecture_index = 0; architecture_index < BUSTER_ARRAY_LENGTH(coff_architectures); architecture_index += 1)
+        {
+            Target target = {
+                .cpu_arch = coff_architectures[architecture_index],
+                .os = OPERATING_SYSTEM_WINDOWS,
+            };
+            u16 expected_relocation_type = target.cpu_arch == CPU_ARCH_AARCH64 ? 0x000e : 0x0001;
+            for (u32 count_index = 0; count_index < BUSTER_ARRAY_LENGTH(coff_relocation_counts); count_index += 1)
+            {
+                u32 relocation_count = coff_relocation_counts[count_index];
+                bool relocation_overflow = relocation_count > UINT16_MAX;
+                TemporalArena overflow_scope = arena_begin_temporal(arguments->arena);
+
+                // These bytes are assembled independently of object_write.
+                // The real relocations end exactly at the symbol table, so a
+                // reader that counts the marker as real consumes symbol bytes.
+                ByteSlice external_bytes =
+                    object_test_coff_relocation_count_object(arguments->arena, target.cpu_arch, relocation_count);
+                ObjectFile external_read = object_read(arguments->arena, external_bytes, target);
+                bool external_read_valid = external_read.error == OBJECT_ERROR_NONE && external_read.relocations &&
+                                           external_read.symbols && external_read.relocation_count == relocation_count &&
+                                           external_read.symbol_count == 1;
+                if (BUSTER_REQUIRE(arguments, external_read_valid))
+                {
+                    ObjectRelocation* first = external_read.relocations;
+                    ObjectRelocation* last = external_read.relocations + relocation_count - 1;
+                    BUSTER_STRING_TEST(arguments, external_read.symbols[0].name, S8("external"));
+                    BUSTER_TEST(arguments, first->offset == 0 && first->symbol == 0 && first->addend == -17);
+                    BUSTER_TEST(arguments, last->offset == (u64)(relocation_count - 1) * sizeof(u64) &&
+                                               last->symbol == 0 && last->addend == 23);
+                }
+
+                u64 data_size = (u64)relocation_count * sizeof(u64);
+                u8* data = arena_allocate(arguments->arena, u8, data_size);
+                memset(data, 0, data_size);
+                ObjectSection section = {
+                    .name = S8(".data"),
+                    .data = {.pointer = data, .length = data_size},
+                    .kind = OBJECT_SECTION_DATA,
+                    .alignment = 8,
+                };
+                ObjectSymbol symbol = {
+                    .name = S8("external"),
+                    .section = OBJECT_SECTION_UNDEFINED,
+                    .kind = OBJECT_SYMBOL_DATA,
+                    .global = true,
+                };
+                ObjectRelocation* relocations = arena_allocate(arguments->arena, ObjectRelocation, relocation_count);
+                for (u32 relocation_index = 0; relocation_index < relocation_count; relocation_index += 1)
+                {
+                    relocations[relocation_index] = (ObjectRelocation){
+                        .addend = relocation_index == 0 ? -17 : relocation_index + 1 == relocation_count ? 23 : 0,
+                        .offset = (u64)relocation_index * sizeof(u64),
+                        .section = 0,
+                        .symbol = 0,
+                        .kind = OBJECT_RELOCATION_ABSOLUTE64,
+                    };
+                }
+                ObjectFile writer_input = {
+                    .sections = &section,
+                    .symbols = &symbol,
+                    .relocations = relocations,
+                    .target = target,
+                    .section_count = 1,
+                    .symbol_count = 1,
+                    .relocation_count = relocation_count,
+                };
+                ObjectArtifact written = object_write(arguments->arena, &writer_input, OBJECT_FORMAT_COFF);
+                BUSTER_TEST(arguments, written.error == OBJECT_ERROR_NONE);
+
+                u32 raw_offset = 0;
+                u32 relocation_offset = 0;
+                u16 written_count = 0;
+                u32 characteristics = 0;
+                bool section_found = written.error == OBJECT_ERROR_NONE &&
+                                     object_test_coff_named_section(written.bytes, S8(".data"), &raw_offset, &relocation_offset,
+                                                                    &written_count, &characteristics);
+                if (BUSTER_REQUIRE(arguments, section_found))
+                {
+                    BUSTER_TEST(arguments, written_count == (relocation_overflow ? UINT16_MAX : (u16)relocation_count));
+                    BUSTER_TEST(arguments, ((characteristics & OBJECT_TEST_COFF_SECTION_LINK_NRELOC_OVFL) != 0) == relocation_overflow);
+                    u64 first_entry = relocation_offset + (relocation_overflow ? 10 : 0);
+                    u64 last_entry = first_entry + (u64)(relocation_count - 1) * 10;
+                    u32 first_source_offset = 0;
+                    u32 last_source_offset = 0;
+                    u32 first_symbol = UINT32_MAX;
+                    u32 last_symbol = UINT32_MAX;
+                    u16 first_type = 0;
+                    u16 last_type = 0;
+                    memcpy(&first_source_offset, written.bytes.pointer + first_entry, sizeof(first_source_offset));
+                    memcpy(&first_symbol, written.bytes.pointer + first_entry + 4, sizeof(first_symbol));
+                    memcpy(&first_type, written.bytes.pointer + first_entry + 8, sizeof(first_type));
+                    memcpy(&last_source_offset, written.bytes.pointer + last_entry, sizeof(last_source_offset));
+                    memcpy(&last_symbol, written.bytes.pointer + last_entry + 4, sizeof(last_symbol));
+                    memcpy(&last_type, written.bytes.pointer + last_entry + 8, sizeof(last_type));
+                    BUSTER_TEST(arguments, first_source_offset == 0 && first_symbol == 0 && first_type == expected_relocation_type);
+                    BUSTER_TEST(arguments, last_source_offset == (u32)((u64)(relocation_count - 1) * sizeof(u64)) &&
+                                               last_symbol == 0 && last_type == expected_relocation_type);
+                    if (relocation_overflow)
+                    {
+                        u32 marker_count = 0;
+                        u32 marker_symbol = UINT32_MAX;
+                        u16 marker_type = UINT16_MAX;
+                        memcpy(&marker_count, written.bytes.pointer + relocation_offset, sizeof(marker_count));
+                        memcpy(&marker_symbol, written.bytes.pointer + relocation_offset + 4, sizeof(marker_symbol));
+                        memcpy(&marker_type, written.bytes.pointer + relocation_offset + 8, sizeof(marker_type));
+                        BUSTER_TEST(arguments, marker_count == relocation_count + 1 && marker_symbol == 0 && marker_type == 0);
+                    }
+                }
+
+                ObjectFile writer_readback = object_read(arguments->arena, written.bytes, target);
+                bool writer_readback_valid = written.error == OBJECT_ERROR_NONE && writer_readback.error == OBJECT_ERROR_NONE &&
+                                             writer_readback.relocations && writer_readback.symbols &&
+                                             writer_readback.relocation_count == relocation_count && writer_readback.symbol_count == 1;
+                if (BUSTER_REQUIRE(arguments, writer_readback_valid))
+                {
+                    ObjectRelocation* first = writer_readback.relocations;
+                    ObjectRelocation* last = writer_readback.relocations + relocation_count - 1;
+                    BUSTER_STRING_TEST(arguments, writer_readback.symbols[0].name, S8("external"));
+                    BUSTER_TEST(arguments, first->offset == 0 && first->symbol == 0 && first->addend == -17);
+                    BUSTER_TEST(arguments, last->offset == (u64)(relocation_count - 1) * sizeof(u64) &&
+                                               last->symbol == 0 && last->addend == 23);
+                }
+                arena_set_position(arguments->arena, overflow_scope.position);
+            }
+        }
+    }
+    {
+        TemporalArena malformed_scope = arena_begin_temporal(arguments->arena);
+        u32 relocation_count = UINT16_MAX + 1;
+        ByteSlice malformed_bytes =
+            object_test_coff_relocation_count_object(arguments->arena, CPU_ARCH_X86_64, relocation_count);
+        u64 marker_offset = OBJECT_TEST_COFF_HEADER_SIZE + OBJECT_TEST_COFF_SECTION_SIZE +
+                            (u64)relocation_count * sizeof(u64);
+        object_test_coff_write_u32(malformed_bytes.pointer, marker_offset, UINT16_MAX + 1);
+        ObjectFile malformed = object_read(arguments->arena, malformed_bytes,
+                                           (Target){.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS});
+        BUSTER_TEST(arguments, malformed.error == OBJECT_ERROR_INVALID_INPUT && !malformed.relocation_count);
+        arena_set_position(arguments->arena, malformed_scope.position);
+    }
     {
         TemporalArena comdat_scope = arena_begin_temporal(arguments->arena);
         ByteSlice comdat_bytes = object_test_coff_comdat_object(arguments->arena);
@@ -2098,7 +2293,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             u32 relocation_offset = 0;
             u16 relocation_count = 0;
             bool text_found = rewritten.error == OBJECT_ERROR_NONE &&
-                              object_test_coff_named_section(rewritten.bytes, S8(".text"), &raw_offset, &relocation_offset, &relocation_count);
+                              object_test_coff_named_section(rewritten.bytes, S8(".text"), &raw_offset, &relocation_offset, &relocation_count, 0);
             BUSTER_TEST(arguments, text_found && relocation_count == 2);
             if (text_found && relocation_count == 2)
             {
@@ -2432,7 +2627,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
             u32 relocation_offset = 0;
             u16 relocation_count = 0;
             bool debug_found = rewritten.error == OBJECT_ERROR_NONE &&
-                               object_test_coff_named_section(rewritten.bytes, S8(".debug$S"), &raw_offset, &relocation_offset, &relocation_count);
+                               object_test_coff_named_section(rewritten.bytes, S8(".debug$S"), &raw_offset, &relocation_offset, &relocation_count, 0);
             BUSTER_TEST(arguments, debug_found && relocation_count == 1);
             if (debug_found && relocation_count == 1)
             {
@@ -5324,6 +5519,35 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         ObjectArchive null_archive = object_archive_read(arguments->arena, (ByteSlice){.length = 8}, x86_linux_target);
         BUSTER_TEST(arguments, null_archive.error != OBJECT_ERROR_NONE);
         arena_set_position(arguments->arena, archive_scope.position);
+    }
+    String8 clang_coff_fixture_path = arguments->coff_relocation_fixture_path;
+    if (clang_coff_fixture_path.length)
+    {
+        TemporalArena clang_coff_scope = arena_begin_temporal(arguments->arena);
+        ByteSlice clang_coff_bytes = file_read(arguments->arena, clang_coff_fixture_path, (FileReadOptions){0});
+        Target clang_coff_target = {
+            .cpu_arch = CPU_ARCH_X86_64,
+            .os = OPERATING_SYSTEM_WINDOWS,
+        };
+        ObjectFile clang_coff = object_read(arguments->arena, clang_coff_bytes, clang_coff_target);
+        bool clang_coff_valid = clang_coff.error == OBJECT_ERROR_NONE && clang_coff.relocation_count == UINT16_MAX + 1 &&
+                                clang_coff.relocations && clang_coff.symbols && clang_coff.symbol_count;
+        if (BUSTER_REQUIRE(arguments, clang_coff_valid))
+        {
+            ObjectRelocation* first = clang_coff.relocations;
+            ObjectRelocation* last = clang_coff.relocations + clang_coff.relocation_count - 1;
+            bool symbols_valid = first->symbol < clang_coff.symbol_count && last->symbol < clang_coff.symbol_count;
+            BUSTER_TEST(arguments, first->section == last->section && first->offset == 0 && first->addend == 0 &&
+                                       first->kind == OBJECT_RELOCATION_ABSOLUTE64);
+            BUSTER_TEST(arguments, last->offset == (u64)UINT16_MAX * sizeof(u64) && last->addend == 0 &&
+                                       last->kind == OBJECT_RELOCATION_ABSOLUTE64);
+            if (BUSTER_REQUIRE(arguments, symbols_valid))
+            {
+                BUSTER_STRING_TEST(arguments, clang_coff.symbols[first->symbol].name, S8("relocation_marker"));
+                BUSTER_STRING_TEST(arguments, clang_coff.symbols[last->symbol].name, S8("relocation_marker"));
+            }
+        }
+        arena_set_position(arguments->arena, clang_coff_scope.position);
     }
 #if BUSTER_FUZZ_AVAILABLE
     {
