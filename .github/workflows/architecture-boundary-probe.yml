@@ -1,0 +1,32 @@
+name: Architecture boundary probe
+on:
+  push:
+    branches: [codex/architecture-boundary-scout-20260925-astra-ade6]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          persist-credentials: false
+      - name: Record immutable source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ade6ac4b6ecb21f30b61b656439bac476c145e2f
+          test "$(git rev-parse HEAD^{tree})" = 4c5306221fdb22fccc929b55e333163742de17d0
+          git rev-parse HEAD HEAD^{tree}
+          git archive --format=tar.gz --output=architecture-source.tar.gz HEAD src/buster/lib/compiler/frontend/c src/buster/lib/compiler/ir src/buster/lib/compiler/debug src/buster/lib/compiler/object src/buster/lib/target.c src/buster/lib/target.h src/buster/tests/compiler/frontend/c docs/agents docs/performance-audits tools/new_audit.py PERFORMANCE_AUDITS.md AGENTS.md build.c .github/workflows/ci.yml
+          sha256sum architecture-source.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: architecture-source-${{ github.run_id }}
+          path: architecture-source.tar.gz
+          if-no-files-found: error
+          retention-days: 14
