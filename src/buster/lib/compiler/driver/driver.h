@@ -176,11 +176,12 @@ struct CompilerDriverInvocation
     bool has_gpu_target;
     bool save_gpu_temporaries;
     bool register_allocator_explicit;
-    // -fno-machine-fallback: fail native C compilation before writing its
-    // object if any function needed the canonical differential oracle.
+    // Compatibility state for -fno-machine-fallback/-fmachine-fallback.
+    // Native production codegen is unconditionally MIR-only; neither flag
+    // can re-enable the retired direct canonical fallback.
     bool reject_machine_fallback;
-    // -fcodegen-fallback-census: retain every observed native fallback's
-    // source identity. It does not enable or disable production fallback.
+    // Compatibility state for the retired native fallback census. Current
+    // production generation returns no fallback records.
     bool record_codegen_fallbacks;
     bool c_dialect_explicit;
 };

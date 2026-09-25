@@ -82,70 +82,65 @@ BUSTER_GLOBAL_LOCAL void aarch64_stride_apply_move_immediate(Aarch64StrideRegist
     }
 }
 
-typedef struct Aarch64StrideScan Aarch64StrideScan;
-struct Aarch64StrideScan
+// The allocator may reuse a physical register after the address calculation,
+// so the byte oracle owns only the exact movz/movk materialization claim.
+BUSTER_GLOBAL_LOCAL bool aarch64_stride_machine_materializes(u8 const* code, u32 size, Aarch64StrideCase expected)
 {
-    // Scaling multiplies found in the function, and how many of them scaled
-    // by exactly the expected stride with the expected word count.
-    u32 scale_count;
-    u32 matching_scale_count;
-    bool add_follows_every_scale;
-};
-
-// Walks the canonical backend's scaling idiom: the stride lands in x11,
-// `mul x10, x10, x11` scales the index, and `add x9, x9, x10` reaches the
-// element. Both fixed words are the canonical emission's own spelling.
-BUSTER_GLOBAL_LOCAL Aarch64StrideScan aarch64_stride_scan_canonical(u8 const* code, u64 size, Aarch64StrideCase expected)
-{
-    Aarch64StrideScan scan = {.add_follows_every_scale = true};
+    bool found = false;
     Aarch64StrideRegisters registers = {0};
-    for (u64 offset = 0; offset + 4 <= size; offset += 4)
+    for (u32 offset = 0; !found && offset + 4 <= size; offset += 4)
     {
         u32 word = (u32)code[offset] | ((u32)code[offset + 1] << 8) | ((u32)code[offset + 2] << 16) | ((u32)code[offset + 3] << 24);
-        if (word == 0x9b0b7d4a)
-        {
-            scan.scale_count += 1;
-            scan.matching_scale_count +=
-                registers.written[11] == expected.materialization_words && registers.values[11] == expected.stride;
-            u64 add_offset = offset + 4;
-            u32 add_word = 0;
-            if (add_offset + 4 <= size)
-            {
-                add_word = (u32)code[add_offset] | ((u32)code[add_offset + 1] << 8) | ((u32)code[add_offset + 2] << 16) |
-                           ((u32)code[add_offset + 3] << 24);
-            }
-            scan.add_follows_every_scale = scan.add_follows_every_scale && add_word == 0x8b0a0129;
-            continue;
-        }
         if (aarch64_stride_move_immediate(word))
         {
             aarch64_stride_apply_move_immediate(&registers, word);
+            u32 target = word & 31;
+            if (registers.written[target] == expected.materialization_words && registers.values[target] == expected.stride)
+            {
+                found = true;
+            }
         }
     }
-    return scan;
+    return found;
 }
 
-// The machine-IR selector allocates its own registers and schedules its own
-// rows, so neither the register holding the stride nor the position of the
-// multiply is fixed. Assert only what is: the stride reaches some register.
-BUSTER_GLOBAL_LOCAL bool aarch64_stride_machine_materializes(u8 const* code, u32 size, u64 stride)
+// MIR owns the register-independent dataflow claim: the exact immediate must
+// define a virtual register consumed by MUL, whose result must in turn feed
+// the address ADD. Together with the byte oracle above this proves both the
+// selected relationship and the final materialization cost.
+BUSTER_GLOBAL_LOCAL bool aarch64_stride_machine_scales(MachineFunction const* function, u64 stride)
 {
-    Aarch64StrideRegisters registers = {0};
-    for (u32 offset = 0; offset + 4 <= size; offset += 4)
+    bool found = false;
+    u32 stride_register = UINT32_MAX;
+    u32 scaled_register = UINT32_MAX;
+    for (u32 row_index = 0; !found && row_index < function->instruction_count; row_index += 1)
     {
-        u32 word = (u32)code[offset] | ((u32)code[offset + 1] << 8) | ((u32)code[offset + 2] << 16) | ((u32)code[offset + 3] << 24);
-        if (!aarch64_stride_move_immediate(word))
+        MachineInstruction row = function->instructions[row_index];
+        if (row.opcode == MACHINE_A64_MOV_RI && machine_ref_kind(row.operands[0]) == MACHINE_REF_VIRTUAL_REGISTER &&
+            machine_ref_kind(row.operands[1]) == MACHINE_REF_IMMEDIATE && machine_ref_payload(row.operands[1]) < function->immediate_count &&
+            function->immediates[machine_ref_payload(row.operands[1])] == stride)
         {
-            continue;
+            stride_register = machine_ref_payload(row.operands[0]);
         }
-        aarch64_stride_apply_move_immediate(&registers, word);
-        u32 target = word & 31;
-        if (registers.written[target] && registers.values[target] == stride)
+        else if (row.opcode == MACHINE_A64_MUL64 && stride_register != UINT32_MAX &&
+                 machine_ref_kind(row.operands[0]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                 ((machine_ref_kind(row.operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                   machine_ref_payload(row.operands[1]) == stride_register) ||
+                  (machine_ref_kind(row.operands[2]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                   machine_ref_payload(row.operands[2]) == stride_register)))
         {
-            return true;
+            scaled_register = machine_ref_payload(row.operands[0]);
+        }
+        else if (row.opcode == MACHINE_A64_ADD64 && scaled_register != UINT32_MAX &&
+                 ((machine_ref_kind(row.operands[1]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                   machine_ref_payload(row.operands[1]) == scaled_register) ||
+                  (machine_ref_kind(row.operands[2]) == MACHINE_REF_VIRTUAL_REGISTER &&
+                   machine_ref_payload(row.operands[2]) == scaled_register)))
+        {
+            found = true;
         }
     }
-    return false;
+    return found;
 }
 
 UnitTestResult aarch64_stride_tests(UnitTestArguments* arguments)
@@ -206,25 +201,24 @@ UnitTestResult aarch64_stride_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, descriptor != 0);
         if (descriptor && (u64)descriptor->code_offset + descriptor->code_size <= generated.code.length)
         {
-            Aarch64StrideScan scan =
-                aarch64_stride_scan_canonical(generated.code.pointer + descriptor->code_offset, descriptor->code_size, stride_case);
-            BUSTER_TEST(arguments, scan.scale_count >= 1);
-            BUSTER_TEST(arguments, scan.matching_scale_count == scan.scale_count);
-            BUSTER_TEST(arguments, scan.add_follows_every_scale);
+            BUSTER_TEST(arguments, aarch64_stride_machine_materializes(generated.code.pointer + descriptor->code_offset,
+                                                                       descriptor->code_size, stride_case));
         }
-        // The machine-IR selector reaches the same stride through its own
-        // immediate materialization; keep both AArch64 paths covered.
+        BUSTER_TEST(arguments, generated.statistics.fallback_function_count == 0);
+        // MIR dataflow connects the exact stride to MUL and then address ADD;
+        // the byte oracle above independently checks its materialization.
         MachineSelectResult selected = machine_select_canonical_function(arguments->arena, lowered.program, stride_index, aarch64_target);
         BUSTER_TEST(arguments, selected.supported);
         if (selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE)
         {
+            BUSTER_TEST(arguments, aarch64_stride_machine_scales(&selected.function, stride_case.stride));
             MachineStackPlacement placement = machine_stack_placement_build(arguments->arena, &selected.function);
             BUSTER_TEST(arguments, placement.valid);
             if (placement.valid)
             {
                 MachineEncodeResult encoded = machine_encode_aarch64(arguments->arena, &selected.function, &placement);
                 BUSTER_TEST(arguments, encoded.valid);
-                BUSTER_TEST(arguments, encoded.valid && aarch64_stride_machine_materializes(encoded.bytes, encoded.byte_count, stride_case.stride));
+                BUSTER_TEST(arguments, encoded.valid && aarch64_stride_machine_materializes(encoded.bytes, encoded.byte_count, stride_case));
             }
         }
     }

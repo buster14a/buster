@@ -313,9 +313,9 @@ struct CodegenModuleGlobal
 };
 
 typedef struct CodegenModule CodegenModule;
-// Stable census keys. Append new reasons; do not renumber existing reports.
-// SELECTION_OTHER preserves unclassified selector failures without claiming
-// they are unsupported semantics. VERIFICATION is an implementation failure.
+// Legacy fallback census keys retained for result-layout compatibility until
+// #514 removes the retired direct-native implementation. Production native
+// generation no longer records fallbacks; machine failures are CodegenErrors.
 typedef enum CodegenFallbackReason
 {
     CODEGEN_FALLBACK_TARGET_EXCLUDED,
@@ -362,9 +362,8 @@ struct CodegenStatistics
     u64 simd_operation_count;
     u32 function_count;
     u32 maximum_stack_frame_bytes;
-    // Functions a non-NONE register-allocator mode handed to the canonical
-    // stack path because the machine pipeline could not retain them. Zero
-    // under NONE; exactly the sum of fallback_reason_counts otherwise.
+    // Retired native-fallback census. Production generation keeps these zero;
+    // the fields remain temporarily so existing result consumers retain ABI.
     u32 fallback_function_count;
     u32 reserved;
     // Census of why machine selection rejected each fallback function,
@@ -490,14 +489,12 @@ struct CodegenExecutable
     CodegenError error;
 };
 
-// Register-allocation strategy for the machine-IR backend path. `NONE` uses
-// the canonical direct emitter and is the explicit compatibility/diagnostic
-// escape hatch. `MIR_STACK` places every eligible value in a stack location
-// through the machine selector/encoder for differential testing. `FAST` is
-// the driver default and minimizes allocation latency; `QUALITY` maximizes
-// generated-code performance under a compile-time budget. Every non-NONE
-// mode falls back to the canonical path per unsupported function, and the
-// fallback is counted in CodegenStatistics.
+// Register-allocation strategy for the machine-IR backend path. `NONE` is a
+// retained compatibility spelling for `MIR_STACK`; neither selects the direct
+// native emitter. `MIR_STACK` places every value in a stack location through
+// the machine selector/encoder. `FAST` is the driver default and minimizes
+// allocation latency; `QUALITY` maximizes generated-code performance under a
+// compile-time budget. A machine failure fails the module without fallback.
 typedef enum CodegenRegisterAllocatorMode
 {
     CODEGEN_REGISTER_ALLOCATOR_NONE,
@@ -528,11 +525,10 @@ struct CodegenModuleOptions
 {
     bool debug_info;
     bool assume_validated;
-    // Test/audit mode: validate certified IR and selected/scheduled MIR too;
-    // verifier/placement failures must not disappear into canonical fallback.
+    // Test/audit mode: validate certified IR and selected/scheduled MIR too.
     bool verify_invariants;
-    // Keep diagnostic flags independently addressable during self-hosting.
-    // Packed _Bool fields can lose their load type during local promotion.
+    // Retained compatibility option for the retired fallback census. Native
+    // production generation never records fallback rows.
     bool record_fallbacks;
     // -fPIC/-fpic: this object may end up in a shared library. No
     // thread-local definition it names can be assumed to sit in the initial
