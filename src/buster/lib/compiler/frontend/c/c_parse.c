@@ -18643,12 +18643,12 @@ BUSTER_C_INTERNAL String8 c_parse_assignment_conversion_message(CTypeParseMachin
             {
                 CType target_element = result->types[target_pointee.value];
                 CType source_element = result->types[source_pointee.value];
+                bool object_void_compatible = (target_element.kind == C_TYPE_VOID && source_element.kind != C_TYPE_FUNCTION) ||
+                                              (source_element.kind == C_TYPE_VOID && target_element.kind != C_TYPE_FUNCTION);
                 bool drops_qualifier = (source_element.is_const && !target_element.is_const) ||
                                        (source_element.is_volatile && !target_element.is_volatile) ||
                                        (source_element.is_restrict && !target_element.is_restrict) ||
-                                       (source_element.is_atomic && !target_element.is_atomic);
-                bool object_void_compatible = (target_element.kind == C_TYPE_VOID && source_element.kind != C_TYPE_FUNCTION) ||
-                                              (source_element.kind == C_TYPE_VOID && target_element.kind != C_TYPE_FUNCTION);
+                                       (!object_void_compatible && source_element.is_atomic && !target_element.is_atomic);
                 bool compatible = object_void_compatible ||
                                   c_parse_types_compatible(machine->scratch_arena, result, preprocess,
                                       c_parse_unqualified_type(result, target_pointee), c_parse_unqualified_type(result, source_pointee));
@@ -18783,11 +18783,12 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
     }
     for (u32 index = start; index < end; index += 1)
     {
-        if (declaration_tokens[index - start] || (skipped && skipped[index - start]))
+        CToken token = preprocess.tokens[index];
+        bool assignment_token = c_parse_assignment_punctuator(token);
+        if ((declaration_tokens[index - start] && !assignment_token) || (skipped && skipped[index - start]))
         {
             continue;
         }
-        CToken token = preprocess.tokens[index];
         if (token.kind == C_TOKEN_CHARACTER_LITERAL)
         {
             u64 character = 0;
@@ -19024,6 +19025,16 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         u64 query_mark = machine->scratch_arena->position;
         bool typed = c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, scope, operand_start, operand_end, &type_id);
         arena_set_position(machine->scratch_arena, query_mark);
+        CTypeId assignment_type_id = type_id;
+        bool assignment_typed = typed && type_id.value < result->type_count;
+        if (assignment && !assignment_typed && operand_start < operand_end && operand_start + 1 == operand_end &&
+            preprocess.tokens[operand_start].kind == C_TOKEN_IDENTIFIER && entity &&
+            (entity->kind == C_ENTITY_LOCAL || entity->kind == C_ENTITY_PARAMETER || entity->kind == C_ENTITY_OBJECT) &&
+            entity->type.value < result->type_count)
+        {
+            assignment_type_id = entity->type;
+            assignment_typed = true;
+        }
         bool member_place = operand_end >= operand_start + 2 &&
                             (c_token_is_punctuator(&preprocess.tokens[operand_end - 2], C_PUNCTUATOR_DOT) ||
                              c_token_is_punctuator(&preprocess.tokens[operand_end - 2], C_PUNCTUATOR_ARROW));
@@ -19037,7 +19048,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
             CEntityId object = c_parse_lookup_entity_token(result, preprocess.spelling_base, scope, &preprocess.tokens[root]);
             read_only |= object.value < result->entity_count && result->entities[object.value].is_constexpr;
         }
-        if (assignment && typed && c_parse_incompatible_function_initializer(machine, result, preprocess, scope, type_id,
+        if (assignment && assignment_typed && c_parse_incompatible_function_initializer(machine, result, preprocess, scope, assignment_type_id,
                 index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end)))
         {
             c_parse_lowering_constraint_consider(diagnostic, S8("assignment from an incompatible function pointer type"), index, index + 1);
@@ -19050,7 +19061,7 @@ BUSTER_C_INTERNAL void c_parse_validate_const_assignments(CTypeParseMachine* mac
         }
         String8 assignment_conversion_message = {0};
         bool simple_assignment = c_token_is_punctuator(&token, C_PUNCTUATOR_EQUAL);
-        if (assignment && typed && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, type_id,
+        if (assignment && assignment_typed && c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, assignment_type_id,
                 index + 1, c_parse_constraint_expression_end(result, preprocess, index + 1, end), simple_assignment, &assignment_conversion_message))
         {
             c_parse_lowering_constraint_consider(diagnostic,
@@ -19884,10 +19895,9 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
         if (declaration.kind == C_DECLARATION_OBJECT && c_ir_declaration_initializer_range(preprocess, declaration, &start, &end))
         {
             CScopeId scope = {.value = 0};
-            CParseInitializerDiagnostic shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
             String8 conversion_message = {0};
             bool braced = start < end && c_token_is_punctuator(&preprocess.tokens[start], C_PUNCTUATOR_LEFT_BRACE);
-            bool incompatible = !shape.message.length && !braced &&
+            bool incompatible = !braced &&
                 c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, declaration.type, start, end, true, &conversion_message);
             if (incompatible)
             {
@@ -19896,6 +19906,7 @@ BUSTER_C_INTERNAL void c_parse_validate_static_initializers(CTypeParseMachine* m
             }
             else
             {
+                CParseInitializerDiagnostic shape = c_parse_validate_initializer_shape(machine, result, preprocess, scope, declaration.type, start, end);
                 if (!shape.message.length)
                     shape = c_parse_validate_static_scalar(machine, result, preprocess, scope, declaration.type, start, end, declaration.is_constexpr);
                 if (!shape.message.length) shape = c_parse_validate_compound_literals(machine, result, preprocess, scope, start, end, true, 0);
@@ -20108,9 +20119,19 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
         u32 shape_end = 0;
         if (c_ir_declaration_initializer_range(preprocess, local_initializer, &shape_start, &shape_end))
         {
-            CParseInitializerDiagnostic shape = c_parse_validate_initializer_shape(machine, result, preprocess, entity->scope, entity->type,
-                                                                                  shape_start, shape_end);
-            if (entity->type.value < result->type_count && result->types[entity->type.value].kind == C_TYPE_NULLPTR &&
+            bool braced_initializer = shape_start < shape_end &&
+                                     c_token_is_punctuator(&preprocess.tokens[shape_start], C_PUNCTUATOR_LEFT_BRACE);
+            String8 simple_conversion_message = {0};
+            u64 conversion_mark = machine->scratch_arena->position;
+            bool simple_conversion_failure = !entity->is_static_storage && !braced_initializer &&
+                c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type,
+                                                     shape_start, shape_end, true, &simple_conversion_message) &&
+                simple_conversion_message.length;
+            arena_set_position(machine->scratch_arena, conversion_mark);
+            CParseInitializerDiagnostic shape = simple_conversion_failure
+                ? (CParseInitializerDiagnostic){.message = simple_conversion_message, .token = shape_start, .container = entity->type}
+                : c_parse_validate_initializer_shape(machine, result, preprocess, entity->scope, entity->type, shape_start, shape_end);
+            if (!simple_conversion_failure && entity->type.value < result->type_count && result->types[entity->type.value].kind == C_TYPE_NULLPTR &&
                 c_parse_incompatible_aggregate_value(machine, result, preprocess, entity->scope, entity->type, shape_start, shape_end, true, 0))
                 c_parse_lowering_constraint_consider(diagnostic, S8("only a value of type nullptr_t may be converted to nullptr_t"), start, shape_end);
             if (!entity->is_static_storage)
@@ -20125,9 +20146,12 @@ BUSTER_C_INTERNAL void c_parse_validate_vla_declarations(CTypeParseMachine* mach
             }
             if (shape.message.length)
             {
-                String8 message = string_format(result->arena, S8("could not lower initializer expression for local '{S8}'"), entity->name);
-                u32 token = location;
-                if (shape.container.value < result->type_count && string_equal(shape.message, S8("aggregate designator names an unknown field")))
+                String8 message = simple_conversion_failure
+                    ? simple_conversion_message
+                    : string_format(result->arena, S8("could not lower initializer expression for local '{S8}'"), entity->name);
+                u32 token = simple_conversion_failure ? shape_start : location;
+                if (!simple_conversion_failure && shape.container.value < result->type_count &&
+                    string_equal(shape.message, S8("aggregate designator names an unknown field")))
                 {
                     CType container = result->types[shape.container.value];
                     message = string_format(result->arena, S8("type '{S8}' has no member named '{S8}' ({u32} fields available)"), container.tag,
