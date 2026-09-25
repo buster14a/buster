@@ -10,8 +10,13 @@
 #undef main
 #include <stdlib.h>
 #include <stddef.h>
+#ifndef _WIN32
+#include <pwd.h>
+#endif
 #ifdef __linux__
 #include <sys/time.h>
+#include <sys/prctl.h>
+#include <grp.h>
 #include <sys/wait.h>
 #include "sgid_sandbox_test.h"
 #endif
@@ -820,6 +825,121 @@ BUSTER_GLOBAL_LOCAL void bq_test_sgid_sandbox(void)
         pid_t waited = waitpid(child, &status, 0);
         BQ_CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL void bq_test_cleanup_candidate_identity(void)
+{
+    struct stat child = {.st_mode = S_IFDIR | 0770, .st_uid = 65001, .st_gid = 65001};
+    for (u32 sgid = 0; sgid < 2; sgid += 1)
+    {
+        child.st_mode = S_IFDIR | (sgid ? 02770 : 0770);
+        BQ_CHECK(bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+        child.st_uid = 65002;
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+        child.st_uid = 0;
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+        child.st_uid = 65001;
+        child.st_gid = 65003;
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+        child.st_gid = 65001;
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65003, 65000, 65001, 65001));
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, (uid_t)-1, 65001));
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65000, 65001));
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 0, 65001));
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, (gid_t)-1));
+    }
+    mode_t refused[] = {0750, 0700, 0777, 01770, 04770};
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(refused); index += 1)
+    {
+        child.st_mode = S_IFDIR | refused[index];
+        BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+    }
+    child.st_mode = S_IFREG | 0770;
+    BQ_CHECK(!bq_cleanup_candidate_directory(&child, 65001, 65000, 65001, 65001));
+}
+
+#ifdef __linux__
+/* Opt-in only: the root fixture runs on disposable test infrastructure, never
+ * as part of the ordinary unprivileged suite or on the protected host. The
+ * cleanup child uses the real production resolver and traversal. */
+BUSTER_GLOBAL_LOCAL void bq_test_cleanup_identity_filesystem(void)
+{
+    struct passwd* account = getpwnam("buster-bench");
+    uid_t service_uid = account ? account->pw_uid : (uid_t)-1;
+    gid_t service_gid = account ? account->pw_gid : (gid_t)-1;
+    account = getpwnam("buster-bench-candidate");
+    uid_t candidate_uid = account ? account->pw_uid : (uid_t)-1;
+    gid_t candidate_gid = account ? account->pw_gid : (gid_t)-1;
+    account = getpwnam("buster-github-runner");
+    uid_t foreign_uid = account ? account->pw_uid : (uid_t)-1;
+    gid_t foreign_gid = account ? account->pw_gid : (gid_t)-1;
+    bool provisioned = geteuid() == 0 && service_uid != (uid_t)-1 && service_uid != 0 &&
+                       candidate_uid != (uid_t)-1 && candidate_uid != 0 && candidate_uid != service_uid &&
+                       foreign_uid != (uid_t)-1 && foreign_uid != 0 &&
+                       foreign_uid != service_uid && foreign_uid != candidate_uid &&
+                       service_gid != candidate_gid && foreign_gid != candidate_gid;
+    BQ_CHECK(provisioned);
+    struct { uid_t uid; gid_t gid; mode_t mode; bool removed; } cases[] = {
+        {service_uid, candidate_gid, 0550, true},
+        {candidate_uid, candidate_gid, 0770, true},
+        {candidate_uid, candidate_gid, 02770, true},
+        {foreign_uid, candidate_gid, 0770, false},
+        {foreign_uid, candidate_gid, 02770, false},
+        {candidate_uid, candidate_gid, 0750, false},
+        {candidate_uid, foreign_gid, 0770, false},
+        {0, candidate_gid, 0770, false},
+    };
+    for (u32 index = 0; provisioned && index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        char path[] = "/tmp/buster-cleanup-identity-XXXXXX";
+        bool made = mkdtemp(path) != NULL;
+        int root = made ? open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        bool ready = root >= 0 && fchown(root, service_uid, candidate_gid) == 0 &&
+                     mkdirat(root, "child", 0700) == 0;
+        int child = ready ? openat(root, "child", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        int file = child >= 0 ? openat(child, "payload", O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+        ready = ready && file >= 0 && fchown(child, cases[index].uid, cases[index].gid) == 0 &&
+                fchmod(child, cases[index].mode) == 0;
+        if (file >= 0) close(file);
+        if (child >= 0) close(child);
+        BQ_CHECK(ready);
+        pid_t process = ready ? fork() : -1;
+        if (process == 0)
+        {
+            bool dropped = setgroups(1, &candidate_gid) == 0 && setgid(service_gid) == 0 &&
+                           setuid(service_uid) == 0 && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0;
+            bool removed = dropped && bq_remove_workspace_payload(root);
+            _exit(!dropped ? 127 : removed ? 0 : 1);
+        }
+        if (process > 0)
+        {
+            int status = 0;
+            pid_t waited;
+            do { waited = waitpid(process, &status, 0); } while (waited < 0 && errno == EINTR);
+            int expected = cases[index].removed ? 0 : 1;
+            BQ_CHECK(waited == process && WIFEXITED(status) && WEXITSTATUS(status) == expected);
+            struct stat info;
+            bool remains = fstatat(root, "child", &info, AT_SYMLINK_NOFOLLOW) == 0;
+            BQ_CHECK(remains == !cases[index].removed);
+            printf("CLEANUP_IDENTITY case=%u owner=%u group=%u mode=%04o expected=%s actual=%s\n",
+                   index, (unsigned)cases[index].uid, (unsigned)cases[index].gid, (unsigned)cases[index].mode,
+                   cases[index].removed ? "removed" : "refused", remains ? "refused" : "removed");
+        }
+        else BQ_CHECK(process >= 0);
+        /* Known fixture names only; do not use the function under test to
+         * erase the foreign-owned negative controls. */
+        child = root >= 0 ? openat(root, "child", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+        if (child >= 0)
+        {
+            BQ_CHECK(unlinkat(child, "payload", 0) == 0);
+            close(child);
+            BQ_CHECK(unlinkat(root, "child", AT_REMOVEDIR) == 0);
+        }
+        if (root >= 0) close(root);
+        if (made) BQ_CHECK(rmdir(path) == 0);
+    }
+    printf("CLEANUP_IDENTITY_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
 }
 #endif
 
@@ -4901,6 +5021,7 @@ BUSTER_GLOBAL_LOCAL int bq_test_run_all(int argc, char** argv)
 #ifndef _WIN32
     bq_test_physical_temp_paths();
     bq_test_workspace_root_group_policy();
+    bq_test_cleanup_candidate_identity();
     bq_test_closed_handle();
     bq_test_admission();
     bq_test_prefixes_and_corruption();
@@ -4995,6 +5116,11 @@ int main(int argc, char** argv)
         bq_test_export(true);
         bq_test_export(false);
         printf("EXPORT_SELF_TEST assertions=%u failures=%u\n", bq_test_assertions, bq_test_failures);
+        result = bq_test_failures ? 1 : 0;
+    }
+    else if (argc == 2 && !strcmp(argv[1], "--cleanup-identity-only"))
+    {
+        bq_test_cleanup_identity_filesystem();
         result = bq_test_failures ? 1 : 0;
     }
     else if (argc == 2 && !strcmp(argv[1], "--sgid-only"))

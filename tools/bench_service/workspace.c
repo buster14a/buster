@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -628,8 +629,25 @@ BUSTER_GLOBAL_LOCAL bool bq_entry_identity(int parent, char const* name, dev_t d
     return ok;
 }
 
+/* Group write alone is not proof of candidate ownership. Resolve the fixed
+ * account once per cleanup; a missing/aliased identity disables the foreign
+ * owner exception without preventing cleanup of service-owned fixtures. */
+BUSTER_GLOBAL_LOCAL bool bq_cleanup_candidate_directory(struct stat const* child, gid_t workspace_group,
+                                                           uid_t service_uid, uid_t candidate_uid, gid_t candidate_gid)
+{
+    mode_t mode = child->st_mode & 07777;
+    bool ok = candidate_uid != (uid_t)-1 && candidate_uid != 0 && candidate_uid != service_uid &&
+              candidate_gid != (gid_t)-1 && candidate_gid != 0 && candidate_gid == workspace_group &&
+              child->st_uid == candidate_uid && child->st_gid == candidate_gid &&
+              S_ISDIR(child->st_mode) && (mode == 0770 || mode == 02770);
+    return ok;
+}
+
 BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload(int workspace)
 {
+    struct passwd* candidate = getpwnam("buster-bench-candidate");
+    uid_t candidate_uid = candidate ? candidate->pw_uid : (uid_t)-1;
+    gid_t candidate_gid = candidate ? candidate->pw_gid : (gid_t)-1;
     BqCleanupFrame frames[BQ_CLEANUP_DEPTH_CAP];
     memset(frames, 0, sizeof(frames));
     int root = openat(workspace, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -684,11 +702,9 @@ BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload(int workspace)
                     /* Candidate build directories inherit the attempt group.
                      * The service can remove entries through group write, but
                      * cannot chmod a foreign-owned directory without CAP_FOWNER. */
-                    mode_t mode = child_info.st_mode & 07777;
                     bool trusted_owned = child_info.st_uid == geteuid();
-                    bool candidate_owned = child_info.st_uid != 0 &&
-                                           child_info.st_gid == root_info.st_gid &&
-                                           (mode == 0770 || mode == 02770);
+                    bool candidate_owned = bq_cleanup_candidate_directory(&child_info, root_info.st_gid,
+                                                                           geteuid(), candidate_uid, candidate_gid);
                     ok = stream != NULL && (trusted_owned ? fchmod(dirfd(stream), 0700) == 0 :
                                             candidate_owned);
                     if (ok)
