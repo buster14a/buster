@@ -9,10 +9,12 @@
 #ifndef BUSTER_BENCH_SERVICE_PHASE_CHANNEL_H
 #define BUSTER_BENCH_SERVICE_PHASE_CHANNEL_H
 #ifdef __linux__
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -40,6 +42,17 @@ static inline uint64_t bq_phase_clock(void)
              (uint64_t)time.tv_sec <= (UINT64_MAX - (uint64_t)time.tv_nsec) / 1000000000;
     uint64_t result = ok ? (uint64_t)time.tv_sec * 1000000000 + (uint64_t)time.tv_nsec : 0;
     return result;
+}
+
+/* Convert the supervisor's absolute CLOCK_MONOTONIC millisecond deadline to
+ * this channel's nanosecond domain without wrapping on hostile input. */
+static inline bool bq_phase_deadline_from_milliseconds(uint64_t deadline_milliseconds,
+                                                       uint64_t* deadline_nanoseconds)
+{
+    bool ok = deadline_nanoseconds && deadline_milliseconds <= UINT64_MAX / UINT64_C(1000000);
+    if (deadline_nanoseconds)
+        *deadline_nanoseconds = ok ? deadline_milliseconds * UINT64_C(1000000) : 0;
+    return ok;
 }
 
 static inline void bq_phase_put(unsigned char* bytes, uint64_t value)
@@ -128,14 +141,40 @@ static inline int bq_phase_check(BqPhaseChannel const* channel, unsigned char co
     return ok;
 }
 
-static inline int bq_phase_exchange(BqPhaseChannel* channel, unsigned phase)
+/* The caller's absolute monotonic deadline bounds the acknowledgement wait.
+ * The existing per-ack cap remains an additional limit for the smoke recipe. */
+static inline int bq_phase_exchange_until(BqPhaseChannel* channel, unsigned phase,
+                                          uint64_t deadline_ns)
 {
     unsigned char request[BQ_PHASE_MESSAGE_BYTES] = {0}, response[BQ_PHASE_MESSAGE_BYTES] = {0};
-    int ok = bq_phase_make(channel, phase, request);
+    uint64_t start = bq_phase_clock();
+    uint64_t ack_budget = (uint64_t)BQ_PHASE_ACK_MILLISECONDS * UINT64_C(1000000);
+    uint64_t ack_deadline = start && ack_budget <= UINT64_MAX - start ? start + ack_budget : UINT64_MAX;
+    if (deadline_ns < ack_deadline) ack_deadline = deadline_ns;
+    int ok = start && deadline_ns > start && bq_phase_make(channel, phase, request);
+    if (ok) ok = bq_phase_clock() < ack_deadline;
     if (ok) ok = send(channel->descriptor, request, sizeof(request), MSG_NOSIGNAL | MSG_DONTWAIT) == sizeof(request);
     struct pollfd wait = {.fd = channel ? channel->descriptor : -1, .events = POLLIN};
-    if (ok) ok = poll(&wait, 1, BQ_PHASE_ACK_MILLISECONDS) > 0 && (wait.revents & POLLIN);
+    bool acknowledged = false;
+    while (ok && !acknowledged)
+    {
+        uint64_t now = bq_phase_clock();
+        if (!now) ok = false;
+        uint64_t remaining = now < ack_deadline ? ack_deadline - now : 0;
+        uint64_t timeout_ms = remaining / UINT64_C(1000000) +
+                              (remaining % UINT64_C(1000000) != 0);
+        int timeout = timeout_ms > INT_MAX ? INT_MAX : (int)timeout_ms;
+        int ready = ok && timeout ? poll(&wait, 1, timeout) : 0;
+        if (ready < 0 && errno != EINTR) ok = false;
+        else if (ready > 0)
+        {
+            acknowledged = (wait.revents & POLLIN) != 0;
+            if (!acknowledged) ok = false;
+        }
+        else if (ok && !timeout) ok = false;
+    }
     if (ok) ok = bq_phase_receive(channel->descriptor, response);
+    if (ok) ok = bq_phase_clock() < ack_deadline;
     if (ok)
     {
         bq_phase_put(request + 40, 1);
@@ -147,6 +186,15 @@ static inline int bq_phase_exchange(BqPhaseChannel* channel, unsigned phase)
         channel->last_time = bq_phase_get(request + 32);
     }
     else if (channel) channel->failed = 1;
+    return ok;
+}
+
+static inline int bq_phase_exchange(BqPhaseChannel* channel, unsigned phase)
+{
+    uint64_t now = bq_phase_clock();
+    uint64_t budget = (uint64_t)BQ_PHASE_ACK_MILLISECONDS * UINT64_C(1000000);
+    uint64_t deadline = now ? (budget <= UINT64_MAX - now ? now + budget : UINT64_MAX) : 0;
+    int ok = bq_phase_exchange_until(channel, phase, deadline);
     return ok;
 }
 #endif

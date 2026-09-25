@@ -2,40 +2,57 @@
 
 `retirement_correctness.{h,c}` is the private A→B→D handoff for the
 `native-retirement-performance-v1` recipe. It has no request-facing fields and
-does not change the blocked recipe descriptor. The importer and the production
-caller have not yet been wired to this child branch.
+does not change the blocked recipe descriptor. The service-side validator
+projection is wired as a fail-closed check, but the production worker has no
+caller for a ready correctness gate or timed launch.
 
-`retirement_correctness_service.{h,c}` provides a partial private service entry
-for the first A→B join. It imports the same-attempt preparation, matched-build
-receipts and binary record using service-held installed/workspace descriptors
-and authenticated record digests. It opens both verified frozen binaries and
-checks the caller-supplied B declaration's preparation, source and binary
-digests against that readback. Before the build import, the entry reads a
-private, read-only, single-link support declaration descriptor and verifies
-its exact bytes against the compiled profile SHA-256 pin. It counts subject
-rows, including registered non-object controls, and computes the expected
-matrix object-row count: the 12-target, 2-frontend, 2-PIC, 4-allocator matrix
-requires 192 object rows per subject. It checks the supplied declaration's
-`object_rows` count and requires at least two additional link/self-host stage
-rows. For each supplied object row, it joins the declared census ordinal to
-the pinned subject source digest and target position; omitted, duplicated,
-misnumbered, source-swapped or wrong-target object rows fail before build
-import. This is a partial support projection, not a raw census importer. Its
-support declaration pin and matrix-derived expected count do not authenticate
-all census rows or establish full-population authority. The B raw census
-importer, complete row/validator replay, applicability and eligibility checks,
-and check/oracle receipt authentication remain separate integration work.
-The pinned miniature seam is synthetic. Only after this partial join does the
-entry call `bq_retirement_correctness_begin`.
-Failure poisons a fresh gate and releases any descriptors acquired by this
-call; an already live holder is left alone. A successful holder stays open
-through all correctness work and subsequent dependent launches and must be
-released by the caller. The #923 integrator must compile this private module
-after the A and B implementations and call the public entry point from the
-actual service producer. Its pinned test seam checks the support-projection
-join after four real miniature host-compiled process stages and readback; that
-join uses a synthetic one-row B declaration. Neither fixture provides a
-trusted Clang build, full population, oracle receipt or timed invocation.
+The lower-level `_built_pinned` seams read same-attempt preparation,
+matched-build receipts and binary records through service-held descriptors.
+The public `begin_service` performs only a staged eligibility projection and
+stops before matched-build import. That projection separately pins #508 support, inputs, rows,
+manifest, the source applicability ledger, schema-2 report, and applicability
+and skip sidecars. It recomputes the raw identities, checks the complete fixed
+matrix and report class-row partition, and requires the exact source-derived
+non-executed set. For full-census it requires the approved source applicability
+ledger digest/count and exactly four shards. It then checks projection object
+ordinals against the supplied B row inventory. It derives classes, reasons, and
+ownership for default rows missing from the source applicability ledger using
+the raw row obligations, allocator role, and retained direct-reference failure
+set; it does not replay baseline shard results or independent supplements. It
+also fails closed on candidate and final reference failure rows, checks that
+acceptance failures match unresolved `unavailable` rows, checks
+`clean_acceptance`, requires both acceptance flags for full-census, and rejects
+nonempty defect arrays. A report with retained
+direct-reference failures and four supplement digests remains only a staged
+projection; independent supplemental proof and the separate #508 binding are
+required before admission.
+
+This importer is not a C replay of every #508 shard, result, argv, environment,
+supported-gap ledger contents, residual TSV bytes, or report field. It checks
+the supported-gap report list against the approved full-census count/digest
+and permits no gaps in the self-test profile. The current hosted full-census
+validator uses four reference supplements. The projection checks their digest
+syntax and count but cannot grant their correctness authority until the
+service reopens and replays independent supplement evidence. With no held
+residual-file descriptor in this service boundary, it permits only the canonical zero-row,
+untruncated residual summary and matching header-only digest; it does not read
+the residual TSV. It also does not authenticate per-row configuration
+identities, compiler/runtime command plans, #509
+required-check receipt bytes/digests, or independent-oracle bytes. A valid
+projection therefore returns fail-closed `BQ_RECIPE_MISMATCH` before the
+correctness gate begins. Before the validator projection, the production entry
+reimports the durable A preparation and fixed matched-build/binary records and
+compares their identities to B's declaration. The checked-in production profile
+lacks the new validator pins and fails earlier. The low-level fixture probe tests projection
+mechanics only; it does not authorize readiness or a timed launch.
+The separate `_built_pinned` fixture seam can import matched-build evidence and
+acquire held binaries for lower-level tests. The production `begin_service`
+entry intentionally does not call it after projection: independent
+configuration, command, #509 receipt, and oracle authority must be supplied
+before that handoff can be enabled. The existing pinned service test seam uses
+a synthetic one-row B declaration after four real miniature host-compiled
+process stages and readback. Neither fixture provides a trusted Clang build,
+full population, oracle receipt, or timed invocation.
 
 `retirement_artifact_service.{h,c}` provides the B-side artifact observation
 around each service-owned compiler process and before `row`. Before launch,
@@ -88,19 +105,14 @@ deadlines, cancellation, complete semantic receipts and the independent oracle.
 
 ## Trusted inputs
 
-The eventual production caller must first verify the complete #1018
-preparation and independently replay the #508/#929 support, raw census,
-validator-report and sparse eligibility projection. The D handoff in this
-branch does not provide that replay. The caller supplies a contiguous
-canonical row array, including every untimed control and inapplicable row, and
-derives `object_rows` from that independently checked inventory. The gate uses
-caller-provided identity hash slots (at least `2 * rows + 1`) and a census
-bitmap (`object_rows` bytes) to
-reject duplicate identities or missing/duplicate object census rows. A
-`retained-control` label alone does not exclude a row. The importer derives
-each skip proof, source, configuration,
-target, stage and execution obligation from those authenticated inputs. No
-candidate output, manifest or request may select these values.
+The eventual production caller must verify the complete #1018 preparation and
+independently replay the #508/#929 support, raw census, validator report, and
+sparse eligibility projection. The current C code checks only the staged raw
+identity and source-ledger projection described above. It does not yet derive
+or authenticate each row's configuration, compiler/runtime commands, #509
+receipts, or oracle from an admitted source. A `retained-control` label alone
+does not exclude a row. No candidate output, manifest, or request may select
+these missing authority values.
 
 The production gate must take population counts from the independently replayed
 current support/census authority. It checks the complete object join, the
@@ -111,13 +123,12 @@ The miniature and synthetic-capacity fixtures do not establish that proof.
 
 The required-check array must enumerate every applicable #509 native semantic
 lane, supported configuration matrix, no-fallback/census validation, self-host
-and fixed-point gate. The service executes or independently validates each
-exact-source and exact-binary check, then verifies the receipt bytes against a
-separate trusted digest before passing its status to `check`. Each required
-check carries that independently established digest; `check` requires equality
-and the readiness seal covers both the expected and observed values. A digest obtained
-from the candidate or downloaded result is not a trusted receipt. Any required
-host unavailable at qualification leaves the campaign blocked.
+and fixed-point gate. The gate checks equality with the expected digest supplied
+in each required-check record and seals both expected and observed values, but
+the current service importer does not authenticate the required-check list or
+receipt bytes/digest against a separate authority. A digest obtained from the
+candidate or downloaded result is not a trusted receipt. Any required host
+unavailable at qualification leaves the campaign blocked.
 
 Before `row`, the service derives exact compiler and applicable runtime command
 hashes (argv, cwd and environment) independently from the admitted oracle

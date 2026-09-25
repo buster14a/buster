@@ -205,10 +205,72 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     CHECK(tp_retirement_campaign_capacity(72672, 0, 60, &large) &&
           large.samples_per_stage == UINT64_C(8720640) &&
           large.total_samples == UINT64_C(17441280) &&
-          large.total_sample_partitions == 2);
+          large.total_sample_partitions == 2 &&
+          large.compiler_invocations_per_stage == UINT64_C(17731968) &&
+          large.runtime_invocations_per_stage == 0 &&
+          large.total_invocations == UINT64_C(35463936) &&
+          large.total_transcript_bytes_upper_bound ==
+              UINT64_C(35463936) * TP_RETIREMENT_EXECUTION_LINE_CAP);
+    CHECK(tp_retirement_campaign_capacity(72672, 72672, 60, &large) &&
+          large.compiler_invocations_per_stage == UINT64_C(17731968) &&
+          large.runtime_invocations_per_stage == UINT64_C(17731968) &&
+          large.invocations_per_stage == UINT64_C(35463936) &&
+          large.total_invocations == UINT64_C(70927872));
+    CHECK(tp_retirement_campaign_capacity(77762, 0, 254, &large) &&
+          large.samples_per_stage == UINT64_C(39503096) &&
+          large.sample_partitions_per_stage == 3);
+    CHECK(!tp_retirement_campaign_capacity(77792, 0, 254, &large));
     CHECK(!tp_retirement_campaign_capacity(72672, 72672, 254, &large));
     CHECK(!tp_retirement_campaign_capacity(0, 0, 60, &large));
     CHECK(!tp_retirement_campaign_capacity(1, 2, 60, &large));
+    uint64_t capacity_value = 1;
+    CHECK(!tp_retirement_campaign_u64_mul(UINT64_MAX, 2, &capacity_value) && !capacity_value);
+    capacity_value = 1;
+    CHECK(!tp_retirement_campaign_u64_add(UINT64_MAX, 1, &capacity_value) && !capacity_value);
+    CHECK(tp_retirement_campaign_capacity(1, 1, 60, &large));
+    TpRetirementCampaignDurationBounds bounds = {
+        .reservation_ns = 1000000, .materialization_ns = 1000000,
+        .baseline_build_ns = 1000000, .candidate_build_ns = 1000000,
+        .correctness_ns = 1000000, .settling_per_stage_ns = 1000000,
+        .compiler_invocation_ns = 2000000, .runtime_invocation_ns = 3000000,
+        .aa_qualification_ns = 1000000, .aa_receipt_sealing_ns = 1000000,
+        .sample_export_per_stage_ns = 1000000, .final_statistics_ns = 1000000,
+        .final_sealing_ns = 1000000, .cleanup_ns = 1000000};
+    TpRetirementCampaignPreflight preflight;
+    CHECK(tp_retirement_campaign_preflight(&large, &bounds, &preflight) && preflight.fits &&
+          preflight.fixed_phase_ns == UINT64_C(14000000) &&
+          preflight.compiler_invocation_total_ns == UINT64_C(976000000) &&
+          preflight.runtime_invocation_total_ns == UINT64_C(1464000000) &&
+          preflight.required_ns == UINT64_C(2454000000) &&
+          preflight.remaining_ns == TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS - preflight.required_ns);
+    uint64_t* required_bounds[] = {
+        &bounds.reservation_ns, &bounds.materialization_ns,
+        &bounds.baseline_build_ns, &bounds.candidate_build_ns, &bounds.correctness_ns,
+        &bounds.settling_per_stage_ns, &bounds.compiler_invocation_ns,
+        &bounds.runtime_invocation_ns, &bounds.aa_qualification_ns,
+        &bounds.aa_receipt_sealing_ns, &bounds.sample_export_per_stage_ns,
+        &bounds.final_statistics_ns, &bounds.final_sealing_ns, &bounds.cleanup_ns};
+    for (unsigned i = 0; i < BUSTER_ARRAY_LENGTH(required_bounds); ++i)
+    {
+        uint64_t saved = *required_bounds[i];
+        *required_bounds[i] = 0;
+        CHECK(!tp_retirement_campaign_preflight(&large, &bounds, &preflight) &&
+              !preflight.required_ns);
+        *required_bounds[i] = saved;
+    }
+    bounds.compiler_invocation_ns =
+        TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS / large.total_compiler_invocations + 1;
+    CHECK(!tp_retirement_campaign_preflight(&large, &bounds, &preflight) && !preflight.fits &&
+          preflight.required_ns > TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS &&
+          !preflight.remaining_ns);
+    bounds.compiler_invocation_ns = 2000000;
+    TpRetirementCampaignCapacity inconsistent = large;
+    inconsistent.total_invocations += 1;
+    CHECK(!tp_retirement_campaign_preflight(&inconsistent, &bounds, &preflight));
+    CHECK(tp_retirement_campaign_capacity(1, 0, 60, &large));
+    bounds.runtime_invocation_ns = 0;
+    CHECK(tp_retirement_campaign_preflight(&large, &bounds, &preflight) && preflight.fits &&
+          !preflight.runtime_invocation_total_ns);
     for (unsigned stage = 0; stage < 2; ++stage)
     {
         TpSampleTest* active = stage ? &ab : &aa;

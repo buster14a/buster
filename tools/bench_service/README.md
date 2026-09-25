@@ -180,7 +180,14 @@ distinct evidence/outcomes.
 The real systemd worker retains the authenticated lease-handoff socket as a
 private phase channel (`phase_channel.h`). The build driver marks it CLOEXEC
 before constructing any child and waits for four ordered acknowledgements:
-preparing, settling, measuring, and measurement finished. The supervisor binds
+preparing, settling, measuring, and measurement finished. The supervisor also binds
+the absolute monotonic execution deadline to its lease response and the
+recipient's acknowledgement. It rejects a missing, expired, or altered deadline;
+the unit checks it again after resuming from `SIGSTOP`, before executing the
+installed recipe. The still-blocked retirement path receives that deadline as
+a private recipe argument for its future bounded phase exchanges. The admitted
+smoke recipe retains its six-value interface.
+The supervisor binds
 each message to the job/attempt and an increasing monotonic timestamp, writes
 an exclusive durable queue record and a read-only `worker-phase-N` result
 receipt, and advances the settling/measuring journal boundary before replying.
