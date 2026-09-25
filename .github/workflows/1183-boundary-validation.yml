@@ -3,35 +3,119 @@ on:
   push:
     branches: [codex/1183-broker-boundary-validation]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Verify transferred patch before execution
+      - name: Verify and apply the exact reviewed patch
         run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/1183-logs"
           python3 - <<'PY'
-          import base64, gzip, hashlib, pathlib
+          import base64, gzip, hashlib, json, os, pathlib, subprocess
           text = pathlib.Path('1183.patch.b64').read_text().strip()
           for old, new in [('ceaE8yTIZ9j959','ceaE8yQIZ9j959'), ('547sbxR5++ZN','547sbxR++ZN'), ('ZRcOKhR5+6Ze','ZRcOKhR+6Ze'), ('Eqt4Ia2WyNTyIt','Eqt4Ia2NTyIt')]:
               text = text.replace(old, new)
           patch = gzip.decompress(base64.b64decode(text, validate=True))
-          actual = hashlib.sha256(patch).hexdigest()
-          print('PATCH_SHA256', actual)
-          assert actual == '5666be76c9941b2f19fefb40eaf771e1b02d0b48055105e1fd59bc5d7b7bc3d5'
-          pathlib.Path('1183.verified.patch').write_bytes(patch)
+          assert hashlib.sha256(patch).hexdigest() == '5666be76c9941b2f19fefb40eaf771e1b02d0b48055105e1fd59bc5d7b7bc3d5'
+          logs = pathlib.Path(os.environ['RUNNER_TEMP']) / '1183-logs'
+          path = logs / 'implementation.patch'
+          path.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', str(path)], check=True)
+          subprocess.run(['git', 'apply', str(path)], check=True)
+          expected = {
+              'build.c': '418ce2406e78793f7b7c0ab5f3c0a5e18dc78bcc',
+              'docs/agents/testing.md': 'f10c813a707818e527571d377a1158cae50347e6',
+              'tools/bench_service/deploy/SYSTEMD_BROKER.md': 'e6d4cfd3425b68f2a9ac583dc3dc87467578e188',
+              'tools/bench_service/systemd_broker_live_test.c': '66caa83d1d067c1783ecc9af37e5500f6c85c69c',
+              'tools/bench_service/tests.c': '9a4734de3228c335ce9784b444f4dd179ed99eda',
+              'tools/bench_service/workspace.c': '99645d6bfcad93828cdf32a8fbe265a53f0c0bc6',
+          }
+          for name, sha in expected.items():
+              actual = subprocess.check_output(['git', 'hash-object', name], text=True).strip()
+              assert actual == sha, (name, actual, sha)
+              print('VERIFIED_SOURCE', name, sha)
+          (logs / 'expected-blobs.json').write_text(json.dumps(expected, indent=2))
+          PY
+          git diff --check
+      - name: Hosted Clang driver and service suites
+        run: |
+          set -euo pipefail
+          clang --version | tee "$RUNNER_TEMP/1183-logs/toolchain.log"
+          uname -a | tee -a "$RUNNER_TEMP/1183-logs/toolchain.log"
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/1183-build"
+          "$RUNNER_TEMP/1183-build" bench_service self-test 2>&1 | tee "$RUNNER_TEMP/1183-logs/service.log"
+          ASAN_OPTIONS=detect_leaks=1 "$RUNNER_TEMP/1183-build" bench_service self-test --sanitize 2>&1 | tee "$RUNNER_TEMP/1183-logs/service-sanitized.log"
+          "$RUNNER_TEMP/1183-build" bench_service_broker self-test 2>&1 | tee "$RUNNER_TEMP/1183-logs/broker.log"
+      - name: Build unchanged-production negative controls
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          tmp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          base = 'a33a1ac33149ccccef6added886218ab838c3bed'
+          workspace = pathlib.Path('tools/bench_service/workspace.c')
+          tests = pathlib.Path('tools/bench_service/tests.c')
+          saved_workspace, saved_tests = workspace.read_text(), tests.read_text()
+          begin = saved_workspace.index('BUSTER_GLOBAL_LOCAL bool bq_cleanup_candidate_directory')
+          end = saved_workspace.index('BUSTER_GLOBAL_LOCAL bool bq_remove_workspace_payload', begin)
+          helper = saved_workspace[begin:end]
+          flags = ['clang', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fwrapv', '-fno-strict-aliasing', '-funsigned-char']
+          try:
+              workspace.write_bytes(subprocess.check_output(['git', 'show', base + ':tools/bench_service/workspace.c']))
+              tests.write_text(saved_tests.replace('BUSTER_GLOBAL_LOCAL void bq_test_cleanup_candidate_identity', helper + 'BUSTER_GLOBAL_LOCAL void bq_test_cleanup_candidate_identity', 1))
+              subprocess.run(flags + ['-Isrc', '-DBUSTER_SINGLE_THREADED=1', str(tests), 'tools/throughput/shared.c', '-lm', '-o', str(tmp / '1183-red-service-tests')], check=True)
+          finally:
+              workspace.write_text(saved_workspace)
+              tests.write_text(saved_tests)
+          old = tmp / '1183-old-live.c'
+          old.write_bytes(subprocess.check_output(['git', 'show', base + ':tools/bench_service/systemd_broker_live_test.c']))
+          new = pathlib.Path('tools/bench_service/systemd_broker_live_test.c').resolve()
+          wrappers = {
+              'old-groups': (old, 'struct passwd* p = getpwnam("buster-bench-candidate"); uid_t u = p ? p->pw_uid : (uid_t)-1; gid_t g = p ? p->pw_gid : (gid_t)-1; char* a[] = {"/usr/bin/id", "-G", NULL}; return p ? bq_test_run(u, g, a) : 127;'),
+              'new-groups': (new, 'BqTestIdentity i; bool ok = bq_test_identity_load("buster-bench-candidate", &i); char* a[] = {"/usr/bin/id", "-G", NULL}; return ok ? bq_test_run(&i, a) : 127;'),
+              'new-private': (new, 'BqTestIdentity i; bool ok = bq_test_identity_load("buster-bench-candidate", &i); return ok ? bq_test_private_access(&i, "/var/lib/buster-bench/queue/worker-1", "/var/lib/buster-bench/queue/worker-instance-1", "/var/lib/buster-bench/workspaces/results/job-1-attempt-2") : 127;'),
+          }
+          for name, (source, body) in wrappers.items():
+              wrapper = tmp / ('1183-' + name + '.c')
+              wrapper.write_text('#define main original_probe_main\n#include "' + str(source) + '"\n#undef main\nint main(void) { ' + body + ' }\n')
+              subprocess.run(flags + [str(wrapper), '-o', str(tmp / ('1183-' + name))], check=True)
+          PY
+      - name: Disposable real-identity and DAC red-green regressions
+        run: |
+          set -euo pipefail
+          sudo unshare --mount --pid --fork --mount-proc python3 "$PWD/1183-fixture.py" "$PWD" "$RUNNER_TEMP" 2>&1 | tee "$RUNNER_TEMP/1183-logs/identity-regression.log"
+      - name: Check the final six blobs and publish only those immutable objects
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' | tee "$RUNNER_TEMP/1183-logs/published-blobs.log"
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
+          logs = pathlib.Path(os.environ['RUNNER_TEMP']) / '1183-logs'
+          expected = json.loads((logs / 'expected-blobs.json').read_text())
+          for path, sha in expected.items():
+              data = pathlib.Path(path).read_bytes()
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert actual == sha, (path, actual, sha)
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()}).encode()
+              request = urllib.request.Request('https://api.github.com/repos/buster14a/buster/git/blobs', data=body, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}, method='POST')
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.load(response)
+              assert result['sha'] == sha
+              print('PUBLISHED_BLOB', path, sha)
+          subprocess.run(['git', 'diff', '--check'], check=True)
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: issue-1183-transfer-integrity
-          path: |
-            1183.patch.b64
-            1183.verified.patch
+          name: issue-1183-validation-${{ github.run_id }}
+          path: ${{ runner.temp }}/1183-logs
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 14
