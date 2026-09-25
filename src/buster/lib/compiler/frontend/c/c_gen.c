@@ -13081,21 +13081,28 @@ typedef enum CIrLowerFrameStage
     C_IR_LOWER_STAGE_EXPRESSION_CORE_COMPOUND_LITERAL,
 } CIrLowerFrameStage;
 
-typedef struct CIrNestedInitializerTask CIrNestedInitializerTask;
-struct CIrNestedInitializerTask
-{
-    IrValueId place;
-    IrTypeId type;
-    u32 open;
-    u32 close;
-};
-
 typedef struct CIrNestedInitializerCursor CIrNestedInitializerCursor;
 struct CIrNestedInitializerCursor
 {
     IrValueId place;
     IrTypeId type;
     u32 next_index;
+};
+
+typedef struct CIrNestedInitializerTask CIrNestedInitializerTask;
+struct CIrNestedInitializerTask
+{
+    IrValueId place;
+    IrTypeId type;
+    CIrNestedInitializerCursor* cursors;
+    u32 open;
+    u32 close;
+    u32 item_start;
+    u32 index;
+    u32 next_index;
+    u32 cursor_count;
+    bool resume;
+    bool zero_subobject;
 };
 
 typedef struct CIrNestedCompoundLiteralState CIrNestedCompoundLiteralState;
@@ -24629,14 +24636,47 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         {
             frame->as.nested_compound_literal.state->task =
                 frame->as.nested_compound_literal.state->tasks[--frame->as.nested_compound_literal.state->task_count];
-            frame->as.nested_compound_literal.state->next_index = 0;
-            frame->as.nested_compound_literal.state->item_start = frame->as.nested_compound_literal.state->task.open + 1;
-            frame->as.nested_compound_literal.state->index = frame->as.nested_compound_literal.state->item_start;
-            frame->as.nested_compound_literal.state->cursors[0] = (CIrNestedInitializerCursor){
-                .place = frame->as.nested_compound_literal.state->task.place,
-                .type = frame->as.nested_compound_literal.state->task.type,
-            };
-            frame->as.nested_compound_literal.state->cursor_count = 1;
+            CIrNestedInitializerTask* active = &frame->as.nested_compound_literal.state->task;
+            if (active->resume)
+            {
+                frame->as.nested_compound_literal.state->next_index = active->next_index;
+                frame->as.nested_compound_literal.state->item_start = active->item_start;
+                frame->as.nested_compound_literal.state->index = active->index;
+                memcpy(frame->as.nested_compound_literal.state->cursors, active->cursors,
+                       active->cursor_count * sizeof(*active->cursors));
+                frame->as.nested_compound_literal.state->cursor_count = active->cursor_count;
+            }
+            else
+            {
+                if (active->zero_subobject)
+                {
+                    CToken token = builder->preprocess.tokens[active->open];
+                    bool zeroed;
+                    if (c_ir_zero_storage_compatible(builder, active->type))
+                    {
+                        IrType* subobject = ir_type_from_id(&builder->program->types, active->type);
+                        zeroed = c_ir_emit_zero_storage(builder, active->place, active->type, subobject->layout.size, token);
+                    }
+                    else
+                    {
+                        IrValueId zero = c_ir_emit_zero_value(builder, active->type, token);
+                        zeroed = zero.value != IR_ID_UNDERLYING_INVALID &&
+                                 c_ir_emit_store_place(builder, active->place, active->type, zero, c_ir_token_source_range(builder, token));
+                    }
+                    if (!zeroed)
+                    {
+                        goto c_ir_nested_compound_failed;
+                    }
+                }
+                frame->as.nested_compound_literal.state->next_index = 0;
+                frame->as.nested_compound_literal.state->item_start = active->open + 1;
+                frame->as.nested_compound_literal.state->index = frame->as.nested_compound_literal.state->item_start;
+                frame->as.nested_compound_literal.state->cursors[0] = (CIrNestedInitializerCursor){
+                    .place = active->place,
+                    .type = active->type,
+                };
+                frame->as.nested_compound_literal.state->cursor_count = 1;
+            }
             frame->as.nested_compound_literal.state->task_active = true;
         }
         CIrNestedInitializerTask task = frame->as.nested_compound_literal.state->task;
@@ -24683,6 +24723,7 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
         u32 parentheses = 0;
         u32 brackets = 0;
         u32 braces = 0;
+        bool descended = false;
         while (index <= task.close)
         {
             bool at_end = index == task.close;
@@ -25016,16 +25057,31 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             }
             else if (nested)
             {
-                if (frame->as.nested_compound_literal.state->task_count >= frame->as.nested_compound_literal.state->capacity)
+                if (frame->as.nested_compound_literal.state->task_count > frame->as.nested_compound_literal.state->capacity - 2)
                 {
                     goto c_ir_nested_compound_failed;
                 }
+                // Suspend the parent before lowering this brace list. Its later
+                // scalar items must not run before the nested stores.
+                CIrNestedInitializerTask parent = task;
+                parent.resume = true;
+                parent.item_start = index + 1;
+                parent.index = index + 1;
+                parent.next_index = (!cursor_item && !promoted_designator) ? selected_index + 1 : next_index;
+                parent.cursor_count = frame->as.nested_compound_literal.state->cursor_count;
+                parent.cursors = arena_allocate(builder->temporary_arena, CIrNestedInitializerCursor, parent.cursor_count);
+                memcpy(parent.cursors, frame->as.nested_compound_literal.state->cursors,
+                       parent.cursor_count * sizeof(*parent.cursors));
+                frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = parent;
                 frame->as.nested_compound_literal.state->tasks[frame->as.nested_compound_literal.state->task_count++] = (CIrNestedInitializerTask){
                     .place = child_place,
                     .type = child_type,
                     .open = value_start,
                     .close = index - 1,
+                    .zero_subobject = true,
                 };
+                descended = true;
+                break;
             }
             else
             {
@@ -25069,6 +25125,10 @@ BUSTER_C_INTERNAL void c_ir_lower_nested_compound_literal_step(CIntegerIrBuilder
             index += 1;
         }
         frame->as.nested_compound_literal.state->task_active = false;
+        if (descended)
+        {
+            continue;
+        }
     }
     {
         CToken root_token = builder->preprocess.tokens[frame->as.nested_compound_literal.state->root_open];
