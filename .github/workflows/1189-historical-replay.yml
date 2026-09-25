@@ -1,0 +1,105 @@
+name: Issue 1189 historical replay
+
+# Temporary, isolated validation branch only. Not part of the fixing PR.
+on:
+  push:
+    branches: [codex/1189-historical-replay]
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    name: Exact-source guard and historical red-green replay
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact repair source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 644088f3dc4471cd862f6ca8989af08ed1807f81
+          path: repair
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Full-history regressions and exact patch check
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd repair
+          test "$(git rev-parse HEAD)" = 644088f3dc4471cd862f6ca8989af08ed1807f81
+          test "$(git rev-parse 'HEAD^{tree}')" = 366dd0bfa577ad6add605968fc97225b9d52c86c
+          test "$(git hash-object tools/merge_parent_preservation.py)" = c85d1b4ff96b7fea3c96a4c316402dce96e0296c
+          test "$(git hash-object tools/merge_parent_preservation_test.py)" = 74860e7d2d48ecc61235e0a3168b10a5be97a313
+          git cat-file -e '718ee0064bdc3513499784e7522ebad5e39bc29c^{commit}'
+          git diff --check dce1b8caa3d368dede16ad4aa9da6760e26fe704 HEAD
+          python3 -B tools/merge_parent_preservation_test.py -v 2>&1 | tee "$RUNNER_TEMP/1189-regressions.log"
+          if grep -q 'skipped' "$RUNNER_TEMP/1189-regressions.log"; then
+            echo 'A full-history regression was skipped.'
+            exit 1
+          fi
+      - name: Checkout immutable incident candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ca631038c6d883c41f4e704f39aa8034f76ee313
+          path: incident
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reproduce original failure and verify the repaired guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          repair = Path('repair').resolve()
+          incident = Path('incident').resolve()
+          candidate = 'ca631038c6d883c41f4e704f39aa8034f76ee313'
+          actual_base = '83c5f229288ecd8e23588c11b9ad19edc8bf4be2'
+          event_base = '7c7431183b1b64c532ebb6092c0e6a0bb351bcad'
+          source = 'a33a1ac33149ccccef6added886218ab838c3bed'
+          tree = '56037bca96a1a401e254d0a71dfcd586d29e9fef'
+          def git(repo, *args):
+              return subprocess.check_output(['git', '-C', str(repo), *args], timeout=60).decode().strip()
+          assert git(incident, 'rev-parse', 'HEAD') == candidate
+          assert git(incident, 'show', '-s', '--format=%T', candidate) == tree
+          assert git(incident, 'show', '-s', '--format=%P', candidate) == actual_base + ' ' + source
+          event_path = Path(os.environ['RUNNER_TEMP']) / '1189-incident-event.json'
+          # Minimal replay fixture reconstructed from the recorded failing job,
+          # not a claim to export the complete original GitHub event payload.
+          event = {'pull_request': {'base': {'sha': event_base, 'ref': 'main'}, 'head': {'sha': source}}}
+          event_path.write_text(json.dumps(event), encoding='utf-8')
+          original = Path(os.environ['RUNNER_TEMP']) / '1189-original-guard.py'
+          original.write_bytes(subprocess.check_output([
+              'git', '-C', str(repair), 'show',
+              'dce1b8caa3d368dede16ad4aa9da6760e26fe704:tools/merge_parent_preservation.py'], timeout=60))
+          raw = original.read_bytes()
+          assert hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() == '48b32ebc80a5d8378626160819130087a1ff22bb'
+          env = os.environ.copy()
+          env['GITHUB_EVENT_PATH'] = str(event_path)
+          args = ['--repository', str(incident), '--candidate', candidate, '--base', event_base, '--event-name', 'pull_request']
+          def check(script, expected):
+              result = subprocess.run([sys.executable, '-B', str(script), *args], env=env, capture_output=True, text=True, timeout=300)
+              print(f'guard={script.name} expected={expected} actual={result.returncode}')
+              print(result.stdout.replace('::error', 'expected-error') if expected else result.stdout)
+              print(result.stderr)
+              assert result.returncode == expected, result.stdout + result.stderr
+              return result.stdout
+          baseline = check(original, 2)
+          assert 'candidate first parent does not equal the event base SHA' in baseline
+          fixed = check(repair / 'tools/merge_parent_preservation.py', 0)
+          assert 'base=' + actual_base in fixed and 'event-base=' + event_base in fixed
+          event['pull_request']['head']['sha'] = event_base
+          event_path.write_text(json.dumps(event), encoding='utf-8')
+          rejected = check(repair / 'tools/merge_parent_preservation.py', 2)
+          assert 'second parent does not equal the event source head SHA' in rejected
+          assert git(incident, 'rev-parse', 'HEAD') == candidate
+          assert not git(incident, 'status', '--porcelain')
+          print('HISTORICAL_REPLAY_PASS candidate=' + candidate + ' tree=' + tree + ' source=' + source)
+          print('fetched-base-tip=' + git(incident, 'rev-parse', 'refs/remotes/origin/main'))
+          print('No source branch, historical candidate, protected host, or admission status was modified.')
+          PY
