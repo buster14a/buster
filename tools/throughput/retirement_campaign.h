@@ -12,6 +12,7 @@
 #ifdef __linux__
 #define TP_RETIREMENT_CAMPAIGN_STAGES 2u
 #define TP_RETIREMENT_CAMPAIGN_COMMANDS_PER_ROW 4u
+#define TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS UINT64_C(3600000000000)
 
 typedef enum TpRetirementCampaignPhase
 {
@@ -38,11 +39,36 @@ typedef struct TpRetirementCampaignOutcome
 
 typedef struct TpRetirementCampaignCapacity
 {
+    uint64_t compiler_invocations_per_stage, runtime_invocations_per_stage;
     uint64_t invocations_per_stage, samples_per_stage, spool_bytes_per_stage;
+    uint64_t transcript_bytes_per_stage_upper_bound;
     uint64_t transcript_shards_per_stage, sample_shards_per_stage, sample_partitions_per_stage;
+    uint64_t total_compiler_invocations, total_runtime_invocations;
     uint64_t total_invocations, total_samples, total_spool_bytes;
+    uint64_t total_transcript_bytes_upper_bound;
     uint64_t total_transcript_shards, total_sample_shards, total_sample_partitions;
 } TpRetirementCampaignCapacity;
+
+/* Supplied by the caller only after it independently authenticates each
+ * phase ceiling for this exact job, population, host and held binaries. The
+ * invocation ceilings include launcher/collector work for every applicable
+ * compiler metric (wall, RSS and parsed code bytes) or runtime oracle. */
+typedef struct TpRetirementCampaignDurationBounds
+{
+    uint64_t reservation_ns, materialization_ns;
+    uint64_t baseline_build_ns, candidate_build_ns, correctness_ns;
+    uint64_t settling_per_stage_ns, compiler_invocation_ns, runtime_invocation_ns;
+    uint64_t aa_qualification_ns, aa_receipt_sealing_ns;
+    uint64_t sample_export_per_stage_ns, final_statistics_ns, final_sealing_ns;
+    uint64_t cleanup_ns;
+} TpRetirementCampaignDurationBounds;
+
+typedef struct TpRetirementCampaignPreflight
+{
+    uint64_t fixed_phase_ns, compiler_invocation_total_ns, runtime_invocation_total_ns;
+    uint64_t required_ns, remaining_ns;
+    int fits;
+} TpRetirementCampaignPreflight;
 
 /* The command hash covers argv/cwd/environment; all other oracle fields are
  * copied separately. One entry exists for each (canonical eligible row, kind,
@@ -73,42 +99,168 @@ typedef struct TpRetirementCampaign
     int cpu;
 } TpRetirementCampaign;
 
+static int tp_retirement_campaign_u64_mul(uint64_t left, uint64_t right, uint64_t* product)
+{
+    int ok = product && (!left || right <= UINT64_MAX / left);
+    if (product) *product = ok ? left * right : 0;
+    return ok;
+}
+
+static int tp_retirement_campaign_u64_add(uint64_t left, uint64_t right, uint64_t* sum)
+{
+    int ok = sum && right <= UINT64_MAX - left;
+    if (sum) *sum = ok ? left + right : 0;
+    return ok;
+}
+
+static uint64_t tp_retirement_campaign_ceil_div(uint64_t value, uint64_t divisor)
+{
+    uint64_t quotient = divisor ? value / divisor : 0;
+    uint64_t remainder = divisor ? value % divisor : 0;
+    return quotient + !!remainder;
+}
+
+/* Rows and runtime_rows must come from the authenticated correctness/oracle
+ * gate. The report includes both fixed stages and a worst-case transcript
+ * byte bound (every line at its current 8 KiB validator limit); it does not
+ * predict host speed or establish that the whole-job deadline can be met. */
 static int tp_retirement_campaign_capacity(unsigned rows, unsigned runtime_rows, unsigned pairs,
     TpRetirementCampaignCapacity* capacity)
 {
-    uint64_t samples = tp_retirement_samples_count(rows, pairs);
-    uint64_t invocations = (uint64_t)(rows + runtime_rows) * 2 *
-        (TP_RETIREMENT_WARMUPS + TP_RETIREMENT_ROUNDS * (uint64_t)pairs);
-    uint64_t transcript_shards = (invocations + TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS - 1) /
-        TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS;
-    uint64_t sample_shards = (samples + TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS - 1) /
-        TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS;
+    uint64_t per_variant = 0, invocations_per_row = 0;
+    uint64_t compiler_invocations = 0, runtime_invocations = 0, invocations = 0;
+    uint64_t samples = tp_retirement_samples_count(rows, pairs), spool_bytes = 0;
+    uint64_t transcript_bytes = 0;
+    uint64_t transcript_shards = 0, sample_shards = 0;
+    uint64_t total_compiler_invocations = 0, total_runtime_invocations = 0;
+    uint64_t total_invocations = 0, total_samples = 0, total_spool_bytes = 0;
+    uint64_t total_transcript_bytes = 0;
+    uint64_t total_transcript_shards = 0, total_sample_shards = 0, total_sample_partitions = 0;
     int ok = capacity && rows && runtime_rows <= rows && samples &&
-        invocations <= (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS * TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
-        transcript_shards <= TP_RETIREMENT_TRANSCRIPT_SHARDS &&
-        samples <= TP_RETIREMENT_SAMPLE_TOTAL_RECORDS &&
-        sample_shards <= TP_RETIREMENT_TRANSCRIPT_SHARDS;
+        tp_retirement_campaign_u64_mul(TP_RETIREMENT_ROUNDS, pairs, &per_variant) &&
+        tp_retirement_campaign_u64_add(per_variant, TP_RETIREMENT_WARMUPS, &per_variant) &&
+        tp_retirement_campaign_u64_mul(per_variant, 2, &invocations_per_row) &&
+        tp_retirement_campaign_u64_mul(rows, invocations_per_row, &compiler_invocations) &&
+        tp_retirement_campaign_u64_mul(runtime_rows, invocations_per_row, &runtime_invocations) &&
+        tp_retirement_campaign_u64_add(compiler_invocations, runtime_invocations, &invocations) &&
+        tp_retirement_campaign_u64_mul(samples, TP_RETIREMENT_SAMPLE_RECORD_BYTES, &spool_bytes) &&
+        tp_retirement_campaign_u64_mul(invocations, TP_RETIREMENT_EXECUTION_LINE_CAP, &transcript_bytes);
+    if (ok)
+    {
+        transcript_shards = tp_retirement_campaign_ceil_div(invocations,
+            TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
+        sample_shards = tp_retirement_campaign_ceil_div(samples,
+            TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS);
+        ok = invocations <= (uint64_t)TP_RETIREMENT_TRANSCRIPT_SHARDS * TP_RETIREMENT_TRANSCRIPT_SHARD_RECORDS &&
+            transcript_shards <= TP_RETIREMENT_TRANSCRIPT_SHARDS &&
+            samples <= TP_RETIREMENT_SAMPLE_TOTAL_RECORDS &&
+            sample_shards <= TP_RETIREMENT_TRANSCRIPT_SHARDS &&
+            tp_retirement_campaign_u64_mul(compiler_invocations, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_compiler_invocations) &&
+            tp_retirement_campaign_u64_mul(runtime_invocations, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_runtime_invocations) &&
+            tp_retirement_campaign_u64_mul(invocations, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_invocations) &&
+            tp_retirement_campaign_u64_mul(samples, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_samples) &&
+            tp_retirement_campaign_u64_mul(spool_bytes, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_spool_bytes) &&
+            tp_retirement_campaign_u64_mul(transcript_bytes, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_transcript_bytes) &&
+            tp_retirement_campaign_u64_mul(transcript_shards, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_transcript_shards) &&
+            tp_retirement_campaign_u64_mul(sample_shards, TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_sample_shards) &&
+            tp_retirement_campaign_u64_mul(tp_retirement_campaign_ceil_div(samples,
+                TP_RETIREMENT_SAMPLE_PARTITION_RECORDS), TP_RETIREMENT_CAMPAIGN_STAGES,
+                &total_sample_partitions);
+    }
     if (capacity)
     {
         *capacity = (TpRetirementCampaignCapacity){0};
         if (ok)
         {
+            capacity->compiler_invocations_per_stage = compiler_invocations;
+            capacity->runtime_invocations_per_stage = runtime_invocations;
             capacity->invocations_per_stage = invocations;
             capacity->samples_per_stage = samples;
-            capacity->spool_bytes_per_stage = samples * TP_RETIREMENT_SAMPLE_RECORD_BYTES;
+            capacity->spool_bytes_per_stage = spool_bytes;
+            capacity->transcript_bytes_per_stage_upper_bound = transcript_bytes;
             capacity->transcript_shards_per_stage = transcript_shards;
             capacity->sample_shards_per_stage = sample_shards;
             capacity->sample_partitions_per_stage =
-                (samples + TP_RETIREMENT_SAMPLE_PARTITION_RECORDS - 1) / TP_RETIREMENT_SAMPLE_PARTITION_RECORDS;
-            capacity->total_invocations = invocations * TP_RETIREMENT_CAMPAIGN_STAGES;
-            capacity->total_samples = samples * TP_RETIREMENT_CAMPAIGN_STAGES;
-            capacity->total_spool_bytes = capacity->spool_bytes_per_stage * TP_RETIREMENT_CAMPAIGN_STAGES;
-            capacity->total_transcript_shards = transcript_shards * TP_RETIREMENT_CAMPAIGN_STAGES;
-            capacity->total_sample_shards = sample_shards * TP_RETIREMENT_CAMPAIGN_STAGES;
-            capacity->total_sample_partitions =
-                capacity->sample_partitions_per_stage * TP_RETIREMENT_CAMPAIGN_STAGES;
+                tp_retirement_campaign_ceil_div(samples, TP_RETIREMENT_SAMPLE_PARTITION_RECORDS);
+            capacity->total_compiler_invocations = total_compiler_invocations;
+            capacity->total_runtime_invocations = total_runtime_invocations;
+            capacity->total_invocations = total_invocations;
+            capacity->total_samples = total_samples;
+            capacity->total_spool_bytes = total_spool_bytes;
+            capacity->total_transcript_bytes_upper_bound = total_transcript_bytes;
+            capacity->total_transcript_shards = total_transcript_shards;
+            capacity->total_sample_shards = total_sample_shards;
+            capacity->total_sample_partitions = total_sample_partitions;
         }
     }
+    return ok;
+}
+
+/* Failure-first whole-job preflight. This arithmetic helper has no production
+ * caller: the integrator must first authenticate nonzero worst-case bounds
+ * from the trusted service for this job. Missing bounds, overflow, an
+ * inconsistent capacity record or a sum above the fixed one-hour job budget
+ * rejects before timing; fixture bounds are not authority. */
+static int tp_retirement_campaign_preflight(TpRetirementCampaignCapacity const* capacity,
+    TpRetirementCampaignDurationBounds const* bounds, TpRetirementCampaignPreflight* preflight)
+{
+    uint64_t expected_invocations = 0, settling_ns = 0, export_ns = 0;
+    uint64_t compiler_ns = 0, runtime_ns = 0, fixed_ns = 0, required_ns = 0;
+    int ok = capacity && bounds && preflight && capacity->total_invocations &&
+        capacity->total_compiler_invocations && capacity->total_samples &&
+        bounds->reservation_ns && bounds->materialization_ns && bounds->baseline_build_ns &&
+        bounds->candidate_build_ns && bounds->correctness_ns && bounds->settling_per_stage_ns &&
+        bounds->compiler_invocation_ns && bounds->aa_qualification_ns &&
+        bounds->aa_receipt_sealing_ns && bounds->sample_export_per_stage_ns &&
+        bounds->final_statistics_ns && bounds->final_sealing_ns && bounds->cleanup_ns &&
+        (!capacity->total_runtime_invocations || bounds->runtime_invocation_ns) &&
+        (capacity->total_runtime_invocations || !bounds->runtime_invocation_ns) &&
+        tp_retirement_campaign_u64_add(capacity->total_compiler_invocations,
+            capacity->total_runtime_invocations, &expected_invocations) &&
+        expected_invocations == capacity->total_invocations &&
+        tp_retirement_campaign_u64_mul(bounds->settling_per_stage_ns,
+            TP_RETIREMENT_CAMPAIGN_STAGES, &settling_ns) &&
+        tp_retirement_campaign_u64_mul(bounds->sample_export_per_stage_ns,
+            TP_RETIREMENT_CAMPAIGN_STAGES, &export_ns) &&
+        tp_retirement_campaign_u64_mul(capacity->total_compiler_invocations,
+            bounds->compiler_invocation_ns, &compiler_ns) &&
+        tp_retirement_campaign_u64_mul(capacity->total_runtime_invocations,
+            bounds->runtime_invocation_ns, &runtime_ns);
+    if (ok)
+    {
+        uint64_t fixed_parts[] = {
+            bounds->reservation_ns, bounds->materialization_ns,
+            bounds->baseline_build_ns, bounds->candidate_build_ns,
+            bounds->correctness_ns, settling_ns, bounds->aa_qualification_ns,
+            bounds->aa_receipt_sealing_ns, export_ns, bounds->final_statistics_ns,
+            bounds->final_sealing_ns, bounds->cleanup_ns
+        };
+        for (unsigned i = 0; ok && i < BUSTER_ARRAY_LENGTH(fixed_parts); ++i)
+            ok = tp_retirement_campaign_u64_add(fixed_ns, fixed_parts[i], &fixed_ns);
+        ok = ok && tp_retirement_campaign_u64_add(fixed_ns, compiler_ns, &required_ns) &&
+            tp_retirement_campaign_u64_add(required_ns, runtime_ns, &required_ns);
+    }
+    if (preflight) *preflight = (TpRetirementCampaignPreflight){0};
+    if (ok && preflight)
+    {
+        preflight->fixed_phase_ns = fixed_ns;
+        preflight->compiler_invocation_total_ns = compiler_ns;
+        preflight->runtime_invocation_total_ns = runtime_ns;
+        preflight->required_ns = required_ns;
+        preflight->fits = required_ns <= TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS;
+        if (preflight->fits)
+            preflight->remaining_ns = TP_RETIREMENT_CAMPAIGN_WHOLE_JOB_BUDGET_NS - required_ns;
+        ok = preflight->fits;
+    }
+    else ok = 0;
     return ok;
 }
 
