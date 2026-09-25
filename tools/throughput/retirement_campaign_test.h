@@ -73,6 +73,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         .frozen_before_samples = 1};
     char const* identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     TpRetirementCampaign campaign = {0};
+    BqRetirementCampaignBinding binding = {0};
     TpRetirementCampaignCommand snapshots[8];
     unsigned identities[3];
     BqRetirementTrustedRow trusted[7] = {0};
@@ -103,9 +104,11 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     }
     bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
     CHECK(bq_retirement_correctness_ready(&gate));
-    CHECK(bq_retirement_campaign_bind(&gate, &campaign, &plan, &aa.samples, &ab.samples,
+    CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
         &frozen, &frozen, commands[0], commands[1], snapshots, 8,
         identities, 3, identity, identity));
+    CHECK(binding.campaign == &campaign && binding.gate == &gate &&
+          !strcmp(binding.sealed_sha256, gate.sealed_sha256));
     CHECK(campaign.phase == TP_RETIREMENT_CAMPAIGN_AA && campaign.row_ids[0] == 6 &&
           campaign.capacity.invocations_per_stage == 488 &&
           campaign.capacity.samples_per_stage == 120 &&
@@ -133,7 +136,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
             int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
             TpProcessInputs inputs = {binary, cwd, log, environment};
             TpRetirementMeasurementResult measured;
-            ok = log >= 3 && tp_retirement_campaign_run(&campaign, &commands[stage][index],
+            ok = log >= 3 && bq_retirement_campaign_run(&binding, &commands[stage][index],
                 &inputs, cwd, &measured);
             CHECK(ok && measured.status == TP_RETIREMENT_MEASUREMENT_COMPLETE);
             if (log >= 3) CHECK(close(log) == 0);
@@ -189,6 +192,44 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     test_sample_close(&aa);
     test_sample_close(&ab);
 
+    /* Recheck the full #1020 seal at the launch boundary. A changed fact or
+     * self-consistent reseal after freeze cannot start even the first child. */
+    for (unsigned scenario = 0; scenario < 2; ++scenario)
+    {
+        CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
+        CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
+            aa.runtime, 1, 60, aa.workspace, 5));
+        CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
+            ab.runtime, 1, 60, ab.workspace, 5));
+        aa.transcript.cpu = ab.transcript.cpu = cpu;
+        campaign = (TpRetirementCampaign){0};
+        binding = (BqRetirementCampaignBinding){0};
+        CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
+            &frozen, &frozen, commands[0], commands[1], snapshots, 8,
+            identities, 3, identity, identity));
+        char original_artifact_digit = facts[6].side[1].artifact_sha256[0];
+        facts[6].side[1].artifact_sha256[0] = original_artifact_digit == 'e' ? 'f' : 'e';
+        if (scenario) bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+        CHECK(scenario ? bq_retirement_correctness_ready(&gate) :
+                         !bq_retirement_correctness_ready(&gate));
+        int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        TpProcessInputs inputs = {binary, cwd, log, environment};
+        TpRetirementMeasurementResult measured;
+        struct stat unchanged;
+        CHECK(log >= 3 && !bq_retirement_campaign_run(&binding, &commands[0][0],
+            &inputs, cwd, &measured) &&
+            measured.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID &&
+            campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&
+            aa.samples.failed && ab.samples.failed &&
+            !aa.execution.sequence && !ab.execution.sequence &&
+            fstat(log, &unchanged) == 0 && unchanged.st_size == 0 &&
+            fstatat(cwd, "artifact-left.bin", &unchanged, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
+        facts[6].side[1].artifact_sha256[0] = original_artifact_digit;
+        if (scenario) bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+        if (log >= 3) CHECK(close(log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
+        test_sample_close(&aa); test_sample_close(&ab);
+    }
+
     /* Mutation of a frozen oracle fails before launch and poisons both stages. */
     CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
     CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
@@ -223,7 +264,8 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     facts[6].side[1].artifact_sha256[0] = 'e';
     bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
     CHECK(bq_retirement_correctness_ready(&gate));
-    CHECK(!bq_retirement_campaign_bind(&gate, &campaign, &plan, &aa.samples, &ab.samples,
+    binding = (BqRetirementCampaignBinding){0};
+    CHECK(!bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
         &frozen, &frozen, commands[0], commands[1], snapshots, 8,
         identities, 3, identity, identity) &&
         campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID &&

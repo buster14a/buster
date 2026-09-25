@@ -147,6 +147,17 @@ section remains zero; a zero baseline has no code ratio denominator.
    the same identities across lane D's frozen commands and gate its first timed
    invocation. A later mutation removes structural readiness.
 
+`retirement_campaign_binding.h` captures the finished seal when it freezes
+lane D. Its private `bq_retirement_campaign_run` must be the service's path
+for every timed invocation: it rejects a changed seal on each call and rehashes
+the whole gate before the first A/A and first A/B child. A failed check poisons
+the campaign and both sample streams before launch. The service must keep the
+gate, underlying row/check arrays and authenticated inputs immutable through
+collection; rehashing all 78,912 object rows before each of millions of child
+launches is deliberately avoided. The focused real-child fixture verifies zero
+launches when a fact changes after freeze, including a newly computed seal.
+The production worker has not yet been wired to this adapter.
+
 `sealed_sha256` is a private in-process integrity check, not publication,
 service authority, or a performance verdict. The integration owner must make
 the trusted importer, execution and receipt readback concrete, persist the
