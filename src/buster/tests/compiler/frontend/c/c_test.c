@@ -7021,6 +7021,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
         {S8("__builtin_ffs"), all_targets},
         {S8("__builtin_ffsl"), all_targets},
         {S8("__builtin_ffsll"), all_targets},
+        {S8("__builtin_clz"), all_targets},
+        {S8("__builtin_clzl"), all_targets},
+        {S8("__builtin_clzll"), all_targets},
+        {S8("__builtin_ctz"), all_targets},
+        {S8("__builtin_ctzl"), all_targets},
+        {S8("__builtin_ctzll"), all_targets},
+        {S8("__builtin_popcount"), all_targets},
+        {S8("__builtin_popcountl"), all_targets},
+        {S8("__builtin_popcountll"), all_targets},
         {S8("__is_target_arch"), all_targets},
         {S8("not_a_builtin"), 0},
         {S8("__atomic_"), 0},
@@ -7136,6 +7145,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_has_builtin(UnitTestArguments* argumen
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_ffs_sources[index], (CPreprocessOptions){.target = targets[0]});
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);
+        BUSTER_TEST(arguments, parse.diagnostic_count != 0);
+        scratch_end(temporary);
+    }
+
+    // The nine fixed-signature bit-count spellings take unsigned
+    // int/long/long long and return signed int. The target-dependent long
+    // width must be visible in canonical IR on both frontend forms.
+    for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
+    {
+        for (u32 memory_form = 0; memory_form < 2; memory_form += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            Target target = targets[target_index];
+            String8 source = S8(
+                "_Static_assert(sizeof(__builtin_clz(1u)) == sizeof(int), \"clz result\");\n"
+                "_Static_assert(sizeof(__builtin_clzl(1ul)) == sizeof(int), \"clzl result\");\n"
+                "_Static_assert(sizeof(__builtin_clzll(1ull)) == sizeof(int), \"clzll result\");\n"
+                "_Static_assert(sizeof(__builtin_ctz(1u)) == sizeof(int), \"ctz result\");\n"
+                "_Static_assert(sizeof(__builtin_ctzl(1ul)) == sizeof(int), \"ctzl result\");\n"
+                "_Static_assert(sizeof(__builtin_ctzll(1ull)) == sizeof(int), \"ctzll result\");\n"
+                "_Static_assert(sizeof(__builtin_popcount(1u)) == sizeof(int), \"popcount result\");\n"
+                "_Static_assert(sizeof(__builtin_popcountl(1ul)) == sizeof(int), \"popcountl result\");\n"
+                "_Static_assert(sizeof(__builtin_popcountll(1ull)) == sizeof(int), \"popcountll result\");\n"
+                "int query_counts(unsigned long long value) {\n"
+                "    return __builtin_clz(value) + __builtin_clzl(value) + __builtin_clzll(value) +\n"
+                "           __builtin_ctz(value) + __builtin_ctzl(value) + __builtin_ctzll(value) +\n"
+                "           __builtin_popcount(value) + __builtin_popcountl(value) + __builtin_popcountll(value);\n"
+                "}\n");
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, source, (CPreprocessOptions){.target = target});
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0);
+            if (BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 0 && parse.diagnostic_count == 0))
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("count-signatures.c"), preprocess, parse, target,
+                    (CIRLowerOptions){.disable_direct_ssa = memory_form != 0});
+                if (BUSTER_REQUIRE(arguments, lowered.diagnostic_count == 0 && lowered.program && lowered.program->module_count == 1))
+                {
+                    IrModule* module = lowered.program->modules;
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, module).error == IR_VALIDATION_NONE);
+                    IrFunction* function = c_test_find_ir_function(module, S8("query_counts"));
+                    if (BUSTER_REQUIRE(arguments, function != 0))
+                    {
+                        u32 count_width_32 = 0;
+                        u32 count_width_64 = 0;
+                        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+                        {
+                            IrInstruction* instruction = function->instructions + instruction_index;
+                            if (instruction->opcode == IR_OPCODE_UNARY &&
+                                (instruction->unary_operation == IR_UNARY_INTEGER_COUNT_LEADING_ZEROS ||
+                                 instruction->unary_operation == IR_UNARY_INTEGER_COUNT_TRAILING_ZEROS))
+                            {
+                                IrType* type = ir_type_from_id(&lowered.program->types, instruction->canonical_type);
+                                if (BUSTER_REQUIRE(arguments, type != 0))
+                                {
+                                    count_width_32 += type->bit_width == 32;
+                                    count_width_64 += type->bit_width == 64;
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, count_width_32 == (target_uses_llp64_data_model(target) ? 4u : 2u));
+                        BUSTER_TEST(arguments, count_width_64 == (target_uses_llp64_data_model(target) ? 2u : 4u));
+                        BUSTER_TEST(arguments, c_test_ir_call_count(function) == 0);
+                    }
+                }
+            }
+            scratch_end(temporary);
+        }
+    }
+
+    String8 invalid_count_sources[] = {
+        S8("int f(void) { return __builtin_clz(); }"),
+        S8("int f(void) { return __builtin_clzll(1, 2); }"),
+        S8("int f(void) { return __builtin_ctzl((int*)0); }"),
+        S8("int f(void) { return __builtin_popcountll((struct Bad { int x; }){0}); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid_count_sources); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, invalid_count_sources[index], (CPreprocessOptions){.target = targets[0]});
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         CAnalysisResult parse = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
         BUSTER_TEST(arguments, preprocess.diagnostic_count == 0);

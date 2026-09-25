@@ -20075,13 +20075,26 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             {
                 return false;
             }
-            IrTypeId type = builder->function->values[operand.value].canonical_type;
-            IrType* type_value = ir_type_from_id(&builder->program->types, type);
-            bool find_first_set = c_ir_token_builtin_kind(builder, token) == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
-            if (!type_value || (!find_first_set && type_value->kind != IR_TYPE_INTEGER))
+            CSymbolBuiltin builtin = c_ir_token_builtin_kind(builder, token);
+            CTypeKind parameter_kind = c_semantic_integer_count_parameter_kind(builtin,
+                c_token_spelling(builder->preprocess.spelling_base, token));
+            bool find_first_set = builtin == C_SYMBOL_BUILTIN_FIND_FIRST_SET;
+            IrTypeId original_type = builder->function->values[operand.value].canonical_type;
+            IrType* original = ir_type_from_id(&builder->program->types, original_type);
+            if (!original || (!find_first_set && original->kind != IR_TYPE_INTEGER && original->kind != IR_TYPE_BOOLEAN &&
+                              original->kind != IR_TYPE_FLOAT && !original->is_complex))
             {
                 return false;
             }
+            if (parameter_kind != C_TYPE_INVALID)
+            {
+                operand = c_ir_emit_cast(builder, operand, builder->scalar_types[parameter_kind], c_ir_token_source_range(builder, token));
+                if (operand.value == IR_ID_UNDERLYING_INVALID)
+                {
+                    return false;
+                }
+            }
+            IrTypeId type = builder->function->values[operand.value].canonical_type;
             IrSourceRange instruction_source = c_ir_token_source_range(builder, token);
             IrValueId result = IR_VALUE_ID_INVALID;
             if (find_first_set)
@@ -20107,6 +20120,14 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 instruction.result = result;
                 IrInstructionId id = c_ir_append_instruction(builder, instruction, instruction_source);
                 builder->function->values[result.value].definition = id;
+            }
+            if (parameter_kind != C_TYPE_INVALID && result.value != IR_ID_UNDERLYING_INVALID)
+            {
+                result = c_ir_emit_cast(builder, result, builder->s32_type, instruction_source);
+            }
+            if (result.value == IR_ID_UNDERLYING_INVALID)
+            {
+                return false;
             }
             selected->result = result;
             selected->argument_count = 1;
@@ -25927,6 +25948,24 @@ BUSTER_C_INTERNAL bool c_ir_sizeof_operand_identifier_type_attempt(CIntegerIrBui
     CToken token = builder->preprocess.tokens[start];
     String8 name = c_token_spelling(builder->preprocess.spelling_base, token);
     u32 chain_start = start + 1;
+
+    // A count builtin has no declared function entity. Resolve its fixed
+    // signed-int result before a surrounding conditional predicts the type
+    // of either arm, even when the call has not been emitted yet.
+    if (c_semantic_integer_count_parameter_kind(c_ir_token_builtin_kind(builder, token), name) != C_TYPE_INVALID)
+    {
+        if (chain_start >= end || !c_token_is_punctuator(&builder->preprocess.tokens[chain_start], C_PUNCTUATOR_LEFT_PARENTHESIS))
+        {
+            return false;
+        }
+        u32 close = c_ir_matching_delimiter_cached(builder, chain_start, end, C_PUNCTUATOR_LEFT_PARENTHESIS, C_PUNCTUATOR_RIGHT_PARENTHESIS);
+        if (close >= end)
+        {
+            return false;
+        }
+        *type_out = builder->s32_type;
+        return c_ir_sizeof_operand_postfix_chain_attempt(builder, type_out, close + 1, end, promote_bit_fields);
+    }
 
     // Builtin math names are parser symbols rather than ordinary declarations,
     // so they have no CEntity/signature for the strict type walk to query.
