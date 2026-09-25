@@ -228,6 +228,25 @@ BUSTER_GLOBAL_LOCAL int bq_retirement_build_source_fd(BqRetirementMatchedBuild c
     return source;
 }
 
+/* A successful no-op build must not inherit an earlier executable from the
+ * shared configured pathname. The worker owns isolation until the child and
+ * all descendants have been reaped; this check precedes log and child creation. */
+BUSTER_GLOBAL_LOCAL bool bq_retirement_build_output_absent(BqRetirementMatchedBuild const* build)
+{
+    int root = bq_open_absolute_directory(string_from_pointer(build->build));
+    bool ok = root >= 3;
+    int release = ok ? openat(root, "Release", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    if (ok && release < 0) ok = errno == ENOENT;
+    if (release >= 0)
+    {
+        struct stat output = {0};
+        ok = fstatat(release, "ide", &output, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+        if (close(release) != 0) ok = false;
+    }
+    if (root >= 0 && close(root) != 0) ok = false;
+    return ok;
+}
+
 /* The child keeps verified executable and source descriptors through setup;
  * replacement of either pathname cannot select different bytes or a cwd. The
  * worker still owns the separate candidate UID and sandbox around this stage. */
@@ -284,6 +303,11 @@ bool bq_retirement_matched_build_launch(BqRetirementMatchedBuild* build,
     int source = ok ? bq_retirement_build_source_fd(build) : -1;
     if (ok && source < 3) build->failed = true;
     ok = ok && source >= 3;
+    if (ok && (build->next & 1u))
+    {
+        ok = bq_retirement_build_output_absent(build);
+        if (!ok) build->failed = true;
+    }
     int directory = ok ? bq_open_absolute_directory(string_from_pointer(build->attempt)) : -1;
     ok = ok && directory >= 3 && bq_owned_directory(directory, true, false) &&
          fstat(directory, &directory_stat) == 0;
