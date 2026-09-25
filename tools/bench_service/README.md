@@ -103,13 +103,15 @@ returns without dereferencing or reserving one.
 
 A successful result is not committed across an unchecked signal window.
 Cancellation is sampled after each durable success-phase transition and after
-physical workspace removal. TERM/INT are masked at a checked boundary
-immediately before the final journal append; that boundary is the completion
-linearization point. A cancellation ordered before it makes the terminal
-outcome `cancelled` on replay. If the success bundle was already published,
-the terminal cancellation retains and binds that exact success bundle/digest
-and publishes a separate cancellation outcome record; replay never replaces
-or loses the durable artifact.
+physical workspace removal. The supervisor validates and binds the retained
+result bundle while TERM/INT are masked, then checks for pending signals at
+the terminal journal boundary, consumes and records any pending cancellation,
+and keeps them masked through the terminal append. A cancellation ordered
+before that checked boundary makes the terminal outcome `cancelled` on replay.
+If the success bundle was already published, the terminal cancellation
+retains and binds that exact success bundle/digest and publishes a separate
+cancellation outcome record; replay never replaces or loses the durable
+artifact.
 
 ## Result bundle and retained evidence
 
@@ -201,6 +203,16 @@ the retirement descriptor remains blocked pending its full correctness,
 sampling, host-qualification and replay integration. The six-argument direct
 recipe test seam remains available; the installed worker supplies the seventh,
 private channel descriptor itself. No public request selects a descriptor.
+
+The fixed worker budget is one hour and starts before materialization. The
+historical 60-pair arithmetic capacity model in [EXPORT.md](EXPORT.md) has
+35,463,936 compiler invocations before its separately modeled runtime
+invocations; it is not the current support population or a measured host-rate
+bound. Those compiler calls alone would have to average under 101.5
+microseconds across the whole job, leaving no budget for preparation,
+validation, cleanup or manager overhead. No measured end-to-end bound
+establishes that the full population fits this worker budget, so the blocked
+recipe is not admitted on a capacity assumption.
 
 The production systemd path is Linux-only. Windows and macOS return
 `unsupported`; those builds still compile the bounded codec and portable

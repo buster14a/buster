@@ -12,18 +12,21 @@
 #ifdef __linux__
 static void test_retirement_campaign(char const* executable_path, char const* root)
 {
-    char directory[TP_PATH_CAP], binary_path[TP_PATH_CAP];
+    char directory[TP_PATH_CAP], binary_path[TP_PATH_CAP], candidate_path[TP_PATH_CAP];
     CHECK(tp_path(directory, root, "campaign-fixture") && tp_mkdirs(directory));
     CHECK(test_text(directory, "cwd-marker", "fixed cwd\n"));
     CHECK(tp_path(binary_path, directory, "fixture-child") && tp_copy_file(executable_path, binary_path));
-    CHECK(chmod(binary_path, 0500) == 0);
+    CHECK(tp_path(candidate_path, directory, "fixture-candidate-child") &&
+          tp_copy_file(executable_path, candidate_path));
+    CHECK(chmod(binary_path, 0500) == 0 && chmod(candidate_path, 0500) == 0);
     int binary = open(binary_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int candidate_binary = open(candidate_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     int cwd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     int leak = fcntl(binary, F_DUPFD, 512);
     char leak_text[32], binary_sha[65], artifact_sha[65], code_sha[65], runtime_sha[65];
     uint64_t binary_bytes = 0;
     snprintf(leak_text, sizeof(leak_text), "%d", leak);
-    CHECK(binary >= 3 && cwd >= 3 && leak >= 3 &&
+    CHECK(binary >= 3 && candidate_binary >= 3 && cwd >= 3 && leak >= 3 &&
           tp_retirement_file_hash(binary, binary_sha, &binary_bytes) && binary_bytes);
     TpRetirementExecutable frozen;
     CHECK(tp_retirement_executable_init(&frozen, binary, binary_sha));
@@ -74,6 +77,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     char const* identity = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     TpRetirementCampaign campaign = {0};
     BqRetirementCampaignBinding binding = {0};
+    BqRetirementHeldBinaries held = {.descriptors = {-1, -1}};
     TpRetirementCampaignCommand snapshots[8];
     unsigned identities[3];
     BqRetirementTrustedRow trusted[7] = {0};
@@ -84,8 +88,21 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     gate.finished = 1;
     gate.trusted_rows = trusted;
     gate.facts = facts;
+    memcpy(gate.prepared.preparation_sha256, identity, 65);
+    memcpy(gate.prepared.source_sha256[0], identity, 65);
+    memcpy(gate.prepared.source_sha256[1], identity, 65);
     memcpy(gate.prepared.binary_sha256[0], binary_sha, 65);
     memcpy(gate.prepared.binary_sha256[1], binary_sha, 65);
+    held.owned = 1;
+    held.descriptors[0] = binary;
+    held.descriptors[1] = candidate_binary;
+    memcpy(held.verified.preparation_sha256, gate.prepared.preparation_sha256, 65);
+    memcpy(held.verified.directory_identity_sha256, identity, 65);
+    memcpy(held.verified.source_sha256, gate.prepared.source_sha256, sizeof(held.verified.source_sha256));
+    memcpy(held.verified.binary_sha256, gate.prepared.binary_sha256, sizeof(held.verified.binary_sha256));
+    CHECK(bq_retirement_campaign_descriptor_identity(binary, held.verified.binary_identity_sha256[0]) &&
+          bq_retirement_campaign_descriptor_identity(candidate_binary, held.verified.binary_identity_sha256[1]) &&
+          strcmp(held.verified.binary_identity_sha256[0], held.verified.binary_identity_sha256[1]));
     for (unsigned row = 0; row < 7; ++row)
     {
         trusted[row].row = facts[row].row = row;
@@ -115,8 +132,64 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     sha256_finish_hex(&hash, gate.prepared.aa_second_commands_sha256);
     bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
     CHECK(bq_retirement_correctness_ready(&gate));
-    CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
-        &frozen, &frozen, commands[0], commands[1], snapshots, 8,
+    test_sample_close(&aa);
+    test_sample_close(&ab);
+    char candidate_identity[SHA256_HEX_CAPACITY];
+    memcpy(candidate_identity, held.verified.binary_identity_sha256[1], sizeof(candidate_identity));
+    for (unsigned scenario = 0; scenario < 4; ++scenario)
+    {
+        CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
+        if (scenario == 0)
+            aa.transcript.attempt = ab.transcript.attempt = 3;
+        else if (scenario == 1)
+            strcpy(ab.transcript.job, "job-2");
+        else if (scenario == 2)
+        {
+            gate.prepared.source_sha256[1][0] = 'b';
+            bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+            CHECK(bq_retirement_correctness_ready(&gate));
+        }
+        int alias = -1;
+        if (scenario == 3)
+        {
+            alias = fcntl(binary, F_DUPFD_CLOEXEC, 512);
+            held.descriptors[1] = alias;
+            memcpy(held.verified.binary_identity_sha256[1],
+                   held.verified.binary_identity_sha256[0], SHA256_HEX_CAPACITY);
+        }
+        campaign = (TpRetirementCampaign){0};
+        binding = (BqRetirementCampaignBinding){0};
+        CHECK(!bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan,
+            &aa.samples, &ab.samples, &held, 1, 2, commands[0], commands[1], snapshots, 8,
+            identities, 3, identity, identity) &&
+            campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && aa.samples.failed && ab.samples.failed &&
+            !aa.execution.sequence && !ab.execution.sequence && !binding.campaign);
+        if (scenario == 2)
+        {
+            gate.prepared.source_sha256[1][0] = 'a';
+            bq_retirement_correctness_seal(&gate, gate.sealed_sha256);
+            CHECK(bq_retirement_correctness_ready(&gate));
+        }
+        if (scenario == 3)
+        {
+            held.descriptors[1] = candidate_binary;
+            memcpy(held.verified.binary_identity_sha256[1], candidate_identity,
+                   sizeof(candidate_identity));
+            CHECK(alias >= 3 && close(alias) == 0);
+        }
+        test_sample_close(&aa);
+        test_sample_close(&ab);
+    }
+    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
+    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
+        aa.runtime, 1, 60, aa.workspace, 5));
+    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
+        ab.runtime, 1, 60, ab.workspace, 5));
+    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    campaign = (TpRetirementCampaign){0};
+    binding = (BqRetirementCampaignBinding){0};
+    CHECK(bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
+        &held, 1, 2, commands[0], commands[1], snapshots, 8,
         identities, 3, identity, identity));
     CHECK(binding.campaign == &campaign && binding.gate == &gate &&
           !strcmp(binding.sealed_sha256, gate.sealed_sha256));
@@ -145,7 +218,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         {
             unsigned index = invocation.kind * 2 + invocation.variant;
             int log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-            TpProcessInputs inputs = {binary, cwd, log, environment};
+            TpProcessInputs inputs = {held.descriptors[stage && invocation.variant], cwd, log, environment};
             TpRetirementMeasurementResult measured;
             ok = log >= 3 && bq_retirement_campaign_run(&binding, &commands[stage][index],
                 &inputs, cwd, &measured);
@@ -203,6 +276,63 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
     test_sample_close(&aa);
     test_sample_close(&ab);
 
+    /* The held-record join is checked again at launch, after freeze. */
+    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
+    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
+        aa.runtime, 1, 60, aa.workspace, 5));
+    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
+        ab.runtime, 1, 60, ab.workspace, 5));
+    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    campaign = (TpRetirementCampaign){0};
+    binding = (BqRetirementCampaignBinding){0};
+    CHECK(bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan,
+        &aa.samples, &ab.samples, &held, 1, 2, commands[0], commands[1],
+        snapshots, 8, identities, 3, identity, identity));
+    char held_binary_digit = held.verified.binary_sha256[1][0];
+    held.verified.binary_sha256[1][0] = held_binary_digit == 'e' ? 'f' : 'e';
+    int held_guard_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    TpProcessInputs held_guard_inputs = {binary, cwd, held_guard_log, environment};
+    TpRetirementMeasurementResult held_guard_result;
+    struct stat held_guard_stat;
+    CHECK(held_guard_log >= 3 && !bq_retirement_campaign_run(&binding, &commands[0][0],
+        &held_guard_inputs, cwd, &held_guard_result) &&
+        held_guard_result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID &&
+        campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && aa.samples.failed && ab.samples.failed &&
+        !aa.execution.sequence && !ab.execution.sequence && fstat(held_guard_log, &held_guard_stat) == 0 &&
+        held_guard_stat.st_size == 0 &&
+        fstatat(cwd, "artifact-left.bin", &held_guard_stat, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
+    held.verified.binary_sha256[1][0] = held_binary_digit;
+    if (held_guard_log >= 3)
+        CHECK(close(held_guard_log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
+    test_sample_close(&aa);
+    test_sample_close(&ab);
+
+    /* The lower-level freeze helper cannot launch without held service files. */
+    CHECK(test_sample_open(&aa, 1) && test_sample_open(&ab, 1));
+    CHECK(tp_retirement_execution_init_rows(&aa.execution, 7, 1, census_id, 7,
+        aa.runtime, 1, 60, aa.workspace, 5));
+    CHECK(tp_retirement_execution_init_rows(&ab.execution, 7, 1, census_id, 7,
+        ab.runtime, 1, 60, ab.workspace, 5));
+    aa.transcript.cpu = ab.transcript.cpu = cpu;
+    campaign = (TpRetirementCampaign){0};
+    binding = (BqRetirementCampaignBinding){0};
+    CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
+        &frozen, &frozen, commands[0], commands[1], snapshots, 8, identities, 3, identity, identity));
+    int unheld_log = openat(cwd, "child.log", O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    TpProcessInputs unheld_inputs = {binary, cwd, unheld_log, environment};
+    TpRetirementMeasurementResult unheld_result;
+    struct stat unheld_stat;
+    CHECK(unheld_log >= 3 && !bq_retirement_campaign_run(&binding, &commands[0][0],
+        &unheld_inputs, cwd, &unheld_result) &&
+        unheld_result.status == TP_RETIREMENT_MEASUREMENT_PLAN_INVALID &&
+        campaign.phase == TP_RETIREMENT_CAMPAIGN_INVALID && aa.samples.failed && ab.samples.failed &&
+        !aa.execution.sequence && !ab.execution.sequence && fstat(unheld_log, &unheld_stat) == 0 &&
+        unheld_stat.st_size == 0 &&
+        fstatat(cwd, "artifact-left.bin", &unheld_stat, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
+    if (unheld_log >= 3) CHECK(close(unheld_log) == 0 && unlinkat(cwd, "child.log", 0) == 0);
+    test_sample_close(&aa);
+    test_sample_close(&ab);
+
     /* Both baseline-label-2 command kinds require the sealed precommit;
      * a different, self-consistent plan fails before the first timed child. */
     for (unsigned kind = 0; kind < 2; ++kind)
@@ -242,8 +372,8 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
         aa.transcript.cpu = ab.transcript.cpu = cpu;
         campaign = (TpRetirementCampaign){0};
         binding = (BqRetirementCampaignBinding){0};
-        CHECK(bq_retirement_campaign_bind(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
-            &frozen, &frozen, commands[0], commands[1], snapshots, 8,
+        CHECK(bq_retirement_campaign_bind_held(&binding, &gate, &campaign, &plan, &aa.samples, &ab.samples,
+            &held, 1, 2, commands[0], commands[1], snapshots, 8,
             identities, 3, identity, identity));
         char original_artifact_digit = facts[6].side[1].artifact_sha256[0];
         facts[6].side[1].artifact_sha256[0] = original_artifact_digit == 'e' ? 'f' : 'e';
@@ -376,6 +506,7 @@ static void test_retirement_campaign(char const* executable_path, char const* ro
 
     if (leak >= 3) CHECK(close(leak) == 0);
     if (cwd >= 3) CHECK(close(cwd) == 0);
+    if (candidate_binary >= 3) CHECK(close(candidate_binary) == 0);
     if (binary >= 3) CHECK(close(binary) == 0);
 }
 #endif

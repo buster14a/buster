@@ -1,9 +1,11 @@
-/* Private #1018 -> #1020 service join. The caller supplies independently
- * authenticated #508/#509 row/check/oracle declarations; this entry point
- * independently reads the pinned support declaration through a held descriptor
- * to derive the complete object census size and join each object ordinal to its
- * approved source hash and target. It binds binary identities to A readback.
- * The caller still owes the full validator/applicability/oracle replay.
+/* Private #1018 -> #1020 service join. The caller supplies held descriptors for
+ * the pinned #508 support declaration, inputs.tsv, and raw rows.tsv. The input
+ * and row files each require separate compiled-profile digests; B declaration
+ * digests are consistency checks only. This entry point validates the exact
+ * source-ledger join, fixture recipes, complete fixed matrix and #508 canonical
+ * row identities, then binds binary identities to A readback. Validator-derived
+ * eligibility and per-row configuration receipts still require independent
+ * replay and approved authority.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_SERVICE_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_SERVICE_H
@@ -12,7 +14,8 @@
 #include "retirement_correctness.h"
 
 BUSTER_F_DECL BqError bq_retirement_correctness_begin_service(BqQueue* queue, BqJob const* job,
-    int installed, int workspaces, int support_declaration, String8 workspace_root,
+    int installed, int workspaces, int support_declaration, int census_inputs, int census_rows,
+    String8 workspace_root,
     char const preparation_sha256[SHA256_HEX_CAPACITY],
     char const record_sha256[SHA256_HEX_CAPACITY],
     char const build_record_sha256[SHA256_HEX_CAPACITY], BqRetirementPrepared const* prepared,

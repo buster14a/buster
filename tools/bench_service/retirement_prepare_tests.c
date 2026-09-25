@@ -325,6 +325,471 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_support_population(void)
     BQ_PREP_CHECK(rmdir(directory) == 0);
 }
 
+BUSTER_GLOBAL_LOCAL void bq_prep_test_census_append(char* text, u32 capacity, u32* used,
+    BqRetirementTrustedRow* rows, u32 row, u32 target_index, u32 allocator,
+    char const* fixture, char const* fixture_recipe, char const* compile_obligation)
+{
+    u32 subject_row = row % BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT;
+    u32 within_target = subject_row % 16u;
+    u32 frontend = within_target / 8u;
+    u32 pic = (within_target % 8u) / 4u;
+    String8 lowering = frontend ? S8("direct-ssa") : S8("local-backed-canonical");
+    String8 pic_text = pic ? S8("1") : S8("0");
+    String8 execution = target_index == 8 ? S8("unavailable-platform-control") : S8("semantic-gate-509");
+    char line[512] = {0};
+    u32 group = row / BQ_RETIREMENT_CENSUS_ALLOCATOR_COUNT;
+    int length = snprintf(line, sizeof(line),
+        "%u\t%u\t%s\t%.*s\t%.*s\tbaseline\tfixture-features\t%.*s\t%.*s\t%.*s\t1\t%s\t%s\tsemantic-gate-509\t%.*s\tnone\tgroups/%u/%.*s.argv\n",
+        row, group, fixture,
+        (int)bq_retirement_census_targets[target_index].length, bq_retirement_census_targets[target_index].pointer,
+        (int)bq_retirement_census_target_abis[target_index].length, bq_retirement_census_target_abis[target_index].pointer,
+        (int)bq_retirement_census_allocators[allocator].length, bq_retirement_census_allocators[allocator].pointer,
+        (int)lowering.length, lowering.pointer, (int)pic_text.length, pic_text.pointer,
+        fixture_recipe, compile_obligation, (int)execution.length, execution.pointer, group,
+        (int)bq_retirement_census_allocators[allocator].length, bq_retirement_census_allocators[allocator].pointer);
+    bool ok = length > 0 && (u32)length < sizeof(line) &&
+              *used + (u32)length < capacity;
+    if (ok)
+    {
+        memcpy(text + *used, line, (size_t)length);
+        *used += (u32)length;
+        rows[row].row = row;
+        rows[row].census_row = row;
+        rows[row].target = bq_retirement_census_target_ids[target_index];
+        rows[row].stage = BQ_RETIREMENT_STAGE_OBJECT;
+        rows[row].compiler_eligible = strcmp(compile_obligation, "registered-non-object-control") != 0;
+        memset(rows[row].configuration_sha256, '3', 64);
+        rows[row].configuration_sha256[64] = 0;
+    }
+    BQ_PREP_CHECK(ok);
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_census_identity_sha256(String8 fields[17], char digest[65])
+{
+    char json[2048] = {0};
+    int length = snprintf(json, sizeof(json),
+        "{\"PIC\":\"%.*s\",\"allocator\":\"%.*s\",\"argv_evidence\":\"%.*s\","
+        "\"artifact_stage\":\"object\",\"compile_obligation\":\"%.*s\",\"cpu\":\"%.*s\","
+        "\"cpu_features\":\"%.*s\",\"diagnostic_obligation\":\"%.*s\","
+        "\"execution_obligation\":\"%.*s\",\"fixture\":\"%.*s\",\"fixture_recipe\":\"%.*s\","
+        "\"frontend_lowering\":\"%.*s\",\"link_obligation\":\"%.*s\",\"target\":\"%.*s\","
+        "\"target_abi\":\"%.*s\"}",
+        (int)fields[9].length, fields[9].pointer, (int)fields[7].length, fields[7].pointer,
+        (int)fields[16].length, fields[16].pointer, (int)fields[12].length, fields[12].pointer,
+        (int)fields[5].length, fields[5].pointer, (int)fields[6].length, fields[6].pointer,
+        (int)fields[15].length, fields[15].pointer, (int)fields[14].length, fields[14].pointer,
+        (int)fields[2].length, fields[2].pointer, (int)fields[11].length, fields[11].pointer,
+        (int)fields[8].length, fields[8].pointer, (int)fields[13].length, fields[13].pointer,
+        (int)fields[3].length, fields[3].pointer, (int)fields[4].length, fields[4].pointer);
+    bool ok = length > 0 && (u32)length < sizeof(json);
+    if (ok) bq_digest(json, (u32)length, (char8*)digest);
+    return ok;
+}
+
+BUSTER_GLOBAL_LOCAL bool bq_prep_test_write_bytes(char const* path, char const* bytes, u32 count)
+{
+    int file = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0400);
+    bool ok = file >= 3 && bq_write_all(file, (u8 const*)bytes, count) && fsync(file) == 0;
+    if (file >= 3 && close(file) != 0) ok = false;
+    return ok;
+}
+
+/* Both #508 inputs.tsv and rows.tsv need pins independent of B's declaration.
+ * This fixture's input digest below is an independent known SHA-256 vector. */
+BUSTER_GLOBAL_LOCAL void bq_prep_test_raw_census_boundary(void)
+{
+    enum { subject_count = 3, object_rows = subject_count * BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT,
+           all_rows = object_rows + 2,
+           text_capacity = 1024 * 1024 };
+    char directory[] = "/tmp/bq-retirement-raw-census-XXXXXX";
+    char support_path[160] = {0}, inputs_path[160] = {0}, rows_path[160] = {0};
+    bool ok = mkdtemp(directory) != NULL;
+    int length = snprintf(support_path, sizeof(support_path), "%s/support.tsv", directory);
+    ok = ok && length > 0 && (size_t)length < sizeof(support_path);
+    length = ok ? snprintf(inputs_path, sizeof(inputs_path), "%s/inputs.tsv", directory) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(inputs_path);
+    length = ok ? snprintf(rows_path, sizeof(rows_path), "%s/rows.tsv", directory) : -1;
+    ok = ok && length > 0 && (size_t)length < sizeof(rows_path);
+    char const* support = "path\trole\tcompile_obligation\tbytes\tsha256\n"
+        "tests/a.c\tsubject\tsupported-object-zero-fallback\t4\t"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "tests/basic_c_constexpr.c\tsubject\tsupported-object-zero-fallback\t5\t"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "tests/z-control.c\tsubject\tregistered-non-object-control\t6\t"
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n"
+        "tests/zz.h\tsupport-file\tdependency-only\t3\t"
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n";
+    char const* inputs = "path\trole\tcompile_obligation\tbytes\tbuster_hash_64\tsha256\tfixture_recipe\tfixture_flags\n"
+        "tests/a.c\tsubject\tsupported-object-zero-fallback\t4\t11\t"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcompiler-default\t\n"
+        "tests/basic_c_constexpr.c\tsubject\tsupported-object-zero-fallback\t5\t22\t"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tc23\t-std=c23\n"
+        "tests/z-control.c\tsubject\tregistered-non-object-control\t6\t33\t"
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\tcompiler-default\t\n"
+        "tests/zz.h\tsupport-file\tdependency-only\t3\t44\t"
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\tcompiler-default\t\n";
+    ok = ok && bq_prep_test_write(support_path, support) && bq_prep_test_write(inputs_path, inputs);
+    char* text = calloc(text_capacity, 1);
+    char* changed = calloc(text_capacity, 1);
+    BqRetirementTrustedRow* trusted = calloc(all_rows, sizeof(*trusted));
+    ok = ok && text && changed && trusted;
+    u32 used = 0;
+    static char const census_header[] = "row\tgroup\tfixture\ttarget\ttarget_abi\tcpu\tcpu_features\tallocator\tfrontend_lowering\tPIC\tselected\tfixture_recipe\tcompile_obligation\tlink_obligation\texecution_obligation\tdiagnostic_obligation\targv_evidence\n";
+    if (ok)
+    {
+        memcpy(text, census_header, sizeof(census_header) - 1);
+        used = sizeof(census_header) - 1;
+        for (u32 subject = 0; subject < subject_count; subject += 1)
+        {
+            char const* fixture = subject == 0 ? "tests/a.c" :
+                subject == 1 ? "tests/basic_c_constexpr.c" : "tests/z-control.c";
+            char const* fixture_recipe = subject == 1 ? "c23" : "compiler-default";
+            char const* obligation = subject == 2 ? "registered-non-object-control" :
+                "supported-object-zero-fallback";
+            for (u32 target = 0; target < 12; target += 1)
+                for (u32 frontend = 0; frontend < 2; frontend += 1)
+                    for (u32 pic = 0; pic < 2; pic += 1)
+                        for (u32 allocator = 0; allocator < BQ_RETIREMENT_CENSUS_ALLOCATOR_COUNT; allocator += 1)
+                        {
+                            u32 row = subject * BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT + target * 16u +
+                                      frontend * 8u + pic * 4u + allocator;
+                            bq_prep_test_census_append(text, text_capacity, &used, trusted, row, target,
+                                                       allocator, fixture, fixture_recipe, obligation);
+                        }
+        }
+        u64 offset = sizeof(census_header) - 1;
+        u32 census_row = 0;
+        String8 line = {0};
+        String8 text_view = {(char8*)text, used};
+        bool identities_ok = true;
+        while (identities_ok && offset < text_view.length)
+        {
+            identities_ok = bq_next_line(text_view, &offset, &line) && census_row < object_rows;
+            String8 fields[17] = {0};
+            char identity[SHA256_HEX_CAPACITY] = {0};
+            identities_ok = identities_ok && bq_retirement_census_line_fields(line, fields) &&
+                            bq_prep_test_census_identity_sha256(fields, identity);
+            if (identities_ok)
+            {
+                memcpy(trusted[census_row].identity_sha256, identity, SHA256_HEX_CAPACITY);
+                census_row += 1;
+            }
+        }
+        ok = ok && identities_ok && census_row == object_rows;
+        ok = used > sizeof(census_header) - 1 && used < text_capacity &&
+             bq_prep_test_write_bytes(rows_path, text, used);
+    }
+    BqRetirementPrepared prepared = {.rows = all_rows, .object_rows = object_rows, .native_target = 1};
+    if (ok)
+    {
+        bq_digest(support, (u32)strlen(support), (char8*)prepared.support_sha256);
+        bq_digest(text, used, (char8*)prepared.census_sha256);
+        memset(prepared.preparation_sha256, '1', 64);
+        prepared.preparation_sha256[64] = 0;
+        memset(prepared.aa_second_commands_sha256, '2', 64);
+        prepared.aa_second_commands_sha256[64] = 0;
+        for (u32 row = 0; row < object_rows; row += 1)
+        {
+            memcpy(trusted[row].source_sha256, row < BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT ?
+                   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" :
+                   row < 2 * BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT ?
+                   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :
+                   "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", 65);
+        }
+        trusted[object_rows].row = object_rows;
+        trusted[object_rows].census_row = 0;
+        trusted[object_rows].target = bq_retirement_census_target_ids[0];
+        trusted[object_rows].stage = BQ_RETIREMENT_STAGE_LINK;
+        trusted[object_rows + 1].row = object_rows + 1;
+        trusted[object_rows + 1].census_row = 0;
+        trusted[object_rows + 1].target = bq_retirement_census_target_ids[0];
+        trusted[object_rows + 1].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+        memcpy(trusted[object_rows].source_sha256, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 65);
+        memcpy(trusted[object_rows + 1].source_sha256, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 65);
+        String8 known_fields[17] = {
+            S8("0"), S8("0"), S8("tests/a.c"), S8("x86_64-unknown-linux-gnu"), S8("systemv-x86_64"),
+            S8("baseline"), S8("fixture-features"), S8("none"), S8("local-backed-canonical"), S8("0"),
+            S8("1"), S8("compiler-default"), S8("supported-object-zero-fallback"), S8("semantic-gate-509"),
+            S8("semantic-gate-509"), S8("none"), S8("groups/0/none.argv")
+        };
+        char expected_identity[SHA256_HEX_CAPACITY] = {0}, service_identity[SHA256_HEX_CAPACITY] = {0};
+        BQ_PREP_CHECK(bq_prep_test_census_identity_sha256(known_fields, expected_identity) &&
+                      bq_retirement_census_identity_sha256(known_fields, service_identity) &&
+                      !strcmp(expected_identity, "f87f6401cf1b60971613e1fd7f740e30828c1d93b29830b94e681b325433b6fb") &&
+                      !strcmp(expected_identity, service_identity));
+    }
+    static char const inputs_pin[] = "0e2ddd7a187c0aa3371021b5e4d3939440320ab41043ade4f3b087e4d8adb17c";
+    char profile[384] = {0};
+    int profile_length = ok ? snprintf(profile, sizeof(profile),
+        "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+        prepared.support_sha256, inputs_pin, prepared.census_sha256) : -1;
+    ok = ok && profile_length > 0 && (size_t)profile_length < sizeof(profile);
+    BQ_PREP_CHECK(ok);
+    int support_fd = ok ? open(support_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int inputs_fd = ok ? open(inputs_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    int rows_fd = ok ? open(rows_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    BQ_PREP_CHECK(support_fd >= 3 && inputs_fd >= 3 && rows_fd >= 3);
+    if (support_fd >= 3 && inputs_fd >= 3 && rows_fd >= 3)
+    {
+        char verified_inputs[SHA256_HEX_CAPACITY] = {0};
+        char verified_rows[SHA256_HEX_CAPACITY] = {0};
+        BQ_PREP_CHECK(bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                      string_from_pointer(profile), &prepared, trusted, verified_inputs, verified_rows) &&
+                      !memcmp(verified_inputs, inputs_pin, SHA256_HEX_CAPACITY) &&
+                      !memcmp(verified_rows, prepared.census_sha256, SHA256_HEX_CAPACITY));
+        char no_pin[256] = {0};
+        int no_pin_length = snprintf(no_pin, sizeof(no_pin),
+            "support-declaration-sha256=%.64s\ncensus-rows-sha256=%.64s\n",
+            prepared.support_sha256, prepared.census_sha256);
+        BQ_PREP_CHECK(no_pin_length > 0 && (size_t)no_pin_length < sizeof(no_pin) &&
+                      !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(no_pin), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        char altered_pin[65] = {0};
+        memcpy(altered_pin, inputs_pin, 64);
+        altered_pin[0] = altered_pin[0] == '0' ? '1' : '0';
+        char altered_pin_profile[384] = {0};
+        int altered_pin_length = snprintf(altered_pin_profile, sizeof(altered_pin_profile),
+            "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+            prepared.support_sha256, altered_pin, prepared.census_sha256);
+        BQ_PREP_CHECK(altered_pin_length > 0 && (size_t)altered_pin_length < sizeof(altered_pin_profile) &&
+                      !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(altered_pin_profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        char saved = prepared.census_sha256[0];
+        prepared.census_sha256[0] = saved == '0' ? '1' : '0';
+        BQ_PREP_CHECK(!bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        prepared.census_sha256[0] = saved;
+        saved = trusted[17].identity_sha256[0];
+        trusted[17].identity_sha256[0] = saved == '0' ? '1' : '0';
+        BQ_PREP_CHECK(!bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        trusted[17].identity_sha256[0] = saved;
+        BQ_PREP_CHECK(close(rows_fd) == 0);
+        rows_fd = open(rows_path, O_RDONLY | O_NOFOLLOW);
+        BQ_PREP_CHECK(rows_fd >= 3 &&
+                      !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+        rows_fd = open(rows_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(rows_fd >= 3);
+
+        BQ_PREP_CHECK(close(inputs_fd) == 0);
+        inputs_fd = open(inputs_path, O_RDONLY | O_NOFOLLOW);
+        BQ_PREP_CHECK(inputs_fd >= 3 &&
+                      !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                       string_from_pointer(profile), &prepared, trusted,
+                                                       verified_inputs, verified_rows));
+        if (inputs_fd >= 3) BQ_PREP_CHECK(close(inputs_fd) == 0);
+        inputs_fd = open(inputs_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        BQ_PREP_CHECK(inputs_fd >= 3);
+
+        char inputs_changed[2048] = {0};
+        u32 inputs_size = (u32)strlen(inputs);
+        memcpy(inputs_changed, inputs, inputs_size);
+        char* mutated_flag = strstr(inputs_changed, "-std=c23");
+        BQ_PREP_CHECK(mutated_flag != NULL);
+        if (mutated_flag) memcpy(mutated_flag, "-std=c99", strlen("-std=c99"));
+        char mutated_inputs_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(inputs_changed, inputs_size, (char8*)mutated_inputs_digest);
+        char input_mutation_path[160] = {0};
+        int input_mutation_length = snprintf(input_mutation_path, sizeof(input_mutation_path),
+                                             "%s/mutated-inputs.tsv", directory);
+        BQ_PREP_CHECK(mutated_flag && input_mutation_length > 0 &&
+                      (size_t)input_mutation_length < sizeof(input_mutation_path) &&
+                      bq_prep_test_write_bytes(input_mutation_path, inputs_changed, inputs_size));
+        if (mutated_flag && input_mutation_length > 0 &&
+            (size_t)input_mutation_length < sizeof(input_mutation_path))
+        {
+            int mutated_inputs_fd = open(input_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_inputs_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, mutated_inputs_fd, rows_fd,
+                                                           string_from_pointer(profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            char mutated_inputs_profile[384] = {0};
+            int mutated_profile_length = snprintf(mutated_inputs_profile, sizeof(mutated_inputs_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%.64s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, mutated_inputs_digest, prepared.census_sha256);
+            BQ_PREP_CHECK(mutated_profile_length > 0 &&
+                          (size_t)mutated_profile_length < sizeof(mutated_inputs_profile) &&
+                          mutated_inputs_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, mutated_inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_inputs_profile), &prepared,
+                                                           trusted, verified_inputs, verified_rows));
+            if (mutated_inputs_fd >= 3) BQ_PREP_CHECK(close(mutated_inputs_fd) == 0);
+            BQ_PREP_CHECK(unlink(input_mutation_path) == 0);
+        }
+
+        memcpy(inputs_changed, inputs, inputs_size);
+        char* mutated_source_sha = strstr(inputs_changed,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        BQ_PREP_CHECK(mutated_source_sha != NULL);
+        if (mutated_source_sha) memset(mutated_source_sha, 'e', 64);
+        bq_digest(inputs_changed, inputs_size, (char8*)mutated_inputs_digest);
+        input_mutation_length = snprintf(input_mutation_path, sizeof(input_mutation_path),
+                                         "%s/mutated-input-source.tsv", directory);
+        BQ_PREP_CHECK(mutated_source_sha && input_mutation_length > 0 &&
+                      (size_t)input_mutation_length < sizeof(input_mutation_path) &&
+                      bq_prep_test_write_bytes(input_mutation_path, inputs_changed, inputs_size));
+        if (mutated_source_sha && input_mutation_length > 0 &&
+            (size_t)input_mutation_length < sizeof(input_mutation_path))
+        {
+            int mutated_inputs_fd = open(input_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            char mutated_inputs_profile[384] = {0};
+            int mutated_profile_length = snprintf(mutated_inputs_profile, sizeof(mutated_inputs_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%.64s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, mutated_inputs_digest, prepared.census_sha256);
+            BQ_PREP_CHECK(mutated_profile_length > 0 &&
+                          (size_t)mutated_profile_length < sizeof(mutated_inputs_profile) &&
+                          mutated_inputs_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, mutated_inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_inputs_profile), &prepared,
+                                                           trusted, verified_inputs, verified_rows));
+            if (mutated_inputs_fd >= 3) BQ_PREP_CHECK(close(mutated_inputs_fd) == 0);
+            BQ_PREP_CHECK(unlink(input_mutation_path) == 0);
+        }
+
+        memcpy(changed, text, used);
+        char* allocator = strstr(changed + sizeof(census_header) - 1,
+                                 "\tbaseline\tfixture-features\tnone\t");
+        BQ_PREP_CHECK(allocator != NULL);
+        if (allocator) memcpy(allocator + strlen("\tbaseline\tfixture-features\t"), "fast", 4);
+        char allocator_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(changed, used, (char8*)allocator_digest);
+        char allocator_mutation_path[160];
+        int allocator_path_length = snprintf(allocator_mutation_path, sizeof(allocator_mutation_path),
+                                            "%s/mutated-allocator.tsv", directory);
+        BQ_PREP_CHECK(allocator && allocator_path_length > 0 &&
+                      (size_t)allocator_path_length < sizeof(allocator_mutation_path) &&
+                      bq_prep_test_write_bytes(allocator_mutation_path, changed, used));
+        if (allocator && allocator_path_length > 0 &&
+            (size_t)allocator_path_length < sizeof(allocator_mutation_path))
+        {
+            char mutated_profile[384] = {0};
+            int mutated_length = snprintf(mutated_profile, sizeof(mutated_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, inputs_pin, allocator_digest);
+            memcpy(prepared.census_sha256, allocator_digest, SHA256_HEX_CAPACITY);
+            rows_fd = open(allocator_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_length > 0 && (size_t)mutated_length < sizeof(mutated_profile) && rows_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+            bq_digest(text, used, (char8*)prepared.census_sha256);
+            BQ_PREP_CHECK(unlink(allocator_mutation_path) == 0);
+        }
+
+        memcpy(changed, text, used);
+        char* ordinal = strstr(changed + sizeof(census_header) - 1, "\n17\t4\t");
+        BQ_PREP_CHECK(ordinal != NULL);
+        if (ordinal) memcpy(ordinal + 1, "16", 2);
+        char ordinal_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(changed, used, (char8*)ordinal_digest);
+        char ordinal_mutation_path[160];
+        int ordinal_path_length = snprintf(ordinal_mutation_path, sizeof(ordinal_mutation_path),
+                                           "%s/mutated-ordinal.tsv", directory);
+        BQ_PREP_CHECK(ordinal && ordinal_path_length > 0 &&
+                      (size_t)ordinal_path_length < sizeof(ordinal_mutation_path) &&
+                      bq_prep_test_write_bytes(ordinal_mutation_path, changed, used));
+        if (ordinal && ordinal_path_length > 0 && (size_t)ordinal_path_length < sizeof(ordinal_mutation_path))
+        {
+            char mutated_profile[384] = {0};
+            int mutated_length = snprintf(mutated_profile, sizeof(mutated_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, inputs_pin, ordinal_digest);
+            memcpy(prepared.census_sha256, ordinal_digest, SHA256_HEX_CAPACITY);
+            rows_fd = open(ordinal_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_length > 0 && (size_t)mutated_length < sizeof(mutated_profile) && rows_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+            bq_digest(text, used, (char8*)prepared.census_sha256);
+            BQ_PREP_CHECK(unlink(ordinal_mutation_path) == 0);
+        }
+
+        memcpy(changed, text, used);
+        char* row_recipe = strstr(changed + sizeof(census_header) - 1, "\tcompiler-default\t");
+        BQ_PREP_CHECK(row_recipe != NULL);
+        if (row_recipe) row_recipe[strlen("\tcompiler-default") - 1] = 'x';
+        char row_recipe_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(changed, used, (char8*)row_recipe_digest);
+        char row_recipe_path[160] = {0};
+        int row_recipe_path_length = snprintf(row_recipe_path, sizeof(row_recipe_path),
+                                               "%s/mutated-row-recipe.tsv", directory);
+        BQ_PREP_CHECK(row_recipe && row_recipe_path_length > 0 &&
+                      (size_t)row_recipe_path_length < sizeof(row_recipe_path) &&
+                      bq_prep_test_write_bytes(row_recipe_path, changed, used));
+        if (row_recipe && row_recipe_path_length > 0 &&
+            (size_t)row_recipe_path_length < sizeof(row_recipe_path))
+        {
+            char mutated_profile[384] = {0};
+            int mutated_length = snprintf(mutated_profile, sizeof(mutated_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, inputs_pin, row_recipe_digest);
+            memcpy(prepared.census_sha256, row_recipe_digest, SHA256_HEX_CAPACITY);
+            rows_fd = open(row_recipe_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_length > 0 && (size_t)mutated_length < sizeof(mutated_profile) && rows_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+            bq_digest(text, used, (char8*)prepared.census_sha256);
+            BQ_PREP_CHECK(unlink(row_recipe_path) == 0);
+        }
+
+        memcpy(changed, text, used);
+        char* fixture = strstr(changed + sizeof(census_header) - 1, "tests/a.c");
+        BQ_PREP_CHECK(fixture != NULL);
+        if (fixture) memcpy(fixture, "tests/b.c", strlen("tests/b.c"));
+        char source_digest[SHA256_HEX_CAPACITY] = {0};
+        bq_digest(changed, used, (char8*)source_digest);
+        char source_mutation_path[160];
+        int source_mutation_length = snprintf(source_mutation_path, sizeof(source_mutation_path),
+                                               "%s/mutated-source.tsv", directory);
+        BQ_PREP_CHECK(fixture && source_mutation_length > 0 &&
+                      (size_t)source_mutation_length < sizeof(source_mutation_path) &&
+                      bq_prep_test_write_bytes(source_mutation_path, changed, used));
+        if (fixture && source_mutation_length > 0 &&
+            (size_t)source_mutation_length < sizeof(source_mutation_path))
+        {
+            char mutated_profile[384] = {0};
+            int mutated_length = snprintf(mutated_profile, sizeof(mutated_profile),
+                "support-declaration-sha256=%.64s\ncensus-inputs-sha256=%s\ncensus-rows-sha256=%.64s\n",
+                prepared.support_sha256, inputs_pin, source_digest);
+            memcpy(prepared.census_sha256, source_digest, SHA256_HEX_CAPACITY);
+            rows_fd = open(source_mutation_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+            BQ_PREP_CHECK(mutated_length > 0 && (size_t)mutated_length < sizeof(mutated_profile) && rows_fd >= 3 &&
+                          !bq_retirement_census_projection(support_fd, inputs_fd, rows_fd,
+                                                           string_from_pointer(mutated_profile), &prepared, trusted,
+                                                           verified_inputs, verified_rows));
+            if (rows_fd >= 3) BQ_PREP_CHECK(close(rows_fd) == 0);
+            bq_digest(text, used, (char8*)prepared.census_sha256);
+            BQ_PREP_CHECK(unlink(source_mutation_path) == 0);
+        }
+        BQ_PREP_CHECK(close(inputs_fd) == 0);
+        BQ_PREP_CHECK(close(support_fd) == 0);
+    }
+    else
+    {
+        if (support_fd >= 3) close(support_fd);
+        if (inputs_fd >= 3) close(inputs_fd);
+        if (rows_fd >= 3) close(rows_fd);
+    }
+    free(trusted);
+    free(changed);
+    free(text);
+    if (support_path[0]) BQ_PREP_CHECK(unlink(support_path) == 0);
+    if (inputs_path[0]) BQ_PREP_CHECK(unlink(inputs_path) == 0);
+    if (rows_path[0]) BQ_PREP_CHECK(unlink(rows_path) == 0);
+    BQ_PREP_CHECK(rmdir(directory) == 0);
+}
+
 BUSTER_GLOBAL_LOCAL void bq_prep_test_large_manifest(void)
 {
     char root[80] = "/tmp/bq-retirement-large-XXXXXX";
@@ -1544,9 +2009,12 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_ready_handoff(int installed, int workspace
     if (queue_path[0] && ok) bq_prep_test_cleanup(queue_path);
 }
 
+#include "retirement_campaign_service_tests.h"
+
 int main(void)
 {
     bq_prep_test_support_population();
+    bq_prep_test_raw_census_boundary();
     char installed[80] = {0}, workspaces[80] = {0}, profile[512] = {0};
     BqRetirementSource subjects[2] = {0};
     BqRequest request = {0};
@@ -1562,6 +2030,7 @@ int main(void)
         BqRetirementSource verified_base = preparation.subjects[0];
         BQ_PREP_CHECK(preparation.subjects[0].entries == 1 && preparation.subjects[1].entries == 1 &&
                       preparation.source_reservation_bytes > BQ_RETIREMENT_COPY_OVERHEAD);
+        BQ_PREP_CHECK(bq_retirement_campaign_service_test(input, output, &preparation, profile));
         bq_prep_test_ready_handoff(input, output, installed, workspaces, &preparation, profile);
 
         char wrong_profile[512];

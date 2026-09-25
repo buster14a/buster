@@ -1827,25 +1827,55 @@ BUSTER_GLOBAL_LOCAL BqError bq_worker_finish_cancel(BqQueue* queue, BqJob** job)
     return error;
 }
 
+BUSTER_GLOBAL_LOCAL BqError bq_worker_consume_pending_cancel(sigset_t const* pending)
+{
+    int signals[] = {SIGTERM, SIGINT};
+    BqError error = BQ_OK;
+    for (u32 index = 0; error == BQ_OK && index < BUSTER_ARRAY_LENGTH(signals); index += 1)
+    {
+        int member = sigismember(pending, signals[index]);
+        if (member < 0) error = BQ_IO;
+        else if (member == 1)
+        {
+            sigset_t selected;
+            sigemptyset(&selected);
+            if (sigaddset(&selected, signals[index]) != 0) error = BQ_IO;
+            else
+            {
+                struct timespec no_wait = {0};
+                siginfo_t received = {0};
+                int signal_number = sigtimedwait(&selected, &received, &no_wait);
+                /* EAGAIN, EINTR or a different result leaves cancellation
+                 * unproven, so do not append a successful terminal record. */
+                if (signal_number != signals[index]) error = BQ_IO;
+                else bq_worker_cancel_handler(signal_number);
+            }
+        }
+    }
+    return error;
+}
+
 BUSTER_GLOBAL_LOCAL BqError bq_worker_before_terminal(BqQueue* queue, BqJob* job, void* context)
 {
     BqWorkerFinalization* finalization = context;
-    bq_worker_finish_checkpoint();
     sigset_t blocked, pending;
     sigemptyset(&blocked);
     sigaddset(&blocked, SIGTERM);
     sigaddset(&blocked, SIGINT);
     BqError error = sigprocmask(SIG_BLOCK, &blocked, &finalization->prior_mask) == 0 ? BQ_OK : BQ_IO;
     finalization->masked = error == BQ_OK;
-    if (error == BQ_OK && sigpending(&pending) != 0) error = BQ_IO;
-    if (error == BQ_OK && (sigismember(&pending, SIGTERM) == 1 || sigismember(&pending, SIGINT) == 1))
-        bq_worker_cancel_signal = 1;
     if (error == BQ_OK && finalization->config && finalization->config->production_path)
         error = bq_worker_result_validate(finalization->config, job, finalization);
     if (error == BQ_OK && finalization->config && finalization->config->production_path && job && finalization->result_bound)
         error = job->result_bound ? bq_worker_result_binding_validate(job) :
                 bq_result_bind(queue, job, string_from_pointer(finalization->result_root), finalization->result_digest,
                                finalization->bundle_digest, finalization->full_digest);
+    /* Result validation and binding may hash and sync the whole bundle. Keep
+     * TERM/INT blocked across that work, then sample pending signals at the
+     * terminal journal boundary immediately before the FINISHED transition. */
+    if (error == BQ_OK) bq_worker_finish_checkpoint();
+    if (error == BQ_OK && sigpending(&pending) != 0) error = BQ_IO;
+    if (error == BQ_OK) error = bq_worker_consume_pending_cancel(&pending);
     bool cancelled = bq_worker_cancel_signal != 0;
     if (error == BQ_OK) error = bq_worker_finish_cancel(queue, &job);
     if (error == BQ_OK && cancelled && finalization->config && finalization->config->production_path)
