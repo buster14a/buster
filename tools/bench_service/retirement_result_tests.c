@@ -144,6 +144,159 @@ static int fixture_receipt(Fixture* fixture, char const* path, char const* shard
     return valid;
 }
 
+typedef struct QueueAuthorityFixture
+{
+    char path[96];
+    int root;
+} QueueAuthorityFixture;
+
+static int fixture_queue_start(QueueAuthorityFixture* queue)
+{
+    *queue = (QueueAuthorityFixture){.root = -1};
+    strcpy(queue->path, "/tmp/buster-retirement-queue-XXXXXX");
+    int valid = mkdtemp(queue->path) != NULL;
+    if (valid) queue->root = open(queue->path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    valid = valid && queue->root >= 0;
+    return valid;
+}
+
+static void fixture_queue_stop(QueueAuthorityFixture* queue)
+{
+    if (queue->root >= 0)
+    {
+        fixture_clean_directory(queue->root);
+        CHECK(close(queue->root) == 0);
+    }
+    CHECK(rmdir(queue->path) == 0);
+}
+
+static int fixture_authority_ready(Fixture* fixture, TpRetirementReceiptAuthority* authority)
+{
+    int valid = fixture_start(fixture, 4);
+    if (valid) valid = tp_retirement_store_plan(&fixture->store, 2, 3, 1024);
+    if (valid) valid = fixture_publish(fixture, "shard.jsonl", "{}\n", 3, 3);
+    if (valid) valid = fixture_receipt(fixture, "shard.jsonl", "{}\n", 3);
+    if (valid) valid = tp_retirement_store_receipt_authority(&fixture->store, fixture->private_root,
+        TP_RETIREMENT_EXECUTION_RECEIPT_PATH, "job-1", 2, digest_a, digest_b, authority);
+    return valid;
+}
+
+static void test_queue_authority_copy(void)
+{
+    Fixture fixture;
+    QueueAuthorityFixture queue;
+    TpRetirementReceiptAuthority authority;
+    CHECK(fixture_authority_ready(&fixture, &authority));
+    CHECK(fixture_queue_start(&queue));
+    CHECK(tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    struct stat sealed, after;
+    CHECK(fstatat(queue.root, "authority-job-1-2.txt", &sealed, AT_SYMLINK_NOFOLLOW) == 0 &&
+          S_ISREG(sealed.st_mode) && (sealed.st_mode & 0777) == 0400);
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    CHECK(fstatat(queue.root, "authority-job-1-2.txt", &after, AT_SYMLINK_NOFOLLOW) == 0 &&
+          after.st_dev == sealed.st_dev && after.st_ino == sealed.st_ino);
+    tp_retirement_store_close(&fixture.store);
+    CHECK(tp_retirement_store_authority_reopen(fixture.root, queue.root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    CHECK(!tp_retirement_store_authority_reopen(fixture.root, queue.root,
+        "job-1", 3, digest_a, digest_b, &authority));
+    fixture_queue_stop(&queue);
+    fixture_stop(&fixture);
+}
+
+static void test_queue_authority_invalid_source(void)
+{
+    Fixture fixture;
+    QueueAuthorityFixture queue;
+    TpRetirementReceiptAuthority authority;
+    struct stat info;
+    CHECK(fixture_authority_ready(&fixture, &authority));
+    CHECK(fixture_queue_start(&queue));
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-2", 2, digest_a, digest_b, &authority));
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_b, digest_b, &authority));
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_a, digest_a, &authority));
+    TpRetirementReceiptAuthority altered = authority;
+    altered.receipt_sha256[0] = altered.receipt_sha256[0] == '0' ? '1' : '0';
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_a, digest_b, &altered));
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, fixture.private_root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, fixture.root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    CHECK(fstatat(queue.root, "authority-job-1-2.txt", &info, AT_SYMLINK_NOFOLLOW) != 0);
+    CHECK(unlinkat(fixture.private_root, "authority-job-1-2.txt", 0) == 0);
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    CHECK(fstatat(queue.root, "authority-job-1-2.txt", &info, AT_SYMLINK_NOFOLLOW) != 0);
+    fixture_queue_stop(&queue);
+    fixture_stop(&fixture);
+
+    CHECK(fixture_authority_ready(&fixture, &authority));
+    CHECK(fixture_queue_start(&queue));
+    CHECK(unlinkat(fixture.root, "shard.jsonl", 0) == 0);
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    CHECK(fstatat(queue.root, "authority-job-1-2.txt", &info, AT_SYMLINK_NOFOLLOW) != 0);
+    fixture_queue_stop(&queue);
+    fixture_stop(&fixture);
+
+    CHECK(fixture_authority_ready(&fixture, &authority));
+    CHECK(fixture_queue_start(&queue));
+    CHECK(unlinkat(fixture.root, "shard.jsonl", 0) == 0);
+    int replacement = openat(fixture.root, "shard.jsonl",
+        O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+    CHECK(replacement >= 0 && write(replacement, "{}\n", 3) == 3 &&
+          fchmod(replacement, 0400) == 0 && close(replacement) == 0);
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    CHECK(fstatat(queue.root, "authority-job-1-2.txt", &info, AT_SYMLINK_NOFOLLOW) != 0);
+    fixture_queue_stop(&queue);
+    fixture_stop(&fixture);
+}
+
+static void test_queue_authority_interrupted(void)
+{
+    Fixture fixture;
+    QueueAuthorityFixture queue;
+    TpRetirementReceiptAuthority authority;
+    struct stat info;
+    CHECK(fixture_authority_ready(&fixture, &authority));
+    CHECK(fixture_queue_start(&queue));
+    int pending = openat(queue.root, "authority-job-1-2.txt.pending",
+        O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+    CHECK(pending >= 0 && close(pending) == 0);
+    CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+        "job-1", 2, digest_a, digest_b, &authority));
+    CHECK(fstatat(queue.root, "authority-job-1-2.txt.pending", &info, AT_SYMLINK_NOFOLLOW) == 0);
+    CHECK(fstatat(queue.root, "authority-job-1-2.txt", &info, AT_SYMLINK_NOFOLLOW) != 0);
+    fixture_queue_stop(&queue);
+    fixture_stop(&fixture);
+
+    for (unsigned fail_at = 1; fail_at <= 4; ++fail_at)
+    {
+        CHECK(fixture_authority_ready(&fixture, &authority));
+        CHECK(fixture_queue_start(&queue));
+        tp_retirement_store_test_sync_calls = 0;
+        tp_retirement_store_test_fail_sync = fail_at;
+        CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+            "job-1", 2, digest_a, digest_b, &authority));
+        tp_retirement_store_test_fail_sync = 0;
+        CHECK(fstatat(queue.root, "authority-job-1-2.txt", &info,
+                      AT_SYMLINK_NOFOLLOW) == (fail_at >= 3 ? 0 : -1));
+        CHECK(fstatat(queue.root, "authority-job-1-2.txt.pending", &info,
+                      AT_SYMLINK_NOFOLLOW) == (fail_at <= 3 ? 0 : -1));
+        CHECK(!tp_retirement_store_authority_copy(fixture.root, fixture.private_root, queue.root,
+            "job-1", 2, digest_a, digest_b, &authority));
+        fixture_queue_stop(&queue);
+        fixture_stop(&fixture);
+    }
+}
+
 static void test_publication_and_authority(void)
 {
     Fixture fixture;
@@ -536,6 +689,9 @@ static void test_actual_encoder_fixture(char const* source_root)
 int main(int argc, char** argv)
 {
     test_publication_and_authority();
+    test_queue_authority_copy();
+    test_queue_authority_invalid_source();
+    test_queue_authority_interrupted();
     test_missing_authority_and_invalid_input();
     test_reopened_shard_inventory();
     test_malformed_receipt_and_shard_inventory();

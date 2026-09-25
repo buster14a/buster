@@ -766,6 +766,50 @@ int tp_retirement_store_authority_reopen(int result_root, int authority_root,
     return valid;
 }
 
+int tp_retirement_store_authority_copy(int result_root, int authority_root,
+    int queue_authority_root, char const* job, uint64_t attempt,
+    char const* plan_sha256, char const* final_context_sha256,
+    TpRetirementReceiptAuthority const* trusted)
+{
+    /* The producer has already published its private record. Reopen that
+     * record and the original result/shard inodes before copying anything. */
+    int valid = tp_retirement_store_authority_reopen(result_root, authority_root,
+        job, attempt, plan_sha256, final_context_sha256, trusted);
+    TpRetirementStore source, destination, result;
+    TpRetirementStoredFile source_file, destination_file, result_file;
+    int source_open = valid && tp_retirement_store_open(&source, authority_root, &source_file, 1);
+    int destination_open = source_open &&
+        tp_retirement_store_open(&destination, queue_authority_root, &destination_file, 1);
+    int result_open = destination_open && tp_retirement_store_open(&result, result_root, &result_file, 1);
+    valid = result_open && tp_retirement_store_private_root(&source, &destination) &&
+            tp_retirement_store_private_root(&result, &destination);
+    char name[TP_RETIREMENT_STORE_PATH_BYTES + 1], body[512], digest[65];
+    size_t length = 0;
+    if (valid) valid = tp_retirement_store_authority_bytes(trusted, name, body, &length);
+    if (valid)
+    {
+        Sha256 hash;
+        sha256_init(&hash);
+        sha256_add(&hash, body, length);
+        sha256_finish_hex(&hash, (char8*)digest);
+        valid = !strcmp(digest, trusted->authority_sha256);
+    }
+    TpRetirementPending pending = {0};
+    if (valid) valid = tp_retirement_store_begin(&destination, name, sizeof(body), &pending);
+    if (valid) valid = fwrite(body, 1, length, pending.stream) == length;
+    if (valid)
+        valid = tp_retirement_store_publish(&destination, &pending, length, digest) &&
+                tp_retirement_store_validate(&destination);
+    else if (destination_open && destination.active)
+        tp_retirement_store_abort(&destination, &pending);
+    if (valid) valid = tp_retirement_store_authority_reopen(result_root, queue_authority_root,
+        job, attempt, plan_sha256, final_context_sha256, trusted);
+    if (result_open) tp_retirement_store_close(&result);
+    if (destination_open) tp_retirement_store_close(&destination);
+    if (source_open) tp_retirement_store_close(&source);
+    return valid;
+}
+
 int tp_retirement_store_authority_matches(TpRetirementStore* store, int authority_root, char const* path,
     char const* job, uint64_t attempt, char const* plan_sha256, char const* context_sha256,
     TpRetirementReceiptAuthority const* trusted)
