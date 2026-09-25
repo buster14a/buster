@@ -150,7 +150,10 @@ retry, partial transfers advance, and zero progress is an error. Close consumes
 the handle even on failure and is never retried. `file_write_checked` preserves
 a write error over a later close error; `file_write` exposes the same completion
 contract as a boolean. Executable/PDB writers use the checked file helper with
-execute permission. Compiler artifact branches report `driver.file-write`;
+`OS_FILE_CREATE_MODE_EXECUTABLE`. Handle access, POSIX creation mode, and Windows
+read/write/delete sharing are passed independently. POSIX ignores sharing flags;
+Windows creation mode inherits the directory ACL and cannot promise private
+permissions or an explicit POSIX mode. Compiler artifact branches report `driver.file-write`;
 linker writers retain `link.file-write`. Metadata/import and copy callers check
 their existing boolean results, which now include close completion.
 

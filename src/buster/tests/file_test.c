@@ -284,7 +284,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_write_failures(UnitTestArguments* a
         os_file_delete(path);
         os_file_test_begin(path, scripts[index], counts[index]);
         BUSTER_TEST(arguments, file_write(other, content));
-        OsFileTransferResult written = file_write_checked(path, content, (OpenPermissions){.read = 1, .write = 1});
+        OsFileTransferResult written = file_write_checked(path, content, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, os_file_test_end() == counts[index]);
         BUSTER_TEST(arguments, written.transferred == transferred[index]);
         BUSTER_TEST(arguments, (written.error.v == 0) == (index == 5));
@@ -305,13 +305,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_write_failures(UnitTestArguments* a
     BUSTER_TEST(arguments, file_write(path, (ByteSlice){0}));
     OsFileTestStep close_step = {OS_FILE_TEST_CLOSE, OS_FILE_TEST_ERROR, 23456};
     os_file_test_begin(path, &close_step, 1);
-    OsFileTransferResult empty = file_write_checked(path, (ByteSlice){0}, (OpenPermissions){.write = 1});
+    OsFileTransferResult empty = file_write_checked(path, (ByteSlice){0}, (OsFileCreateMode){0}, (OsFileShareFlags){ .write = 1, .delete = 1 });
     BUSTER_TEST(arguments, os_file_test_end() == 1);
     BUSTER_TEST(arguments, empty.transferred == 0 && empty.error.v == 23456);
 
     OsFileTestStep flush_step = {OS_FILE_TEST_FLUSH, OS_FILE_TEST_ERROR, 12345};
     os_file_test_begin(path, &flush_step, 1);
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.write = 1}, (OpenPermissions){.read = 1, .write = 1});
+    OsFileDescriptor* file = os_file_open(
+        path,
+        (OpenFlags){0},
+        (OsFileAccess){ .write = 1 },
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
     BUSTER_TEST(arguments, file != 0);
     if (file)
     {
@@ -323,7 +328,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_write_failures(UnitTestArguments* a
     BUSTER_TEST(arguments, os_file_flush(0).v != 0 && os_file_close_checked(0).v != 0);
     BUSTER_TEST(arguments, os_file_write_checked(0, (ByteSlice){0}).error.v == 0);
     BUSTER_TEST(arguments, os_file_write_checked(0, content).error.v != 0);
-    BUSTER_TEST(arguments, os_file_open_checked((String8){0}, (OpenFlags){.read = 1}, (OpenPermissions){0}).error.v != 0);
+    BUSTER_TEST(arguments, os_file_open_checked(
+        (String8){0},
+        (OpenFlags){0},
+        (OsFileAccess){ .read = 1 },
+        (OsFileCreateMode){0},
+        (OsFileShareFlags){0}).error.v != 0);
 
     // file_copy includes completion of its staging file: a close failure
     // leaves the existing empty destination unpublished and unchanged.
@@ -362,7 +372,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_read_failures(UnitTestArguments* ar
     for (u32 exact = 0; exact < 2; exact += 1)
     {
         os_file_test_begin(path, prefix, 2);
-        OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1 });
         BUSTER_TEST(arguments, file != 0);
         if (file)
         {
@@ -382,7 +392,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_read_failures(UnitTestArguments* ar
         }
         BUSTER_TEST(arguments, os_file_test_end() == 2);
     }
-    OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+    OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1 });
     BUSTER_TEST(arguments, file != 0);
     if (file)
     {
@@ -705,7 +715,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_copy_aliases(UnitTestArguments* arg
         // the alternate spelling is ENOENT to lookup but EEXIST to creation or
         // rename. Probe that reserved-name case independently of file_copy.
         String8 case_alias = file_test_child(arena, directory, S8("alias-source.BIN"));
-        OsFileOpenResult case_probe = os_file_open_checked(case_alias, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+        OsFileOpenResult case_probe = os_file_open_checked(
+            case_alias,
+            (OpenFlags){0},
+            (OsFileAccess){ .read = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1 });
         bool case_insensitive = case_probe.file != 0;
         u32 case_create_error = 0;
         if (case_probe.file)
@@ -842,7 +857,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_contents(UnitTestArguments*
         ByteSlice old_content = {old_bytes, sizeof(old_bytes)};
         ByteSlice new_content = {new_bytes, sizeof(new_bytes)};
         BUSTER_TEST(arguments, file_write(artifact, old_content));
-        FilePublishResult published = file_publish_checked(artifact, new_content, (OpenPermissions){.read = 1, .write = 1});
+        FilePublishResult published = file_publish_checked(
+            artifact,
+            new_content,
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, published.status == FILE_PUBLISH_PUBLISHED && !published.error.v && !published.cleanup_error.v);
         BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, new_content));
         String8 artifact_only[] = {names[0]};
@@ -851,7 +870,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_contents(UnitTestArguments*
         // A reader opened before replacement keeps the old object; a new
         // reader sees the complete new object. This makes Windows open-handle
         // replacement deterministic instead of depending on race timing.
-        OsFileOpenResult held = os_file_open_checked(artifact, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1, .write = 1});
+        OsFileOpenResult held = os_file_open_checked(
+            artifact,
+            (OpenFlags){0},
+            (OsFileAccess){ .read = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         if (BUSTER_REQUIRE(arguments, held.file != 0))
         {
             BUSTER_TEST(arguments, file_publish(artifact, old_content));
@@ -875,19 +899,31 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_contents(UnitTestArguments*
 
         // Missing parents fail without creating an alternate path.
         String8 unreachable = file_test_child(arena, directory, S8("missing/artifact.bin"));
-        FilePublishResult no_parent = file_publish_checked(unreachable, new_content, (OpenPermissions){.read = 1, .write = 1});
+        FilePublishResult no_parent = file_publish_checked(
+            unreachable,
+            new_content,
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, no_parent.status == FILE_PUBLISH_FAILED && no_parent.error.v != 0);
         BUSTER_TEST(arguments, file_test_entries_are(arena, directory, artifact_only, 1, 0));
 
         // Directories and destination links are never followed or replaced.
         BUSTER_TEST(arguments, os_make_directory_attempt(subdirectory));
-        FilePublishResult into_directory = file_publish_checked(subdirectory, new_content, (OpenPermissions){.read = 1, .write = 1});
+        FilePublishResult into_directory = file_publish_checked(
+            subdirectory,
+            new_content,
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, into_directory.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION && !into_directory.cleanup_error.v);
         FileTestLink link_status = file_test_link(arguments, true, directory, names[0], names[2]);
         BUSTER_TEST(arguments, link_status != FILE_TEST_LINK_FAILED);
         if (link_status == FILE_TEST_LINK_CREATED)
         {
-            FilePublishResult into_link = file_publish_checked(linked, new_content, (OpenPermissions){.read = 1, .write = 1});
+            FilePublishResult into_link = file_publish_checked(
+                linked,
+                new_content,
+                (OsFileCreateMode){0},
+                (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
             BUSTER_TEST(arguments, into_link.status == FILE_PUBLISH_UNSUPPORTED_DESTINATION && !into_link.cleanup_error.v);
             BUSTER_TEST(arguments, file_test_is_link(arena, linked, names[0]) && file_test_bytes_are(arena, artifact, new_content));
             BUSTER_TEST(arguments, os_file_delete(linked));
@@ -898,7 +934,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_contents(UnitTestArguments*
         String16 artifact_w = string16_from_string8(arena, artifact, true);
         DWORD attributes = GetFileAttributesW(artifact_w.pointer);
         BUSTER_TEST(arguments, attributes != INVALID_FILE_ATTRIBUTES && SetFileAttributesW(artifact_w.pointer, attributes | FILE_ATTRIBUTE_READONLY));
-        FilePublishResult read_only = file_publish_checked(artifact, old_content, (OpenPermissions){.read = 1, .write = 1});
+        FilePublishResult read_only = file_publish_checked(
+            artifact,
+            old_content,
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         BUSTER_TEST(arguments, read_only.status == FILE_PUBLISH_FAILED && read_only.error.v == (u32)ERROR_ACCESS_DENIED);
         BUSTER_TEST(arguments, file_test_bytes_are(arena, artifact, new_content));
         BUSTER_TEST(arguments, SetFileAttributesW(artifact_w.pointer, attributes));
@@ -1014,7 +1054,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult file_test_publish_faults(UnitTestArguments* a
                     String8 destination = existing ? old_path : fresh_path;
                     BUSTER_TEST(arguments, file_write(old_path, old_content) && os_file_delete(fresh_path));
                     os_file_test_begin(destination, fault->steps, fault->step_count);
-                    FilePublishResult published = file_publish_checked(destination, content, (OpenPermissions){.read = 1, .write = 1});
+                    FilePublishResult published = file_publish_checked(
+                        destination,
+                        content,
+                        (OsFileCreateMode){0},
+                        (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
                     u32 consumed = os_file_test_end();
                     bool succeeded = fault->status == FILE_PUBLISH_PUBLISHED;
                     bool error_matches = fault->any_error ? published.error.v != 0 : published.error.v == fault->error;
@@ -1078,8 +1122,13 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType file_test_publish_reader(void* raw)
     {
         bool valid = false;
         // Windows readers must permit delete sharing for atomic replacement;
-        // OpenPermissions controls sharing, while OpenFlags controls access.
-        OsFileOpenResult opened = os_file_open_checked(reader->path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1, .write = 1});
+        // OsFileShareFlags controls Windows sharing, while OsFileAccess controls requested access.
+        OsFileOpenResult opened = os_file_open_checked(
+            reader->path,
+            (OpenFlags){0},
+            (OsFileAccess){ .read = 1 },
+            (OsFileCreateMode){0},
+            (OsFileShareFlags){ .read = 1, .write = 1, .delete = 1 });
         if (opened.file)
         {
             OsFileReadResult content = os_file_read_exact(opened.file, (ByteSlice){bytes, sizeof(bytes)});

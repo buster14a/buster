@@ -76,7 +76,7 @@ BUSTER_GLOBAL_LOCAL bool font_path_is_usable(String8 path)
         else
 #endif
         {
-            OsFileDescriptor* file = os_file_open(path, (OpenFlags){.read = 1}, (OpenPermissions){.read = 1});
+            OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){ .read = 1 }, (OsFileCreateMode){0}, (OsFileShareFlags){ .read = 1 });
             if (file)
             {
                 FileStats stats = os_file_get_stats(file, (FileStatsOptions){.size = 1});
