@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Read-only exact-merge-group admission (#867).
+"""Read-only exact-merge-group admission (#867, #1122).
 
 GitHub owns ordering and rebuilding; this is not another queue or publisher.
 The six existing gates remain independently required. Their latest workflow
 attempts are resolved by path, event and exact group SHA, never by a same-name
 commit status or a historical PR-head result. Native-retirement admission is
-executed only from the immutable trusted base and must fail closed.
+executed only from an independently trusted main revision and must fail closed.
 """
 
 from __future__ import annotations
@@ -25,6 +25,10 @@ SCHEMA = "buster-merge-queue-admission-v1"
 CONTEXT = "Main integration admission"
 RETIREMENT_CONTEXT = "Native retirement merge admission"
 RULESET_ID = 22537199
+BYPASS_ACTORS = [
+    {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"},
+    {"actor_id": 39247043, "actor_type": "User", "bypass_mode": "always"},
+]
 CHECKS = {
     "ci.yml": "CI complete",
     "self-host-audit.yml": "Linux x86-64 bootstrap evidence",
@@ -45,6 +49,25 @@ QUEUE = {
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 MAX_PAGES = 20
+POLICY_PATHS = (
+    "tools/merge_queue_admission.py",
+    "tools/native_retirement_merge_gate.py",
+    "tools/native_retirement_integration.py",
+    "tools/native_retirement_contract.py",
+    "tools/native_retirement_dependency_binding.py",
+    "tools/native_retirement_external.py",
+    "tools/native_retirement_materializer.py",
+    "tools/native_retirement_rebind.py",
+    "tools/native_retirement_rebind_contract.py",
+    "tools/native_retirement_sdks.py",
+    ".github/workflows/merge-queue-admission.yml",
+    ".github/workflows/api-migration-policy.yml",
+    ".github/workflows/native-retirement-rebind.yml",
+    ".github/main-merge-queue.ruleset.json",
+    "docs/native-retirement-dependencies-v1.json",
+    "docs/native-retirement-sdks-v1.json",
+    "docs/native-retirement-support-v1.tsv",
+)
 
 
 class AdmissionError(Exception):
@@ -69,7 +92,8 @@ def git(repo: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def identity(event: dict, repository: str, expected_sha: str, repo: Path) -> dict:
+def identity(event: dict, repository: str, expected_sha: str, repo: Path,
+             trusted_sha: str | None = None) -> dict:
     require(event.get("action") == "checks_requested", "not a checks_requested event")
     require(event.get("repository", {}).get("full_name") == repository,
             "merge-group repository mismatch")
@@ -81,19 +105,44 @@ def identity(event: dict, repository: str, expected_sha: str, repo: Path) -> dic
     base = digest(group.get("base_sha"), "base")
     head = digest(group.get("head_sha"), "head")
     require(head == digest(expected_sha, "GITHUB_SHA"), "event/group SHA mismatch")
-    require(git(repo, "rev-parse", "HEAD") == base,
-            "admission must execute from the immutable trusted base")
+    policy_sha = digest(trusted_sha if trusted_sha is not None else git(repo, "rev-parse", "HEAD"),
+                        "trusted policy revision")
+    # GitHub builds later entries on the preceding synthetic merge. Never run
+    # policy from that base until it has actually become main.
+    chain = git(repo, "rev-list", "--first-parent", "--max-count=21", base).splitlines()
+    require(policy_sha in chain,
+            "trusted main is not within the bounded first-parent chain of the group base")
     git(repo, "merge-base", "--is-ancestor", base, head)
+    parents = git(repo, "rev-list", "--parents", "-n", "1", head).split()
+    require(len(parents) == 3 and parents[0] == head and parents[1] == base,
+            "group head must have the event base as its first parent and one PR as its second")
     return {"schema": SCHEMA, "repository": repository, "base": base,
             "base_tree": git(repo, "rev-parse", base + "^{tree}"), "head": head,
-            "final_tree": git(repo, "rev-parse", head + "^{tree}"), "head_ref": ref}
+            "final_tree": git(repo, "rev-parse", head + "^{tree}"), "head_ref": ref,
+            "policy_sha": policy_sha, "base_first_parents": chain}
 
 
-def check_current(candidate: dict, current_main: str, queue_head: str) -> None:
-    require(digest(current_main, "current main") == candidate["base"],
-            "main advanced: discard this group and rebuild against current main")
+def check_current(candidate: dict, current_main: str, queue_head: str) -> bool:
+    main = digest(current_main, "current main")
     require(digest(queue_head, "current queue head") == candidate["head"],
-            "merge group was replaced: never reuse this result for its successor")
+            f"merge group replaced: main={main} base={candidate['base']} "
+            f"head={candidate['head']} current_head={queue_head}; do not reuse this result")
+    chain = candidate["base_first_parents"]
+    require(candidate["policy_sha"] in chain and main in chain and
+            chain.index(main) <= chain.index(candidate["policy_sha"]),
+            f"main diverged from queued predecessor: main={main} "
+            f"base={candidate['base']} head={candidate['head']}; rebuild this group")
+    return main == candidate["base"]
+
+
+def verify_trusted_policy(candidate: dict, repo: Path) -> None:
+    # A predecessor may change policy while this workflow waits. Old code is
+    # independently trusted, but must not authorize a tree under new policy.
+    changed = git(repo, "diff", "--name-only", candidate["policy_sha"],
+                  candidate["base"], "--", *POLICY_PATHS)
+    require(not changed,
+            f"queued predecessor changed admission policy ({changed.replace(chr(10), ', ')}): "
+            f"main={candidate['base']} head={candidate['head']}; rebuild this group")
 
 
 def latest_runs(rows: list, candidate: dict) -> dict:
@@ -159,7 +208,8 @@ def validate_ruleset(data: dict, *, read_only_response: bool = False) -> None:
     if not read_only_response or "bypass_actors" in data:
         require("bypass_actors" in data,
                 "bypass inventory is hidden: check-ruleset needs an administrator response")
-        require(data["bypass_actors"] == [], "standing bypasses are not admitted")
+        require(data["bypass_actors"] == BYPASS_ACTORS,
+                "bypass actors differ from reviewed main ruleset")
     if "current_user_can_bypass" in data:
         require(data["current_user_can_bypass"] == "never",
                 "the admission reader must not have bypass authority")
@@ -205,10 +255,10 @@ def live_ruleset(api: GitHub, repository: str) -> dict:
             data.get("source_type") == "Repository" and data.get("source") == repository,
             "live ruleset identity mismatch")
     validate_ruleset(data, read_only_response=True)
-    visibility = "verified-empty" if "bypass_actors" in data else "hidden"
+    visibility = "verified-expected" if "bypass_actors" in data else "hidden"
     if visibility == "hidden":
         print("ruleset bypass inventory is hidden from the read-only token; "
-              "no-bypass configuration requires a separate administrator audit", file=sys.stderr)
+              "the two reviewed bypass actors require a separate administrator audit", file=sys.stderr)
     return {"id": RULESET_ID, "bypass_inventory": visibility}
 
 
@@ -267,11 +317,34 @@ class GitHub:
         return result
 
 
-def live_identity(api: GitHub, candidate: dict) -> None:
+def live_identity(api: GitHub, candidate: dict) -> bool:
     main = api.get("git/ref/heads/main")["object"]["sha"]
     ref = candidate["head_ref"].removeprefix("refs/")
     head = api.get("git/ref/" + urllib.parse.quote(ref, safe="/"))["object"]["sha"]
-    check_current(candidate, main, head)
+    ready = check_current(candidate, main, head)
+    if not ready:
+        print(f"waiting for queued predecessor: main={main} base={candidate['base']} "
+              f"head={candidate['head']} predecessor=ahead-of-main", file=sys.stderr)
+    return ready
+
+
+def wait_base(arguments) -> dict:
+    event = json.loads(arguments.event.read_text())
+    policy_sha = git(arguments.trusted_root, "rev-parse", "HEAD")
+    candidate = identity(event, arguments.repository, arguments.sha, arguments.repo_root,
+                         trusted_sha=policy_sha)
+    api = GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
+    deadline = time.monotonic() + arguments.wait_seconds
+    while True:
+        if live_identity(api, candidate):
+            verify_trusted_policy(candidate, arguments.repo_root)
+            require(live_identity(api, candidate), "group changed after predecessor landed")
+            return {"schema": SCHEMA, "status": "base-landed", "base": candidate["base"],
+                    "head": candidate["head"], "policy_sha": candidate["policy_sha"]}
+        require(time.monotonic() < deadline,
+                f"timed out waiting for predecessor: base={candidate['base']} "
+                f"head={candidate['head']}; no admission was issued")
+        time.sleep(min(30, max(0, deadline - time.monotonic())))
 
 
 def collect(api: GitHub, candidate: dict) -> tuple[list, list]:
@@ -310,11 +383,15 @@ def run_gate(arguments) -> dict:
     api = GitHub(arguments.repository, os.environ.get("GH_TOKEN", ""))
     live_identity(api, candidate)
     ruleset_before = live_ruleset(api, arguments.repository)
-    retirement = retirement_admission(arguments, candidate)
     deadline = time.monotonic() + arguments.wait_seconds
+    retirement = None
     while True:
-        live_identity(api, candidate)
-        evidence, pending = collect(api, candidate)
+        if live_identity(api, candidate):
+            verify_trusted_policy(candidate, arguments.repo_root)
+            retirement = retirement_admission(arguments, candidate)
+            evidence, pending = collect(api, candidate)
+        else:
+            pending = ["queued predecessor has not landed"]
         if not pending:
             # Re-read completed attempts as well as refs. An older successful
             # attempt must not hide a rerun that started during collection.
@@ -322,7 +399,9 @@ def run_gate(arguments) -> dict:
             if not pending and repeated == evidence:
                 require(retirement_admission(arguments, candidate) == retirement,
                         "trusted publication changed during combined-head CI; rebuild admission")
-                live_identity(api, candidate)
+                require(live_identity(api, candidate),
+                        "predecessor no longer equals main before final admission")
+                verify_trusted_policy(candidate, arguments.repo_root)
                 ruleset_after = live_ruleset(api, arguments.repository)
                 break
         require(time.monotonic() < deadline, "timed out waiting for exact-group gates: " + ", ".join(pending))
@@ -345,6 +424,13 @@ def main(argv=None) -> int:
     check.add_argument("--sha", required=True)
     check.add_argument("--wait-seconds", type=int, default=18000)
     check.add_argument("--output", type=Path, required=True)
+    waiting = commands.add_parser("wait-base")
+    waiting.add_argument("--repo-root", type=Path, required=True)
+    waiting.add_argument("--trusted-root", type=Path, required=True)
+    waiting.add_argument("--event", type=Path, required=True)
+    waiting.add_argument("--repository", required=True)
+    waiting.add_argument("--sha", required=True)
+    waiting.add_argument("--wait-seconds", type=int, default=18000)
     arguments = parser.parse_args(argv)
     code = 0
     try:
@@ -354,6 +440,9 @@ def main(argv=None) -> int:
         elif arguments.command == "audit-workflows":
             audit_workflows(arguments.root)
             print("required workflow event inventory passed")
+        elif arguments.command == "wait-base":
+            require(0 <= arguments.wait_seconds <= 18000, "wait must be bounded to five hours")
+            print(json.dumps(wait_base(arguments), sort_keys=True))
         else:
             require(0 <= arguments.wait_seconds <= 18000, "wait must be bounded to five hours")
             report = run_gate(arguments)

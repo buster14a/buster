@@ -2521,38 +2521,12 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
     BqWorkerFixture* fixture = (BqWorkerFixture*)((char*)fake - offsetof(BqWorkerFixture, fake));
     BqError error = BQ_OK;
     fake->starts += 1;
-    fake->argv_valid = count == 53 && !strcmp(argv[0], BQ_SYSTEMD_RUN) && !strcmp(argv[1], "--quiet") &&
-        !strcmp(argv[2], "--wait") && !strcmp(argv[3], "--service-type=exec") &&
-        !strcmp(argv[4], "--uid=buster-bench") && !strcmp(argv[5], "--gid=buster-bench") &&
-        !strncmp(argv[6], "--unit=buster-bench-", 20) &&
-        !strcmp(argv[7], "--slice=buster-bench.slice") && !strcmp(argv[8], "--property=KillMode=control-group") &&
-        !strcmp(argv[9], "--property=SendSIGKILL=yes") && !strcmp(argv[10], "--property=TimeoutStopSec=10s") &&
-        !strcmp(argv[11], "--property=AllowedCPUs=2") && !strcmp(argv[12], "--property=MemoryMax=8589934592") &&
-        !strcmp(argv[13], "--property=MemorySwapMax=0") && !strcmp(argv[14], "--property=TasksMax=256") &&
-        !strcmp(argv[15], "--property=RuntimeMaxSec=3600000000us") &&
-        strstr(argv[16], "--property=InaccessiblePaths=") == argv[16] && strstr(argv[16], fixture->material.workspaces) != NULL &&
-        strstr(argv[17], "--property=ReadOnlyPaths=") == argv[17] && strstr(argv[17], fixture->material.installed) != NULL &&
-        strstr(argv[18], "--property=ReadWritePaths=") == argv[18] && strstr(argv[18], fixture->material.workspaces) != NULL &&
-        !strcmp(argv[19], "--property=ProtectSystem=strict") && !strcmp(argv[20], "--property=PrivateTmp=yes") &&
-        !strcmp(argv[21], "--property=PrivateDevices=yes") && !strcmp(argv[22], "--property=NoNewPrivileges=yes") &&
-        !strcmp(argv[23], "--property=RestrictSUIDSGID=yes") && !strcmp(argv[24], "--property=ProtectHome=yes") &&
-        !strcmp(argv[25], "--property=ProtectControlGroups=yes") && !strcmp(argv[26], "--property=ProtectKernelTunables=yes") &&
-        !strcmp(argv[27], "--property=ProtectKernelModules=yes") && !strcmp(argv[28], "--property=ProtectKernelLogs=yes") &&
-        !strcmp(argv[29], "--property=ProtectClock=yes") && !strcmp(argv[30], "--property=ProtectHostname=yes") &&
-        !strcmp(argv[31], "--property=ProtectProc=invisible") && !strcmp(argv[32], "--property=LockPersonality=yes") &&
-        !strcmp(argv[33], "--property=MemoryDenyWriteExecute=yes") && !strcmp(argv[34], "--property=RemoveIPC=yes") &&
-        !strcmp(argv[35], "--property=KeyringMode=private") && !strcmp(argv[36], "--property=RestrictAddressFamilies=AF_UNIX") &&
-        !strcmp(argv[37], "--property=RestrictNamespaces=yes") && !strcmp(argv[38], "--property=RestrictRealtime=yes") &&
-        !strcmp(argv[39], "--property=SystemCallArchitectures=native") && !strcmp(argv[40], "--property=SystemCallFilter=@system-service") &&
-        !strcmp(argv[41], "--property=SystemCallErrorNumber=EPERM") && !strcmp(argv[42], "--property=PrivateNetwork=yes") &&
-        !strcmp(argv[43], BQ_WORKER_EXECUTABLE) && !strcmp(argv[44], "worker-unit") && argv[45][0] == '/' &&
-        !strcmp(argv[46], "1") && argv[47][0] && !strcmp(argv[48], "validate-buster-v1") &&
-        argv[49][0] == '/' && !strstr(argv[49], "/job-1-attempt-") &&
-        strlen(argv[50]) == 64 && strlen(argv[51]) == 64 && argv[52][0] == '/' &&
-        strstr(argv[52], "/results/job-1-attempt-") != NULL && strstr(argv[52], "/result") != NULL &&
+    fake->argv_valid = count == 6 && !strcmp(argv[0], BQ_SYSTEMD_BROKER) &&
+        !strcmp(argv[1], "start-outer") && !strcmp(argv[2], "1") && argv[3][0] &&
+        strlen(argv[4]) == 64 && strlen(argv[5]) == 64 &&
         bq_test_worker_probe_locked(fixture->lease);
     fake->inherited_lease = -1;
-    snprintf(fake->observed.unit, sizeof(fake->observed.unit), "%s", argv[6] + 7);
+    snprintf(fake->observed.unit, sizeof(fake->observed.unit), "buster-bench-%s-%s.service", argv[2], argv[3]);
     snprintf(fake->observed.cgroup, sizeof(fake->observed.cgroup), "/buster-bench.slice/%s", fake->observed.unit);
     fake->observed.unit_found = true;
     fake->observed.active = true;
@@ -2581,8 +2555,13 @@ BUSTER_GLOBAL_LOCAL BqError bq_test_worker_start(BqWorkerBackend* backend, char 
             close(fake->queue->directory_fd);
             close(fake->queue->lock_fd);
             close(fake->queue->journal_fd);
-            execl(bq_test_executable, bq_test_executable, "fixed-recipe-helper", marker,
-                  argv[46], argv[47], argv[48], argv[49], argv[50], argv[51], argv[52], NULL);
+            char result[BQ_PATH_CAP + 1];
+            int result_length = snprintf(result, sizeof(result), "%s/results/job-%s-attempt-%s",
+                                         fixture->material.workspaces, argv[2], argv[3]);
+            if (result_length > 0 && (u32)result_length < sizeof(result))
+                execl(bq_test_executable, bq_test_executable, "fixed-recipe-helper", marker,
+                      argv[2], argv[3], "validate-buster-v1", fixture->material.workspaces,
+                      argv[4], argv[5], result, NULL);
             _exit(127);
         }
         if (fake->detached < 0) error = BQ_IO;

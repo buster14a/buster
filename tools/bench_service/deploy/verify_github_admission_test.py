@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Adversarial read-back fixtures for benchmark admission."""
+"""Adversarial read-back fixtures for the benchmark environment preflight."""
 
-import copy
 import os
 import subprocess
 import tempfile
@@ -13,21 +12,14 @@ from verify_github_admission import verify
 
 class AdmissionReadbackTest(unittest.TestCase):
     def setUp(self):
-        self.policy = {
-            "name": "Benchmark dispatch main protection",
-            "enforcement": "active",
-            "bypass_actors": [],
-            "rules": [{"type": "required_status_checks", "parameters": {
-                "strict_required_status_checks_policy": False}}],
-        }
-        self.ruleset = copy.deepcopy(self.policy)
-        self.ruleset.update(id=42, source_type="Repository",
-                            current_user_can_bypass="never")
         self.environment = {
             "name": "benchmark-9700x",
             "deployment_branch_policy": {
                 "protected_branches": False, "custom_branch_policies": True},
-            "protection_rules": [],
+            "protection_rules": [{"type": "required_reviewers",
+                                  "prevent_self_review": True,
+                                  "reviewers": [{"type": "User", "reviewer": {
+                                      "login": "davidgmbb", "id": 39247043}}]}],
         }
         self.branches = {"total_count": 1, "branch_policies": [
             {"name": "main", "type": "branch"}]}
@@ -35,30 +27,30 @@ class AdmissionReadbackTest(unittest.TestCase):
                          "value": "false"}
 
     def check(self):
-        verify(self.policy, self.ruleset, self.environment, self.branches,
-               self.variable)
-
-    def test_valid_and_fail_closed_drift(self):
-        self.check()
-        for field, value in (("current_user_can_bypass", "always"),
-                             ("bypass_actors", [{"actor_id": 1}])):
-            with self.subTest(field=field):
-                original = self.ruleset[field]
-                self.ruleset[field] = value
-                with self.assertRaises(ValueError):
-                    self.check()
-                self.ruleset[field] = original
-        self.ruleset["rules"][0]["parameters"][
-            "strict_required_status_checks_policy"] = True
-        with self.assertRaises(ValueError):
-            self.check()
+        verify(self.environment, self.branches, self.variable)
 
     def test_environment_and_disabled_admission(self):
-        self.environment["protection_rules"].append({
-            "type": "required_reviewers", "reviewers": [{"type": "User"}]})
+        self.environment["protection_rules"].clear()
         with self.assertRaises(ValueError):
             self.check()
-        self.environment["protection_rules"].clear()
+        self.environment["protection_rules"] = [{"type": "required_reviewers",
+                                                  "prevent_self_review": True,
+                                                  "reviewers": [{"type": "User", "reviewer": {
+                                                      "login": "davidgmbb", "id": 39247043}}]}]
+        reviewer = self.environment["protection_rules"][0]
+        reviewer["prevent_self_review"] = False
+        with self.assertRaises(ValueError):
+            self.check()
+        reviewer["prevent_self_review"] = True
+        reviewer["reviewers"][0]["reviewer"]["login"] = "buster14a14a"
+        with self.assertRaises(ValueError):
+            self.check()
+        reviewer["reviewers"][0]["reviewer"]["login"] = "davidgmbb"
+        reviewer["reviewers"].append({"type": "User", "reviewer": {
+            "login": "buster14a14a", "id": 1}})
+        with self.assertRaises(ValueError):
+            self.check()
+        reviewer["reviewers"].pop()
         self.branches["branch_policies"].append({"name": "*", "type": "branch"})
         with self.assertRaises(ValueError):
             self.check()
@@ -67,11 +59,11 @@ class AdmissionReadbackTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
-    def test_rejects_policy_and_branch_drift(self):
-        self.policy["rules"].append({"type": "non_fast_forward"})
+    def test_rejects_environment_and_branch_drift(self):
+        self.environment["name"] = "unprotected"
         with self.assertRaises(ValueError):
             self.check()
-        self.policy["rules"].pop()
+        self.environment["name"] = "benchmark-9700x"
         self.branches["branch_policies"][0]["name"] = "release"
         with self.assertRaises(ValueError):
             self.check()

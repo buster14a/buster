@@ -29,6 +29,7 @@
 //   aarch64_import_*, aarch64_generated_*        Arm A64 XML importer
 //   bench_throughput_add                        reproducible compiler benchmarks
 //   bench_service_recipe                        fixed validate-buster service recipe
+//   bench_service_broker_add                    Linux constrained systemd broker build
 //   native_retirement_census_main                frozen native coverage inventory
 //   gpu_tools_main                               real GPU toolchain acceptance
 //   uefi_boot_*                                 pinned firmware boot gate
@@ -79,6 +80,7 @@ typedef enum BuildCommand
 {
     BUILD_COMMAND_NONE,
     BUILD_COMMAND_BENCH_SERVICE,
+    BUILD_COMMAND_BENCH_SERVICE_BROKER,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE,
     BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST,
     BUILD_COMMAND_BENCH_THROUGHPUT,
@@ -37994,93 +37996,67 @@ BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* 
                                                                           BenchServiceRecipeIdentity identity,
                                                                           BenchServiceRecipeStage* stage);
 
-BUSTER_GLOBAL_LOCAL bool bench_service_recipe_argument_present(SliceString8 arguments, String8 expected)
-{
-    bool found = false;
-    for (u64 index = 0; !found && index < arguments.length; index += 1)
-        found = string_equal(arguments.pointer[index], expected);
-    return found;
-}
-
 BUSTER_GLOBAL_LOCAL bool bench_service_recipe_identity_test(Arena* arena)
 {
     String8List trusted = {0}, candidate = {0}, invalid = {0};
     bool ok = bench_service_recipe_identity_append(arena, &trusted, BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED) &&
               bench_service_recipe_identity_append(arena, &candidate, BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE) &&
               !bench_service_recipe_identity_append(arena, &invalid, BENCH_SERVICE_RECIPE_IDENTITY_INVALID);
-    SliceString8 trusted_arguments = string8_list_to_slice(arena, trusted);
-    SliceString8 candidate_arguments = string8_list_to_slice(arena, candidate);
-    ok = ok && invalid.count == 0 && trusted_arguments.length == 3 && candidate_arguments.length == 3 &&
-         string_equal(trusted_arguments.pointer[0], S8("--uid=buster-bench")) &&
-         string_equal(trusted_arguments.pointer[1], S8("--gid=buster-bench")) &&
-         string_equal(trusted_arguments.pointer[2], S8("--property=UMask=0077")) &&
-         string_equal(candidate_arguments.pointer[0], S8("--uid=buster-bench-candidate")) &&
-         string_equal(candidate_arguments.pointer[1], S8("--gid=buster-bench-candidate")) &&
-         string_equal(candidate_arguments.pointer[2], S8("--property=UMask=0007"));
+    SliceString8 trusted_identity = string8_list_to_slice(arena, trusted);
+    SliceString8 candidate_identity = string8_list_to_slice(arena, candidate);
+    ok = ok && invalid.count == 0 && trusted_identity.length == 3 && candidate_identity.length == 3 &&
+         string_equal(trusted_identity.pointer[0], S8("--uid=buster-bench")) &&
+         string_equal(candidate_identity.pointer[0], S8("--uid=buster-bench-candidate"));
     BuildGraph saved_graph = program.build_graph;
     program.build_graph = (BuildGraph){0};
     String8 production_arguments[] = {S8(BENCH_SERVICE_RECIPE_DRIVER), S8("generate")};
-    BenchServiceRecipeManifest test_manifest = {.job_id = S8("1"), .attempt_token = S8("2")};
-    BenchServiceRecipeStage stage = {.manifest = &test_manifest, .name = S8("throughput")};
-    ProcessRun* trusted_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
-                                                                         S8("/"), S8("/installed /source"), S8("/workspace"),
-                                                                         S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED,
-                                                                         &stage);
+    BenchServiceRecipeManifest test_manifest = {.job_id = S8("1"), .attempt_token = S8("2"),
+        .base_revision = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        .candidate_revision = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")};
+    BenchServiceRecipeStage base_stage = {.manifest = &test_manifest, .name = S8("base-generate")};
+    BenchServiceRecipeStage candidate_stage = {.manifest = &test_manifest, .name = S8("throughput")};
+    ProcessRun* base = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED, &base_stage);
     ProcessRun* candidate_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-                                                                           (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
-                                                                           S8("/"), S8("/installed /source"), S8("/workspace"),
-                                                                           S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE,
-                                                                           &stage);
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE, &candidate_stage);
     ProcessRun* invalid_run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
-                                                                         (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments),
-                                                                         S8("/"), S8("/installed /source"), S8("/workspace"),
-                                                                         S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_INVALID,
-                                                                         &stage);
-    SliceString8 trusted_wrapped = trusted_run ? trusted_run->arguments : (SliceString8){0};
-    SliceString8 candidate_wrapped = candidate_run ? candidate_run->arguments : (SliceString8){0};
-    SliceString8 invalid_wrapped = invalid_run ? invalid_run->arguments : (SliceString8){0};
-    bool common = trusted_wrapped.length > 5 && candidate_wrapped.length > 5 &&
-                  string_equal(trusted_wrapped.pointer[0], S8("/usr/bin/systemd-run")) &&
-                  string_equal(trusted_wrapped.pointer[1], S8("--quiet")) &&
-                  string_equal(trusted_wrapped.pointer[2], S8("--wait")) &&
-                  string_equal(trusted_wrapped.pointer[4], S8("--service-type=exec")) &&
-                  string_equal(candidate_wrapped.pointer[0], S8("/usr/bin/systemd-run")) &&
-                  string_equal(candidate_wrapped.pointer[1], S8("--quiet")) &&
-                  string_equal(candidate_wrapped.pointer[2], S8("--wait")) &&
-                  string_equal(candidate_wrapped.pointer[4], S8("--service-type=exec"));
-    bool trusted_identity = common && bench_service_recipe_argument_present(trusted_wrapped, S8("--uid=buster-bench")) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--gid=buster-bench")) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=UMask=0077")) &&
-                            !bench_service_recipe_argument_present(trusted_wrapped, S8("--uid=buster-bench-candidate")) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--slice=buster-bench.slice")) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU)) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY)) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP)) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS)) &&
-                            bench_service_recipe_argument_present(trusted_wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
-    bool candidate_identity = common && bench_service_recipe_argument_present(candidate_wrapped, S8("--uid=buster-bench-candidate")) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--gid=buster-bench-candidate")) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=UMask=0007")) &&
-                              !bench_service_recipe_argument_present(candidate_wrapped, S8("--uid=buster-bench")) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--slice=buster-bench.slice")) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU)) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY)) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP)) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS)) &&
-                              bench_service_recipe_argument_present(candidate_wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
-    bool invalid_identity = invalid_wrapped.length == 1 && string_equal(invalid_wrapped.pointer[0], S8("/usr/bin/false"));
-    bool nested_relation = bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--unit=buster-bench-1-2-throughput.service")) &&
-                           bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--property=PartOf=buster-bench-1-2.service")) &&
-                           bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--property=BindsTo=buster-bench-1-2.service")) &&
-                           bench_service_recipe_argument_present(candidate_wrapped,
-                                                                  S8("--property=After=buster-bench-1-2.service")) &&
-                           bench_service_recipe_argument_present(candidate_wrapped, S8("--collect"));
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_INVALID, &candidate_stage);
+    SliceString8 base_arguments = base ? base->arguments : (SliceString8){0};
+    SliceString8 candidate_arguments = candidate_run ? candidate_run->arguments : (SliceString8){0};
+    SliceString8 invalid_arguments = invalid_run ? invalid_run->arguments : (SliceString8){0};
+    ok = ok && base_arguments.length == 7 && candidate_arguments.length == 7 &&
+         string_equal(base_arguments.pointer[0], S8("/usr/local/libexec/buster-bench-systemd-broker")) &&
+         string_equal(candidate_arguments.pointer[0], base_arguments.pointer[0]) &&
+         string_equal(base_arguments.pointer[1], S8("start-stage")) &&
+         string_equal(base_arguments.pointer[2], S8("1")) &&
+         string_equal(base_arguments.pointer[3], S8("2")) &&
+         string_equal(base_arguments.pointer[4], S8("base-generate")) &&
+         string_equal(candidate_arguments.pointer[4], S8("throughput")) &&
+         string_equal(base_arguments.pointer[5], test_manifest.base_revision) &&
+         string_equal(candidate_arguments.pointer[6], test_manifest.candidate_revision) &&
+         invalid_arguments.length == 1 && string_equal(invalid_arguments.pointer[0], S8("/usr/bin/false"));
+    String8 additional_names[] = {S8("base-build"), S8("candidate-generate"), S8("candidate-build")};
+    for (u32 index = 0; ok && index < BUSTER_ARRAY_LENGTH(additional_names); index += 1)
+    {
+        BenchServiceRecipeStage additional = {.manifest = &test_manifest, .name = additional_names[index]};
+        BenchServiceRecipeIdentity additional_identity = index == 0 ? BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED :
+                                                            BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE;
+        ProcessRun* run = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+            (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+            S8("/workspace"), S8("/result"), additional_identity, &additional);
+        ok = run && run->arguments.length == 7 &&
+             string_equal(run->arguments.pointer[4], additional_names[index]);
+    }
+    BenchServiceRecipeStage unknown_stage = {.manifest = &test_manifest, .name = S8("shell")};
+    ProcessRun* unknown = bench_service_recipe_sandbox_process_add(arena, step_add(arena),
+        (SliceString8)BUSTER_ARRAY_TO_SLICE(production_arguments), S8("/"), S8("/installed /source"),
+        S8("/workspace"), S8("/result"), BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED, &unknown_stage);
+    ok = ok && unknown && unknown->arguments.length == 1 &&
+         string_equal(unknown->arguments.pointer[0], S8("/usr/bin/false"));
     program.build_graph = saved_graph;
-    ok = ok && trusted_identity && candidate_identity && invalid_identity && nested_relation;
     return ok;
 }
 
@@ -38096,79 +38072,36 @@ BUSTER_GLOBAL_LOCAL ProcessRun* bench_service_recipe_sandbox_process_add(Arena* 
     String8 driver = arguments.length ? arguments.pointer[0] : (String8){0};
     bool production_driver = string_equal(driver, S8(BENCH_SERVICE_RECIPE_DRIVER)) ||
                              string_equal(driver, S8(BENCH_SERVICE_RECIPE_THROUGHPUT));
+    bool base_stage = stage && (string_equal(stage->name, S8("base-generate")) ||
+                                string_equal(stage->name, S8("base-build")));
+    bool candidate_stage = stage && (string_equal(stage->name, S8("candidate-generate")) ||
+                                     string_equal(stage->name, S8("candidate-build")) ||
+                                     string_equal(stage->name, S8("throughput")));
+    bool identity_ok = (base_stage && identity == BENCH_SERVICE_RECIPE_IDENTITY_TRUSTED) ||
+                       (candidate_stage && identity == BENCH_SERVICE_RECIPE_IDENTITY_CANDIDATE);
     String8List wrapped = {0};
-    bool identity_ok = true;
-    if (production_driver)
+    if (production_driver && identity_ok && stage->manifest)
     {
-        string8_list_push(arena, &wrapped, S8("/usr/bin/systemd-run"));
-        string8_list_push(arena, &wrapped, S8("--quiet"));
-        string8_list_push(arena, &wrapped, S8("--wait"));
-        string8_list_push(arena, &wrapped, S8("--pipe"));
-        string8_list_push(arena, &wrapped, S8("--service-type=exec"));
-        string8_list_push(arena, &wrapped, S8("--slice=buster-bench.slice"));
-        string8_list_push(arena, &wrapped, S8("--property=AllowedCPUs=" BENCH_SERVICE_RECIPE_CPU));
-        string8_list_push(arena, &wrapped, S8("--property=MemoryMax=" BENCH_SERVICE_RECIPE_MEMORY));
-        string8_list_push(arena, &wrapped, S8("--property=MemorySwapMax=" BENCH_SERVICE_RECIPE_SWAP));
-        string8_list_push(arena, &wrapped, S8("--property=TasksMax=" BENCH_SERVICE_RECIPE_TASKS));
-        string8_list_push(arena, &wrapped, S8("--property=RuntimeMaxSec=" BENCH_SERVICE_RECIPE_RUNTIME));
-        if (stage && stage->manifest)
-        {
-            String8 child_unit = string_format(arena, S8("buster-bench-{S8}-{S8}-{S8}.service"),
-                                                stage->manifest->job_id, stage->manifest->attempt_token, stage->name);
-            String8 parent_unit = string_format(arena, S8("buster-bench-{S8}-{S8}.service"),
-                                                stage->manifest->job_id, stage->manifest->attempt_token);
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--unit={S8}"), child_unit));
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=PartOf={S8}"), parent_unit));
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=BindsTo={S8}"), parent_unit));
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=After={S8}"), parent_unit));
-            string8_list_push(arena, &wrapped, S8("--collect"));
-        }
-        identity_ok = bench_service_recipe_identity_append(arena, &wrapped, identity);
-        string8_list_push(arena, &wrapped, S8("--property=KillMode=control-group"));
-        string8_list_push(arena, &wrapped, S8("--property=SendSIGKILL=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=TimeoutStopSec=10s"));
-        string8_list_push(arena, &wrapped, S8("--property=NoNewPrivileges=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=PrivateTmp=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=PrivateDevices=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectSystem=strict"));
-        string8_list_push(arena, &wrapped, S8("--property=RestrictSUIDSGID=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectHome=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectControlGroups=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelTunables=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelModules=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectKernelLogs=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectClock=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectHostname=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=ProtectProc=invisible"));
-        string8_list_push(arena, &wrapped, S8("--property=LockPersonality=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=MemoryDenyWriteExecute=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=RemoveIPC=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=KeyringMode=private"));
-        string8_list_push(arena, &wrapped, S8("--property=RestrictNamespaces=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=RestrictRealtime=yes"));
-        string8_list_push(arena, &wrapped, S8("--property=RestrictAddressFamilies=AF_UNIX"));
-        string8_list_push(arena, &wrapped, S8("--property=SystemCallArchitectures=native"));
-        string8_list_push(arena, &wrapped, S8("--property=SystemCallFilter=@system-service"));
-        string8_list_push(arena, &wrapped, S8("--property=SystemCallErrorNumber=EPERM"));
-        string8_list_push(arena, &wrapped, string_format(arena, S8("--property=ReadOnlyPaths={S8}"), read_only_paths));
-        string8_list_push(arena, &wrapped, string_format(arena, S8("--property=ReadWritePaths={S8}"), read_write_path));
-        if (result_root.length && !string_equal(result_root, read_write_path))
-            string8_list_push(arena, &wrapped, string_format(arena, S8("--property=InaccessiblePaths={S8}"), result_root));
-        string8_list_push(arena, &wrapped, S8("--property=PrivateNetwork=yes"));
+        string8_list_push(arena, &wrapped, S8("/usr/local/libexec/buster-bench-systemd-broker"));
+        string8_list_push(arena, &wrapped, S8("start-stage"));
+        string8_list_push(arena, &wrapped, stage->manifest->job_id);
+        string8_list_push(arena, &wrapped, stage->manifest->attempt_token);
+        string8_list_push(arena, &wrapped, stage->name);
+        string8_list_push(arena, &wrapped, stage->manifest->base_revision);
+        string8_list_push(arena, &wrapped, stage->manifest->candidate_revision);
     }
-    if (!identity_ok)
-    {
-        /* No production stage may fall back to the manager's default root
-         * identity.  An invalid compile-time identity is converted into a
-         * fixed failing command with no caller arguments. */
-        wrapped = (String8List){0};
-        string8_list_push(arena, &wrapped, S8("/usr/bin/false"));
-    }
-    else
+    else if (identity_ok)
     {
         for (u64 index = 0; index < arguments.length; index += 1)
             string8_list_push(arena, &wrapped, arguments.pointer[index]);
     }
+    else
+    {
+        string8_list_push(arena, &wrapped, S8("/usr/bin/false"));
+    }
+    (void)read_only_paths;
+    (void)read_write_path;
+    (void)result_root;
     SliceString8 stable = string8_list_to_slice(arena, wrapped);
     return bench_service_recipe_process_add(arena, step, stable, working_directory, stage);
 }
@@ -39116,6 +39049,48 @@ BUSTER_GLOBAL_LOCAL void bench_service_add(Arena* arena, SliceString8 arguments)
 #endif
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult bench_service_broker_add(Arena* arena, SliceString8 arguments)
+{
+    bool self_test = arguments.length == 1 && string_equal(arguments.pointer[0], S8("self-test"));
+    ProcessResult result = arguments.length == 0 || self_test ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+#if BUSTER_LINUX
+    if (result == PROCESS_RESULT_SUCCESS)
+    {
+        make_directory_recursive(arena, S8("build/bench-service-tools"));
+        String8 executable = S8("build/bench-service-tools/systemd-broker");
+        String8 compiler = cmake_cc(arena, BUILD_COMPILER_CLANG);
+        ProcessRun* compile = run_add(arena, step_add(arena));
+        OsArgumentBuilder builder = os_argument_builder_start(arena);
+        os_argument_builder_append(&builder, compiler);
+        os_argument_builder_append(&builder, S8("-std=c11"));
+        os_argument_builder_append(&builder, S8("-O2"));
+        os_argument_builder_append(&builder, S8("-Wall"));
+        os_argument_builder_append(&builder, S8("-Wextra"));
+        os_argument_builder_append(&builder, S8("-Werror"));
+        os_argument_builder_append(&builder, S8("-fwrapv"));
+        os_argument_builder_append(&builder, S8("-fno-strict-aliasing"));
+        os_argument_builder_append(&builder, S8("-funsigned-char"));
+        os_argument_builder_append(&builder, S8("tools/bench_service/systemd_broker.c"));
+        os_argument_builder_append(&builder, S8("-o"));
+        os_argument_builder_append(&builder, executable);
+        *compile = (ProcessRun){.arguments = os_argument_builder_flush(&builder), .working_directory = S8("."),
+                                .spawn_options = {.use_process_environment = 1}};
+        if (self_test)
+        {
+            ProcessRun* test = run_add(arena, step_add(arena));
+            String8 command[] = {executable, S8("self-test")};
+            *test = (ProcessRun){.arguments = (SliceString8)BUSTER_ARRAY_TO_SLICE(command),
+                                 .working_directory = S8("."), .spawn_options = {.use_process_environment = 1}};
+        }
+    }
+#else
+    (void)arena;
+    (void)self_test;
+    result = PROCESS_RESULT_FAILED;
+#endif
+    return result;
+}
+
 // A same-runner CI comparison. A separately checked-out baseline is required;
 // the generated workload and flags are owned by the candidate harness, shared
 // byte-for-byte by both compiler executables. Never restore timing baselines or
@@ -39211,6 +39186,7 @@ ProcessResult process_arguments(void)
 BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_BENCH_SERVICE] = S8_INITIALIZER("bench_service"),
+        [BUILD_COMMAND_BENCH_SERVICE_BROKER] = S8_INITIALIZER("bench_service_broker"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE] = S8_INITIALIZER("bench_service_recipe"),
         [BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST] = S8_INITIALIZER("bench_service_recipe_self_test"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
@@ -39386,7 +39362,8 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
     while (result == PROCESS_RESULT_SUCCESS && argument_i < arguments.length)
     {
         String8 argument = arguments.pointer[argument_i];
-        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
+        if (command == BUILD_COMMAND_BENCH_SERVICE || command == BUILD_COMMAND_BENCH_SERVICE_BROKER ||
+            command == BUILD_COMMAND_BENCH_SERVICE_RECIPE ||
             command == BUILD_COMMAND_BENCH_SERVICE_RECIPE_SELF_TEST || command == BUILD_COMMAND_BENCH_THROUGHPUT ||
             command == BUILD_COMMAND_BENCH_THROUGHPUT_CI)
         {
@@ -40326,6 +40303,11 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_BENCH_SERVICE:
         {
             bench_service_add(arena, string8_list_to_slice(arena, throughput_arguments));
+        }
+        break;
+        case BUILD_COMMAND_BENCH_SERVICE_BROKER:
+        {
+            result = bench_service_broker_add(arena, string8_list_to_slice(arena, throughput_arguments));
         }
         break;
         case BUILD_COMMAND_BENCH_SERVICE_RECIPE:

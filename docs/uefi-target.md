@@ -111,8 +111,12 @@ firmware code image and pristine variable template. The GitHub `UEFI firmware
 boot` job installs those exact packages from the snapshot and is required by
 `CI complete`. It uses the ordinary PR merge checkout, main/tag pushes,
 merge groups and manual dispatches, under the existing `GH_ACTIONS_CI_ENABLED`
-switch. Update the snapshot, package versions, firmware hashes and machine
-configuration together when intentionally refreshing the reference lane.
+switch. Apt retries transient snapshot fetch errors up to three times per
+request, then makes up to three complete attempts per apt command with 30- and
+60-second backoffs. It fails on any incomplete index refresh and never changes
+the signed source, package versions or required boot result. Update the snapshot,
+package versions, firmware hashes and machine configuration together when
+intentionally refreshing the reference lane.
 
 Each boot gets a deterministic raw disk with a 16 MiB FAT16 EFI System
 Partition (MBR type `0xef`, starting at LBA 2048), containing `EFI/BOOT/BOOTX64.EFI` or

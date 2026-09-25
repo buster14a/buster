@@ -104,7 +104,9 @@ Do not grant candidate write permission to either parent to fix an access error.
 The long-lived reference uses `Type=exec` and `serve`, with `Restart=no`.
 `RuntimeDirectory` manages only the socket directory. It does not reconcile
 queue state or clean sibling transient units. No `.socket` activation unit is
-supplied: `serve` binds its own endpoint and rejects a pre-existing socket.
+supplied for the service control endpoint: `serve` binds its own endpoint and
+rejects a pre-existing socket. The separate root systemd broker has a
+socket-activated template service.
 Do not blindly unlink a stale endpoint; establish daemon/instance absence and
 preserve the journal before an operator-authorized restart.
 
@@ -153,14 +155,15 @@ identities; changing only `serve`'s CPU argument is insufficient. Preserve the
 existing sandbox properties and exact checks in `bq_worker_observed` and
 `bench_service_recipe_sandbox_process_add`.
 
-An operator must review system-bus authorization for the fixed transient-unit
-lifecycle. Merely matching a unit-name prefix or granting the entire
-`manage-units` action does not constrain arbitrary transient service properties
-or executable selection. Do not install such a broad polkit rule. Establish a
-reviewed boundary for the actual installed systemd/polkit versions and record
-which identity may start, observe, signal and collect each fixed unit. If that
-cannot be demonstrated, leave the service stopped. Candidates and the Actions
-runner must not gain that authority.
+An operator must review and install the constrained broker and exact socket,
+template service and lease-identity receipt described in
+[SYSTEMD_BROKER.md](SYSTEMD_BROKER.md). Merely matching a unit-name prefix or
+granting the entire `manage-units` action does not constrain arbitrary
+transient service properties or executable selection. Do not install such a
+broad polkit rule. Record which identity may start, observe, signal and collect
+each fixed unit and prove that direct manager writes remain denied to the
+service, candidate and runner. If that cannot be demonstrated, leave the
+service stopped. Candidates and the Actions runner must not gain broker access.
 
 Record kernel, boot ID, systemd version, cgroup-v2 mount identity, CPU model,
 logical/physical topology and SMT siblings, microcode, RAM, governor/driver,
@@ -176,10 +179,18 @@ Restrict the runner to the reviewed service workflow and a protected manual
 main dispatch. Provision and verify the environment's actual review/branch
 rules; an `environment:` name in YAML can create an unprotected environment.
 See [GitHub's environment documentation](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
-Require immutable action SHAs, minimal permissions, read-only contents,
-`persist-credentials: false` for any checkout, and exactly
-`runs-on: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]`.
-Do not expose those labels to a `pull_request` job.
+Require immutable action SHAs for any action use, minimal permissions, and
+`persist-credentials: false` for any checkout. The fixed dispatcher has no
+checkout, sets `permissions: {}`, and selects both the restricted group and
+labels exactly:
+
+```yaml
+runs-on:
+  group: buster-9700x-service-dispatch
+  labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+```
+
+Do not expose that group or those labels to a `pull_request` job.
 
 The reviewed workflow must not execute checked-out candidate code. All service,
 driver, harness, source and policy identities come from the installed inventory.

@@ -1,6 +1,14 @@
-name: Upload native logs with one bounded retry
-description: Upload packed native CI evidence and retry one transient failure.
+name: Upload CI log artifacts with one bounded retry
+description: Upload CI log evidence and retry one transient failure.
 inputs:
+  label:
+    description: Artifact family named in step labels and recovery evidence.
+    required: false
+    default: native
+  label_title:
+    description: Title-cased artifact family used in recovery messages.
+    required: false
+    default: Native
   name:
     description: Artifact name used for both attempts.
     required: true
@@ -22,8 +30,9 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Retain native logs
-      id: native_upload
+    - name: Retain ${{ inputs.label }} logs
+      id: artifact_upload
+      if: ${{ !cancelled() }}
       continue-on-error: true
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
@@ -33,17 +42,19 @@ runs:
         if-no-files-found: ${{ inputs.if-no-files-found }}
         retention-days: ${{ inputs.retention-days }}
 
-    - name: Back off before retrying native log upload
-      if: ${{ !cancelled() && steps.native_upload.outcome == 'failure' }}
+    - name: Back off before retrying ${{ inputs.label }} log upload
+      if: ${{ !cancelled() && steps.artifact_upload.outcome == 'failure' }}
       shell: bash
+      env:
+        ARTIFACT_TITLE: ${{ inputs.label_title }}
       run: |
-        printf '::warning::Native artifact upload failed; retrying once after 15 seconds.\n'
-        printf '## Native artifact upload\n\nInitial upload failed; retrying once after a 15-second backoff.\n' >> "$GITHUB_STEP_SUMMARY"
+        printf '::warning::%s artifact upload failed; retrying once after 15 seconds.\n' "$ARTIFACT_TITLE"
+        printf '## %s artifact upload\n\nInitial upload failed; retrying once after a 15-second backoff.\n' "$ARTIFACT_TITLE" >> "$GITHUB_STEP_SUMMARY"
         sleep 15
 
-    - name: Retain native logs (retry)
-      id: native_upload_retry
-      if: ${{ !cancelled() && steps.native_upload.outcome == 'failure' }}
+    - name: Retain ${{ inputs.label }} logs (retry)
+      id: artifact_upload_retry
+      if: ${{ !cancelled() && steps.artifact_upload.outcome == 'failure' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: ${{ inputs.name }}
@@ -54,14 +65,19 @@ runs:
         # A timed-out CreateArtifact request may have committed remotely.
         overwrite: true
 
-    - name: Record recovered native log upload
-      if: ${{ !cancelled() && steps.native_upload.outcome == 'failure' && steps.native_upload_retry.outcome == 'success' }}
+    - name: Record recovered ${{ inputs.label }} log upload
+      if: ${{ !cancelled() && steps.artifact_upload.outcome == 'failure' && steps.artifact_upload_retry.outcome == 'success' }}
       shell: bash
-      run: printf '\nRetry succeeded; native evidence was retained.\n' >> "$GITHUB_STEP_SUMMARY"
+      env:
+        ARTIFACT_LABEL: ${{ inputs.label }}
+      run: printf '\nRetry succeeded; %s evidence was retained.\n' "$ARTIFACT_LABEL" >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Record failed native log upload
-      if: ${{ always() && !cancelled() && steps.native_upload.outcome == 'failure' && steps.native_upload_retry.outcome == 'failure' }}
+    - name: Record failed ${{ inputs.label }} log upload
+      if: ${{ always() && !cancelled() && steps.artifact_upload.outcome == 'failure' && steps.artifact_upload_retry.outcome == 'failure' }}
       shell: bash
+      env:
+        ARTIFACT_TITLE: ${{ inputs.label_title }}
+        ARTIFACT_LABEL: ${{ inputs.label }}
       run: |
-        printf '::error::Native artifact upload retry failed; evidence was not retained.\n'
-        printf '\nNative artifact upload retry failed; evidence was not retained.\n' >> "$GITHUB_STEP_SUMMARY"
+        printf '::error::%s artifact upload retry failed; evidence was not retained.\n' "$ARTIFACT_TITLE"
+        printf '\n%s artifact upload retry failed; evidence was not retained.\n' "$ARTIFACT_LABEL" >> "$GITHUB_STEP_SUMMARY"

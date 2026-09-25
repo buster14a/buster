@@ -273,7 +273,11 @@ contract permits up to 20 speculative combined-head builds while allowing only
 one validated candidate to merge at a time. `ALLGREEN` requires every queued
 group's checks, and `MERGE` retains merge commits. The initial activation had
 one build slot and no bypass; the administrator must read back the current live
-settings before relying on them. Live acceptance is tracked in #867 and remains
+settings before relying on them. On 2026-09-24 the administrator added two
+standing `always` bypass actors to the live main ruleset: Repository admin
+(role 5) and `davidgmbb` (user 39247043). The reviewed contract now expects
+exactly these actors; a bypass action is not passing queue evidence. Live
+acceptance is tracked in #867 and remains
 distinct from activation. Keep
 `strict_required_status_checks_policy: false`: a conflict-free branch does not
 need a manual update just because main advanced. Use the queue to validate the

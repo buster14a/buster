@@ -42,6 +42,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_c_diagnostic_code(CDiagnosticKind ki
         [C_DIAGNOSTIC_TOKEN_TOO_LONG] = S8_INITIALIZER("c.token-too-long"),
         [C_DIAGNOSTIC_INVALID_INTEGER_LITERAL] = S8_INITIALIZER("c.invalid-integer-literal"),
         [C_DIAGNOSTIC_INVALID_UTF8] = S8_INITIALIZER("c.invalid-utf8"),
+        [C_DIAGNOSTIC_UNKNOWN_TYPE_NAME] = S8_INITIALIZER("c.unknown-type-name"),
     };
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(names) == C_DIAGNOSTIC_KIND_COUNT);
     return (u32)kind < (u32)BUSTER_ARRAY_LENGTH(names) ? names[kind] : S8("not-applicable");
@@ -340,6 +341,14 @@ BUSTER_GLOBAL_LOCAL CompilerDiagnosticBackend compiler_driver_backend_context(Ar
         .instruction_id = code.failed_instruction.value, .opcode_id = code.failed_opcode < IR_OPCODE_COUNT ? (u32)code.failed_opcode : UINT32_MAX,
         .operation_id = UINT32_MAX,
     };
+    if (code.error == CODEGEN_ERROR_INVALID_IR && code.failed_opcode >= IR_OPCODE_COUNT)
+    {
+        result.opcode = S8("unknown");
+    }
+    if (code.failed_machine_verification.error != MACHINE_VERIFY_NONE)
+    {
+        result.reason = machine_verify_error_name(code.failed_machine_verification.error);
+    }
     if (code.failed_function.value < module->function_count)
     {
         IrFunction* function = module->functions + code.failed_function.value;

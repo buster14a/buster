@@ -31,16 +31,24 @@ Checkout necessarily precedes repository-local checks; its literal pin must
 itself be reviewed in the PR. This policy cannot prevent a PR author from
 changing the checker together with a workflow.
 
-## Approved local native-upload composite action
+## Approved local CI evidence-upload composite action
 
-`./.github/actions/native-artifact-upload` is approved for the packed native
-evidence step in Buster CI. The caller reaches it only after evidence packaging
-succeeds. The composite uses the existing pinned upload-artifact v7 action for
-the initial attempt and one retry, tolerates only the initial failure, waits
-15 seconds, and sets `overwrite: true` on the blocking retry. A retry failure
-keeps the native lane red and writes an explicit evidence-loss summary. The
-workflow leaves its older step order intact; regression coverage in
-`tools/ci_native_observation_test.py` checks the wrapper and both pinned calls.
+`./.github/actions/native-artifact-upload` is approved only for two Buster CI
+uses: the packed native evidence step after successful packaging, and the
+mobile log-retention step after `Mobile result and reproduction`. The mobile
+caller runs it under `!cancelled()`, so build, lifecycle, test, and coverage
+failures still retain the available logs. Its inputs preserve the mobile
+artifact name and path, the upload action's default compression level (6),
+`if-no-files-found: ignore`, and seven-day retention.
+
+The composite uses the existing pinned upload-artifact v7 action for the
+initial attempt and one retry, tolerates only the initial failure, waits
+15 seconds, and sets `overwrite: true` on the blocking retry. Recovery and
+evidence loss are reported explicitly. A successful retry does not change any
+earlier build or coverage failure. Regression coverage in
+`tools/ci_native_observation_test.py` checks both callers, all three mobile
+matrix entries, the matching retry inputs, cancellation, and the two-attempt
+limit.
 
 The checker allows this exact local path, then scans its manifest with the same
 remote action allowlist. It does not authorize arbitrary local or container

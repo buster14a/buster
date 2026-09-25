@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Read-only comparison of installed GitHub benchmark admission controls.
+"""Read-only comparison of the protected benchmark environment and switch.
 
-The administrator captures four GET responses after installation. The installer
-separately checks the existing admin-only Actions policy and restricted runner
-group before mutation. This check does not authorize host provisioning or
-workflow dispatch.
+The administrator captures three GET responses during preflight. The caller
+also checks the existing main ruleset, requester policy, administrator
+permission and restricted runner group. This check does not authorize host
+provisioning or workflow dispatch.
 """
 
 import argparse
@@ -32,21 +32,18 @@ def matching(expected, actual, path):
         require(expected == actual, f"{path}: value differs")
 
 
-def verify(policy, ruleset, environment, branches, variable):
-    require(type(ruleset.get("id")) is int and ruleset["id"] > 0,
-            "benchmark ruleset ID missing")
-    require(ruleset.get("source_type") == "Repository",
-            "benchmark ruleset is not repository-owned")
-    require(ruleset.get("current_user_can_bypass") == "never",
-            "benchmark ruleset allows caller bypass")
-    matching(policy, ruleset, "benchmark ruleset")
+def verify(environment, branches, variable):
     require(environment.get("name") == "benchmark-9700x", "environment differs")
     matching({"protected_branches": False, "custom_branch_policies": True},
              environment.get("deployment_branch_policy"), "deployment policy")
     rules = environment.get("protection_rules")
     require(isinstance(rules, list), "environment protection rules missing")
-    require(not any(rule.get("type") == "required_reviewers" for rule in rules),
-            "environment still requires a reviewer")
+    reviewers = [rule for rule in rules if rule.get("type") == "required_reviewers"]
+    require(len(reviewers) == 1, "environment must require one administrator reviewer")
+    require(reviewers[0].get("prevent_self_review") is True,
+            "environment must prevent self-review")
+    matching([{"type": "User", "reviewer": {"login": "davidgmbb", "id": 39247043}}],
+             reviewers[0].get("reviewers"), "environment reviewers")
     require(branches.get("total_count") == 1 and
             len(branches.get("branch_policies", [])) == 1,
             "environment must have exactly one deployment branch")
@@ -58,16 +55,13 @@ def verify(policy, ruleset, environment, branches, variable):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("policy", type=Path)
-    parser.add_argument("ruleset", type=Path)
     parser.add_argument("environment", type=Path)
     parser.add_argument("branches", type=Path)
     parser.add_argument("variable", type=Path)
     args = parser.parse_args()
     try:
         inputs = [json.loads(path.read_text(encoding="utf-8")) for path in
-                  (args.policy, args.ruleset, args.environment, args.branches,
-                   args.variable)]
+                  (args.environment, args.branches, args.variable)]
         verify(*inputs)
     except (ValueError, OSError, TypeError, KeyError) as error:
         print(f"BENCH_ADMISSION_FAIL {error}", file=sys.stderr)
