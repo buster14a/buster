@@ -1,0 +1,76 @@
+name: Isolated interner complexity evidence e84c
+on:
+  push:
+    branches: [astra/60-interner-scaling-20260925-e84c]
+permissions:
+  contents: read
+jobs:
+  bounded-counter-probe:
+    if: ${{ github.server_url == 'https://github.com' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin source and run isolated C correctness counters
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=d9e736e2cf08804a2c603d153e9fb608f18c5c49
+          expected_blob=7d3d9e83e4273e669107819d721c18f15183a1eb
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$base" HEAD
+          test "$(git rev-parse HEAD:src/buster/lib/compiler/frontend/c/c_source.c)" = "$expected_blob"
+          printf 'SOURCE_COMMIT=%s\nSOURCE_TREE=%s\nEXPERIMENT_COMMIT=%s\nRUN=%s ATTEMPT=%s\n' "$base" "$(git rev-parse "$base^{tree}")" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          root="$RUNNER_TEMP/interner-e84c"
+          mkdir -p "$root"
+          git worktree add --detach "$root/source" "$base"
+          source="$root/source/src/buster/lib/compiler/frontend/c/c_source.c"
+          probe="$GITHUB_WORKSPACE/tools/experiments/interner_scaling"
+          clang --version
+          gcc --version
+          sha256sum "$source" "$probe/prepare.c" "$probe/probe.c"
+          git -C "$root/source" ls-tree -r --name-only HEAD docs/performance-audits | grep -E '/[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z.md$' | sort | tail -5
+          flags=(-std=c11 -O2 -g -Wall -Wextra -Wpedantic -Werror -fwrapv -fno-strict-aliasing -funsigned-char)
+          clang "${flags[@]}" "$probe/prepare.c" -o "$root/prepare"
+          "$root/prepare" "$source" "$root/kernel.inc"
+          sha256sum "$root/kernel.inc"
+          files=("$source" "$root/source/src/buster/lib/compiler/frontend/c/c_parse.c" "$root/source/src/buster/lib/compiler/frontend/c/c_gen.c" "$root/source/src/buster/lib/compiler/ir/ir.c" "$root/source/src/buster/lib/compiler/object/object.c" "$root/source/src/buster/lib/compiler/link/link.c")
+          for cc in clang gcc; do
+            for mode in 0 1; do
+              "$cc" "${flags[@]}" -I"$root" -DPROBE_ALTERNATIVE="$mode" "$probe/probe.c" -o "$root/$cc-$mode"
+              printf '\nRAW_SYNTHETIC cc=%s alternative=%s\n' "$cc" "$mode"
+              timeout 90s "$root/$cc-$mode" | tee "$root/$cc-$mode.csv"
+              printf '\nRAW_LEXICAL cc=%s alternative=%s\n' "$cc" "$mode"
+              timeout 90s "$root/$cc-$mode" "${files[@]}" | tee "$root/$cc-$mode-lexical.csv"
+              cut -d, -f1-6,16-19 "$root/$cc-$mode.csv" > "$root/$cc-$mode-identities"
+              cut -d, -f1-6,16-19 "$root/$cc-$mode-lexical.csv" >> "$root/$cc-$mode-identities"
+            done
+            cmp "$root/$cc-0-identities" "$root/$cc-1-identities"
+          done
+          cmp "$root/clang-0.csv" "$root/gcc-0.csv"
+          cmp "$root/clang-1.csv" "$root/gcc-1.csv"
+          cmp "$root/clang-0-lexical.csv" "$root/gcc-0-lexical.csv"
+          cmp "$root/clang-1-lexical.csv" "$root/gcc-1-lexical.csv"
+          for mode in 0 1; do
+            clang "${flags[@]}" -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -I"$root" -DPROBE_ALTERNATIVE="$mode" "$probe/probe.c" -o "$root/sanitized-$mode"
+            printf '\nRAW_SANITIZED alternative=%s\n' "$mode"
+            ASAN_OPTIONS=detect_leaks=1 timeout 120s "$root/sanitized-$mode" | tee "$root/sanitized-$mode.csv"
+            cmp "$root/clang-$mode.csv" "$root/sanitized-$mode.csv"
+          done
+          clang "${flags[@]}" -I"$root" -DPROBE_ALTERNATIVE=1 -DPROBE_FORCE_COLLISIONS=1 "$probe/probe.c" -o "$root/forced"
+          printf '\nRAW_FORCED_COLLISIONS\n'
+          timeout 120s "$root/forced" | tee "$root/forced.csv"
+          cut -d, -f1-6,16-19 "$root/forced.csv" > "$root/forced-identities"
+          cut -d, -f1-6,16-19 "$root/clang-0.csv" > "$root/synthetic-identities"
+          cmp "$root/synthetic-identities" "$root/forced-identities"
+          for control in 0 1; do
+            "$root/clang-0" generate "$root/generated-$control.c" 1024 4096 "$control"
+            sha256sum "$root/generated-$control.c"
+            for cc in clang gcc; do
+              timeout 60s "$cc" -std=c11 -Wall -Wextra -Werror -fsyntax-only "$root/generated-$control.c"
+            done
+          done
+          printf '\nCOMPLETED: isolated extracted-helper counts and identity controls. Full Buster, seeded preprocessing, self-host, target lanes, timing and 9700X acceptance were NOT RUN.\n'
