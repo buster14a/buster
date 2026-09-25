@@ -373,6 +373,26 @@ BUSTER_C_INTERNAL void c_source_map_publish(Arena* arena, CSourceMapRecovery* re
     recovery->capacity = map->capacity;
 }
 
+// Only the append-only C23 respell phase may use this boundary: equal counts
+// there mean every existing key and its sentinel are still final. This is not
+// a general mutation cache. Keep published storage alive in the TU arena;
+// canonical lowering copies its pointers for later diagnostics and debug info.
+BUSTER_C_INTERNAL void c_source_map_publish_appended(Arena* arena, CSourceMapRecovery* recovery, CSourceMap const* map)
+{
+    if (map->count != recovery->map.count)
+    {
+        c_source_map_publish(arena, recovery, map);
+    }
+}
+
+#if BUSTER_INCLUDE_TESTS
+void c_test_source_map_publish_appended(Arena* arena, CSourceMapRecovery* recovery, IrSourceRegion* regions, u32 count, u32 capacity)
+{
+    CSourceMap map = {.arena = arena, .regions = regions, .count = count, .capacity = capacity};
+    c_source_map_publish_appended(arena, recovery, &map);
+}
+#endif
+
 BUSTER_C_SHARED bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target, u64* value_out, CTypeKind* kind_out);
 
 BUSTER_C_SHARED bool c_preprocess_dialect_is_c23(CPreprocessDialect dialect);
@@ -9367,11 +9387,11 @@ CPreprocessResult c_preprocess(Arena* arena, String8 source, CPreprocessOptions 
     result.files = file_table.files;
     result.file_count = file_table.count;
     c_source_map_publish(arena, recovery, &map);
-    // Respelling appends regions at the tail of the space, in order, and
-    // queries the map as it goes; publish once so those queries land, and
-    // again for what they added.
+    // Respelling queries the published prefix and may append regions (moving
+    // their backing array). Rebuild keys only for that appended tail; without
+    // it, a second publication would retain an identical key array in the TU.
     c_preprocess_respell_c23(space, &map, &result);
-    c_source_map_publish(arena, recovery, &map);
+    c_source_map_publish_appended(arena, recovery, &map);
     u32 page_count = (u32)((space->used >> IR_SOURCE_MAP_PAGE_SHIFT) + 1);
     u32* pages = arena_allocate(arena, u32, page_count);
     u32 fill_entry = 0;

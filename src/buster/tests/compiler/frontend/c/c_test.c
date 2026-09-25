@@ -6176,6 +6176,285 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_locations(UnitTestArguments
     return result;
 }
 
+// Published key storage is never rewound, even when a later map supersedes it.
+// The no-append branch must be genuinely allocation-free, not merely equivalent.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 counts[] = {0, 1, 2, 63, 64, 65, 255, 256, 257, 1024, 65536};
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(32), .flags = {.no_pool = 1}});
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        for (u32 repetition = 0; repetition < 3; repetition += 1)
+        {
+            CSourceMapRecovery recovery = {0};
+            IrSourceMap snapshots[BUSTER_ARRAY_LENGTH(counts)] = {0};
+            for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(counts); size += 1)
+            {
+                u32 count = counts[size];
+                // A distinct backing array models the growth during respelling.
+                IrSourceRegion* regions = count ? arena_allocate(arena, IrSourceRegion, count) : 0;
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    regions[index] = (IrSourceRegion){.start = index * 16, .source = index % 7,
+                                                      .kind = IR_SOURCE_REGION_STAMP};
+                }
+                u64 before = arena->position;
+                c_test_source_map_publish_appended(arena, &recovery, regions, count, count);
+                u64 alignment = BUSTER_ALIGN_OF(IrSourceRegionKey);
+                u64 expected = count ? (before + alignment - 1) / alignment * alignment + sizeof(IrSourceRegionKey) * (count + 1) : before;
+                BUSTER_TEST(arguments, arena->position == expected);
+                BUSTER_TEST(arguments, recovery.map.count == count && recovery.capacity == count);
+                if (BUSTER_REQUIRE(arguments, !count || (recovery.map.keys && recovery.map.regions == regions)))
+                {
+                    if (count)
+                    {
+                        BUSTER_TEST(arguments, recovery.map.keys[count].start == UINT32_MAX && recovery.map.keys[count].source == 0);
+                    }
+                    snapshots[size] = recovery.map;
+                    // Interleaved persistent allocations make a broad rewind or
+                    // in-place replacement observable, as do the saved models.
+                    u8* canary = arena_allocate(arena, u8, 97);
+                    memset(canary, 0x5a, 97);
+                    u64 position = arena->position;
+                    u64 committed = arena->os_position;
+                    u64 dirty = arena_dirty_position(arena);
+                    c_test_source_map_publish_appended(arena, &recovery, regions, count, count);
+                    BUSTER_TEST(arguments, arena->position == position && arena->os_position == committed);
+                    BUSTER_TEST(arguments, arena_dirty_position(arena) == dirty);
+                    BUSTER_TEST(arguments, recovery.map.keys == snapshots[size].keys);
+                    BUSTER_TEST(arguments, recovery.map.regions == snapshots[size].regions);
+                    for (u32 index = 0; index < 97; index += 1)
+                    {
+                        BUSTER_TEST(arguments, canary[index] == 0x5a);
+                    }
+                }
+            }
+            for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(counts); size += 1)
+            {
+                IrSourceMap copy = snapshots[size];
+                if (BUSTER_REQUIRE(arguments, copy.count == counts[size] && (!copy.count || copy.keys)))
+                {
+                    for (u32 index = 0; index < copy.count; index += 1)
+                    {
+                        BUSTER_TEST(arguments, copy.keys[index].start == index * 16 && copy.keys[index].source == index % 7);
+                    }
+                    if (copy.count)
+                    {
+                        BUSTER_TEST(arguments, copy.keys[copy.count].start == UINT32_MAX && copy.keys[copy.count].source == 0);
+                    }
+                }
+            }
+            // No consumers survive this test-owned boundary. The next pass
+            // must work on poisoned, previously committed storage, not fresh zeroes.
+            memset((u8*)arena + arena_minimum_position, 0xa5, arena->position - arena_minimum_position);
+            arena_reset_to_start(arena);
+        }
+        // A no-op publication also succeeds with no reservation left. The
+        // prerequisite keeps the intentional unconditional-publication negative
+        // control an ordinary assertion failure rather than a fatal overflow.
+        IrSourceRegion region = {.start = 0, .kind = IR_SOURCE_REGION_STAMP};
+        CSourceMapRecovery recovery = {0};
+        c_test_source_map_publish_appended(arena, &recovery, &region, 1, 1);
+        u64 position = arena->position;
+        c_test_source_map_publish_appended(arena, &recovery, &region, 1, 1);
+        if (BUSTER_REQUIRE(arguments, arena->position == position))
+        {
+            (void)arena_allocate(arena, u8, arena->reserved_size - arena->position);
+            c_test_source_map_publish_appended(arena, &recovery, &region, 1, 1);
+            BUSTER_TEST(arguments, arena->position == arena->reserved_size);
+            BUSTER_TEST(arguments, recovery.map.keys[0].start == 0 && recovery.map.keys[1].start == UINT32_MAX);
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_source_map_lifetime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8(""),
+        S8("int tiny;\n"),
+        S8("#define KEEP(x) x\n#define JOIN(a,b) a##b\n"
+           "#line 73 \"map-lifetime.c\"\n#warning retained message\n"
+           "bool JOIN(va,lue);\nalignas(16) int aligned_value;\n"
+           "static_assert(alignof(int) >= 1, \"ok\");\nthread_local int tls;\n"
+           "int f(void) { return KEEP(alignof(int)) + value; }\n"),
+        S8("int broken(\n"),
+    };
+    Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128), .flags = {.no_pool = 1}});
+    if (BUSTER_REQUIRE(arguments, arena != 0))
+    {
+        for (u32 repetition = 0; repetition < 3; repetition += 1)
+        {
+            for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
+            {
+                Target target = target_native;
+                CPreprocessOptions options = {.source_path = S8("tests/map-lifetime.c"), .target = target,
+                    .data_layout = target_data_layout(target),
+                    .dialect = source_index == 2 || repetition == 1 ? C_PREPROCESS_DIALECT_C23 : C_PREPROCESS_DIALECT_C17};
+                CPreprocessResult preprocess = c_preprocess(arena, sources[source_index], options);
+                if (BUSTER_REQUIRE(arguments, preprocess.recovery && preprocess.tokens && !preprocess.error_count))
+                {
+                    CPreprocessResult saved = preprocess;
+                    IrSourceMap map = preprocess.recovery->map;
+                    CSourceLocation* locations = arena_allocate(arena, CSourceLocation, preprocess.token_count);
+                    for (u64 index = 0; index < preprocess.token_count; index += 1)
+                    {
+                        locations[index] = c_preprocess_token_location(&preprocess, preprocess.tokens[index]);
+                    }
+                    BUSTER_TEST(arguments, preprocess.warning_count == (source_index == 2));
+                    if (source_index == 2 && BUSTER_REQUIRE(arguments, preprocess.diagnostic_count == 1))
+                    {
+                        BUSTER_STRING_TEST(arguments, preprocess.diagnostics[0].message, S8("retained message"));
+                        BUSTER_TEST(arguments, preprocess.diagnostics[0].location.line == 73);
+                    }
+                    CParserResult syntax = c_parse_ast(arena, preprocess);
+                    CIRLowerResult lowered = {0};
+                    CDiagnostic parser_diagnostic = {0};
+                    if (source_index == 3)
+                    {
+                        if (BUSTER_REQUIRE(arguments, syntax.diagnostic_count && syntax.diagnostics))
+                        {
+                            parser_diagnostic = syntax.diagnostics[0];
+                            parser_diagnostic.message = string_duplicate_arena(arguments->arena, parser_diagnostic.message, false);
+                            BUSTER_TEST(arguments, parser_diagnostic.message.length != 0);
+                        }
+                    }
+                    else if (BUSTER_REQUIRE(arguments, syntax.diagnostic_count == 0))
+                    {
+                        CAnalysisResult analysis = c_analyze_semantics_only(arena, preprocess, syntax);
+                        if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && analysis.diagnostic_count == 0))
+                        {
+                            // The model and preprocess descriptors are copied by
+                            // value. Their borrowed payload must remain valid.
+                            CAnalysisResult analysis_copy = analysis;
+                            lowered = c_lower_to_ir(arena, options.source_path, saved, analysis_copy, target);
+                            BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+                        }
+                    }
+                    // A second live TU shares the caller arena, but owns its
+                    // own spelling/token arenas and malformed-input diagnostics.
+                    CPreprocessResult other = c_preprocess(arena,
+                        S8("#line 9 \"map-other.c\"\n#error another message\nint other;\n"), options);
+                    if (BUSTER_REQUIRE(arguments, other.recovery && other.error_count == 1 && other.diagnostic_count == 1))
+                    {
+                        BUSTER_STRING_TEST(arguments, other.diagnostics[0].message, S8("another message"));
+                        BUSTER_TEST(arguments, other.diagnostics[0].location.line == 9);
+                    }
+                    memset(arena_allocate(arena, u8, 8192), 0x5a, 8192);
+                    for (u64 index = 0; index < saved.token_count; index += 1)
+                    {
+                        CSourceLocation location = c_preprocess_token_location(&saved, saved.tokens[index]);
+                        BUSTER_TEST(arguments, location.file == locations[index].file && location.line == locations[index].line &&
+                                               location.column == locations[index].column && location.map_offset == locations[index].map_offset);
+                        if (lowered.program)
+                        {
+                            IrSourcePosition position = ir_source_map_position(&lowered.program->source_map, saved.tokens[index].offset, 0);
+                            BUSTER_TEST(arguments, position.source == location.file && position.line == location.line && position.column == location.column);
+                        }
+                    }
+                    BUSTER_TEST(arguments, saved.recovery->map.keys == map.keys && saved.recovery->map.regions == map.regions);
+                    if (lowered.program)
+                    {
+                        BUSTER_TEST(arguments, lowered.program->source_map.keys == map.keys && lowered.program->source_map.regions == map.regions);
+                        BUSTER_TEST(arguments, lowered.program->source_map.pages == map.pages && lowered.program->source_map.count == map.count);
+                    }
+                    if (source_index == 2 && BUSTER_REQUIRE(arguments, saved.diagnostic_count == 1))
+                    {
+                        BUSTER_STRING_TEST(arguments, saved.diagnostics[0].message, S8("retained message"));
+                        BUSTER_TEST(arguments, saved.diagnostics[0].location.line == 73);
+                    }
+                    if (source_index == 3 && parser_diagnostic.message.length)
+                    {
+                        BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, parser_diagnostic.message);
+                        BUSTER_TEST(arguments, syntax.diagnostics[0].kind == parser_diagnostic.kind &&
+                                               syntax.diagnostics[0].location.line == parser_diagnostic.location.line);
+                    }
+                    if (other.recovery)
+                    {
+                        arena_destroy(other.recovery->spelling_arena, 1);
+                        arena_destroy(other.recovery->token_arena, 1);
+                        arena_destroy(other.recovery->token_shape_arena, 1);
+                    }
+                }
+                if (preprocess.recovery)
+                {
+                    arena_destroy(preprocess.recovery->spelling_arena, 1);
+                    arena_destroy(preprocess.recovery->token_arena, 1);
+                    arena_destroy(preprocess.recovery->token_shape_arena, 1);
+                }
+                memset((u8*)arena + arena_minimum_position, 0xa5, arena->position - arena_minimum_position);
+                arena_reset_to_start(arena);
+            }
+        }
+        // The respell pass appends one STAMP per alias. Cross the region
+        // array's initial 256-row growth boundary and larger populations.
+        u32 counts[] = {0, 1, 255, 256, 257, 4096};
+        for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(counts); size += 1)
+        {
+            u64 capacity = (u64)counts[size] * 32 + 1;
+            char8* bytes = arena_allocate(arena, char8, capacity);
+            u64 length = 0;
+            for (u32 index = 0; index < counts[size]; index += 1)
+            {
+                c_test_append_source(bytes, capacity, &length, string_format(arena, S8("bool value_{u32};\n"), index));
+            }
+            CPreprocessResult preprocess = c_preprocess(arena, (String8){.pointer = bytes, .length = length},
+                (CPreprocessOptions){.source_path = S8("tests/map-growth.c"), .dialect = C_PREPROCESS_DIALECT_C23});
+            if (BUSTER_REQUIRE(arguments, preprocess.recovery && !preprocess.diagnostic_count && preprocess.token_count == (u64)counts[size] * 3 + 1))
+            {
+                IrSourceMap map = preprocess.recovery->map;
+                BUSTER_TEST(arguments, map.count >= counts[size] && map.keys[map.count].start == UINT32_MAX);
+                for (u32 index = 0; index < counts[size]; index += 1)
+                {
+                    CToken token = preprocess.tokens[index * 3];
+                    BUSTER_STRING_TEST(arguments, c_token_spelling(preprocess.spelling_base, token), S8("_Bool"));
+                    CSourceLocation location = c_preprocess_token_location(&preprocess, token);
+                    BUSTER_TEST(arguments, location.line == index + 1 && location.column == 1);
+                }
+                for (u32 index = 0; index < map.count; index += 1)
+                {
+                    BUSTER_TEST(arguments, map.keys[index].start == map.regions[index].start && map.keys[index].source == map.regions[index].source);
+                }
+            }
+            if (preprocess.recovery)
+            {
+                arena_destroy(preprocess.recovery->spelling_arena, 1);
+                arena_destroy(preprocess.recovery->token_arena, 1);
+                arena_destroy(preprocess.recovery->token_shape_arena, 1);
+            }
+            arena_reset_to_start(arena);
+        }
+        // These are the supported nullable construction failures. In-arena
+        // exhaustion is fatal and remains covered by the arena subprocess suite.
+        for (u32 failure = 0; failure < 2; failure += 1)
+        {
+            arena_pool_release_thread();
+            // Ensure the detail block cannot request a commit before the
+            // intended new spelling-arena construction consumes the one-shot seam.
+            (void)arena_allocate(arena, u8, 4096);
+            arena_reset_to_start(arena);
+            if (failure) { arena_test_fail_next_commit(); }
+            else { arena_test_fail_next_reserve(); }
+            CPreprocessResult rejected = c_preprocess(arena, S8("int x;\n"), (CPreprocessOptions){0});
+            BUSTER_TEST(arguments, rejected.recovery == 0 && rejected.tokens == 0 && rejected.token_count == 0);
+            CPreprocessResult retried = c_preprocess(arena, S8("int x;\n"), (CPreprocessOptions){0});
+            BUSTER_TEST(arguments, retried.recovery && retried.tokens && !retried.error_count);
+            if (retried.recovery)
+            {
+                arena_destroy(retried.recovery->spelling_arena, 1);
+                arena_destroy(retried.recovery->token_arena, 1);
+                arena_destroy(retried.recovery->token_shape_arena, 1);
+            }
+            arena_reset_to_start(arena);
+        }
+        BUSTER_TEST(arguments, arena_destroy(arena, 1));
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_macro_task_batches(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -21665,6 +21944,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, c_test_pasted_keyword_body_walk);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_order);
     BUSTER_TEST_FIXTURE(arguments, c_test_source_map_locations);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_publication);
+    BUSTER_TEST_FIXTURE(arguments, c_test_source_map_lifetime);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_task_batches);
     BUSTER_TEST_FIXTURE(arguments, c_test_macro_plain_production);
     BUSTER_TEST_FIXTURE(arguments, c_test_frontend_vla_and_ir);
