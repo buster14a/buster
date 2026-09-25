@@ -28,12 +28,12 @@ jobs:
           import base64, gzip, hashlib, os, pathlib
           text = pathlib.Path('.github/transport/frontend-map-1100.patch.b64').read_text().strip()
           patch = gzip.decompress(base64.b64decode(text, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == 'a38a3eae894f6ba027a764135a79cfa983961407ecdd39f6c7e0bc69bb73bd25'
+          assert hashlib.sha256(patch).hexdigest() == '03f6293ee9bebbb393288cc9bf84077047a1479a0424c0625b3da6d92fa15010'
           pathlib.Path(os.environ['RUNNER_TEMP'], 'candidate.patch').write_bytes(patch)
           PY
-          git worktree add --detach "$RUNNER_TEMP/product" 50d603af42afeb8ebc466459b7fe2587f2f1deee
+          git worktree add --detach "$RUNNER_TEMP/product" 7c7431183b1b64c532ebb6092c0e6a0bb351bcad
           cd "$RUNNER_TEMP/product"
-          test "$(git rev-parse HEAD^{tree})" = 4366b705251082e216f3daee52f7fb5f088d96e6
+          test "$(git rev-parse HEAD^{tree})" = 4299be769b4fc9c1463aa5aa29070689d6a0b0e6
           git apply --check "$RUNNER_TEMP/candidate.patch"
           git apply "$RUNNER_TEMP/candidate.patch"
           git diff --check
