@@ -1,8 +1,9 @@
 /* Private #1018 -> #1020 service join. The caller supplies independently
  * authenticated #508/#509 row/check/oracle declarations; this entry point
  * independently reads the pinned support declaration through a held descriptor
- * to derive the complete object census size, then binds source and binary
- * identities to actual A readback. The caller still owes the complete replay.
+ * to derive the complete object census size and join each object ordinal to its
+ * approved source hash and target. It binds binary identities to A readback.
+ * The caller still owes the full validator/applicability/oracle replay.
  */
 #ifndef BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_SERVICE_H
 #define BUSTER_BENCH_SERVICE_RETIREMENT_CORRECTNESS_SERVICE_H

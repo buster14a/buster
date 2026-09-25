@@ -187,36 +187,72 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_support_population(void)
                       prepared.support_sha256);
     BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(profile));
     int file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    BQ_PREP_CHECK(file >= 3 && bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(file >= 3 && bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+    BqRetirementTrustedRow* rows = calloc(prepared.rows, sizeof(*rows));
+    BQ_PREP_CHECK(rows != NULL);
+    if (rows)
+    {
+        for (u32 i = 0; i < prepared.object_rows; i += 1)
+        {
+            rows[i].row = rows[i].census_row = i;
+            rows[i].stage = BQ_RETIREMENT_STAGE_OBJECT;
+            rows[i].target = bq_retirement_census_target_ids[(i % BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT) / 16u];
+            memset(rows[i].source_sha256, i < 192 ? 'a' : 'b', 64);
+        }
+        rows[384].row = 384;
+        rows[384].stage = BQ_RETIREMENT_STAGE_LINK;
+        rows[385].row = 385;
+        rows[385].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+        BQ_PREP_CHECK(bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[192].source_sha256[0] = 'a';
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[192].source_sha256[0] = 'b';
+        rows[16].target = rows[0].target;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[16].target = bq_retirement_census_target_ids[1];
+        rows[383].census_row = 382;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[383].census_row = 383;
+        rows[385].stage = BQ_RETIREMENT_STAGE_LINK;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[385].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+        rows[384].row = 0;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[384].row = 384;
+        rows[384].census_row = 384;
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, rows));
+        rows[384].census_row = 0;
+    }
+    free(rows);
     prepared.object_rows = 192;
-    BQ_PREP_CHECK(!bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
     prepared.object_rows = 384;
     prepared.rows = 385;
-    BQ_PREP_CHECK(!bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
     prepared.rows = 386;
     char first = prepared.support_sha256[0];
     prepared.support_sha256[0] = first == '0' ? '1' : '0';
-    BQ_PREP_CHECK(!bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
     prepared.support_sha256[0] = first;
     BQ_PREP_CHECK(fcntl(file, F_SETFD, 0) == 0 &&
-                  !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared) &&
+                  !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL) &&
                   fcntl(file, F_SETFD, FD_CLOEXEC) == 0);
     BQ_PREP_CHECK(chmod(path, 0600) == 0 &&
-                  !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared) &&
+                  !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL) &&
                   chmod(path, 0400) == 0);
     char link[128];
     length = snprintf(link, sizeof(link), "%s/alias", directory);
     BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(link) && linkat(AT_FDCWD, path, AT_FDCWD, link, 0) == 0 &&
-                  !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared) &&
+                  !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL) &&
                   unlink(link) == 0);
-    BQ_PREP_CHECK(close(file) == 0 && !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(close(file) == 0 && !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
     BQ_PREP_CHECK(chmod(path, 0600) == 0);
     file = open(path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
-    BQ_PREP_CHECK(file >= 3 && !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(file >= 3 && !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
     BQ_PREP_CHECK(file >= 3 && pwrite(file, "x", 1, 6) == 1 && close(file) == 0 &&
                   chmod(path, 0400) == 0);
     file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    BQ_PREP_CHECK(file >= 3 && !bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+    BQ_PREP_CHECK(file >= 3 && !bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
     if (file >= 3) BQ_PREP_CHECK(close(file) == 0);
     BQ_PREP_CHECK(unlink(path) == 0);
 
@@ -241,9 +277,47 @@ BUSTER_GLOBAL_LOCAL void bq_prep_test_support_population(void)
         BQ_PREP_CHECK(length > 0 && (size_t)length < sizeof(profile));
         file = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
         BQ_PREP_CHECK(file >= 3 &&
-                      bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+                      bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
+        BqRetirementTrustedRow* full = calloc(prepared.rows, sizeof(*full));
+        BQ_PREP_CHECK(full != NULL);
+        if (full)
+        {
+            String8 text = {(char8*)actual, actual_bytes}, line = {0};
+            u64 offset = 0;
+            u32 object = 0;
+            BQ_PREP_CHECK(bq_next_line(text, &offset, &line));
+            while (offset < text.length && bq_next_line(text, &offset, &line))
+            {
+                char8* tab = memchr(line.pointer, '\t', (size_t)line.length);
+                char8* next = tab ? memchr(tab + 1, '\t', (size_t)(line.pointer + line.length - tab - 1)) : NULL;
+                bool subject = next && (size_t)(next - tab - 1) == strlen("subject") &&
+                               !memcmp(tab + 1, "subject", strlen("subject"));
+                if (subject && line.length >= 64)
+                    for (u32 cell = 0; cell < BQ_RETIREMENT_OBJECT_ROWS_PER_SUBJECT &&
+                                       object < prepared.object_rows; cell += 1)
+                    {
+                        full[object].row = full[object].census_row = object;
+                        full[object].target = bq_retirement_census_target_ids[cell / 16u];
+                        full[object].stage = BQ_RETIREMENT_STAGE_OBJECT;
+                        memcpy(full[object].source_sha256, line.pointer + line.length - 64, 64);
+                        object += 1;
+                    }
+            }
+            BQ_PREP_CHECK(object == prepared.object_rows);
+            if (object == prepared.object_rows && object)
+            {
+                full[object].row = object;
+                full[object].stage = BQ_RETIREMENT_STAGE_LINK;
+                full[object + 1].row = object + 1;
+                full[object + 1].stage = BQ_RETIREMENT_STAGE_SELF_HOST;
+                BQ_PREP_CHECK(bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, full));
+                full[object - 1].target -= 1;
+                BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, full));
+            }
+            free(full);
+        }
         prepared.object_rows -= 192;
-        BQ_PREP_CHECK(!bq_retirement_support_object_rows(file, string_from_pointer(profile), &prepared));
+        BQ_PREP_CHECK(!bq_retirement_support_projection(file, string_from_pointer(profile), &prepared, NULL));
         if (file >= 3) BQ_PREP_CHECK(close(file) == 0);
         BQ_PREP_CHECK(unlink(path) == 0);
     }

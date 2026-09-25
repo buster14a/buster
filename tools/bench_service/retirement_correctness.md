@@ -19,10 +19,17 @@ rows (including registered non-object controls). The 12-target, 2-frontend,
 a B declaration with a different `object_rows` count or fewer than two additional
 link/self-host stage rows. This independently establishes the current 78,912
 object-row count from the reviewed 411-subject ledger, without trusting a
-caller-supplied census count. The integrator must install/hold the exact
+caller-supplied census count. For every declared object row, the public entry
+also joins its unique #508 census ordinal to the pinned subject's source SHA-256
+and twelve-target matrix position, including source-bound non-object controls.
+It requires at least one link and one self-host stage row. An omitted, duplicated,
+misnumbered, source-swapped or wrong-target object row fails before the build
+import. The integrator must install/hold the exact
 declaration file and pass its descriptor; the pinned miniature seam remains
-synthetic. This cardinality check does not authenticate any individual row,
-eligibility, check receipt or oracle. Only then does the entry call
+synthetic. This projection join does not independently authenticate the
+remaining row identity/configuration fields, applicability and eligibility,
+check receipts or oracles; those require the full census/validator replay.
+Only then does the entry call
 `bq_retirement_correctness_begin`.
 Failure poisons a fresh gate and releases any descriptors acquired by this
 call; an already live holder is left alone. A successful holder stays open
