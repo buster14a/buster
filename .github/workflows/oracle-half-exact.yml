@@ -29,6 +29,25 @@ jobs:
           "$RUNNER_TEMP/half-oracle" emit design "$RUNNER_TEMP/half-evidence/design.c"
           "$RUNNER_TEMP/half-oracle" emit heldout "$RUNNER_TEMP/half-evidence/heldout.c"
           sha256sum tests/oracle_half_exact/*.c "$RUNNER_TEMP/half-evidence/"*.c | tee "$RUNNER_TEMP/half-evidence/frozen-inputs.sha256"
+      - name: Independent reference control
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/half-evidence"
+          for family in design heldout; do
+            clang -std=gnu11 -O0 -ffloat16-excess-precision=none -c "$family.c" -o "$family.clang.o"
+            clang -std=gnu11 -O1 -Wall -Wextra -Werror observer.c "$family.clang.o" -o "$family.clang-observer"
+            "./$family.clang-observer" > "$family.clang.values"
+            "$RUNNER_TEMP/half-oracle" check "$family" "$family.clang.values" > "$family.clang.csv" 2> "$family.clang.summary"
+            cat "$family.clang.summary"
+          done
+      - name: Install the existing Linux build prerequisite
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes mold
+          mold --version | tee "$RUNNER_TEMP/half-evidence/mold-version.txt"
       - name: Isolated unmodified pinned compiler
         shell: bash
         run: |
@@ -44,18 +63,6 @@ jobs:
           "$RUNNER_TEMP/half-build" generate --cc clang 2>&1 | tee "$RUNNER_TEMP/half-evidence/configure.log"
           "$RUNNER_TEMP/half-build" build --config Release -t ide 2>&1 | tee "$RUNNER_TEMP/half-evidence/build.log"
           sha256sum build/Release/ide | tee "$RUNNER_TEMP/half-evidence/compiler-binary.sha256"
-      - name: Independent reference control
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/half-evidence"
-          for family in design heldout; do
-            clang -std=gnu11 -O0 -ffloat16-excess-precision=none -c "$family.c" -o "$family.clang.o"
-            clang -std=gnu11 -O1 -Wall -Wextra -Werror observer.c "$family.clang.o" -o "$family.clang-observer"
-            "./$family.clang-observer" > "$family.clang.values"
-            "$RUNNER_TEMP/half-oracle" check "$family" "$family.clang.values" > "$family.clang.csv" 2> "$family.clang.summary"
-            cat "$family.clang.summary"
-          done
       - name: Apply detector to pinned Buster
         shell: bash
         run: |
