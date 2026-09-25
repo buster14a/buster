@@ -36,7 +36,11 @@ int main(void)
     for (unsigned index = 0; index < sizeof(unsigned_values) / sizeof(unsigned_values[0]); index += 1)
     {
         U128 value = unsigned_values[index];
-        failures += x64_u128_to_f32(value) != (float)value;
+        // The all-ones u128 exceeds FLT_MAX; converting it to f32 is undefined C.
+        if (index != 5)
+        {
+            failures += x64_u128_to_f32(value) != (float)value;
+        }
         failures += x64_u128_to_f64(value) != (double)value;
         failures += x64_u128_to_f80(value) != (long double)value;
     }
